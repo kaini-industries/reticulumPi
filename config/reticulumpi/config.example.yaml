@@ -1,0 +1,50 @@
+# ReticulumPi Application Configuration
+# Copy to ~/.config/reticulumpi/config.yaml and edit as needed.
+
+reticulumpi:
+  # Path to Reticulum config directory.
+  # Set to null to use the default (~/.reticulum).
+  reticulum_config_dir: null
+
+  # Connect to a shared rnsd instance (true) or run Reticulum standalone (false).
+  # If true, rnsd must be running. If false, reticulumPi opens interfaces directly.
+  use_shared_instance: true
+
+  # Path to the persistent node identity file.
+  # Created automatically on first run.
+  identity_path: ~/.config/reticulumpi/identity
+
+  # Reticulum log level: 0=critical 1=error 2=warning 3=notice 4=info 5=verbose 6=debug 7=extreme
+  log_level: 4
+
+  # Additional directories to scan for plugin .py files.
+  # The built-in plugins/ directory is always scanned.
+  plugin_paths: []
+  #  - /opt/reticulumpi/custom_plugins
+
+  # Plugin configuration. Each key is a plugin_name.
+  # Set enabled: true to activate a plugin.
+  plugins:
+
+    heartbeat_announce:
+      enabled: true
+      interval_seconds: 300
+      app_name: reticulumpi
+      aspects:
+        - node
+        - heartbeat
+      include_telemetry: true
+
+    message_echo:
+      enabled: true
+      display_name: "ReticulumPi Echo"
+      storage_path: /tmp/reticulumpi_lxmf
+
+    system_monitor:
+      enabled: true
+      collect_interval_seconds: 60
+      metrics:
+        - cpu_percent
+        - cpu_temp
+        - memory_percent
+        - disk_percent

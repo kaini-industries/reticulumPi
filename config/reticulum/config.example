@@ -1,0 +1,67 @@
+# Reticulum Configuration Example for Raspberry Pi 5
+#
+# Copy this to ~/.reticulum/config and edit as needed.
+# For full documentation see: https://reticulum.network/manual/interfaces.html
+#
+# This example enables LAN auto-discovery and a TCP listener.
+# Uncomment the RNode or Serial sections if you have radio hardware.
+
+[reticulum]
+  enable_transport = True
+  share_instance = True
+
+  # Limit to local shared instance clients
+  shared_instance_port = 37428
+
+[logging]
+  loglevel = 4
+
+# ============================================================
+# INTERFACES
+# ============================================================
+
+# Auto Interface - discovers peers on local Ethernet/WiFi
+# Works out of the box with no configuration needed.
+[Auto Discovery Interface]
+  type = AutoInterface
+  enabled = yes
+
+# TCP Server - accept incoming connections from remote nodes
+[TCP Server Interface]
+  type = TCPServerInterface
+  enabled = yes
+  listen_ip = 0.0.0.0
+  listen_port = 4242
+
+# ------------------------------------------------------------
+# RADIO INTERFACES (uncomment and configure as needed)
+# ------------------------------------------------------------
+
+# RNode LoRa Interface - for RNode USB radio transceivers
+# See: https://unsigned.io/rnode/
+#[RNode LoRa Interface]
+#  type = RNodeInterface
+#  enabled = no
+#  port = /dev/ttyUSB0
+#  frequency = 915000000
+#  bandwidth = 125000
+#  txpower = 7
+#  spreadingfactor = 8
+#  codingrate = 5
+
+# Serial Interface - for packet radio TNCs or data radios
+#[Serial Interface]
+#  type = SerialInterface
+#  enabled = no
+#  port = /dev/ttyAMA0
+#  speed = 115200
+#  databits = 8
+#  parity = none
+#  stopbits = 1
+
+# I2P Interface - for anonymous global connectivity
+# Requires a local I2P router (e.g., i2pd)
+#[I2P Interface]
+#  type = I2PInterface
+#  enabled = no
+#  peers = i2p_endpoint_b32.b32.i2p

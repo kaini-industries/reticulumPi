@@ -1,0 +1,17 @@
+services:
+  reticulumpi:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./config:/config
+      - reticulumpi-data:/data
+    # Host networking required for Reticulum UDP/TCP interfaces
+    network_mode: host
+    restart: unless-stopped
+    # Uncomment to pass through serial devices (LoRa radio, etc.)
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+
+volumes:
+  reticulumpi-data:

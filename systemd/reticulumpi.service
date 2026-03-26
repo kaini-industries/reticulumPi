@@ -1,0 +1,23 @@
+[Unit]
+Description=ReticulumPi Network Node
+After=network-online.target rnsd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reticulumpi
+Group=reticulumpi
+ExecStart=/opt/reticulumpi/.venv/bin/reticulumpi --config /etc/reticulumpi/config.yaml
+Restart=on-failure
+RestartSec=10
+WatchdogSec=120
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /tmp/reticulumpi_lxmf
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
