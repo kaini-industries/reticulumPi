@@ -4,7 +4,7 @@
 # For full documentation see: https://reticulum.network/manual/interfaces.html
 #
 # This example enables LAN auto-discovery and a TCP listener.
-# Uncomment the RNode or Serial sections if you have radio hardware.
+# Uncomment additional sections to enable radio, serial, or overlay interfaces.
 
 [reticulum]
   enable_transport = True
@@ -17,28 +17,75 @@
   loglevel = 4
 
 # ============================================================
-# INTERFACES
+# LOCAL NETWORK INTERFACES
 # ============================================================
 
-# Auto Interface - discovers peers on local Ethernet/WiFi
-# Works out of the box with no configuration needed.
+# Auto Interface — discovers peers on local Ethernet/WiFi via IPv6 multicast.
+# Works out of the box with no configuration needed on most networks.
+# Hardware: Built-in Pi WiFi (wlan0) or Ethernet (eth0).
 [Auto Discovery Interface]
   type = AutoInterface
   enabled = yes
+  # group_id = reticulumpi
+  # discovery_scope = link
+  # discovery_port = 29716
+  # data_port = 42671
 
-# TCP Server - accept incoming connections from remote nodes
+# UDP Interface — broadcast Reticulum packets over a specific UDP port.
+# Useful for bridging VLANs or special network topologies where multicast
+# (AutoInterface) does not work. Not needed if AutoInterface is sufficient.
+# Hardware: Any network interface.
+#[UDP Interface]
+#  type = UDPInterface
+#  enabled = no
+#  listen_ip = 0.0.0.0
+#  listen_port = 4243
+#  forward_ip = 255.255.255.255
+#  forward_port = 4243
+
+# ============================================================
+# TCP INTERFACES (Internet / WAN)
+# ============================================================
+
+# TCP Server — accept incoming connections from remote Reticulum nodes.
+# Open port 4242 on your router/firewall to allow inbound connections.
+# Hardware: Any Internet or LAN connection.
 [TCP Server Interface]
   type = TCPServerInterface
   enabled = yes
   listen_ip = 0.0.0.0
   listen_port = 4242
 
-# ------------------------------------------------------------
-# RADIO INTERFACES (uncomment and configure as needed)
-# ------------------------------------------------------------
+# TCP Client — connect to a remote Reticulum node or transport hub.
+# Use this to join an existing Reticulum network over the Internet.
+# Hardware: Any Internet connection.
+#[TCP Client Interface]
+#  type = TCPClientInterface
+#  enabled = no
+#  target_host = example.com
+#  target_port = 4242
 
-# RNode LoRa Interface - for RNode USB radio transceivers
+# Backbone Interface — high-performance TCP server for Linux (uses epoll).
+# Best for dedicated transport nodes handling many simultaneous connections.
+# Hardware: Linux only (Pi qualifies). Same network requirements as TCP Server.
+#[Backbone Interface]
+#  type = BackboneInterface
+#  enabled = no
+#  listen_ip = 0.0.0.0
+#  listen_port = 4245
+
+# ============================================================
+# LoRa RADIO INTERFACES
+# ============================================================
+# RNode is an open-source LoRa transceiver for Reticulum. Compatible boards
+# include LilyGO T-Beam, Heltec LoRa32 v2/v3, RAK4631, and others.
+# Flash firmware with: pip install rnodeconf && rnodeconf --autoinstall
 # See: https://unsigned.io/rnode/
+
+# RNode LoRa Interface — single-channel LoRa radio via USB.
+# Connect your RNode to the Pi via USB. The port is typically /dev/ttyUSB0
+# or /dev/ttyACM0 depending on the board.
+# Frequency should match your region: 915 MHz (Americas), 868 MHz (EU), 433 MHz.
 #[RNode LoRa Interface]
 #  type = RNodeInterface
 #  enabled = no
@@ -48,8 +95,39 @@
 #  txpower = 7
 #  spreadingfactor = 8
 #  codingrate = 5
+#  # id_callsign = MYCALL
+#  # id_interval = 600
 
-# Serial Interface - for packet radio TNCs or data radios
+# RNode Multi Interface — multiple simultaneous LoRa channels on one device.
+# Requires RNode firmware v1.74 or later. Allows monitoring and transmitting
+# on different frequencies at the same time from a single radio.
+#[RNode Multi Interface]
+#  type = RNodeMultiInterface
+#  enabled = no
+#  port = /dev/ttyUSB0
+#
+#  [RNode Multi Interface/Channel 1]
+#    frequency = 915000000
+#    bandwidth = 125000
+#    txpower = 7
+#    spreadingfactor = 8
+#    codingrate = 5
+#
+#  [RNode Multi Interface/Channel 2]
+#    frequency = 868000000
+#    bandwidth = 125000
+#    txpower = 7
+#    spreadingfactor = 8
+#    codingrate = 5
+
+# ============================================================
+# SERIAL / PACKET RADIO INTERFACES
+# ============================================================
+
+# Serial Interface — raw serial communication with data radios or direct wiring.
+# Use /dev/ttyAMA0 for the Pi's built-in UART (GPIO pins 14/15) or
+# /dev/ttyUSB0 for USB-serial adapters. Enable serial in raspi-config first.
+# Works with any device that sends/receives raw bytes over serial.
 #[Serial Interface]
 #  type = SerialInterface
 #  enabled = no
@@ -59,9 +137,69 @@
 #  parity = none
 #  stopbits = 1
 
-# I2P Interface - for anonymous global connectivity
-# Requires a local I2P router (e.g., i2pd)
+# KISS Interface — connect to KISS-compatible packet radio TNCs and modems.
+# Compatible with OpenModem, Dire Wolf (software modem), and standard
+# AX.25 packet radio hardware. Commonly used for VHF/UHF amateur radio.
+# Hardware: KISS TNC connected via USB-serial or Pi UART.
+#[KISS Interface]
+#  type = KISSInterface
+#  enabled = no
+#  port = /dev/ttyUSB0
+#  speed = 9600
+#  databits = 8
+#  parity = none
+#  stopbits = 1
+#  preamble = 350
+#  txtail = 20
+#  persistence = 64
+#  slottime = 20
+#  flow_control = false
+#  # id_callsign = MYCALL-0
+#  # id_interval = 600
+
+# AX.25 KISS Interface — AX.25 protocol over KISS TNC with station
+# identification beaconing. Required for amateur radio regulatory compliance
+# (FCC Part 97, etc.) where callsign identification is mandatory.
+# Adds AX.25 framing overhead compared to plain KISS.
+#[AX25 KISS Interface]
+#  type = AX25KISSInterface
+#  enabled = no
+#  port = /dev/ttyUSB0
+#  speed = 9600
+#  databits = 8
+#  parity = none
+#  stopbits = 1
+#  preamble = 350
+#  txtail = 20
+#  persistence = 64
+#  slottime = 20
+#  flow_control = false
+#  callsign = MYCALL
+#  ssid = 0
+#  # id_interval = 600
+
+# ============================================================
+# OVERLAY / ANONYMOUS INTERFACES
+# ============================================================
+
+# I2P Interface — anonymous, censorship-resistant global connectivity.
+# Requires a local I2P router. Install with: sudo apt install i2pd
+# On first start, Reticulum generates a persistent I2P address.
+# Initial tunnel setup can take several minutes.
 #[I2P Interface]
 #  type = I2PInterface
 #  enabled = no
 #  peers = i2p_endpoint_b32.b32.i2p
+
+# ============================================================
+# ADVANCED / EXPERIMENTAL INTERFACES
+# ============================================================
+
+# Pipe Interface — bridge packets through any external program's stdin/stdout.
+# Enables custom transports: netcat tunnels, SSH pipes, experimental hardware,
+# or any command-line tool that reads/writes binary data.
+#[Pipe Interface]
+#  type = PipeInterface
+#  enabled = no
+#  command = /usr/bin/nc -l 7777
+#  respawn_delay = 5

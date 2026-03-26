@@ -22,7 +22,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Quick Start (Development)
 
 ```bash
-git clone https://github.com/youruser/reticulumPi.git
+git clone https://github.com/kaini-industries/reticulumPi.git
 cd reticulumPi
 make dev            # creates venv + installs in editable mode with dev deps
 make test           # runs the test suite
@@ -170,12 +170,134 @@ reticulumpi:
 
 Standard Reticulum configuration. ReticulumPi does not modify this file. See the [Reticulum manual](https://reticulum.network/manual/interfaces.html) for full documentation.
 
-The included example enables:
-- **AutoInterface** -- LAN peer discovery (works out of the box)
-- **TCP Server** -- accepts incoming connections on port 4242
-- **RNode** (commented) -- LoRa radio via USB
-- **Serial** (commented) -- packet radio TNC
-- **I2P** (commented) -- anonymous global connectivity
+The included example enables AutoInterface and TCP Server by default. It also contains documented, commented-out blocks for every supported interface type: TCP Client, RNode LoRa, RNode Multi, Serial, KISS TNC, AX.25 KISS, UDP, I2P, Pipe, and Backbone. See the [Connectivity Guide](#connectivity-guide) below for details on each.
+
+## Connectivity Guide
+
+Reticulum can communicate over virtually any medium. The Raspberry Pi supports all of these connection methods, and you can enable multiple interfaces simultaneously -- Reticulum automatically meshes traffic across all of them.
+
+### At a Glance
+
+| Connection Method | Hardware Needed | Cost | Range | Best For |
+|---|---|---|---|---|
+| WiFi/Ethernet (Auto) | Built-in | Free | LAN | Local mesh, getting started |
+| TCP Client/Server | Internet connection | Free | Global | Internet gateway, remote nodes |
+| RNode LoRa | RNode USB transceiver | $60--150 | 1--100+ km | Long-range off-grid mesh |
+| RNode Multi | RNode (firmware v1.74+) | $60--150 | Multi-channel | Simultaneous frequencies |
+| Serial | USB-serial adapter + radio | $5--50 | Varies | Data radios, laser links, direct wiring |
+| KISS TNC | Packet radio modem | $100--500 | 10--50 km | Amateur radio (VHF/UHF) |
+| AX.25 KISS | KISS TNC | $100--500 | 10--50 km | Ham radio with FCC-compliant ID |
+| UDP | Network interface | Free | LAN | Bridging VLANs, special topologies |
+| I2P | i2pd software | Free | Global | Anonymous, censorship-resistant |
+| Pipe | Custom program | Free | Varies | Experimental transports |
+| Backbone | Linux TCP | Free | Global | High-throughput transport nodes |
+
+### WiFi and Ethernet (AutoInterface)
+
+Works immediately with no configuration. The Pi's built-in WiFi (`wlan0`) and Ethernet (`eth0`) are automatically discovered. Peers on the same LAN find each other via IPv6 link-local multicast.
+
+This is enabled by default in the example config. For most local setups, this is all you need.
+
+### TCP Client and Server
+
+Connect to remote Reticulum nodes anywhere on the Internet. The **TCP Server** listens for incoming connections (open port 4242 on your router). The **TCP Client** connects outbound to an existing Reticulum transport hub or another Pi node.
+
+Combine with other interfaces to create an Internet gateway -- for example, a Pi with both an RNode radio and a TCP Server bridges local LoRa traffic to the wider Internet-connected Reticulum network.
+
+### RNode LoRa Radio
+
+[RNode](https://unsigned.io/rnode/) is an open-source LoRa transceiver designed specifically for Reticulum. It uses raw LoRa modulation (not LoRaWAN) and delivers long-range, low-power wireless mesh connectivity.
+
+**Compatible boards:**
+- LilyGO T-Beam (v1.0, v1.1, Supreme), T3S3, T-Deck
+- Heltec LoRa32 v2.0, v3.0, v4.0
+- RAK4631-based boards
+- Unsigned RNode v2.x
+
+**Setup on Pi:**
+1. Connect the board via USB (appears as `/dev/ttyUSB0` or `/dev/ttyACM0`)
+2. Flash RNode firmware: `pip install rnodeconf && rnodeconf --autoinstall`
+3. Uncomment the `[RNode LoRa Interface]` section in your Reticulum config
+4. Set the frequency for your region: 915 MHz (Americas), 868 MHz (EU), 433 MHz
+
+**Range:** Several kilometers in urban environments, over 100 km line-of-sight with clear path. A documented test achieved a 15.75 km usable SSH link at 2.6 kbps.
+
+**Frequencies:** 433 MHz, 868 MHz, 915 MHz, 2.4 GHz depending on board and regional regulations.
+
+### RNode Multi-Channel
+
+Requires RNode firmware v1.74 or later. Allows a single RNode device to operate on multiple LoRa frequencies simultaneously -- for example, monitoring 915 MHz and 868 MHz at the same time. Each channel is independently configurable.
+
+### Serial Interface
+
+Sends raw Reticulum packets over any serial connection. Use the Pi's built-in UART (`/dev/ttyAMA0` on GPIO pins 14/15) or any USB-serial adapter (`/dev/ttyUSB0`).
+
+**Use cases:**
+- Direct wire-pair connections between two Pis
+- Data radios with serial interfaces
+- Free-space optical (laser) links with serial output
+- Any device that sends/receives raw bytes
+
+Enable the Pi's serial port with `sudo raspi-config` > Interface Options > Serial Port.
+
+### KISS TNC (Packet Radio)
+
+Connects to [KISS](https://en.wikipedia.org/wiki/KISS_(TNC))-compatible packet radio modems for amateur radio operation. KISS is a standard protocol for communicating with Terminal Node Controllers (TNCs).
+
+**Compatible hardware:**
+- [OpenModem](https://unsigned.io/openmodem/) -- open-source packet radio modem
+- [Dire Wolf](https://github.com/wb2osz/direwolf) -- software modem (uses Pi sound card as radio interface)
+- Any standard KISS-compatible TNC
+
+**Range:** 10--50 km line-of-sight typical for VHF/UHF amateur radio. Supports configurable preamble, TX tail, persistence, and slot time for CSMA channel access.
+
+### AX.25 KISS Interface
+
+Same as KISS but adds AX.25 protocol framing with mandatory station identification beaconing. Required for amateur radio regulatory compliance (FCC Part 97 in the US, similar regulations elsewhere) where periodic callsign transmission is mandatory.
+
+Adds some per-packet overhead compared to plain KISS. Use this only when regulatory compliance requires it.
+
+### UDP Interface
+
+Broadcasts Reticulum packets over UDP. Useful for bridging VLANs or network segments where IPv6 multicast (AutoInterface) doesn't work. Not needed on most standard networks where AutoInterface is sufficient.
+
+### I2P Interface (Anonymous Networking)
+
+Connects to the [Invisible Internet Project (I2P)](https://geti2p.net/) for anonymous, censorship-resistant global connectivity. Traffic is routed through multiple encrypted hops so neither endpoint's IP address is exposed.
+
+**Setup on Pi:**
+1. Install the I2P router: `sudo apt install i2pd`
+2. Start it: `sudo systemctl enable --now i2pd`
+3. Uncomment the `[I2P Interface]` section in your Reticulum config
+4. On first start, Reticulum generates a persistent I2P address (this can take several minutes)
+
+No port forwarding or public IP address is required.
+
+### Pipe Interface
+
+Bridges Reticulum packets through any external program's stdin/stdout. This is the most flexible interface -- it can wrap netcat tunnels, SSH connections, custom hardware drivers, or any command-line tool that reads and writes binary data.
+
+```
+# Example: tunnel Reticulum over an SSH connection
+command = ssh user@remote "cat"
+```
+
+### Backbone Interface
+
+A high-performance TCP server interface that uses Linux `epoll` for efficient handling of many simultaneous connections. Best suited for dedicated transport nodes that relay traffic for the broader network. Functionally similar to TCP Server but optimized for throughput on Linux systems (the Pi qualifies).
+
+### Combining Multiple Interfaces
+
+A key strength of Reticulum is that you can enable many interfaces at once. For example, a single Pi could run:
+
+- **AutoInterface** for local WiFi/Ethernet peers
+- **RNode** for long-range LoRa mesh
+- **TCP Server** for Internet-connected nodes
+- **I2P** for anonymous global reach
+
+Reticulum automatically routes and meshes traffic across all active interfaces. Enable `enable_transport = True` in your Reticulum config to let the Pi relay traffic between interfaces, turning it into a full transport node.
+
+See `config/reticulum/config.example` for ready-to-use configuration blocks for every interface type.
 
 ## Built-in Plugins
 
