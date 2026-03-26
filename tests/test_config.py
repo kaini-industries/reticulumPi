@@ -1,7 +1,5 @@
 """Tests for the config module."""
 
-import os
-
 from reticulumpi.config import AppConfig
 
 
@@ -39,3 +37,28 @@ def test_plugin_paths_expansion():
     paths = config.plugin_paths
     assert len(paths) == 1
     assert "~" not in paths[0]
+
+
+def test_reticulum_config_dir_none():
+    config = AppConfig()
+    assert config.reticulum_config_dir is None
+
+
+def test_config_path_stored(tmp_config):
+    config = AppConfig(tmp_config)
+    assert config.config_path == tmp_config
+
+
+def test_config_path_none_when_no_file():
+    config = AppConfig()
+    assert config.config_path is None
+
+
+def test_reticulum_config_dir_expansion(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "reticulumpi:\n  reticulum_config_dir: ~/my_reticulum\n"
+    )
+    config = AppConfig(str(cfg))
+    assert "~" not in config.reticulum_config_dir
+    assert config.reticulum_config_dir.endswith("my_reticulum")

@@ -4,13 +4,31 @@ import argparse
 import logging
 import sys
 
+from reticulumpi import __version__
 from reticulumpi.app import ReticulumPiApp
+
+# Map RNS log levels (0-7) to Python logging levels
+_RNS_TO_LOGGING = {
+    0: logging.CRITICAL,
+    1: logging.ERROR,
+    2: logging.WARNING,
+    3: logging.WARNING,
+    4: logging.INFO,
+    5: logging.DEBUG,
+    6: logging.DEBUG,
+    7: logging.DEBUG,
+}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="reticulumpi",
         description="ReticulumPi - An extensible Reticulum network node",
+    )
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--config", "-c",
@@ -27,7 +45,20 @@ def main() -> None:
         type=int,
         default=None,
         choices=range(0, 8),
-        help="Log level 0-7 (overrides config file setting)",
+        metavar="0-7",
+        help="Log level: 0=critical, 1=error, 2-3=warning, 4=info, 5-7=debug (overrides config)",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        default=False,
+        help="Validate configuration and plugin discovery without starting (dry run)",
+    )
+    parser.add_argument(
+        "--list-plugins",
+        action="store_true",
+        default=False,
+        help="List all discoverable plugins and exit",
     )
     args = parser.parse_args()
 
@@ -38,16 +69,29 @@ def main() -> None:
         if os.path.isfile(default_path):
             config_path = default_path
 
+    app = ReticulumPiApp(
+        config_path=config_path,
+        reticulum_config_dir=args.reticulum_config,
+        log_level_override=args.log_level,
+    )
+
+    # Determine log level: CLI flag > config file > default (4=info)
+    rns_level = args.log_level if args.log_level is not None else app.config.log_level
+    python_level = _RNS_TO_LOGGING.get(rns_level, logging.INFO)
+
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=python_level,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    app = ReticulumPiApp(
-        config_path=config_path,
-        reticulum_config_dir=args.reticulum_config,
-    )
+    if args.check:
+        success = app.check()
+        sys.exit(0 if success else 1)
+
+    if args.list_plugins:
+        app.list_plugins()
+        sys.exit(0)
 
     try:
         app.start()

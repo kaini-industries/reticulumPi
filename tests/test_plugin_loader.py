@@ -31,6 +31,23 @@ def test_discover_handles_bad_module(tmp_path):
     assert len(found) == 0
 
 
+def test_discover_handles_hyphenated_dir(tmp_path):
+    """Plugin dirs with hyphens/special chars in the name should load fine."""
+    special_dir = tmp_path / "my-custom-plugins"
+    special_dir.mkdir()
+    (special_dir / "good_plugin.py").write_text(
+        "from reticulumpi.plugin_base import PluginBase\n"
+        "class GoodPlugin(PluginBase):\n"
+        "    plugin_name = 'good'\n"
+        "    plugin_version = '1.0.0'\n"
+        "    def start(self): pass\n"
+        "    def stop(self): pass\n"
+    )
+    loader = PluginLoader()
+    found = loader.discover([str(special_dir)])
+    assert "good" in found
+
+
 def test_plugin_instantiation(plugin_dir, mock_app):
     loader = PluginLoader()
     found = loader.discover([plugin_dir])

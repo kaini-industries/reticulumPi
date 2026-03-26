@@ -1,5 +1,8 @@
 """Abstract base class for all reticulumPi plugins."""
 
+import logging
+import threading
+import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
@@ -16,13 +19,17 @@ class PluginBase(ABC):
 
     plugin_name: str = "unnamed"
     plugin_version: str = "0.0.0"
+    plugin_description: str = "No description"
 
     def __init__(self, app: "ReticulumPiApp", plugin_config: dict[str, Any]):
         self.app = app
         self.config = plugin_config
         self.rns = app.reticulum
         self.identity = app.identity
+        self.log = logging.getLogger(f"reticulumpi.plugin.{self.plugin_name}")
         self._active = False
+        self._threads: list[threading.Thread] = []
+        self.validate_config()
 
     @abstractmethod
     def start(self) -> None:
@@ -32,6 +39,35 @@ class PluginBase(ABC):
     def stop(self) -> None:
         """Called on shutdown. Clean up resources, deregister handlers."""
 
+    def validate_config(self) -> None:
+        """Validate plugin config at construction time. Override to add checks."""
+
     def get_status(self) -> dict[str, Any]:
         """Return status info for monitoring. Override for richer status."""
         return {"active": self._active}
+
+    def _join_threads(self, timeout: float = 5.0) -> None:
+        """Wait for all tracked threads to finish."""
+        for thread in self._threads:
+            thread.join(timeout=timeout)
+        self._threads.clear()
+
+    def _sleep_while_active(self, seconds: float) -> None:
+        """Sleep for up to `seconds`, exiting early if the plugin is stopped."""
+        deadline = time.monotonic() + float(seconds)
+        while self._active:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 1.0))
+
+    def _start_thread(self, target: Any, name: str | None = None) -> threading.Thread:
+        """Start a daemon thread and return it."""
+        thread = threading.Thread(
+            target=target,
+            daemon=True,
+            name=name or self.plugin_name,
+        )
+        thread.start()
+        self._threads.append(thread)
+        return thread

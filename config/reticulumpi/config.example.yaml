@@ -38,7 +38,7 @@ reticulumpi:
     message_echo:
       enabled: true
       display_name: "ReticulumPi Echo"
-      storage_path: /tmp/reticulumpi_lxmf
+      storage_path: ~/.local/share/reticulumpi/lxmf
 
     system_monitor:
       enabled: true
@@ -48,3 +48,12 @@ reticulumpi:
         - cpu_temp
         - memory_percent
         - disk_percent
+
+    # Example scaffold plugin (disabled by default).
+    # Copy plugins/example_plugin.py to start your own.
+    #example_plugin:
+    #  enabled: false
+    #  app_name: reticulumpi
+    #  aspect: example
+    #  announce_interval: 300
+    #  display_name: "ReticulumPi Example"

@@ -27,6 +27,7 @@ cd reticulumPi
 make dev            # creates venv + installs in editable mode with dev deps
 make test           # runs the test suite
 make lint           # runs ruff linter
+make format         # auto-format code with ruff
 ```
 
 Run locally:
@@ -85,6 +86,12 @@ cp config/reticulum/config.example ~/.reticulum/config
 
 # Run
 reticulumpi --config ~/.config/reticulumpi/config.yaml
+
+# Validate config without starting
+reticulumpi --check --config ~/.config/reticulumpi/config.yaml
+
+# List available plugins
+reticulumpi --list-plugins
 ```
 
 ### Updating
@@ -95,7 +102,7 @@ Pull the latest code and upgrade dependencies:
 sudo bash scripts/update.sh
 ```
 
-This pulls the repo, upgrades `rns` and `lxmf`, reinstalls the project, and restarts the service.
+This pulls the repo, upgrades all dependencies, reinstalls the project, and restarts the service.
 
 ## Docker
 
@@ -444,7 +451,7 @@ A key strength of Reticulum is that you can enable many interfaces at once. For 
 
 Reticulum automatically routes and meshes traffic across all active interfaces. Enable `enable_transport = True` in your Reticulum config to let the Pi relay traffic between interfaces, turning it into a full transport node.
 
-See `config/reticulum/config.example` for ready-to-use configuration blocks for every interface type.
+See `config/reticulum/config.example` for ready-to-use configuration blocks for every interface type. For a safe starting point with only local mesh discovery (no TCP server), use `config/reticulum/config.minimal` instead.
 
 ## Built-in Plugins
 
@@ -466,7 +473,7 @@ Listens for incoming [LXMF](https://github.com/markqvist/lxmf) messages and repl
 | Option | Default | Description |
 |--------|---------|-------------|
 | `display_name` | ReticulumPi Echo | Name shown to message senders |
-| `storage_path` | /tmp/reticulumpi_lxmf | LXMF message storage directory |
+| `storage_path` | ~/.local/share/reticulumpi/lxmf | LXMF message storage directory |
 
 Send a test message from another device using [Sideband](https://unsigned.io/sideband/) or `lxmf_send`.
 
@@ -494,6 +501,7 @@ from reticulumpi.plugin_base import PluginBase
 class MyPlugin(PluginBase):
     plugin_name = "my_plugin"
     plugin_version = "1.0.0"
+    plugin_description = "Short description shown in --list-plugins"
 
     def start(self):
         self._active = True
@@ -523,6 +531,7 @@ Every plugin receives these through its constructor:
 | `self.rns` | RNS.Reticulum | The Reticulum instance |
 | `self.identity` | RNS.Identity | The node's persistent identity |
 | `self.config` | dict | This plugin's config section from YAML |
+| `self.log` | logging.Logger | Logger namespaced to `reticulumpi.plugin.<name>` |
 
 #### Lifecycle
 
@@ -551,55 +560,40 @@ def get_status(self):
     return {"active": self._active, "messages_handled": self._count}
 ```
 
-### Plugin Examples
+### Example Scaffold
 
-**Create a Reticulum destination and announce:**
+The file `plugins/example_plugin.py` is a fully working example you can copy and modify. It demonstrates all the key plugin features in one place:
 
-```python
-import RNS
+- **Config validation** — `validate_config()` checks settings at construction time
+- **Destination + announcing** — creates a Reticulum destination and announces periodically
+- **Packet handling** — receives incoming data packets and sends proof acknowledgements
+- **Background threads** — `_start_thread()` for daemon threads, `_sleep_while_active()` for interruptible sleep
+- **Inter-plugin communication** — reads metrics from `system_monitor` via `self.app.get_plugin()`
+- **Status reporting** — custom `get_status()` with packet count
+- **Graceful shutdown** — `_join_threads()` in `stop()`
 
-def start(self):
-    self.destination = RNS.Destination(
-        self.identity,
-        RNS.Destination.IN,
-        RNS.Destination.SINGLE,
-        "myapp",
-        "myaspect",
-    )
-    self.destination.announce()
+To use it as a starting point:
+
+```bash
+cp plugins/example_plugin.py plugins/my_plugin.py
 ```
 
-**Listen for LXMF messages:**
+Then edit the class name, `plugin_name`, and config section in `config.yaml`:
 
-```python
-import LXMF
-
-def start(self):
-    self.router = LXMF.LXMRouter(storagepath="/tmp/my_lxmf")
-    self.dest = self.router.register_delivery_identity(self.identity)
-    self.router.register_delivery_callback(self.on_message)
-
-def on_message(self, message):
-    print(f"From {RNS.prettyhexrep(message.source_hash)}: {message.content_as_string()}")
+```yaml
+plugins:
+  my_plugin:
+    enabled: true
+    app_name: reticulumpi
+    aspect: myaspect
+    announce_interval: 300
+    display_name: "My Node"
 ```
 
-**Run a background thread:**
+Discover available plugins at any time with:
 
-```python
-import threading, time
-
-def start(self):
-    self._active = True
-    self._thread = threading.Thread(target=self._loop, daemon=True)
-    self._thread.start()
-
-def _loop(self):
-    while self._active:
-        # do work
-        for _ in range(60):  # sleep in 1s increments for fast shutdown
-            if not self._active:
-                return
-            time.sleep(1)
+```bash
+reticulumpi --list-plugins
 ```
 
 ## Project Structure
@@ -607,21 +601,25 @@ def _loop(self):
 ```
 reticulumPi/
 ├── pyproject.toml                  # Dependencies and entry point
-├── Makefile                        # install, dev, test, lint targets
+├── Makefile                        # install, dev, test, lint, format targets
+├── LICENSE                         # MIT license
+├── CHANGELOG.md                    # Version history
 ├── config/
 │   ├── reticulum/
-│   │   └── config.example          # Reticulum interface config
+│   │   ├── config.example          # Reticulum interface config (all interfaces)
+│   │   └── config.minimal          # Minimal safe config (AutoInterface only)
 │   └── reticulumpi/
 │       └── config.example.yaml     # App + plugin config
 ├── src/reticulumpi/
 │   ├── __init__.py                 # Package version
 │   ├── app.py                      # Core orchestrator
 │   ├── cli.py                      # CLI entry point
-│   ├── config.py                   # YAML config loader
+│   ├── config.py                   # YAML config loader with validation
 │   ├── identity_manager.py         # Persistent identity
 │   ├── plugin_base.py              # Abstract plugin base class
 │   └── plugin_loader.py            # Plugin discovery
 ├── plugins/
+│   ├── example_plugin.py           # Scaffold — copy to start your own plugin
 │   ├── heartbeat_announce.py       # Network presence announcer
 │   ├── message_echo.py             # LXMF echo responder
 │   └── system_monitor.py           # System metrics collector
@@ -635,7 +633,11 @@ reticulumPi/
 │   └── docker-compose.yml
 └── tests/
     ├── conftest.py
+    ├── test_app.py                  # App orchestrator tests
+    ├── test_cli.py                  # CLI entry point tests
     ├── test_config.py
+    ├── test_config_validation.py    # Config error-path tests
+    ├── test_plugin_base.py          # Base class helper tests
     ├── test_plugin_loader.py
     └── test_identity_manager.py
 ```
@@ -643,14 +645,17 @@ reticulumPi/
 ## CLI Usage
 
 ```
-reticulumpi [--config PATH] [--reticulum-config DIR] [--log-level 0-7]
+reticulumpi [--version] [--config PATH] [--reticulum-config DIR] [--log-level 0-7] [--check] [--list-plugins]
 ```
 
 | Flag | Description |
 |------|-------------|
+| `--version`, `-V` | Show version and exit |
 | `--config`, `-c` | Path to app config YAML (default: `~/.config/reticulumpi/config.yaml`) |
 | `--reticulum-config` | Override Reticulum config directory |
-| `--log-level` | Override log level (0=critical, 4=info, 7=extreme) |
+| `--log-level` | Override log level: 0=critical, 1=error, 2-3=warning, 4=info, 5-7=debug |
+| `--check` | Validate configuration and plugin discovery without starting (dry run) |
+| `--list-plugins` | List all discoverable plugins and exit |
 
 ## Architecture
 

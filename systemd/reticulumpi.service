@@ -10,13 +10,12 @@ Group=reticulumpi
 ExecStart=/opt/reticulumpi/.venv/bin/reticulumpi --config /etc/reticulumpi/config.yaml
 Restart=on-failure
 RestartSec=10
-WatchdogSec=120
 
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /tmp/reticulumpi_lxmf
+ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /home/reticulumpi/.local/share/reticulumpi
 PrivateTmp=yes
 
 [Install]

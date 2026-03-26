@@ -23,3 +23,6 @@ Thumbs.db
 
 # Project runtime
 *.identity
+
+# Docker
+docker/config/

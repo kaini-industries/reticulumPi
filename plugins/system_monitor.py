@@ -1,13 +1,9 @@
 """System Monitor plugin - collects system metrics for other plugins to query."""
 
-import logging
-import threading
 import time
 from typing import Any
 
 from reticulumpi.plugin_base import PluginBase
-
-log = logging.getLogger(__name__)
 
 
 class SystemMonitor(PluginBase):
@@ -17,20 +13,21 @@ class SystemMonitor(PluginBase):
     """
 
     plugin_name = "system_monitor"
+    plugin_description = "Collects CPU, temperature, memory, and disk metrics"
     plugin_version = "1.0.0"
 
     def start(self) -> None:
         self._active = True
         self.latest_metrics: dict[str, Any] = {}
-        self._thread = threading.Thread(target=self._collect_loop, daemon=True, name="sysmon")
-        self._thread.start()
-        log.info(
+        self._thread = self._start_thread(self._collect_loop, "sysmon")
+        self.log.info(
             "System monitor active (interval: %ds)",
             self.config.get("collect_interval_seconds", 60),
         )
 
     def stop(self) -> None:
         self._active = False
+        self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
         return {"active": self._active, "metrics": self.latest_metrics}
@@ -40,13 +37,10 @@ class SystemMonitor(PluginBase):
         while self._active:
             try:
                 self.latest_metrics = self._collect_metrics()
-                log.debug("Metrics: %s", self.latest_metrics)
+                self.log.debug("Metrics: %s", self.latest_metrics)
             except Exception:
-                log.exception("Error collecting system metrics")
-            for _ in range(int(interval)):
-                if not self._active:
-                    return
-                time.sleep(1)
+                self.log.exception("Error collecting system metrics")
+            self._sleep_while_active(interval)
 
     def _collect_metrics(self) -> dict[str, Any]:
         import psutil
@@ -55,7 +49,9 @@ class SystemMonitor(PluginBase):
             "timestamp": time.time(),
         }
 
-        enabled = self.config.get("metrics", ["cpu_percent", "cpu_temp", "memory_percent", "disk_percent"])
+        enabled = self.config.get(
+            "metrics", ["cpu_percent", "cpu_temp", "memory_percent", "disk_percent"]
+        )
 
         if "cpu_percent" in enabled:
             metrics["cpu_percent"] = psutil.cpu_percent(interval=0)
@@ -79,7 +75,6 @@ class SystemMonitor(PluginBase):
             temps = psutil.sensors_temperatures()
             if "cpu_thermal" in temps:
                 return temps["cpu_thermal"][0].current
-            # Fallback for some Pi OS versions
             if "cpu-thermal" in temps:
                 return temps["cpu-thermal"][0].current
         except Exception:

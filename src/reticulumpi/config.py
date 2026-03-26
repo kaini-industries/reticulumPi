@@ -8,6 +8,15 @@ import yaml
 
 log = logging.getLogger(__name__)
 
+VALID_KEYS = {
+    "reticulum_config_dir",
+    "use_shared_instance",
+    "identity_path",
+    "log_level",
+    "plugin_paths",
+    "plugins",
+}
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "reticulum_config_dir": None,
     "use_shared_instance": True,
@@ -18,25 +27,65 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+class ConfigError(Exception):
+    """Raised when config is invalid."""
+
+
 class AppConfig:
     """Loads and provides typed access to the reticulumPi YAML config."""
 
     def __init__(self, config_path: str | None = None):
-        self._data: dict[str, Any] = dict(DEFAULT_CONFIG)
+        self._config_path = config_path
+        self._data: dict[str, Any] = {
+            k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+            for k, v in DEFAULT_CONFIG.items()
+        }
         if config_path:
             self._load_file(config_path)
+        self._validate()
+
+    @property
+    def config_path(self) -> str | None:
+        """Return the resolved config file path, or None if using defaults."""
+        if self._config_path:
+            return os.path.expanduser(self._config_path)
+        return None
 
     def _load_file(self, path: str) -> None:
         path = os.path.expanduser(path)
         if not os.path.isfile(path):
             log.warning("Config file not found: %s, using defaults", path)
             return
-        with open(path, "r") as f:
-            raw = yaml.safe_load(f)
+        try:
+            with open(path, "r") as f:
+                raw = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ConfigError(f"Invalid YAML in {path}: {e}") from e
         if raw and isinstance(raw, dict):
-            app_section = raw.get("reticulumpi", raw)
-            self._data.update(app_section)
+            if "reticulumpi" not in raw:
+                log.warning("Config file missing 'reticulumpi:' section, ignoring contents")
+                return
+            app_section = raw["reticulumpi"]
+            if app_section and isinstance(app_section, dict):
+                self._data.update(app_section)
             log.info("Loaded config from %s", path)
+
+    def _validate(self) -> None:
+        unknown = set(self._data.keys()) - VALID_KEYS
+        if unknown:
+            log.warning("Unknown config keys (ignored): %s", ", ".join(sorted(unknown)))
+
+        level = self._data.get("log_level", 4)
+        if not isinstance(level, int) or not 0 <= level <= 7:
+            raise ConfigError(f"log_level must be an integer 0-7, got: {level!r}")
+
+        paths = self._data.get("plugin_paths", [])
+        if not isinstance(paths, list):
+            raise ConfigError(f"plugin_paths must be a list, got: {type(paths).__name__}")
+
+        plugins = self._data.get("plugins", {})
+        if not isinstance(plugins, dict):
+            raise ConfigError(f"plugins must be a mapping, got: {type(plugins).__name__}")
 
     @property
     def reticulum_config_dir(self) -> str | None:
@@ -62,4 +111,4 @@ class AppConfig:
 
     @property
     def plugins(self) -> dict[str, dict[str, Any]]:
-        return self._data.get("plugins", {})
+        return dict(self._data.get("plugins", {}))

@@ -4,6 +4,7 @@ import glob
 import importlib.util
 import logging
 import os
+import re
 from typing import Any
 
 from reticulumpi.plugin_base import PluginBase
@@ -46,7 +47,9 @@ class PluginLoader:
         return found
 
     def _load_module_from_path(self, filepath: str) -> Any:
-        module_name = os.path.basename(filepath).replace(".py", "")
+        dir_part = re.sub(r'[^a-zA-Z0-9_]', '_', os.path.basename(os.path.dirname(filepath)))
+        file_part = re.sub(r'[^a-zA-Z0-9_]', '_', os.path.basename(filepath).replace('.py', ''))
+        module_name = f"reticulumpi_plugin_{dir_part}_{file_part}"
         spec = importlib.util.spec_from_file_location(module_name, filepath)
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot create module spec for {filepath}")

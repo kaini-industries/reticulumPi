@@ -1,0 +1,18 @@
+# Minimal Reticulum configuration for reticulumPi
+#
+# This config enables only AutoInterface for safe local mesh discovery
+# over WiFi and Ethernet. No ports are exposed to the internet.
+#
+# For the full example with all interface types, see config.example.
+
+[reticulum]
+  enable_transport = True
+  share_instance = True
+  shared_instance_port = 37428
+
+[logging]
+  loglevel = 4
+
+[Auto Discovery Interface]
+  type = AutoInterface
+  enabled = yes

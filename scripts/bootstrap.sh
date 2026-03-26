@@ -4,6 +4,13 @@ set -euo pipefail
 # ReticulumPi Bootstrap Script
 # Target: Fresh Raspberry Pi 5 running 64-bit Raspberry Pi OS (Bookworm+)
 
+AUTO_START=false
+for arg in "$@"; do
+    case "$arg" in
+        --start) AUTO_START=true ;;
+    esac
+done
+
 INSTALL_DIR="/opt/reticulumpi"
 CONFIG_DIR="/etc/reticulumpi"
 DATA_DIR="/var/lib/reticulumpi"
@@ -30,13 +37,22 @@ done
 # 3. Install project
 echo "[3/6] Installing ReticulumPi..."
 if [ -d "$INSTALL_DIR/.git" ]; then
-    sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" pull
+    git -C "$INSTALL_DIR" pull
+    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 else
     # If running from a cloned repo, copy it; otherwise clone from remote
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
     if [ -f "$PROJECT_DIR/pyproject.toml" ]; then
-        sudo cp -r "$PROJECT_DIR" "$INSTALL_DIR"
+        sudo mkdir -p "$INSTALL_DIR"
+        # Exclude dev artifacts that won't work on the target
+        rsync -a \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.ruff_cache' \
+            "$PROJECT_DIR/" "$INSTALL_DIR/"
         sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     else
         echo "Error: Run this script from within the reticulumPi project directory."
@@ -65,6 +81,8 @@ sudo -u "$SERVICE_USER" mkdir -p "$RETICULUM_DIR"
 if [ ! -f "$RETICULUM_DIR/config" ]; then
     sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/config/reticulum/config.example" "$RETICULUM_DIR/config"
     echo "  Created $RETICULUM_DIR/config from example. Edit as needed."
+    echo "  TIP: For local-mesh-only operation (no TCP server), use the minimal config instead:"
+    echo "       sudo -u $SERVICE_USER cp $INSTALL_DIR/config/reticulum/config.minimal $RETICULUM_DIR/config"
 fi
 
 # 6. Install systemd service
@@ -76,11 +94,35 @@ sudo systemctl enable reticulumpi.service
 echo ""
 echo "=== Bootstrap complete ==="
 echo ""
-echo "Next steps:"
-echo "  1. Edit $CONFIG_DIR/config.yaml for plugin settings"
-echo "  2. Edit $RETICULUM_DIR/config for Reticulum interfaces"
-echo "  3. Start: sudo systemctl start reticulumpi"
-echo "  4. Logs:  journalctl -u reticulumpi -f"
+
+if [ "$AUTO_START" = true ]; then
+    echo "Starting ReticulumPi service..."
+    sudo systemctl start reticulumpi.service
+    echo "Service started. Check logs with: journalctl -u reticulumpi -f"
+else
+    echo "Next steps:"
+    echo "  1. Edit $CONFIG_DIR/config.yaml for plugin settings"
+    echo "  2. Edit $RETICULUM_DIR/config for Reticulum interfaces"
+    echo ""
+    # Interactive prompt (only if running in a terminal)
+    if [ -t 0 ]; then
+        read -rp "Start ReticulumPi service now? [y/N] " answer
+        case "$answer" in
+            [Yy]*)
+                sudo systemctl start reticulumpi.service
+                echo "Service started. Check logs with: journalctl -u reticulumpi -f"
+                ;;
+            *)
+                echo "To start later: sudo systemctl start reticulumpi"
+                echo "Logs: journalctl -u reticulumpi -f"
+                ;;
+        esac
+    else
+        echo "  3. Start: sudo systemctl start reticulumpi"
+        echo "  4. Logs:  journalctl -u reticulumpi -f"
+    fi
+fi
+
 echo ""
 echo "Optional — for I2P anonymous networking support:"
 echo "  sudo apt install i2pd"

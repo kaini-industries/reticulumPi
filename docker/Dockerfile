@@ -17,5 +17,8 @@ USER reticulumpi
 
 VOLUME ["/config", "/data"]
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python3 -c "import RNS; import reticulumpi"
+
 ENTRYPOINT ["reticulumpi"]
 CMD ["--config", "/config/config.yaml"]

@@ -1,6 +1,5 @@
 """Shared test fixtures for reticulumPi tests."""
 
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
