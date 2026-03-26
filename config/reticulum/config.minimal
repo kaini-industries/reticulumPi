@@ -13,6 +13,8 @@
 [logging]
   loglevel = 4
 
-[Auto Discovery Interface]
+[interfaces]
+
+  [[Auto Discovery Interface]]
   type = AutoInterface
   enabled = yes

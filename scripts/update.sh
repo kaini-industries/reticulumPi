@@ -37,8 +37,26 @@ if "$INSTALL_DIR/.venv/bin/pip" show nomadnet &>/dev/null; then
     sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade nomadnet
 fi
 
-# 4. Restart services
-echo "[3/3] Restarting services..."
+# 4. Update systemd service files if they changed
+echo "[3/4] Updating systemd services..."
+SERVICES_CHANGED=false
+for svc in reticulumpi.service rnsd.service; do
+    src="$INSTALL_DIR/systemd/$svc"
+    dest="/etc/systemd/system/$svc"
+    if [ -f "$src" ] && [ -f "$dest" ]; then
+        if ! diff -q "$src" "$dest" &>/dev/null; then
+            sudo cp "$src" "$dest"
+            SERVICES_CHANGED=true
+            echo "  Updated $svc"
+        fi
+    fi
+done
+if [ "$SERVICES_CHANGED" = true ]; then
+    sudo systemctl daemon-reload
+fi
+
+# 5. Restart services
+echo "[4/4] Restarting services..."
 if systemctl is-active --quiet rnsd; then
     sudo systemctl restart rnsd
 fi

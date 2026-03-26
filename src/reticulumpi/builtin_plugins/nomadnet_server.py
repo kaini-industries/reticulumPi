@@ -23,9 +23,17 @@ class NomadNetServer(PluginBase):
     def validate_config(self) -> None:
         nomadnet_bin = shutil.which("nomadnet")
         if nomadnet_bin is None:
-            raise ValueError(
-                "NomadNet binary not found. Install it with: pip install nomadnet"
-            )
+            # Fall back to checking the same venv that reticulumpi is running from.
+            # This handles systemd environments where the venv bin isn't in PATH.
+            import sys
+
+            venv_bin = os.path.join(os.path.dirname(sys.executable), "nomadnet")
+            if os.path.isfile(venv_bin) and os.access(venv_bin, os.X_OK):
+                nomadnet_bin = venv_bin
+            else:
+                raise ValueError(
+                    "NomadNet binary not found. Install it with: pip install nomadnet"
+                )
         self._nomadnet_bin = nomadnet_bin
 
         interval = self.config.get("health_check_interval", 30)

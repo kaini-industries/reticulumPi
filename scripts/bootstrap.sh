@@ -93,7 +93,16 @@ if [ ! -f "$RETICULUM_DIR/config" ]; then
     echo "       sudo -u $SERVICE_USER cp $INSTALL_DIR/config/reticulum/config.minimal $RETICULUM_DIR/config"
 fi
 
-# 6. NomadNet directories (if enabled)
+# Create all directories required by systemd ReadWritePaths.
+# systemd's ProtectHome=read-only + ReadWritePaths fails with exit 226
+# if any listed path does not exist at service start time.
+sudo -u "$SERVICE_USER" mkdir -p \
+    "/home/$SERVICE_USER/.config/reticulumpi" \
+    "/home/$SERVICE_USER/.local/share/reticulumpi" \
+    "/home/$SERVICE_USER/.local/share" \
+    "/home/$SERVICE_USER/.nomadnet"
+
+# 6. NomadNet directories and config (if enabled)
 if [ "$WITH_NOMADNET" = true ]; then
     echo "[6/7] Setting up NomadNet..."
     NOMADNET_DIR="/home/$SERVICE_USER/.nomadnet"
@@ -104,6 +113,22 @@ if [ "$WITH_NOMADNET" = true ]; then
         sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/config/nomadnet/pages/"*.mu "$NOMADNET_DIR/storage/pages/"
         echo "  Installed example NomadNet pages to $NOMADNET_DIR/storage/pages/"
     fi
+
+    # Auto-configure: NomadNet requires shared instance mode and the plugin enabled.
+    # Set use_shared_instance: true (required so reticulumPi and NomadNet share rnsd)
+    sudo sed -i 's/^  use_shared_instance: false$/  use_shared_instance: true/' "$CONFIG_DIR/config.yaml"
+    echo "  Set use_shared_instance: true in $CONFIG_DIR/config.yaml"
+
+    # Uncomment and enable the nomadnet_server plugin
+    sudo sed -i '/^    #nomadnet_server:$/,/^    #  max_restarts:/{
+s/^    #nomadnet_server:/    nomadnet_server:/
+s/^    #  enabled: false/      enabled: true/
+s/^    #  config_dir:/      config_dir:/
+s/^    #  health_check_interval:/      health_check_interval:/
+s/^    #  auto_restart:/      auto_restart:/
+s/^    #  max_restarts:/      max_restarts:/
+}' "$CONFIG_DIR/config.yaml"
+    echo "  Enabled nomadnet_server plugin in $CONFIG_DIR/config.yaml"
 fi
 
 # 7. Install systemd services
@@ -154,11 +179,9 @@ fi
 
 if [ "$WITH_NOMADNET" = true ]; then
     echo ""
-    echo "NomadNet is installed. To enable the page server:"
-    echo "  1. Set use_shared_instance: true in $CONFIG_DIR/config.yaml"
-    echo "  2. Uncomment and enable the nomadnet_server plugin in $CONFIG_DIR/config.yaml"
-    echo "  3. Edit pages in /home/$SERVICE_USER/.nomadnet/storage/pages/"
-    echo "  4. Start services: sudo systemctl start rnsd reticulumpi"
+    echo "NomadNet is installed and configured. To customize:"
+    echo "  Edit pages in /home/$SERVICE_USER/.nomadnet/storage/pages/"
+    echo "  Start services: sudo systemctl start rnsd reticulumpi"
 else
     echo ""
     echo "Optional — for NomadNet page serving:"

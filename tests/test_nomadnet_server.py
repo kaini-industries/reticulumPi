@@ -39,11 +39,32 @@ def _make_plugin(mock_app, config, nomadnet_bin="nomadnet"):
 
 class TestValidateConfig:
     def test_raises_when_nomadnet_not_found(self, mock_app, nomadnet_config):
-        with patch("shutil.which", return_value=None):
+        with (
+            patch("shutil.which", return_value=None),
+            patch("os.path.isfile", return_value=False),
+        ):
             from reticulumpi.builtin_plugins.nomadnet_server import NomadNetServer
 
             with pytest.raises(ValueError, match="NomadNet binary not found"):
                 NomadNetServer(mock_app, nomadnet_config)
+
+    def test_finds_nomadnet_in_venv_fallback(self, mock_app, nomadnet_config, tmp_path):
+        """When shutil.which fails, plugin finds nomadnet in the same venv."""
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        nomadnet_path = fake_bin / "nomadnet"
+        nomadnet_path.write_text("#!/bin/sh\n")
+        nomadnet_path.chmod(0o755)
+        fake_python = str(fake_bin / "python3")
+
+        with (
+            patch("shutil.which", return_value=None),
+            patch("sys.executable", fake_python),
+        ):
+            from reticulumpi.builtin_plugins.nomadnet_server import NomadNetServer
+
+            plugin = NomadNetServer(mock_app, nomadnet_config)
+            assert plugin._nomadnet_bin == str(nomadnet_path)
 
     def test_raises_on_invalid_health_check_interval(self, mock_app, nomadnet_config):
         nomadnet_config["health_check_interval"] = 2

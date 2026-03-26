@@ -57,20 +57,21 @@ This will:
 3. Copy the project to `/opt/reticulumpi`
 4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
-6. Set up NomadNet directories and example pages (if `--with-nomadnet`)
-7. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet enabled)
+6. Create all runtime directories required by the systemd service sandboxing
+7. Set up NomadNet directories, example pages, and auto-configure `use_shared_instance: true` + enable the `nomadnet_server` plugin (if `--with-nomadnet`)
+8. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet enabled)
 
 After bootstrap, configure and start:
 
 ```bash
-# Edit the app config (plugin settings, identity path, etc.)
-sudo nano /etc/reticulumpi/config.yaml
-
 # Edit the Reticulum config (network interfaces)
 sudo nano /home/reticulumpi/.reticulum/config
 
-# Start the service
-sudo systemctl start reticulumpi
+# Optionally edit the app config (plugin settings, identity path, etc.)
+sudo nano /etc/reticulumpi/config.yaml
+
+# Start the service (use both if --with-nomadnet was used)
+sudo systemctl start rnsd reticulumpi
 
 # Watch the logs
 journalctl -u reticulumpi -f
@@ -106,7 +107,7 @@ Pull the latest code and upgrade dependencies:
 sudo bash scripts/update.sh
 ```
 
-This pulls the repo, upgrades all dependencies, reinstalls the project, and restarts the service.
+This pulls the repo, upgrades all dependencies, reinstalls the project, syncs any changed systemd service files, and restarts the services.
 
 ## Docker
 
@@ -249,7 +250,7 @@ make docker-test          # test on your host architecture
 make docker-test-arm64    # test on ARM64 (Pi architecture, uses QEMU on x86)
 ```
 
-This builds the project as a wheel, installs it into a clean Debian Bookworm container, and runs all 71 tests.
+This builds the project as a wheel, installs it into a clean Debian Bookworm container, and runs the test suite.
 
 ## Configuration
 
@@ -410,7 +411,7 @@ After flashing, the device shows up as `/dev/ttyUSB0` or `/dev/ttyACM0`.
 Uncomment and edit the `[RNode LoRa Interface]` section in your Reticulum config (`~/.reticulum/config` or `/home/reticulumpi/.reticulum/config`):
 
 ```ini
-[RNode LoRa Interface]
+[[RNode LoRa Interface]]
   type = RNodeInterface
   enabled = yes
   port = /dev/ttyUSB0
@@ -456,19 +457,19 @@ You can connect **multiple RNode devices** to a single Pi (one per USB port), ea
 Alternatively, boards with RNode firmware **v1.74 or later** support **multi-channel mode** -- a single device operates on multiple frequencies simultaneously:
 
 ```ini
-[RNode Multi Interface]
+[[RNode Multi Interface]]
   type = RNodeMultiInterface
   enabled = yes
   port = /dev/ttyUSB0
 
-  [RNode Multi Interface/Channel 1]
+  [[RNode Multi Interface/Channel 1]]
     frequency = 915000000
     bandwidth = 125000
     txpower = 7
     spreadingfactor = 8
     codingrate = 5
 
-  [RNode Multi Interface/Channel 2]
+  [[RNode Multi Interface/Channel 2]]
     frequency = 868000000
     bandwidth = 125000
     txpower = 7

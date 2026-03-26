@@ -7,6 +7,7 @@ Wants=network-online.target rnsd.service
 Type=simple
 User=reticulumpi
 Group=reticulumpi
+Environment=PATH=/opt/reticulumpi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/opt/reticulumpi/.venv/bin/reticulumpi --config /etc/reticulumpi/config.yaml
 Restart=on-failure
 RestartSec=10
