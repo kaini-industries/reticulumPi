@@ -101,16 +101,14 @@ class ReticulumPiApp:
 
     def _get_plugin_search_dirs(self) -> list[str]:
         """Return the list of directories to search for plugins."""
-        # Try the development layout first (src/reticulumpi/../../plugins)
+        # Built-in plugins ship inside the package (always available)
+        builtin_dir = os.path.join(os.path.dirname(__file__), "builtin_plugins")
+        # Also check the top-level plugins/ dir (development editable installs)
         dev_plugin_dir = os.path.normpath(
             os.path.join(os.path.dirname(__file__), "..", "..", "plugins")
         )
-        # Also try installed package layout (alongside the package directory)
-        pkg_plugin_dir = os.path.normpath(
-            os.path.join(os.path.dirname(__file__), "..", "plugins")
-        )
         dirs: list[str] = []
-        for d in [dev_plugin_dir, pkg_plugin_dir]:
+        for d in [builtin_dir, dev_plugin_dir]:
             if os.path.isdir(d) and d not in dirs:
                 dirs.append(d)
         return dirs + self.config.plugin_paths

@@ -18,8 +18,8 @@ class MessageEcho(PluginBase):
 
     def start(self) -> None:
         self._lock = threading.Lock()
-        default_storage = os.path.expanduser("~/.local/share/reticulumpi/lxmf")
-        storage_path = self.config.get("storage_path", default_storage)
+        default_storage = "~/.local/share/reticulumpi/lxmf"
+        storage_path = os.path.expanduser(self.config.get("storage_path", default_storage))
 
         self.lxmf_router = LXMF.LXMRouter(storagepath=storage_path)
         self.local_lxmf_destination = self.lxmf_router.register_delivery_identity(

@@ -16,7 +16,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Requirements
 
 - Python 3.9+
-- Raspberry Pi 5 (or any Linux system) running 64-bit OS
+- Raspberry Pi 5 (or any Linux/macOS system) running 64-bit OS
 - Optional: LoRa radio hardware for long-range mesh (see [LoRa Radio with RNode](#lora-radio-with-rnode) -- boards from ~$15)
 
 ## Quick Start (Development)
@@ -106,6 +106,10 @@ This pulls the repo, upgrades all dependencies, reinstalls the project, and rest
 
 ## Docker
 
+Docker is the easiest way to run ReticulumPi without installing anything on the host. The container runs on ARM64 natively (Apple Silicon, Raspberry Pi) and on x86 via QEMU emulation.
+
+### Quick Start
+
 ```bash
 cd docker
 
@@ -114,31 +118,112 @@ mkdir -p config
 cp ../config/reticulumpi/config.example.yaml config/config.yaml
 
 # Build and run
-docker compose up -d
-
-# View logs
-docker compose logs -f
+docker compose up --build -d
 ```
 
-To pass through a serial radio device, uncomment the `devices` section in `docker/docker-compose.yml`:
+### Common Operations
+
+```bash
+# View live logs
+docker compose logs -f
+
+# Check container health and status
+docker compose ps
+
+# Restart after config changes
+docker compose restart
+
+# Rebuild after code changes
+docker compose up --build -d
+
+# Stop the node
+docker compose down
+
+# Stop and remove all data (identity, LXMF storage)
+docker compose down -v
+```
+
+### Configuration
+
+The container mounts `docker/config/` as `/config`. Edit your config there:
+
+```bash
+# Edit the reticulumPi app config
+nano docker/config/config.yaml
+```
+
+The Reticulum config (`~/.reticulum/config`) lives inside the container's home directory and is persisted in the `reticulumpi-data` volume. To customize it, you can copy one in before starting:
+
+```bash
+# Optional: provide a custom Reticulum config
+docker compose run --rm reticulumpi sh -c \
+  "cp /dev/stdin ~/.reticulum/config" < ../config/reticulum/config.minimal
+```
+
+Or exec into a running container:
+
+```bash
+docker exec -it docker-reticulumpi-1 sh
+```
+
+### Networking
+
+Host networking is enabled by default (`network_mode: host`), which is required for Reticulum's AutoInterface (IPv6 multicast discovery), UDP, and TCP interfaces. This means the container shares your host's network stack — no port mapping needed.
+
+### Serial Devices (LoRa, RNode)
+
+To pass through a USB serial device, uncomment the `devices` section in `docker/docker-compose.yml`:
 
 ```yaml
 devices:
   - /dev/ttyUSB0:/dev/ttyUSB0
 ```
 
-Host networking is enabled by default, which is required for Reticulum's UDP/TCP interfaces.
+On **macOS with Docker Desktop**, USB serial passthrough is not supported. Use a native install or a Linux VM for LoRa hardware.
+
+### Viewing the Network
+
+You can run Reticulum tools inside the container:
+
+```bash
+# Show interfaces and network status
+docker exec docker-reticulumpi-1 rnstatus
+
+# List available plugins
+docker exec docker-reticulumpi-1 reticulumpi --list-plugins
+
+# Validate config
+docker exec docker-reticulumpi-1 reticulumpi --check --config /config/config.yaml
+```
+
+### Custom Plugins
+
+To load custom plugins into the container, add a volume mount in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ./config:/config
+  - ./my_plugins:/plugins
+  - reticulumpi-data:/data
+```
+
+Then add the path to your `config.yaml`:
+
+```yaml
+plugin_paths:
+  - /plugins
+```
 
 ### Testing in Docker
 
-Run the full test suite inside a container to verify the non-editable install path (simulates a real Pi deployment):
+Run the full test suite inside a container to verify the installed package works correctly:
 
 ```bash
 make docker-test          # test on your host architecture
 make docker-test-arm64    # test on ARM64 (Pi architecture, uses QEMU on x86)
 ```
 
-This builds the project as a wheel, installs it, and runs all tests inside a Debian Bookworm container.
+This builds the project as a wheel, installs it into a clean Debian Bookworm container, and runs all 71 tests.
 
 ## Configuration
 
@@ -502,12 +587,12 @@ Available metrics: `cpu_percent`, `cpu_temp`, `memory_percent`, `disk_percent`
 
 ## Writing Custom Plugins
 
-Plugins are Python files that define a class inheriting from `PluginBase`. Drop your plugin file into the `plugins/` directory or any path listed in `plugin_paths`.
+Plugins are Python files that define a class inheriting from `PluginBase`. Drop your plugin file into any directory listed in `plugin_paths` in your config.
 
 ### Minimal Plugin
 
 ```python
-# plugins/my_plugin.py
+# my_plugins/my_plugin.py
 from reticulumpi.plugin_base import PluginBase
 
 class MyPlugin(PluginBase):
@@ -524,9 +609,12 @@ class MyPlugin(PluginBase):
         # Clean up resources
 ```
 
-Enable it in `config.yaml`:
+Add your plugin directory and enable it in `config.yaml`:
 
 ```yaml
+plugin_paths:
+  - /home/pi/my_plugins
+
 plugins:
   my_plugin:
     enabled: true
@@ -547,7 +635,7 @@ Every plugin receives these through its constructor:
 
 #### Lifecycle
 
-1. **Discovery** -- `PluginLoader` scans directories for `.py` files, imports them, finds `PluginBase` subclasses
+1. **Discovery** -- `PluginLoader` scans the built-in plugins directory and any `plugin_paths` for `.py` files containing `PluginBase` subclasses
 2. **Instantiation** -- Only plugins with `enabled: true` in config are instantiated
 3. **Start** -- `start()` is called on each enabled plugin
 4. **Shutdown** -- `stop()` is called in reverse order on SIGTERM/SIGINT
@@ -574,7 +662,7 @@ def get_status(self):
 
 ### Example Scaffold
 
-The file `plugins/example_plugin.py` is a fully working example you can copy and modify. It demonstrates all the key plugin features in one place:
+The file `plugins/example_plugin.py` (also at `src/reticulumpi/builtin_plugins/example_plugin.py`) is a fully working example you can copy and modify. It demonstrates all the key plugin features in one place:
 
 - **Config validation** — `validate_config()` checks settings at construction time
 - **Destination + announcing** — creates a Reticulum destination and announces periodically
@@ -587,12 +675,16 @@ The file `plugins/example_plugin.py` is a fully working example you can copy and
 To use it as a starting point:
 
 ```bash
-cp plugins/example_plugin.py plugins/my_plugin.py
+mkdir -p ~/my_plugins
+cp plugins/example_plugin.py ~/my_plugins/my_plugin.py
 ```
 
-Then edit the class name, `plugin_name`, and config section in `config.yaml`:
+Then add your plugin directory and enable it in `config.yaml`:
 
 ```yaml
+plugin_paths:
+  - ~/my_plugins
+
 plugins:
   my_plugin:
     enabled: true
@@ -629,12 +721,14 @@ reticulumPi/
 │   ├── config.py                   # YAML config loader with validation
 │   ├── identity_manager.py         # Persistent identity
 │   ├── plugin_base.py              # Abstract plugin base class
-│   └── plugin_loader.py            # Plugin discovery
+│   ├── plugin_loader.py            # Plugin discovery
+│   └── builtin_plugins/            # Built-in plugins (shipped with package)
+│       ├── heartbeat_announce.py   # Network presence announcer
+│       ├── message_echo.py         # LXMF echo responder
+│       ├── system_monitor.py       # System metrics collector
+│       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
-│   ├── example_plugin.py           # Scaffold — copy to start your own plugin
-│   ├── heartbeat_announce.py       # Network presence announcer
-│   ├── message_echo.py             # LXMF echo responder
-│   └── system_monitor.py           # System metrics collector
+│   └── example_plugin.py           # Scaffold copy (for easy access)
 ├── scripts/
 │   ├── bootstrap.sh                # Fresh Pi setup
 │   └── update.sh                   # Pull + upgrade + restart
