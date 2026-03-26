@@ -131,11 +131,13 @@ s/^    #  max_restarts:/      max_restarts:/
     echo "  Enabled nomadnet_server plugin in $CONFIG_DIR/config.yaml"
 fi
 
-# 7. Install systemd services
+# 7. Install systemd services (template paths to match INSTALL_DIR)
 echo "[7/7] Installing systemd services..."
-sudo cp "$INSTALL_DIR/systemd/reticulumpi.service" /etc/systemd/system/
+sudo sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/reticulumpi.service" \
+    > /etc/systemd/system/reticulumpi.service
 if [ "$WITH_NOMADNET" = true ]; then
-    sudo cp "$INSTALL_DIR/systemd/rnsd.service" /etc/systemd/system/
+    sudo sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/rnsd.service" \
+        > /etc/systemd/system/rnsd.service
     sudo systemctl daemon-reload
     sudo systemctl enable rnsd.service
     sudo systemctl enable reticulumpi.service

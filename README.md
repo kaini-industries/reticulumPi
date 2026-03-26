@@ -54,7 +54,7 @@ This will:
 
 1. Install system packages (`python3`, `python3-venv`, `git`)
 2. Create a `reticulumpi` system user with hardware access groups (`dialout`, `gpio`, `spi`, `i2c`)
-3. Copy the project to `/opt/reticulumpi`
+3. Copy the project to `/opt/reticulumpi` (configurable via `INSTALL_DIR` in the script)
 4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
 6. Create all runtime directories required by the systemd service sandboxing
@@ -640,6 +640,16 @@ reticulumpi:
 ```
 
 Pages are served from `~/.nomadnet/storage/pages/` (micron markup `.mu` files). Files are served from `~/.nomadnet/storage/files/`. Example pages are installed automatically on first start.
+
+#### Accessing the NomadNet TUI over SSH
+
+The plugin runs NomadNet in headless daemon mode. To launch the interactive TUI (e.g. for browsing, editing pages, or managing conversations), use the included script:
+
+```bash
+sudo -u reticulumpi bash <install_dir>/scripts/nomadnet-tui.sh
+```
+
+This temporarily stops the NomadNet daemon, launches the TUI using the same config and storage, and the daemon auto-restarts within 30 seconds after you exit (`Ctrl+Q`).
 
 ## Writing Custom Plugins
 
