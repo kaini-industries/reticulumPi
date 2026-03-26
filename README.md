@@ -129,6 +129,17 @@ devices:
 
 Host networking is enabled by default, which is required for Reticulum's UDP/TCP interfaces.
 
+### Testing in Docker
+
+Run the full test suite inside a container to verify the non-editable install path (simulates a real Pi deployment):
+
+```bash
+make docker-test          # test on your host architecture
+make docker-test-arm64    # test on ARM64 (Pi architecture, uses QEMU on x86)
+```
+
+This builds the project as a wheel, installs it, and runs all tests inside a Debian Bookworm container.
+
 ## Configuration
 
 ReticulumPi uses two separate config files:
@@ -140,7 +151,8 @@ Controls the application, plugins, and identity. Default location: `~/.config/re
 ```yaml
 reticulumpi:
   # Connect to running rnsd (true) or open interfaces directly (false)
-  use_shared_instance: true
+  # Use false for a dedicated node; use true if also running Sideband, NomadNet, etc.
+  use_shared_instance: false
 
   # Persistent cryptographic identity file (created automatically)
   identity_path: ~/.config/reticulumpi/identity

@@ -8,7 +8,8 @@ reticulumpi:
 
   # Connect to a shared rnsd instance (true) or run Reticulum standalone (false).
   # If true, rnsd must be running. If false, reticulumPi opens interfaces directly.
-  use_shared_instance: true
+  # Use false for a dedicated node; use true if also running Sideband, NomadNet, etc.
+  use_shared_instance: false
 
   # Path to the persistent node identity file.
   # Created automatically on first run.

@@ -1,4 +1,4 @@
-.PHONY: install dev test lint format clean
+.PHONY: install dev test lint format clean docker-test docker-test-arm64
 
 install:
 	python3 -m venv .venv
@@ -22,6 +22,12 @@ lint:
 format:
 	.venv/bin/ruff format src/ plugins/ tests/
 	.venv/bin/ruff check --fix src/ plugins/ tests/
+
+docker-test:
+	docker build --target test -f docker/Dockerfile -t reticulumpi-test .
+
+docker-test-arm64:
+	docker build --platform linux/arm64 --target test -f docker/Dockerfile -t reticulumpi-test-arm64 .
 
 clean:
 	rm -rf .venv build dist *.egg-info src/*.egg-info
