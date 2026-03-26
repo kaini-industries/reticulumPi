@@ -73,10 +73,14 @@ class SystemMonitor(PluginBase):
             import psutil
 
             temps = psutil.sensors_temperatures()
-            if "cpu_thermal" in temps:
-                return temps["cpu_thermal"][0].current
-            if "cpu-thermal" in temps:
-                return temps["cpu-thermal"][0].current
+            # Pi 4/5 use "cpu-thermal" or "cpu_thermal"
+            for name in ("cpu_thermal", "cpu-thermal"):
+                if name in temps and temps[name]:
+                    return temps[name][0].current
+            # Fallback: return the first available sensor reading
+            for entries in temps.values():
+                if entries:
+                    return entries[0].current
         except Exception:
             pass
         return None

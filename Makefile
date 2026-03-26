@@ -1,4 +1,4 @@
-.PHONY: install dev test lint format clean docker-test docker-test-arm64
+.PHONY: install dev install-nomadnet test lint format clean docker-test docker-test-arm64
 
 install:
 	python3 -m venv .venv
@@ -9,6 +9,9 @@ dev:
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
 	.venv/bin/pip install -e ".[dev]"
+
+install-nomadnet:
+	.venv/bin/pip install ".[nomadnet]"
 
 test:
 	.venv/bin/pytest -v

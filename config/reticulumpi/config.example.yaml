@@ -50,6 +50,17 @@ reticulumpi:
         - memory_percent
         - disk_percent
 
+    # NomadNet page server — serves pages/files over Reticulum.
+    # Requires: pip install nomadnet
+    # Note: When enabled alongside reticulumPi, both apps need a shared
+    # rnsd instance. Set use_shared_instance: true above.
+    #nomadnet_server:
+    #  enabled: false
+    #  config_dir: ~/.nomadnet
+    #  health_check_interval: 30
+    #  auto_restart: true
+    #  max_restarts: 5
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

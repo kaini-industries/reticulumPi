@@ -31,8 +31,17 @@ if ! sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade -e "
     exit 1
 fi
 
-# 4. Restart service
-echo "[3/3] Restarting service..."
+# Upgrade NomadNet if installed
+if "$INSTALL_DIR/.venv/bin/pip" show nomadnet &>/dev/null; then
+    echo "  Upgrading NomadNet..."
+    sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade nomadnet
+fi
+
+# 4. Restart services
+echo "[3/3] Restarting services..."
+if systemctl is-active --quiet rnsd; then
+    sudo systemctl restart rnsd
+fi
 sudo systemctl restart reticulumpi
 
 echo ""

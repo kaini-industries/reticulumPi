@@ -6,6 +6,7 @@ services:
     volumes:
       - ./config:/config
       - reticulumpi-data:/data
+      - nomadnet-data:/home/reticulumpi/.nomadnet
     # Host networking required for Reticulum UDP/TCP interfaces
     network_mode: host
     restart: unless-stopped
@@ -15,3 +16,4 @@ services:
 
 volumes:
   reticulumpi-data:
+  nomadnet-data:

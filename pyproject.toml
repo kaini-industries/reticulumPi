@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+nomadnet = [
+    "nomadnet",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

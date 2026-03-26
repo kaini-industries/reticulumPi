@@ -7,7 +7,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **Three built-in plugins** -- heartbeat announce, LXMF message echo, system metrics
+- **Four built-in plugins** -- heartbeat announce, LXMF message echo, system metrics, NomadNet page server
 - **Persistent identity** -- stable cryptographic identity across restarts
 - **Shared or standalone mode** -- coexists with `rnsd` or runs interfaces directly
 - **Deployment automation** -- bootstrap script, systemd service, Docker support
@@ -45,6 +45,9 @@ The bootstrap script handles everything on a fresh Raspberry Pi 5 running Raspbe
 ```bash
 # From the cloned repo on your Pi:
 sudo bash scripts/bootstrap.sh
+
+# With NomadNet page server support:
+sudo bash scripts/bootstrap.sh --with-nomadnet
 ```
 
 This will:
@@ -52,9 +55,10 @@ This will:
 1. Install system packages (`python3`, `python3-venv`, `git`)
 2. Create a `reticulumpi` system user with hardware access groups (`dialout`, `gpio`, `spi`, `i2c`)
 3. Copy the project to `/opt/reticulumpi`
-4. Create a Python venv and install dependencies
+4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
-6. Install and enable the systemd service
+6. Set up NomadNet directories and example pages (if `--with-nomadnet`)
+7. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet enabled)
 
 After bootstrap, configure and start:
 
@@ -212,6 +216,28 @@ Then add the path to your `config.yaml`:
 ```yaml
 plugin_paths:
   - /plugins
+```
+
+### NomadNet in Docker
+
+The Docker image includes NomadNet. The container entrypoint automatically starts `rnsd` in the background, enabling shared instance mode for both reticulumPi and NomadNet.
+
+To enable the NomadNet page server, edit your `docker/config/config.yaml`:
+
+```yaml
+reticulumpi:
+  use_shared_instance: true
+
+  plugins:
+    nomadnet_server:
+      enabled: true
+```
+
+NomadNet data (identity, pages, files) is persisted in the `nomadnet-data` volume. Edit pages by exec-ing into the container:
+
+```bash
+docker exec -it docker-reticulumpi-1 sh
+vi ~/.nomadnet/storage/pages/index.mu
 ```
 
 ### Testing in Docker
@@ -585,6 +611,35 @@ Collects system metrics on a timer. Other plugins can read metrics via `app.get_
 
 Available metrics: `cpu_percent`, `cpu_temp`, `memory_percent`, `disk_percent`
 
+### NomadNet Page Server
+
+Manages a [NomadNet](https://github.com/markqvist/NomadNet) daemon as a subprocess, serving pages and files over Reticulum. Other NomadNet users can connect to your node to browse content.
+
+**Requires:** `pip install nomadnet` (or `make install-nomadnet`)
+
+**Important:** NomadNet creates its own Reticulum instance, so both reticulumPi and NomadNet must connect to a shared `rnsd` daemon. Set `use_shared_instance: true` in your config when this plugin is enabled.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `config_dir` | ~/.nomadnet | NomadNet config and storage directory |
+| `health_check_interval` | 30 | Seconds between process health checks |
+| `auto_restart` | true | Restart NomadNet if it crashes |
+| `max_restarts` | 5 | Maximum restart attempts before giving up |
+
+Example config:
+
+```yaml
+reticulumpi:
+  use_shared_instance: true  # Required for NomadNet
+
+  plugins:
+    nomadnet_server:
+      enabled: true
+      config_dir: ~/.nomadnet
+```
+
+Pages are served from `~/.nomadnet/storage/pages/` (micron markup `.mu` files). Files are served from `~/.nomadnet/storage/files/`. Example pages are installed automatically on first start.
+
 ## Writing Custom Plugins
 
 Plugins are Python files that define a class inheriting from `PluginBase`. Drop your plugin file into any directory listed in `plugin_paths` in your config.
@@ -709,6 +764,8 @@ reticulumPi/
 ├── LICENSE                         # MIT license
 ├── CHANGELOG.md                    # Version history
 ├── config/
+│   ├── nomadnet/
+│   │   └── pages/                  # Example NomadNet pages (.mu files)
 │   ├── reticulum/
 │   │   ├── config.example          # Reticulum interface config (all interfaces)
 │   │   └── config.minimal          # Minimal safe config (AutoInterface only)
@@ -726,6 +783,7 @@ reticulumPi/
 │       ├── heartbeat_announce.py   # Network presence announcer
 │       ├── message_echo.py         # LXMF echo responder
 │       ├── system_monitor.py       # System metrics collector
+│       ├── nomadnet_server.py      # NomadNet page server manager
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
 │   └── example_plugin.py           # Scaffold copy (for easy access)
@@ -733,10 +791,12 @@ reticulumPi/
 │   ├── bootstrap.sh                # Fresh Pi setup
 │   └── update.sh                   # Pull + upgrade + restart
 ├── systemd/
-│   └── reticulumpi.service         # Systemd unit file
+│   ├── reticulumpi.service         # Systemd unit file
+│   └── rnsd.service                # Reticulum daemon (for shared instance mode)
 ├── docker/
 │   ├── Dockerfile
-│   └── docker-compose.yml
+│   ├── docker-compose.yml
+│   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
 └── tests/
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
@@ -745,6 +805,7 @@ reticulumPi/
     ├── test_config_validation.py    # Config error-path tests
     ├── test_plugin_base.py          # Base class helper tests
     ├── test_plugin_loader.py
+    ├── test_nomadnet_server.py      # NomadNet plugin tests
     └── test_identity_manager.py
 ```
 

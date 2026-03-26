@@ -5,9 +5,11 @@ set -euo pipefail
 # Target: Fresh Raspberry Pi 5 running 64-bit Raspberry Pi OS (Bookworm+)
 
 AUTO_START=false
+WITH_NOMADNET=false
 for arg in "$@"; do
     case "$arg" in
         --start) AUTO_START=true ;;
+        --with-nomadnet) WITH_NOMADNET=true ;;
     esac
 done
 
@@ -19,12 +21,12 @@ SERVICE_USER="reticulumpi"
 echo "=== ReticulumPi Bootstrap ==="
 
 # 1. System packages
-echo "[1/6] Installing system packages..."
+echo "[1/7] Installing system packages..."
 sudo apt-get update
 sudo apt-get install -y python3 python3-venv python3-pip git
 
 # 2. Create service user (if not exists)
-echo "[2/6] Setting up service user..."
+echo "[2/7] Setting up service user..."
 if ! id "$SERVICE_USER" &>/dev/null; then
     sudo useradd --system --create-home --home-dir "/home/$SERVICE_USER" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
@@ -35,7 +37,7 @@ for grp in gpio spi i2c; do
 done
 
 # 3. Install project
-echo "[3/6] Installing ReticulumPi..."
+echo "[3/7] Installing ReticulumPi..."
 if [ -d "$INSTALL_DIR/.git" ]; then
     git -C "$INSTALL_DIR" pull
     sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
@@ -61,13 +63,19 @@ else
 fi
 
 # 4. Python venv + install
-echo "[4/6] Setting up Python environment..."
+echo "[4/7] Setting up Python environment..."
 sudo -u "$SERVICE_USER" python3 -m venv "$INSTALL_DIR/.venv"
 sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
 sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR"
 
+# 4b. Optional: Install NomadNet
+if [ "$WITH_NOMADNET" = true ]; then
+    echo "[4b/7] Installing NomadNet..."
+    sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install nomadnet
+fi
+
 # 5. Config directories
-echo "[5/6] Setting up configuration..."
+echo "[5/7] Setting up configuration..."
 sudo mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 sudo chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
@@ -85,11 +93,32 @@ if [ ! -f "$RETICULUM_DIR/config" ]; then
     echo "       sudo -u $SERVICE_USER cp $INSTALL_DIR/config/reticulum/config.minimal $RETICULUM_DIR/config"
 fi
 
-# 6. Install systemd service
-echo "[6/6] Installing systemd service..."
+# 6. NomadNet directories (if enabled)
+if [ "$WITH_NOMADNET" = true ]; then
+    echo "[6/7] Setting up NomadNet..."
+    NOMADNET_DIR="/home/$SERVICE_USER/.nomadnet"
+    sudo -u "$SERVICE_USER" mkdir -p "$NOMADNET_DIR/storage/pages" "$NOMADNET_DIR/storage/files"
+
+    # Install example pages if none exist
+    if [ -d "$INSTALL_DIR/config/nomadnet/pages" ] && [ ! -f "$NOMADNET_DIR/storage/pages/index.mu" ]; then
+        sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/config/nomadnet/pages/"*.mu "$NOMADNET_DIR/storage/pages/"
+        echo "  Installed example NomadNet pages to $NOMADNET_DIR/storage/pages/"
+    fi
+fi
+
+# 7. Install systemd services
+echo "[7/7] Installing systemd services..."
 sudo cp "$INSTALL_DIR/systemd/reticulumpi.service" /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable reticulumpi.service
+if [ "$WITH_NOMADNET" = true ]; then
+    sudo cp "$INSTALL_DIR/systemd/rnsd.service" /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable rnsd.service
+    sudo systemctl enable reticulumpi.service
+    echo "  Installed rnsd.service (required for NomadNet shared instance)"
+else
+    sudo systemctl daemon-reload
+    sudo systemctl enable reticulumpi.service
+fi
 
 echo ""
 echo "=== Bootstrap complete ==="
@@ -121,6 +150,19 @@ else
         echo "  3. Start: sudo systemctl start reticulumpi"
         echo "  4. Logs:  journalctl -u reticulumpi -f"
     fi
+fi
+
+if [ "$WITH_NOMADNET" = true ]; then
+    echo ""
+    echo "NomadNet is installed. To enable the page server:"
+    echo "  1. Set use_shared_instance: true in $CONFIG_DIR/config.yaml"
+    echo "  2. Uncomment and enable the nomadnet_server plugin in $CONFIG_DIR/config.yaml"
+    echo "  3. Edit pages in /home/$SERVICE_USER/.nomadnet/storage/pages/"
+    echo "  4. Start services: sudo systemctl start rnsd reticulumpi"
+else
+    echo ""
+    echo "Optional — for NomadNet page serving:"
+    echo "  Re-run with: sudo bash $0 --with-nomadnet"
 fi
 
 echo ""

@@ -1,0 +1,22 @@
+[Unit]
+Description=Reticulum Network Stack Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reticulumpi
+Group=reticulumpi
+ExecStart=/opt/reticulumpi/.venv/bin/rnsd
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/reticulumpi/.reticulum /home/reticulumpi/.local/share
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

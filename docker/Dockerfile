@@ -12,6 +12,9 @@ COPY src/ src/
 
 RUN pip install --no-cache-dir .
 
+# Install NomadNet (optional, used by nomadnet_server plugin)
+RUN pip install --no-cache-dir nomadnet
+
 # ---- Test stage: run the test suite against the installed package ----
 FROM base AS test
 
@@ -27,13 +30,16 @@ RUN python -c "from reticulumpi import __version__; print(f'reticulumpi v{__vers
 # ---- Runtime stage: production image ----
 FROM base AS runtime
 
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 RUN useradd --system --create-home reticulumpi
 USER reticulumpi
 
-VOLUME ["/config", "/data"]
+VOLUME ["/config", "/data", "/home/reticulumpi/.nomadnet"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python3 -c "import RNS; import reticulumpi"
 
-ENTRYPOINT ["reticulumpi"]
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["--config", "/config/config.yaml"]
