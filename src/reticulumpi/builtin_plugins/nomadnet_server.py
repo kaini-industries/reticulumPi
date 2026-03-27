@@ -30,7 +30,7 @@ theme = dark
 enable_node = yes
 node_name = {node_name}
 announce_at_start = yes
-disable_propagation = yes
+disable_propagation = {disable_propagation}
 """
 
 
@@ -191,8 +191,13 @@ class NomadNetServer(PluginBase):
         if os.path.isfile(config_file):
             return
 
-        node_name = self.config.get("node_name", "ReticulumPi")
-        content = _DEFAULT_NOMADNET_CONFIG.format(node_name=node_name)
+        node_name = self.config.get("node_name") or self.app.node_name
+        enable_propagation = self.config.get("enable_propagation", False)
+        disable_propagation = "no" if enable_propagation else "yes"
+        content = _DEFAULT_NOMADNET_CONFIG.format(
+            node_name=node_name,
+            disable_propagation=disable_propagation,
+        )
 
         try:
             with open(config_file, "w") as f:

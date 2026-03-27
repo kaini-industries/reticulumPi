@@ -8,13 +8,16 @@ AUTO_START=false
 WITH_NOMADNET=false
 WITH_MESHCHAT=false
 INSTALL_DIR="/opt/reticulumpi"
+NODE_NAME=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --start) AUTO_START=true ;;
         --with-nomadnet) WITH_NOMADNET=true ;;
         --with-meshchat) WITH_MESHCHAT=true ;;
-        --install-dir) INSTALL_DIR="$2"; shift ;;
+        --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift ;;
         --install-dir=*) INSTALL_DIR="${1#*=}" ;;
+        --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift ;;
+        --node-name=*) NODE_NAME="${1#*=}" ;;
     esac
     shift
 done
@@ -118,6 +121,21 @@ sudo chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     sudo cp "$INSTALL_DIR/config/reticulumpi/config.example.yaml" "$CONFIG_DIR/config.yaml"
     echo "  Created $CONFIG_DIR/config.yaml from example. Edit as needed."
+fi
+
+# Set node name — prompt interactively, use flag, or default to hostname
+if ! grep -q '^\s*node_name:' "$CONFIG_DIR/config.yaml"; then
+    if [ -z "$NODE_NAME" ] && [ -t 0 ]; then
+        DEFAULT_NAME="ReticulumPi-$(hostname)"
+        read -rp "Node name [$DEFAULT_NAME]: " NODE_NAME
+        NODE_NAME="${NODE_NAME:-$DEFAULT_NAME}"
+    fi
+    if [ -n "$NODE_NAME" ]; then
+        # Escape sed special characters in the node name (& \ |)
+        ESCAPED_NAME=$(printf '%s\n' "$NODE_NAME" | sed 's/[&\\/|]/\\&/g')
+        sudo sed -i "s|^  #node_name:.*|  node_name: $ESCAPED_NAME|" "$CONFIG_DIR/config.yaml"
+        echo "  Node name set to: $NODE_NAME"
+    fi
 fi
 
 # Set up Reticulum config directory for the service user

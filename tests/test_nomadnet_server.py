@@ -145,6 +145,7 @@ class TestStart:
             content = f.read()
         assert "enable_node = yes" in content
         assert "node_name = TestNode" in content
+        assert "disable_propagation = yes" in content
 
         plugin._active = False
         plugin._join_threads()
@@ -322,6 +323,21 @@ class TestWriteDefaultConfig:
         assert "enable_node = yes" in content
         assert "node_name = MyNode" in content
 
+    def test_enables_propagation_when_configured(self, mock_app, nomadnet_config, tmp_path):
+        config_dir = str(tmp_path / "nomadnet")
+        nomadnet_config["config_dir"] = config_dir
+        nomadnet_config["enable_propagation"] = True
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        os.makedirs(config_dir, exist_ok=True)
+        plugin._config_dir = config_dir
+        plugin._write_default_config()
+
+        config_file = os.path.join(config_dir, "config")
+        with open(config_file) as f:
+            content = f.read()
+        assert "disable_propagation = no" in content
+
     def test_uses_default_node_name(self, mock_app, nomadnet_config, tmp_path):
         config_dir = str(tmp_path / "nomadnet")
         nomadnet_config["config_dir"] = config_dir
@@ -335,7 +351,7 @@ class TestWriteDefaultConfig:
         config_file = os.path.join(config_dir, "config")
         with open(config_file) as f:
             content = f.read()
-        assert "node_name = ReticulumPi" in content
+        assert "node_name = TestNode" in content
 
     def test_skips_when_config_exists(self, mock_app, nomadnet_config, tmp_path):
         config_dir = str(tmp_path / "nomadnet")

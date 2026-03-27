@@ -28,6 +28,7 @@ class ReticulumPiApp:
         self.config = AppConfig(config_path)
         self._reticulum_config_dir = reticulum_config_dir or self.config.reticulum_config_dir
         self._log_level = log_level_override if log_level_override is not None else self.config.log_level
+        self.node_name: str = self.config.node_name
         self.reticulum: RNS.Reticulum | None = None
         self.identity: RNS.Identity | None = None
         self.plugins: dict[str, PluginBase] = {}
@@ -138,6 +139,7 @@ class ReticulumPiApp:
     def _print_startup_report(self) -> None:
         """Log a human-readable summary of the running system."""
         log.info("=== ReticulumPi v%s ===", self._get_version())
+        log.info("Node name: %s", self.node_name)
         log.info("Config: %s", self.config.config_path or "(defaults, no config file)")
         log.info(
             "Reticulum config: %s",

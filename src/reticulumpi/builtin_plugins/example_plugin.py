@@ -81,7 +81,7 @@ class ExamplePlugin(PluginBase):
         while self._active:
             try:
                 # Optionally include app_data with the announce
-                display_name = self.config.get("display_name", "ReticulumPi Example")
+                display_name = self.config.get("display_name") or f"{self.app.node_name} Example"
                 self.destination.announce(
                     app_data=display_name.encode("utf-8"),
                 )

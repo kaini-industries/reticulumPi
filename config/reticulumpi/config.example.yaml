@@ -2,6 +2,11 @@
 # Copy to ~/.config/reticulumpi/config.yaml and edit as needed.
 
 reticulumpi:
+  # A friendly name for this node. Used by NomadNet, LXMF Echo, and announces.
+  # Defaults to "ReticulumPi-<hostname>" if not set, so every node is unique.
+  # Change this to something meaningful for your node!
+  #node_name: MyNode
+
   # Path to Reticulum config directory.
   # Set to null to use the default (~/.reticulum).
   reticulum_config_dir: null
@@ -38,7 +43,7 @@ reticulumpi:
 
     message_echo:
       enabled: true
-      display_name: "ReticulumPi Echo"
+      #display_name: "MyNode Echo"  # Defaults to "<node_name> Echo"
       storage_path: ~/.local/share/reticulumpi/lxmf
 
     system_monitor:
@@ -57,7 +62,8 @@ reticulumpi:
     #nomadnet_server:
     #  enabled: false
     #  config_dir: ~/.nomadnet
-    #  node_name: ReticulumPi
+    #  node_name: MyNode  # Defaults to top-level node_name
+    #  enable_propagation: false
     #  health_check_interval: 10
     #  auto_restart: true
     #  max_restarts: 5
@@ -82,4 +88,4 @@ reticulumpi:
     #  app_name: reticulumpi
     #  aspect: example
     #  announce_interval: 300
-    #  display_name: "ReticulumPi Example"
+    #  display_name: "MyNode Example"  # Defaults to "<node_name> Example"

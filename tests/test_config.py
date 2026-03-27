@@ -1,5 +1,7 @@
 """Tests for the config module."""
 
+import socket
+
 from reticulumpi.config import AppConfig
 
 
@@ -52,6 +54,19 @@ def test_config_path_stored(tmp_config):
 def test_config_path_none_when_no_file():
     config = AppConfig()
     assert config.config_path is None
+
+
+def test_node_name_defaults_to_hostname():
+    config = AppConfig()
+    expected = f"ReticulumPi-{socket.gethostname()}"
+    assert config.node_name == expected
+
+
+def test_node_name_from_config(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  node_name: MyMeshNode\n")
+    config = AppConfig(str(cfg))
+    assert config.node_name == "MyMeshNode"
 
 
 def test_reticulum_config_dir_expansion(tmp_path):

@@ -39,7 +39,7 @@ class MessageEcho(PluginBase):
         self.lxmf_router = LXMF.LXMRouter(storagepath=storage_path)
         self.local_lxmf_destination = self.lxmf_router.register_delivery_identity(
             self.identity,
-            display_name=self.config.get("display_name", "ReticulumPi Echo"),
+            display_name=self.config.get("display_name") or f"{self.app.node_name} Echo",
         )
         self.lxmf_router.register_delivery_callback(self._handle_message)
 

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import socket
 from typing import Any
 
 import yaml
@@ -9,6 +10,7 @@ import yaml
 log = logging.getLogger(__name__)
 
 VALID_KEYS = {
+    "node_name",
     "reticulum_config_dir",
     "use_shared_instance",
     "identity_path",
@@ -108,6 +110,15 @@ class AppConfig:
     def plugin_paths(self) -> list[str]:
         paths = self._data.get("plugin_paths", [])
         return [os.path.expanduser(p) for p in paths]
+
+    @property
+    def node_name(self) -> str:
+        name = self._data.get("node_name")
+        if name:
+            return str(name)
+        # Default to hostname so each node gets a unique name out of the box.
+        hostname = socket.gethostname()
+        return f"ReticulumPi-{hostname}"
 
     @property
     def plugins(self) -> dict[str, dict[str, Any]]:

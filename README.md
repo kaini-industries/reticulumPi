@@ -55,6 +55,9 @@ sudo bash scripts/bootstrap.sh --with-meshchat
 # With both NomadNet and MeshChat:
 sudo bash scripts/bootstrap.sh --with-nomadnet --with-meshchat
 
+# Set a custom node name (default: ReticulumPi-<hostname>):
+sudo bash scripts/bootstrap.sh --node-name "MyCabin" --with-nomadnet
+
 # Install to a custom directory (default: /opt/reticulumpi):
 sudo bash scripts/bootstrap.sh --install-dir /srv/reticulumpi --with-nomadnet
 
@@ -69,10 +72,11 @@ This will:
 3. Copy the project to the install directory (default `/opt/reticulumpi`, or in-place with `--install-dir .`)
 4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
-6. Create all runtime directories required by the systemd service sandboxing
-7. Set up NomadNet directories, example pages, and auto-configure `use_shared_instance: true` + enable the `nomadnet_server` plugin (if `--with-nomadnet`)
-8. Clone MeshChat, create isolated venv, build frontend, and auto-enable the `meshchat_server` plugin (if `--with-meshchat`)
-9. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet or MeshChat enabled)
+6. Set the node name (from `--node-name`, interactive prompt, or default `ReticulumPi-<hostname>`)
+7. Create all runtime directories required by the systemd service sandboxing
+8. Set up NomadNet directories, example pages, and auto-configure `use_shared_instance: true` + enable the `nomadnet_server` plugin (if `--with-nomadnet`)
+9. Clone MeshChat, create isolated venv, build frontend, and auto-enable the `meshchat_server` plugin (if `--with-meshchat`)
+10. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet or MeshChat enabled)
 
 For a detailed explanation of how files move from your git clone through bootstrap to the running system, see [docs/install-layout.md](docs/install-layout.md).
 
@@ -277,6 +281,10 @@ Controls the application, plugins, and identity. Default location: `~/.config/re
 
 ```yaml
 reticulumpi:
+  # A friendly name for this node — used by NomadNet, LXMF Echo, and announces.
+  # Defaults to "ReticulumPi-<hostname>" if not set, so every node is unique.
+  node_name: MyCabin
+
   # Connect to running rnsd (true) or open interfaces directly (false)
   # Use false for a dedicated node; use true if also running Sideband, NomadNet, etc.
   use_shared_instance: false
@@ -300,7 +308,7 @@ reticulumpi:
 
     message_echo:
       enabled: true
-      display_name: "My Pi Node"
+      # display_name defaults to "<node_name> Echo" — override here if needed
 
     system_monitor:
       enabled: true
@@ -613,7 +621,7 @@ The plugin also **automatically selects the nearest LXMF propagation node** for 
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `display_name` | ReticulumPi Echo | Name shown to message senders |
+| `display_name` | \<node_name\> Echo | Name shown to message senders (inherits from top-level `node_name`) |
 | `storage_path` | ~/.local/share/reticulumpi/lxmf | LXMF message storage directory |
 
 Send a test message from another device using [Sideband](https://unsigned.io/sideband/) or `lxmf_send`.
@@ -640,6 +648,8 @@ Manages a [NomadNet](https://github.com/markqvist/NomadNet) daemon as a subproce
 | Option | Default | Description |
 |--------|---------|-------------|
 | `config_dir` | ~/.nomadnet | NomadNet config and storage directory |
+| `node_name` | \<node_name\> | NomadNet node name (inherits from top-level `node_name`) |
+| `enable_propagation` | false | Run as an LXMF propagation node for store-and-forward |
 | `health_check_interval` | 10 | Seconds between process health checks |
 | `auto_restart` | true | Restart NomadNet if it crashes |
 | `max_restarts` | 5 | Maximum restart attempts before giving up |
@@ -773,7 +783,7 @@ Every plugin receives these through its constructor:
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `self.app` | ReticulumPiApp | The application instance |
+| `self.app` | ReticulumPiApp | The application instance (includes `node_name`) |
 | `self.rns` | RNS.Reticulum | The Reticulum instance |
 | `self.identity` | RNS.Identity | The node's persistent identity |
 | `self.config` | dict | This plugin's config section from YAML |
