@@ -623,7 +623,7 @@ Manages a [NomadNet](https://github.com/markqvist/NomadNet) daemon as a subproce
 | Option | Default | Description |
 |--------|---------|-------------|
 | `config_dir` | ~/.nomadnet | NomadNet config and storage directory |
-| `health_check_interval` | 30 | Seconds between process health checks |
+| `health_check_interval` | 10 | Seconds between process health checks |
 | `auto_restart` | true | Restart NomadNet if it crashes |
 | `max_restarts` | 5 | Maximum restart attempts before giving up |
 
@@ -639,17 +639,17 @@ reticulumpi:
       config_dir: ~/.nomadnet
 ```
 
-Pages are served from `~/.nomadnet/storage/pages/` (micron markup `.mu` files). Files are served from `~/.nomadnet/storage/files/`. Example pages are installed automatically on first start.
+On first start, the plugin writes a NomadNet config with node hosting already enabled -- no manual config patching or restart needed. Pages are served from `~/.nomadnet/storage/pages/` (micron markup `.mu` files). Files are served from `~/.nomadnet/storage/files/`. Example pages are installed automatically on first start.
 
 #### Accessing the NomadNet TUI over SSH
 
-The plugin runs NomadNet in headless daemon mode. To launch the interactive TUI (e.g. for browsing, editing pages, or managing conversations), use the included script:
+The plugin runs NomadNet in headless daemon mode. To launch the interactive TUI for browsing the network, use the included script:
 
 ```bash
 sudo -u reticulumpi bash <install_dir>/scripts/nomadnet-tui.sh
 ```
 
-This temporarily stops the NomadNet daemon, launches the TUI using the same config and storage, and the daemon auto-restarts within 30 seconds after you exit (`Ctrl+Q`).
+The TUI uses a separate browse-only config directory (`~/.nomadnet-tui`) so the daemon continues serving pages uninterrupted. Exit the TUI with `Ctrl+Q`.
 
 ## Writing Custom Plugins
 
@@ -800,7 +800,8 @@ reticulumPi/
 │   └── example_plugin.py           # Scaffold copy (for easy access)
 ├── scripts/
 │   ├── bootstrap.sh                # Fresh Pi setup
-│   └── update.sh                   # Pull + upgrade + restart
+│   ├── update.sh                   # Pull + upgrade + restart
+│   └── nomadnet-tui.sh             # Launch NomadNet TUI over SSH
 ├── systemd/
 │   ├── reticulumpi.service         # Systemd unit file
 │   └── rnsd.service                # Reticulum daemon (for shared instance mode)

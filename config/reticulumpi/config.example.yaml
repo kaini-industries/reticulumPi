@@ -57,7 +57,8 @@ reticulumpi:
     #nomadnet_server:
     #  enabled: false
     #  config_dir: ~/.nomadnet
-    #  health_check_interval: 30
+    #  node_name: ReticulumPi
+    #  health_check_interval: 10
     #  auto_restart: true
     #  max_restarts: 5
 

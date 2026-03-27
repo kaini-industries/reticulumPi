@@ -12,7 +12,7 @@ def nomadnet_config(tmp_path):
     return {
         "enabled": True,
         "config_dir": str(tmp_path / "nomadnet"),
-        "health_check_interval": 30,
+        "health_check_interval": 10,
         "auto_restart": True,
         "max_restarts": 3,
     }
@@ -121,6 +121,55 @@ class TestStart:
         assert os.path.isdir(config_dir)
         assert os.path.isdir(os.path.join(config_dir, "storage", "pages"))
         assert os.path.isdir(os.path.join(config_dir, "storage", "files"))
+
+        plugin._active = False
+        plugin._join_threads()
+
+    def test_writes_default_config_on_first_start(self, mock_app, nomadnet_config, tmp_path):
+        mock_app._reticulum_config_dir = None
+        config_dir = str(tmp_path / "nomadnet")
+        nomadnet_config["config_dir"] = config_dir
+        nomadnet_config["node_name"] = "TestNode"
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 1
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            plugin.start()
+
+        config_file = os.path.join(config_dir, "config")
+        assert os.path.isfile(config_file)
+        with open(config_file) as f:
+            content = f.read()
+        assert "enable_node = yes" in content
+        assert "node_name = TestNode" in content
+
+        plugin._active = False
+        plugin._join_threads()
+
+    def test_does_not_overwrite_existing_config(self, mock_app, nomadnet_config, tmp_path):
+        mock_app._reticulum_config_dir = None
+        config_dir = str(tmp_path / "nomadnet")
+        nomadnet_config["config_dir"] = config_dir
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        # Create existing config before start
+        os.makedirs(config_dir, exist_ok=True)
+        config_file = os.path.join(config_dir, "config")
+        with open(config_file, "w") as f:
+            f.write("my custom config")
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 1
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            plugin.start()
+
+        with open(config_file) as f:
+            assert f.read() == "my custom config"
 
         plugin._active = False
         plugin._join_threads()
@@ -253,6 +302,56 @@ class TestHealthMonitor:
             plugin._active = False
 
         assert plugin._active is False
+
+
+class TestWriteDefaultConfig:
+    def test_writes_config_when_none_exists(self, mock_app, nomadnet_config, tmp_path):
+        config_dir = str(tmp_path / "nomadnet")
+        nomadnet_config["config_dir"] = config_dir
+        nomadnet_config["node_name"] = "MyNode"
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        os.makedirs(config_dir, exist_ok=True)
+        plugin._config_dir = config_dir
+        plugin._write_default_config()
+
+        config_file = os.path.join(config_dir, "config")
+        assert os.path.isfile(config_file)
+        with open(config_file) as f:
+            content = f.read()
+        assert "enable_node = yes" in content
+        assert "node_name = MyNode" in content
+
+    def test_uses_default_node_name(self, mock_app, nomadnet_config, tmp_path):
+        config_dir = str(tmp_path / "nomadnet")
+        nomadnet_config["config_dir"] = config_dir
+        # No node_name in config
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        os.makedirs(config_dir, exist_ok=True)
+        plugin._config_dir = config_dir
+        plugin._write_default_config()
+
+        config_file = os.path.join(config_dir, "config")
+        with open(config_file) as f:
+            content = f.read()
+        assert "node_name = ReticulumPi" in content
+
+    def test_skips_when_config_exists(self, mock_app, nomadnet_config, tmp_path):
+        config_dir = str(tmp_path / "nomadnet")
+        nomadnet_config["config_dir"] = config_dir
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        os.makedirs(config_dir, exist_ok=True)
+        config_file = os.path.join(config_dir, "config")
+        with open(config_file, "w") as f:
+            f.write("existing config")
+
+        plugin._config_dir = config_dir
+        plugin._write_default_config()
+
+        with open(config_file) as f:
+            assert f.read() == "existing config"
 
 
 class TestExamplePages:

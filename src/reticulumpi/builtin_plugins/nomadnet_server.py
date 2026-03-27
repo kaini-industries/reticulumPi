@@ -8,6 +8,31 @@ from typing import Any
 
 from reticulumpi.plugin_base import PluginBase
 
+# Minimal NomadNet config with node hosting enabled.
+# Written before first launch so NomadNet starts serving pages immediately
+# without the launch-patch-restart cycle.
+_DEFAULT_NOMADNET_CONFIG = """\
+[logging]
+loglevel = 4
+destination = file
+
+[client]
+enable_client = yes
+user_interface = text
+announce_at_start = yes
+try_propagation_on_send_fail = yes
+
+[textui]
+intro_time = 1
+theme = dark
+
+[node]
+enable_node = yes
+node_name = {node_name}
+announce_at_start = yes
+disable_propagation = yes
+"""
+
 
 class NomadNetServer(PluginBase):
     """Starts and monitors a NomadNet daemon for serving pages over Reticulum.
@@ -36,7 +61,7 @@ class NomadNetServer(PluginBase):
                 )
         self._nomadnet_bin = nomadnet_bin
 
-        interval = self.config.get("health_check_interval", 30)
+        interval = self.config.get("health_check_interval", 10)
         if not isinstance(interval, (int, float)) or interval < 5:
             raise ValueError("health_check_interval must be a number >= 5")
 
@@ -57,6 +82,7 @@ class NomadNetServer(PluginBase):
         self._files_dir = os.path.join(self._config_dir, "storage", "files")
 
         self._ensure_directories()
+        self._write_default_config()
         self._install_example_pages()
 
         rns_config_dir = self.app._reticulum_config_dir or os.path.expanduser(
@@ -116,7 +142,7 @@ class NomadNetServer(PluginBase):
             self.log.exception("Error stopping NomadNet process")
 
     def _health_monitor(self) -> None:
-        interval = self.config.get("health_check_interval", 30)
+        interval = self.config.get("health_check_interval", 10)
         max_restarts = self.config.get("max_restarts", 5)
         auto_restart = self.config.get("auto_restart", True)
 
@@ -153,6 +179,30 @@ class NomadNetServer(PluginBase):
     def _ensure_directories(self) -> None:
         for d in (self._config_dir, self._pages_dir, self._files_dir):
             os.makedirs(d, exist_ok=True)
+
+    def _write_default_config(self) -> None:
+        """Write a default NomadNet config with node hosting enabled.
+
+        Only writes if no config file exists yet. This avoids the old
+        launch-wait-patch-restart cycle: NomadNet starts correctly on the
+        very first launch with node hosting already enabled.
+        """
+        config_file = os.path.join(self._config_dir, "config")
+        if os.path.isfile(config_file):
+            return
+
+        node_name = self.config.get("node_name", "ReticulumPi")
+        content = _DEFAULT_NOMADNET_CONFIG.format(node_name=node_name)
+
+        try:
+            with open(config_file, "w") as f:
+                f.write(content)
+            self.log.info(
+                "Created NomadNet config with node hosting enabled (node_name: %s)",
+                node_name,
+            )
+        except OSError:
+            self.log.exception("Failed to write default NomadNet config")
 
     def _install_example_pages(self) -> None:
         existing = glob.glob(os.path.join(self._pages_dir, "*.mu"))

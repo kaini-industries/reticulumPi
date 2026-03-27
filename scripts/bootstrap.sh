@@ -100,7 +100,8 @@ sudo -u "$SERVICE_USER" mkdir -p \
     "/home/$SERVICE_USER/.config/reticulumpi" \
     "/home/$SERVICE_USER/.local/share/reticulumpi" \
     "/home/$SERVICE_USER/.local/share" \
-    "/home/$SERVICE_USER/.nomadnet"
+    "/home/$SERVICE_USER/.nomadnet" \
+    "/home/$SERVICE_USER/.nomadnet-tui"
 
 # 6. NomadNet directories and config (if enabled)
 if [ "$WITH_NOMADNET" = true ]; then
