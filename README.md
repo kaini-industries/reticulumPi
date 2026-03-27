@@ -48,13 +48,19 @@ sudo bash scripts/bootstrap.sh
 
 # With NomadNet page server support:
 sudo bash scripts/bootstrap.sh --with-nomadnet
+
+# Install to a custom directory (default: /opt/reticulumpi):
+sudo bash scripts/bootstrap.sh --install-dir /srv/reticulumpi --with-nomadnet
+
+# Or install in-place (run directly from the cloned repo):
+sudo bash scripts/bootstrap.sh --install-dir . --with-nomadnet
 ```
 
 This will:
 
 1. Install system packages (`python3`, `python3-venv`, `git`)
 2. Create a `reticulumpi` system user with hardware access groups (`dialout`, `gpio`, `spi`, `i2c`)
-3. Copy the project to `/opt/reticulumpi` (configurable via `INSTALL_DIR` in the script)
+3. Copy the project to the install directory (default `/opt/reticulumpi`, or in-place with `--install-dir .`)
 4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
 6. Create all runtime directories required by the systemd service sandboxing
@@ -80,9 +86,9 @@ journalctl -u reticulumpi -f
 ### Manual Setup
 
 ```bash
-# Install on the Pi
-python3 -m venv /opt/reticulumpi/.venv
-/opt/reticulumpi/.venv/bin/pip install .
+# Install on the Pi (from the cloned repo directory)
+python3 -m venv .venv
+.venv/bin/pip install .
 
 # Copy example configs
 mkdir -p ~/.config/reticulumpi

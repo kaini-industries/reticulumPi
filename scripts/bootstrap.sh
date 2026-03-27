@@ -6,14 +6,16 @@ set -euo pipefail
 
 AUTO_START=false
 WITH_NOMADNET=false
-for arg in "$@"; do
-    case "$arg" in
+INSTALL_DIR="/opt/reticulumpi"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --start) AUTO_START=true ;;
         --with-nomadnet) WITH_NOMADNET=true ;;
+        --install-dir) INSTALL_DIR="$2"; shift ;;
+        --install-dir=*) INSTALL_DIR="${1#*=}" ;;
     esac
+    shift
 done
-
-INSTALL_DIR="/opt/reticulumpi"
 CONFIG_DIR="/etc/reticulumpi"
 DATA_DIR="/var/lib/reticulumpi"
 SERVICE_USER="reticulumpi"
@@ -38,28 +40,33 @@ done
 
 # 3. Install project
 echo "[3/7] Installing ReticulumPi..."
-if [ -d "$INSTALL_DIR/.git" ]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+INSTALL_DIR="$(realpath "$INSTALL_DIR")"
+
+if [ ! -f "$PROJECT_DIR/pyproject.toml" ]; then
+    echo "Error: Run this script from within the reticulumPi project directory."
+    exit 1
+fi
+
+if [ "$INSTALL_DIR" = "$(realpath "$PROJECT_DIR")" ]; then
+    # In-place install: use the repo directory directly, skip copy
+    echo "  Installing in-place at $INSTALL_DIR (skipping copy)"
+    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+elif [ -d "$INSTALL_DIR/.git" ]; then
     git -C "$INSTALL_DIR" pull
     sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 else
-    # If running from a cloned repo, copy it; otherwise clone from remote
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-    if [ -f "$PROJECT_DIR/pyproject.toml" ]; then
-        sudo mkdir -p "$INSTALL_DIR"
-        # Exclude dev artifacts that won't work on the target
-        rsync -a \
-            --exclude='.git' \
-            --exclude='.venv' \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='.ruff_cache' \
-            "$PROJECT_DIR/" "$INSTALL_DIR/"
-        sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
-    else
-        echo "Error: Run this script from within the reticulumPi project directory."
-        exit 1
-    fi
+    sudo mkdir -p "$INSTALL_DIR"
+    # Exclude dev artifacts that won't work on the target
+    rsync -a \
+        --exclude='.git' \
+        --exclude='.venv' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        --exclude='.ruff_cache' \
+        "$PROJECT_DIR/" "$INSTALL_DIR/"
+    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 fi
 
 # 4. Python venv + install

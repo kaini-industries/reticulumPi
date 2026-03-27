@@ -4,12 +4,21 @@ set -euo pipefail
 # ReticulumPi Update Script
 # Pulls latest code (or rsyncs from source), upgrades dependencies, and restarts.
 
-INSTALL_DIR="/opt/reticulumpi"
+# Auto-detect install directory from this script's location.
+# Works whether installed at /opt/reticulumpi, in-place, or anywhere else.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="$(dirname "$SCRIPT_DIR")"
 SERVICE_USER="reticulumpi"
 
-echo "=== ReticulumPi Update ==="
+if [ ! -f "$INSTALL_DIR/pyproject.toml" ]; then
+    echo "Error: Cannot find reticulumPi project at $INSTALL_DIR"
+    exit 1
+fi
 
-# 1. Update code — git pull if it's a repo, otherwise rsync from source
+echo "=== ReticulumPi Update ==="
+echo "Install directory: $INSTALL_DIR"
+
+# 1. Update code — git pull if it's a repo, otherwise already up-to-date (in-place)
 if [ -d "$INSTALL_DIR/.git" ]; then
     echo "[1/4] Pulling latest code..."
     if ! git -C "$INSTALL_DIR" pull; then
@@ -18,25 +27,7 @@ if [ -d "$INSTALL_DIR/.git" ]; then
     fi
     sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 else
-    # Find the source repo (the directory containing this script)
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    SOURCE_DIR="$(dirname "$SCRIPT_DIR")"
-    if [ -f "$SOURCE_DIR/pyproject.toml" ] && [ "$SOURCE_DIR" != "$INSTALL_DIR" ]; then
-        echo "[1/4] Syncing from $SOURCE_DIR..."
-        rsync -a \
-            --exclude='.git' \
-            --exclude='.venv' \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='.ruff_cache' \
-            --exclude='.pytest_cache' \
-            "$SOURCE_DIR/" "$INSTALL_DIR/"
-        sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
-    else
-        echo "Error: $INSTALL_DIR is not a git repository and no source repo found."
-        echo "Run this script from the cloned reticulumPi directory, or set up $INSTALL_DIR as a git repo."
-        exit 1
-    fi
+    echo "[1/4] No git repo — assuming code is already synced."
 fi
 
 # 2. Upgrade all dependencies and reinstall

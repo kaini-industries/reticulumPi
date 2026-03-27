@@ -21,7 +21,7 @@ reticulumpi:
   # Additional directories to scan for plugin .py files.
   # The built-in plugins/ directory is always scanned.
   plugin_paths: []
-  #  - /opt/reticulumpi/custom_plugins
+  #  - /path/to/custom_plugins
 
   # Plugin configuration. Each key is a plugin_name.
   # Set enabled: true to activate a plugin.
