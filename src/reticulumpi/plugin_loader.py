@@ -42,6 +42,12 @@ class PluginLoader:
                         and attr is not PluginBase
                         and attr.plugin_name != "unnamed"
                     ):
+                        if attr.plugin_name in found:
+                            log.warning(
+                                "Duplicate plugin name '%s' from %s (overrides previous)",
+                                attr.plugin_name,
+                                filepath,
+                            )
                         found[attr.plugin_name] = attr
                         log.info("Discovered plugin: %s (from %s)", attr.plugin_name, filepath)
         return found

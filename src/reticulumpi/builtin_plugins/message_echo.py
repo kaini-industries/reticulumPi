@@ -97,15 +97,16 @@ class MessageEcho(PluginBase):
                 return
 
             hops = RNS.Transport.hops_to(destination_hash)
-            if hops < self._best_propagation_hops:
-                self._best_propagation_hops = hops
-                self.lxmf_router.set_outbound_propagation_node(destination_hash)
-                self.log.info(
-                    "Auto-selected propagation node %s (%d hops)",
-                    RNS.prettyhexrep(destination_hash),
-                    hops,
-                )
-                self._write_nomadnet_propagation_node(destination_hash)
+            with self._lock:
+                if hops < self._best_propagation_hops:
+                    self._best_propagation_hops = hops
+                    self.lxmf_router.set_outbound_propagation_node(destination_hash)
+                    self.log.info(
+                        "Auto-selected propagation node %s (%d hops)",
+                        RNS.prettyhexrep(destination_hash),
+                        hops,
+                    )
+                    self._write_nomadnet_propagation_node(destination_hash)
         except Exception:
             self.log.exception("Error handling propagation node announce")
 

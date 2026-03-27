@@ -27,7 +27,17 @@ def load_or_create(identity_path: str) -> RNS.Identity:
         if identity is not None:
             log.info("Loaded existing identity from %s", identity_path)
             return identity
-        log.warning("Failed to load identity from %s, creating new one", identity_path)
+        # Back up the corrupted file before overwriting
+        backup_path = identity_path + ".bak"
+        try:
+            os.rename(identity_path, backup_path)
+            log.warning(
+                "Failed to load identity from %s, backed up to %s, creating new one",
+                identity_path,
+                backup_path,
+            )
+        except OSError:
+            log.warning("Failed to load identity from %s, creating new one", identity_path)
 
     identity = RNS.Identity()
     identity.to_file(identity_path)

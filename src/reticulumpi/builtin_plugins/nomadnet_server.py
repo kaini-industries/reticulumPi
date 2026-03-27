@@ -140,6 +140,8 @@ class NomadNetServer(PluginBase):
             self._process.wait(timeout=5)
         except Exception:
             self.log.exception("Error stopping NomadNet process")
+        finally:
+            self._process = None
 
     def _health_monitor(self) -> None:
         interval = self.config.get("health_check_interval", 10)

@@ -60,6 +60,10 @@ class ReticulumPiApp:
                 reason = f"start() failed: {exc}"
                 self._failed_plugins.append((name, reason))
                 log.exception("Failed to start plugin: %s", name)
+                try:
+                    plugin.stop()
+                except Exception:
+                    log.debug("Cleanup after failed start of %s also failed", name)
                 del self.plugins[name]
 
         self._print_startup_report()

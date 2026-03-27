@@ -39,7 +39,7 @@ if ! sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade -e "
 fi
 
 # Upgrade NomadNet if installed
-if "$INSTALL_DIR/.venv/bin/pip" show nomadnet &>/dev/null; then
+if sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" show nomadnet &>/dev/null; then
     echo "  Upgrading NomadNet..."
     sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade nomadnet
 fi
