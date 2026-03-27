@@ -5,6 +5,21 @@ All notable changes to ReticulumPi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-03-27
+
+### Added
+- Message echo plugin automatically selects the nearest LXMF propagation node for store-and-forward delivery
+- Selected propagation node is written to NomadNet peersettings so daemon and TUI also use it
+- Bootstrap script supports `--install-dir <path>` for custom install locations (default remains `/opt/reticulumpi`)
+- Bootstrap supports in-place install with `--install-dir .` (runs from cloned repo, no copy)
+- Update script auto-detects install directory from its own location (no hardcoded path)
+- Install layout documentation (`docs/install-layout.md`)
+- Tests for propagation node auto-selection and NomadNet peersettings writing
+- Node Identities section in README documenting the multiple identity files
+
+### Changed
+- README updated with propagation auto-selection docs, node identities section, and install layout reference
+
 ## [0.1.1] - 2026-03-26
 
 ### Fixed

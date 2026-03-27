@@ -67,6 +67,8 @@ This will:
 7. Set up NomadNet directories, example pages, and auto-configure `use_shared_instance: true` + enable the `nomadnet_server` plugin (if `--with-nomadnet`)
 8. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet enabled)
 
+For a detailed explanation of how files move from your git clone through bootstrap to the running system, see [docs/install-layout.md](docs/install-layout.md).
+
 After bootstrap, configure and start:
 
 ```bash
@@ -600,6 +602,8 @@ Periodically announces the node's presence on the Reticulum network. Other nodes
 
 Listens for incoming [LXMF](https://github.com/markqvist/lxmf) messages and replies with an echo. Useful for testing end-to-end connectivity.
 
+The plugin also **automatically selects the nearest LXMF propagation node** for store-and-forward message delivery. On a fresh install, LXMF's built-in auto-selection only considers nodes with trust level `TRUSTED`, which no nodes have by default. This plugin listens for propagation node announces and picks the closest active one by hop count, enabling offline message delivery without manual configuration. The selected node is also written to NomadNet's peersettings so the daemon and TUI benefit too.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `display_name` | ReticulumPi Echo | Name shown to message senders |
@@ -652,10 +656,38 @@ On first start, the plugin writes a NomadNet config with node hosting already en
 The plugin runs NomadNet in headless daemon mode. To launch the interactive TUI for browsing the network, use the included script:
 
 ```bash
-sudo -u reticulumpi bash <install_dir>/scripts/nomadnet-tui.sh
+sudo -u reticulumpi bash /opt/reticulumpi/scripts/nomadnet-tui.sh
 ```
 
-The TUI uses a separate browse-only config directory (`~/.nomadnet-tui`) so the daemon continues serving pages uninterrupted. Exit the TUI with `Ctrl+Q`.
+The TUI uses a separate browse-only config directory (`~/.nomadnet-tui`) so the daemon continues serving pages uninterrupted. Exit the TUI with `Ctrl+Q`. Replace `/opt/reticulumpi` with your install directory if you used `--install-dir`.
+
+## Node Identities
+
+A deployed ReticulumPi node has multiple Reticulum identities, each with its own LXMF address:
+
+| Service | Purpose | Identity File |
+|---|---|---|
+| **reticulumpi** (message_echo) | Echo bot — replies to LXMF messages | `~/.config/reticulumpi/identity` |
+| **NomadNet daemon** | Page server — browsable via NomadNet TUI | `~/.nomadnet/storage/identity` |
+| **NomadNet TUI** | Browse-only client (no node hosting) | `~/.nomadnet-tui/storage/identity` |
+
+To find your node's LXMF addresses:
+
+```bash
+sudo -u reticulumpi /opt/reticulumpi/.venv/bin/python3 -c "
+import RNS
+RNS.Reticulum('/home/reticulumpi/.reticulum', loglevel=RNS.LOG_CRITICAL)
+for label, path in [
+    ('message_echo', '/home/reticulumpi/.config/reticulumpi/identity'),
+    ('NomadNet daemon', '/home/reticulumpi/.nomadnet/storage/identity'),
+]:
+    i = RNS.Identity.from_file(path)
+    d = RNS.Destination(i, RNS.Destination.IN, RNS.Destination.SINGLE, 'lxmf', 'delivery')
+    print(f'{label:20s} {RNS.prettyhexrep(d.hash)}')
+"
+```
+
+The **message_echo** LXMF address is the one to give to other users — they can message it from [Sideband](https://unsigned.io/sideband/) and receive an echo reply.
 
 ## Writing Custom Plugins
 
@@ -780,6 +812,8 @@ reticulumPi/
 ├── Makefile                        # install, dev, test, lint, format targets
 ├── LICENSE                         # MIT license
 ├── CHANGELOG.md                    # Version history
+├── docs/
+│   └── install-layout.md           # Detailed install directory & file flow docs
 ├── config/
 │   ├── nomadnet/
 │   │   └── pages/                  # Example NomadNet pages (.mu files)
@@ -823,6 +857,7 @@ reticulumPi/
     ├── test_config_validation.py    # Config error-path tests
     ├── test_plugin_base.py          # Base class helper tests
     ├── test_plugin_loader.py
+    ├── test_message_echo.py         # LXMF echo + propagation selection tests
     ├── test_nomadnet_server.py      # NomadNet plugin tests
     └── test_identity_manager.py
 ```
