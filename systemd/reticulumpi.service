@@ -11,6 +11,8 @@ Environment=PATH=/opt/reticulumpi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/
 ExecStart=/opt/reticulumpi/.venv/bin/reticulumpi --config /etc/reticulumpi/config.yaml
 Restart=on-failure
 RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
 
 # Security hardening
 NoNewPrivileges=yes

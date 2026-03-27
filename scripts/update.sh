@@ -83,8 +83,9 @@ for svc in reticulumpi.service rnsd.service; do
     src="$INSTALL_DIR/systemd/$svc"
     dest="/etc/systemd/system/$svc"
     if [ -f "$src" ] && [ -f "$dest" ]; then
-        # Template the install dir and compare against the installed version
-        templated=$(sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$src")
+        # Template only the venv/binary path — leave other /opt/reticulumpi paths
+        # (e.g., meshchat) untouched since they may be installed separately
+        templated=$(sed "s|/opt/reticulumpi/\.venv|$INSTALL_DIR/.venv|g" "$src")
         if ! echo "$templated" | diff -q - "$dest" &>/dev/null; then
             echo "$templated" | sudo tee "$dest" >/dev/null
             SERVICES_CHANGED=true
@@ -116,6 +117,8 @@ done
 echo "[5/5] Restarting services..."
 if systemctl is-active --quiet rnsd; then
     sudo systemctl restart rnsd
+    echo "  Waiting for rnsd to initialize..."
+    sleep 3
 fi
 sudo systemctl restart reticulumpi
 
