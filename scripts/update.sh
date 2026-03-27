@@ -44,6 +44,24 @@ if "$INSTALL_DIR/.venv/bin/pip" show nomadnet &>/dev/null; then
     sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade nomadnet
 fi
 
+# Upgrade MeshChat if installed
+MESHCHAT_DIR="$INSTALL_DIR/meshchat"
+if [ -d "$MESHCHAT_DIR/.git" ]; then
+    echo "  Upgrading MeshChat..."
+    MESHCHAT_OLD=$(git -C "$MESHCHAT_DIR" rev-parse HEAD)
+    git -C "$MESHCHAT_DIR" pull
+    MESHCHAT_NEW=$(git -C "$MESHCHAT_DIR" rev-parse HEAD)
+    sudo -u "$SERVICE_USER" "$MESHCHAT_DIR/.venv/bin/pip" install -r "$MESHCHAT_DIR/requirements.txt"
+    # Rebuild frontend if source changed
+    if [ "$MESHCHAT_OLD" != "$MESHCHAT_NEW" ] && [ -f "$MESHCHAT_DIR/package.json" ]; then
+        echo "  Rebuilding MeshChat frontend..."
+        cd "$MESHCHAT_DIR"
+        sudo -u "$SERVICE_USER" npm install --omit=dev
+        sudo -u "$SERVICE_USER" npm run build-frontend
+        cd - >/dev/null
+    fi
+fi
+
 # 3. Update systemd service files if they changed (template paths)
 echo "[3/4] Updating systemd services..."
 SERVICES_CHANGED=false

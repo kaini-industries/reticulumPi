@@ -7,7 +7,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **Four built-in plugins** -- heartbeat announce, LXMF message echo, system metrics, NomadNet page server
+- **Five built-in plugins** -- heartbeat announce, LXMF message echo, system metrics, NomadNet page server, MeshChat web UI
 - **Persistent identity** -- stable cryptographic identity across restarts
 - **Shared or standalone mode** -- coexists with `rnsd` or runs interfaces directly
 - **Deployment automation** -- bootstrap script, systemd service, Docker support
@@ -49,6 +49,12 @@ sudo bash scripts/bootstrap.sh
 # With NomadNet page server support:
 sudo bash scripts/bootstrap.sh --with-nomadnet
 
+# With MeshChat web messaging UI:
+sudo bash scripts/bootstrap.sh --with-meshchat
+
+# With both NomadNet and MeshChat:
+sudo bash scripts/bootstrap.sh --with-nomadnet --with-meshchat
+
 # Install to a custom directory (default: /opt/reticulumpi):
 sudo bash scripts/bootstrap.sh --install-dir /srv/reticulumpi --with-nomadnet
 
@@ -58,14 +64,15 @@ sudo bash scripts/bootstrap.sh --install-dir . --with-nomadnet
 
 This will:
 
-1. Install system packages (`python3`, `python3-venv`, `git`)
+1. Install system packages (`python3`, `python3-venv`, `git`, + `nodejs`/`npm` if `--with-meshchat`)
 2. Create a `reticulumpi` system user with hardware access groups (`dialout`, `gpio`, `spi`, `i2c`)
 3. Copy the project to the install directory (default `/opt/reticulumpi`, or in-place with `--install-dir .`)
-4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`)
+4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
 6. Create all runtime directories required by the systemd service sandboxing
 7. Set up NomadNet directories, example pages, and auto-configure `use_shared_instance: true` + enable the `nomadnet_server` plugin (if `--with-nomadnet`)
-8. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet enabled)
+8. Clone MeshChat, create isolated venv, build frontend, and auto-enable the `meshchat_server` plugin (if `--with-meshchat`)
+9. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet or MeshChat enabled)
 
 For a detailed explanation of how files move from your git clone through bootstrap to the running system, see [docs/install-layout.md](docs/install-layout.md).
 
@@ -115,7 +122,7 @@ Pull the latest code and upgrade dependencies:
 sudo bash scripts/update.sh
 ```
 
-This pulls the repo, upgrades all dependencies, reinstalls the project, syncs any changed systemd service files, and restarts the services.
+This pulls the repo, upgrades all dependencies (including NomadNet and MeshChat if installed), rebuilds the MeshChat frontend if source changed, syncs any changed systemd service files, and restarts the services.
 
 ## Docker
 
@@ -661,6 +668,40 @@ sudo -u reticulumpi bash /opt/reticulumpi/scripts/nomadnet-tui.sh
 
 The TUI uses a separate browse-only config directory (`~/.nomadnet-tui`) so the daemon continues serving pages uninterrupted. Exit the TUI with `Ctrl+Q`. Replace `/opt/reticulumpi` with your install directory if you used `--install-dir`.
 
+### MeshChat Web UI
+
+Manages a [MeshChat](https://github.com/liamcottle/reticulum-meshchat) web UI server as a subprocess. MeshChat provides browser-based messaging over Reticulum/LXMF -- accessible from any device on your network.
+
+**Requires:** `--with-meshchat` during bootstrap (or manual git clone + venv setup)
+
+**Important:** Like NomadNet, MeshChat creates its own Reticulum instance, so both reticulumPi and MeshChat must connect to a shared `rnsd` daemon. Set `use_shared_instance: true` in your config when this plugin is enabled.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `install_dir` | /opt/reticulumpi/meshchat | MeshChat source directory |
+| `host` | 0.0.0.0 | Web UI listen address |
+| `port` | 8000 | Web UI port |
+| `storage_dir` | \<install_dir\>/storage | MeshChat data/identity storage |
+| `health_check_interval` | 10 | Seconds between process health checks |
+| `auto_restart` | true | Restart MeshChat if it crashes |
+| `max_restarts` | 5 | Maximum restart attempts before giving up |
+
+Example config:
+
+```yaml
+reticulumpi:
+  use_shared_instance: true  # Required for MeshChat
+
+  plugins:
+    meshchat_server:
+      enabled: true
+      install_dir: /opt/reticulumpi/meshchat
+      host: "0.0.0.0"
+      port: 8000
+```
+
+After starting, access the web UI at `http://<pi-ip>:8000`. MeshChat manages its own Reticulum identity in its storage directory, separate from the reticulumPi node identity.
+
 ## Node Identities
 
 A deployed ReticulumPi node has multiple Reticulum identities, each with its own LXMF address:
@@ -670,6 +711,7 @@ A deployed ReticulumPi node has multiple Reticulum identities, each with its own
 | **reticulumpi** (message_echo) | Echo bot — replies to LXMF messages | `~/.config/reticulumpi/identity` |
 | **NomadNet daemon** | Page server — browsable via NomadNet TUI | `~/.nomadnet/storage/identity` |
 | **NomadNet TUI** | Browse-only client (no node hosting) | `~/.nomadnet-tui/storage/identity` |
+| **MeshChat** | Web UI chat over LXMF | `<install_dir>/storage/identity` |
 
 To find your node's LXMF addresses:
 
@@ -835,6 +877,7 @@ reticulumPi/
 │       ├── message_echo.py         # LXMF echo responder
 │       ├── system_monitor.py       # System metrics collector
 │       ├── nomadnet_server.py      # NomadNet page server manager
+│       ├── meshchat_server.py     # MeshChat web UI manager
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
 │   └── example_plugin.py           # Scaffold copy (for easy access)
@@ -859,6 +902,7 @@ reticulumPi/
     ├── test_plugin_loader.py
     ├── test_message_echo.py         # LXMF echo + propagation selection tests
     ├── test_nomadnet_server.py      # NomadNet plugin tests
+    ├── test_meshchat_server.py      # MeshChat plugin tests
     └── test_identity_manager.py
 ```
 

@@ -62,6 +62,19 @@ reticulumpi:
     #  auto_restart: true
     #  max_restarts: 5
 
+    # MeshChat web UI — web-based chat over Reticulum/LXMF.
+    # Requires: --with-meshchat during bootstrap, or manual install.
+    # When enabled, set use_shared_instance: true above.
+    #meshchat_server:
+    #  enabled: false
+    #  install_dir: /opt/reticulumpi/meshchat
+    #  host: "0.0.0.0"
+    #  port: 8000
+    #  storage_dir: /opt/reticulumpi/meshchat/storage
+    #  health_check_interval: 10
+    #  auto_restart: true
+    #  max_restarts: 5
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

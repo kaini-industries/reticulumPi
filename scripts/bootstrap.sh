@@ -6,11 +6,13 @@ set -euo pipefail
 
 AUTO_START=false
 WITH_NOMADNET=false
+WITH_MESHCHAT=false
 INSTALL_DIR="/opt/reticulumpi"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --start) AUTO_START=true ;;
         --with-nomadnet) WITH_NOMADNET=true ;;
+        --with-meshchat) WITH_MESHCHAT=true ;;
         --install-dir) INSTALL_DIR="$2"; shift ;;
         --install-dir=*) INSTALL_DIR="${1#*=}" ;;
     esac
@@ -25,7 +27,11 @@ echo "=== ReticulumPi Bootstrap ==="
 # 1. System packages
 echo "[1/7] Installing system packages..."
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip git
+PACKAGES="python3 python3-venv python3-pip git"
+if [ "$WITH_MESHCHAT" = true ]; then
+    PACKAGES="$PACKAGES nodejs npm"
+fi
+sudo apt-get install -y $PACKAGES
 
 # 2. Create service user (if not exists)
 echo "[2/7] Setting up service user..."
@@ -81,6 +87,30 @@ if [ "$WITH_NOMADNET" = true ]; then
     sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install nomadnet
 fi
 
+# 4c. Optional: Install MeshChat
+if [ "$WITH_MESHCHAT" = true ]; then
+    echo "[4c/7] Installing MeshChat..."
+    MESHCHAT_DIR="$INSTALL_DIR/meshchat"
+    if [ -d "$MESHCHAT_DIR/.git" ]; then
+        git -C "$MESHCHAT_DIR" pull
+    else
+        sudo -u "$SERVICE_USER" git clone https://github.com/liamcottle/reticulum-meshchat "$MESHCHAT_DIR"
+    fi
+    sudo -u "$SERVICE_USER" python3 -m venv "$MESHCHAT_DIR/.venv"
+    sudo -u "$SERVICE_USER" "$MESHCHAT_DIR/.venv/bin/pip" install --upgrade pip
+    sudo -u "$SERVICE_USER" "$MESHCHAT_DIR/.venv/bin/pip" install -r "$MESHCHAT_DIR/requirements.txt"
+    sudo -u "$SERVICE_USER" mkdir -p "$MESHCHAT_DIR/storage"
+
+    # Build the frontend (required — MeshChat serves from public/)
+    if [ ! -d "$MESHCHAT_DIR/public" ]; then
+        echo "  Building MeshChat frontend..."
+        cd "$MESHCHAT_DIR"
+        sudo -u "$SERVICE_USER" npm install --omit=dev
+        sudo -u "$SERVICE_USER" npm run build-frontend
+        cd - >/dev/null
+    fi
+fi
+
 # 5. Config directories
 echo "[5/7] Setting up configuration..."
 sudo mkdir -p "$CONFIG_DIR" "$DATA_DIR"
@@ -109,6 +139,11 @@ sudo -u "$SERVICE_USER" mkdir -p \
     "/home/$SERVICE_USER/.local/share" \
     "/home/$SERVICE_USER/.nomadnet" \
     "/home/$SERVICE_USER/.nomadnet-tui"
+
+# Also create MeshChat storage dir if installing (required by ReadWritePaths)
+if [ "$WITH_MESHCHAT" = true ]; then
+    sudo -u "$SERVICE_USER" mkdir -p "$INSTALL_DIR/meshchat/storage"
+fi
 
 # 6. NomadNet directories and config (if enabled)
 if [ "$WITH_NOMADNET" = true ]; then
@@ -139,17 +174,55 @@ s/^    #  max_restarts:/      max_restarts:/
     echo "  Enabled nomadnet_server plugin in $CONFIG_DIR/config.yaml"
 fi
 
+# 6b. MeshChat config (if enabled)
+if [ "$WITH_MESHCHAT" = true ]; then
+    echo "[6b/7] Setting up MeshChat config..."
+
+    # MeshChat also requires shared instance mode
+    sudo sed -i 's/^  use_shared_instance: false$/  use_shared_instance: true/' "$CONFIG_DIR/config.yaml"
+    echo "  Set use_shared_instance: true in $CONFIG_DIR/config.yaml"
+
+    # Enable the meshchat_server plugin: uncomment if present, otherwise append
+    if grep -q '#meshchat_server:' "$CONFIG_DIR/config.yaml"; then
+        sudo sed -i '/^    #meshchat_server:$/,/^    #  max_restarts: 5/{
+s/^    #meshchat_server:/    meshchat_server:/
+s/^    #  enabled: false/      enabled: true/
+s/^    #  install_dir:/      install_dir:/
+s/^    #  host:/      host:/
+s/^    #  port:/      port:/
+s/^    #  storage_dir:/      storage_dir:/
+s/^    #  health_check_interval:/      health_check_interval:/
+s/^    #  auto_restart:/      auto_restart:/
+s/^    #  max_restarts:/      max_restarts:/
+}' "$CONFIG_DIR/config.yaml"
+    elif ! grep -q 'meshchat_server:' "$CONFIG_DIR/config.yaml"; then
+        cat >> "$CONFIG_DIR/config.yaml" <<MESHCHAT
+
+    meshchat_server:
+      enabled: true
+      install_dir: $INSTALL_DIR/meshchat
+      host: "0.0.0.0"
+      port: 8000
+      storage_dir: $INSTALL_DIR/meshchat/storage
+      health_check_interval: 10
+      auto_restart: true
+      max_restarts: 5
+MESHCHAT
+    fi
+    echo "  Enabled meshchat_server plugin in $CONFIG_DIR/config.yaml"
+fi
+
 # 7. Install systemd services (template paths to match INSTALL_DIR)
 echo "[7/7] Installing systemd services..."
 sudo sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/reticulumpi.service" \
     > /etc/systemd/system/reticulumpi.service
-if [ "$WITH_NOMADNET" = true ]; then
+if [ "$WITH_NOMADNET" = true ] || [ "$WITH_MESHCHAT" = true ]; then
     sudo sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/rnsd.service" \
         > /etc/systemd/system/rnsd.service
     sudo systemctl daemon-reload
     sudo systemctl enable rnsd.service
     sudo systemctl enable reticulumpi.service
-    echo "  Installed rnsd.service (required for NomadNet shared instance)"
+    echo "  Installed rnsd.service (required for shared instance mode)"
 else
     sudo systemctl daemon-reload
     sudo systemctl enable reticulumpi.service
@@ -159,8 +232,25 @@ echo ""
 echo "=== Bootstrap complete ==="
 echo ""
 
-if [ "$AUTO_START" = true ]; then
+# Detect if services were already running before bootstrap
+RNSD_WAS_RUNNING=false
+RETICULUMPI_WAS_RUNNING=false
+systemctl is-active --quiet rnsd 2>/dev/null && RNSD_WAS_RUNNING=true
+systemctl is-active --quiet reticulumpi 2>/dev/null && RETICULUMPI_WAS_RUNNING=true
+
+if [ "$RETICULUMPI_WAS_RUNNING" = true ]; then
+    echo "Restarting services (were already running)..."
+    if [ "$RNSD_WAS_RUNNING" = true ]; then
+        sudo systemctl restart rnsd
+    fi
+    sudo systemctl restart reticulumpi
+    echo "Services restarted with new configuration."
+    echo "Check logs with: journalctl -u reticulumpi -f"
+elif [ "$AUTO_START" = true ]; then
     echo "Starting ReticulumPi service..."
+    if systemctl is-enabled --quiet rnsd 2>/dev/null; then
+        sudo systemctl start rnsd
+    fi
     sudo systemctl start reticulumpi.service
     echo "Service started. Check logs with: journalctl -u reticulumpi -f"
 else
@@ -173,6 +263,9 @@ else
         read -rp "Start ReticulumPi service now? [y/N] " answer
         case "$answer" in
             [Yy]*)
+                if systemctl is-enabled --quiet rnsd 2>/dev/null; then
+                    sudo systemctl start rnsd
+                fi
                 sudo systemctl start reticulumpi.service
                 echo "Service started. Check logs with: journalctl -u reticulumpi -f"
                 ;;
@@ -196,6 +289,17 @@ else
     echo ""
     echo "Optional — for NomadNet page serving:"
     echo "  Re-run with: sudo bash $0 --with-nomadnet"
+fi
+
+if [ "$WITH_MESHCHAT" = true ]; then
+    echo ""
+    echo "MeshChat is installed and configured."
+    echo "  Web UI: http://$(hostname -I | awk '{print $1}'):8000"
+    echo "  Start services: sudo systemctl start rnsd reticulumpi"
+else
+    echo ""
+    echo "Optional — for MeshChat web messaging:"
+    echo "  Re-run with: sudo bash $0 --with-meshchat"
 fi
 
 echo ""
