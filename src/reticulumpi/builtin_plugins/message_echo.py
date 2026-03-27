@@ -35,10 +35,22 @@ class MessageEcho(PluginBase):
         self._lock = threading.Lock()
         default_storage = "~/.local/share/reticulumpi/lxmf"
         storage_path = os.path.expanduser(self.config.get("storage_path", default_storage))
+        os.makedirs(storage_path, exist_ok=True)
+
+        # Each LXMF plugin needs its own identity so it gets a unique LXMF
+        # address and doesn't collide with other plugins using register_delivery_identity.
+        identity_path = os.path.join(storage_path, "identity")
+        if os.path.isfile(identity_path):
+            self._echo_identity = RNS.Identity.from_file(identity_path)
+            self.log.debug("Loaded Echo identity from %s", identity_path)
+        else:
+            self._echo_identity = RNS.Identity()
+            self._echo_identity.to_file(identity_path)
+            self.log.info("Created new Echo identity at %s", identity_path)
 
         self.lxmf_router = LXMF.LXMRouter(storagepath=storage_path)
         self.local_lxmf_destination = self.lxmf_router.register_delivery_identity(
-            self.identity,
+            self._echo_identity,
             display_name=self.config.get("display_name") or f"{self.app.node_name} Echo",
         )
         self.lxmf_router.register_delivery_callback(self._handle_message)
@@ -70,8 +82,8 @@ class MessageEcho(PluginBase):
                 self.log.info("Received LXMF message from %s: %s", sender, content[:100])
 
                 reply = LXMF.LXMessage(
-                    self.local_lxmf_destination,
                     message.source,
+                    self.local_lxmf_destination,
                     f"Echo: {content}",
                     desired_method=LXMF.LXMessage.DIRECT,
                 )

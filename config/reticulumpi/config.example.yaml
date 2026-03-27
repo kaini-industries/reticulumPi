@@ -46,6 +46,13 @@ reticulumpi:
       #display_name: "MyNode Echo"  # Defaults to "<node_name> Echo"
       storage_path: ~/.local/share/reticulumpi/lxmf
 
+    # Info Bot — responds to LXMF commands with internet-sourced info.
+    # Send "!help" for a list of commands, "!weather <city>" for weather.
+    #info_bot:
+    #  enabled: false
+    #  display_name: "MyNode Info"  # Defaults to "<node_name> Info"
+    #  storage_path: ~/.local/share/reticulumpi/info_bot_lxmf
+
     system_monitor:
       enabled: true
       collect_interval_seconds: 60

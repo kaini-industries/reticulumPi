@@ -17,10 +17,13 @@ def echo_plugin(mock_app, tmp_path):
     }
     import RNS as _RNS
 
+    mock_echo_identity = MagicMock()
+
     with (
         patch("LXMF.LXMRouter") as mock_router_cls,
         patch.object(_RNS.Transport, "register_announce_handler"),
         patch.object(_RNS.Transport, "deregister_announce_handler"),
+        patch("RNS.Identity", return_value=mock_echo_identity),
     ):
         mock_router = MagicMock()
         mock_dest = MagicMock()

@@ -7,7 +7,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **Five built-in plugins** -- heartbeat announce, LXMF message echo, system metrics, NomadNet page server, MeshChat web UI
+- **Six built-in plugins** -- heartbeat announce, LXMF message echo, info bot, system metrics, NomadNet page server, MeshChat web UI
 - **Persistent identity** -- stable cryptographic identity across restarts
 - **Shared or standalone mode** -- coexists with `rnsd` or runs interfaces directly
 - **Deployment automation** -- bootstrap script, systemd service, Docker support
@@ -626,6 +626,24 @@ The plugin also **automatically selects the nearest LXMF propagation node** for 
 
 Send a test message from another device using [Sideband](https://unsigned.io/sideband/) or `lxmf_send`.
 
+### Info Bot
+
+Responds to LXMF command messages with information fetched from the internet. Send `!help` to see available commands, or `!weather <city>` to get current weather conditions. Uses the free [Open-Meteo](https://open-meteo.com/) API (no API key required).
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `display_name` | \<node_name\> Info | Name shown to message senders (inherits from top-level `node_name`) |
+| `storage_path` | ~/.local/share/reticulumpi/info_bot_lxmf | LXMF message and identity storage directory |
+
+Available commands:
+
+| Command | Example | Description |
+|---------|---------|-------------|
+| `!weather <location>` | `!weather Austin, TX` | Current temperature, conditions, humidity, wind |
+| `!help` | `!help` | List available commands |
+
+Messages without a `!` prefix receive a help response. The command system is extensible — new commands can be added to the plugin's command registry.
+
 ### System Monitor
 
 Collects system metrics on a timer. Other plugins can read metrics via `app.get_plugin("system_monitor").latest_metrics`.
@@ -714,23 +732,32 @@ After starting, access the web UI at `http://<pi-ip>:8000`. MeshChat manages its
 
 ## Node Identities
 
-A deployed ReticulumPi node has multiple Reticulum identities, each with its own LXMF address:
+A deployed ReticulumPi node has multiple Reticulum identities. Each LXMF plugin creates its own identity so that plugins can run independently without destination collisions.
 
 | Service | Purpose | Identity File |
 |---|---|---|
-| **reticulumpi** (message_echo) | Echo bot — replies to LXMF messages | `~/.config/reticulumpi/identity` |
+| **reticulumpi** (node) | Shared node identity for RNS destinations (heartbeat, etc.) | `~/.config/reticulumpi/identity` |
+| **message_echo** | Echo bot — replies to LXMF messages | `~/.local/share/reticulumpi/lxmf/identity` |
+| **info_bot** | Info bot — responds to `!` commands | `~/.local/share/reticulumpi/info_bot_lxmf/identity` |
 | **NomadNet daemon** | Page server — browsable via NomadNet TUI | `~/.nomadnet/storage/identity` |
 | **NomadNet TUI** | Browse-only client (no node hosting) | `~/.nomadnet-tui/storage/identity` |
 | **MeshChat** | Web UI chat over LXMF | `<install_dir>/storage/identity` |
 
-To find your node's LXMF addresses:
+To find your LXMF plugin addresses, check the startup logs:
+
+```bash
+sudo journalctl -u reticulumpi -g "active at" --no-pager
+```
+
+Or compute them from identity files:
 
 ```bash
 sudo -u reticulumpi /opt/reticulumpi/.venv/bin/python3 -c "
 import RNS
 RNS.Reticulum('/home/reticulumpi/.reticulum', loglevel=RNS.LOG_CRITICAL)
 for label, path in [
-    ('message_echo', '/home/reticulumpi/.config/reticulumpi/identity'),
+    ('message_echo', '/home/reticulumpi/.local/share/reticulumpi/lxmf/identity'),
+    ('info_bot', '/home/reticulumpi/.local/share/reticulumpi/info_bot_lxmf/identity'),
     ('NomadNet daemon', '/home/reticulumpi/.nomadnet/storage/identity'),
 ]:
     i = RNS.Identity.from_file(path)
@@ -739,7 +766,7 @@ for label, path in [
 "
 ```
 
-The **message_echo** LXMF address is the one to give to other users — they can message it from [Sideband](https://unsigned.io/sideband/) and receive an echo reply.
+The **message_echo** and **info_bot** LXMF addresses are the ones to give to other users — they can message them from [Sideband](https://unsigned.io/sideband/) or MeshChat.
 
 ## Writing Custom Plugins
 
@@ -885,6 +912,7 @@ reticulumPi/
 │   └── builtin_plugins/            # Built-in plugins (shipped with package)
 │       ├── heartbeat_announce.py   # Network presence announcer
 │       ├── message_echo.py         # LXMF echo responder
+│       ├── info_bot.py             # LXMF command bot (weather, etc.)
 │       ├── system_monitor.py       # System metrics collector
 │       ├── nomadnet_server.py      # NomadNet page server manager
 │       ├── meshchat_server.py     # MeshChat web UI manager
@@ -911,6 +939,7 @@ reticulumPi/
     ├── test_plugin_base.py          # Base class helper tests
     ├── test_plugin_loader.py
     ├── test_message_echo.py         # LXMF echo + propagation selection tests
+    ├── test_info_bot.py             # Info bot command + weather tests
     ├── test_nomadnet_server.py      # NomadNet plugin tests
     ├── test_meshchat_server.py      # MeshChat plugin tests
     └── test_identity_manager.py
