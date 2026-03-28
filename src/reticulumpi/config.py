@@ -1,5 +1,7 @@
 """Application configuration loader."""
 
+from __future__ import annotations
+
 import logging
 import os
 import socket
@@ -15,6 +17,7 @@ VALID_KEYS = {
     "use_shared_instance",
     "identity_path",
     "log_level",
+    "log_format",
     "plugin_paths",
     "plugins",
 }

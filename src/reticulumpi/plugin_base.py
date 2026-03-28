@@ -1,5 +1,7 @@
 """Abstract base class for all reticulumPi plugins."""
 
+from __future__ import annotations
+
 import logging
 import threading
 import time
@@ -26,6 +28,7 @@ class PluginBase(ABC):
         self.config = plugin_config
         self.rns = app.reticulum
         self.identity = app.identity
+        self.event_bus = app.event_bus
         self.log = logging.getLogger(f"reticulumpi.plugin.{self.plugin_name}")
         self._active = False
         self._threads: list[threading.Thread] = []
@@ -60,6 +63,30 @@ class PluginBase(ABC):
             if remaining <= 0:
                 break
             time.sleep(min(remaining, 1.0))
+
+    def _start_log_reader(self, process: Any, prefix: str = "") -> threading.Thread:
+        """Start a daemon thread that reads process stdout line-by-line and logs it.
+
+        The process must have been created with ``stdout=subprocess.PIPE`` and
+        ``stderr=subprocess.STDOUT`` so all output appears on stdout.
+        """
+        import io
+
+        def _reader() -> None:
+            stream: io.BufferedReader | None = getattr(process, "stdout", None)
+            if stream is None:
+                return
+            tag = f"[{prefix}] " if prefix else ""
+            try:
+                for raw_line in stream:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip()
+                    if line:
+                        self.log.info("%s%s", tag, line)
+            except (ValueError, OSError):
+                # Stream closed
+                pass
+
+        return self._start_thread(_reader, name=f"{prefix}-log-reader" if prefix else "log-reader")
 
     def _start_thread(self, target: Any, name: str | None = None) -> threading.Thread:
         """Start a daemon thread and return it."""

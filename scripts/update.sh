@@ -59,6 +59,12 @@ if sudo "$VENV/bin/pip" show aiohttp &>/dev/null; then
     sudo "$VENV/bin/pip" install --upgrade "aiohttp>=3.9,<4.0"
 fi
 
+# Upgrade rnodeconf if installed
+if sudo "$VENV/bin/pip" show rnodeconf &>/dev/null; then
+    echo "  Upgrading rnodeconf (LoRa/RNode tools)..."
+    sudo "$VENV/bin/pip" install --upgrade rnodeconf
+fi
+
 # Upgrade NomadNet if installed
 if sudo "$VENV/bin/pip" show nomadnet &>/dev/null; then
     echo "  Upgrading NomadNet..."

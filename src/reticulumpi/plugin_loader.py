@@ -1,5 +1,7 @@
 """Filesystem-based plugin discovery and loading."""
 
+from __future__ import annotations
+
 import glob
 import importlib.util
 import logging

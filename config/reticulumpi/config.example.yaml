@@ -111,6 +111,99 @@ reticulumpi:
     #    auto_generate: false      # Auto-generate self-signed cert
     #    cert_dir: ~/.config/reticulumpi/web_certs
 
+    # Network Map — passively monitors announces to build mesh topology.
+    # Discovers all reachable nodes and tracks hop counts over time.
+    #network_map:
+    #  enabled: false
+    #  db_path: ~/.local/share/reticulumpi/network_map.db
+    #  max_history_days: 30
+
+    # Mesh Telemetry — broadcasts system metrics over Reticulum announces.
+    # Other nodes running this plugin can see your node's health.
+    #mesh_telemetry:
+    #  enabled: false
+    #  announce_interval: 300
+    #  include_metrics: [cpu_percent, cpu_temp, memory_percent, disk_percent]
+    #  store_history: true
+
+    # Remote Control — manage this node over Reticulum Links (no IP needed).
+    # Only identities in allowed_identities can connect.
+    # Get your identity hash with: rnid (or from the dashboard)
+    #remote_control:
+    #  enabled: false
+    #  allowed_identities:
+    #    - "your_identity_hash_here"
+    #  log_buffer_lines: 500
+
+    # Alert System — sends LXMF messages when thresholds are breached.
+    # Configure recipients (LXMF addresses) and rules.
+    #alert_system:
+    #  enabled: false
+    #  storage_path: ~/.local/share/reticulumpi/alert_lxmf
+    #  recipients:
+    #    - "recipient_lxmf_hash_here"
+    #  cooldown_seconds: 300
+    #  rules:
+    #    - metric: cpu_temp
+    #      operator: ">"
+    #      threshold: 75
+    #      message: "CPU temperature critical: {value}C"
+    #    - metric: disk_percent
+    #      operator: ">"
+    #      threshold: 90
+    #      message: "Disk usage critical: {value}%"
+    #  alert_on_plugin_crash: true
+    #  alert_on_reboot: true
+
+    # File Transfer — send and receive files between nodes over Reticulum.
+    # Uses RNS.Resource for chunked, compressed transfers.
+    #file_transfer:
+    #  enabled: false
+    #  shared_dir: ~/.local/share/reticulumpi/shared_files
+    #  max_file_size_mb: 50
+    #  allowed_identities: []   # Empty = accept from anyone
+    #  auto_accept: true
+
+    # Sensor Framework — config-driven sensor reading with logging and mesh broadcast.
+    # Supports DS18B20, BME280, ADC, and custom commands.
+    # Requires: smbus2 for I2C sensors (pip install smbus2)
+    #sensor_framework:
+    #  enabled: false
+    #  read_interval: 60
+    #  sensors:
+    #    - name: outdoor_temp
+    #      driver: ds18b20
+    #      address: "28-0000abcdef"
+    #    - name: indoor_env
+    #      driver: bme280
+    #      bus: 1
+    #      i2c_address: 0x76
+    #    - name: battery_voltage
+    #      driver: adc
+    #      sysfs_path: /sys/bus/iio/devices/iio:device0/in_voltage0_raw
+    #      scale: 0.001
+    #      reading_name: voltage
+    #    - name: signal_strength
+    #      driver: command
+    #      command: "cat /proc/net/wireless | tail -1 | awk '{print $3}'"
+    #      reading_name: quality
+    #  storage:
+    #    type: sqlite                  # sqlite, csv, or none
+    #    path: ~/.local/share/reticulumpi/sensor_data.db
+    #    retention_days: 30
+    #  broadcast:
+    #    enabled: false
+    #    interval: 300
+
+    # Emergency Broadcast — mesh-wide flood-style priority messaging.
+    # Messages propagate across the mesh via announce re-broadcasting with TTL.
+    #emergency_broadcast:
+    #  enabled: false
+    #  max_ttl: 5                      # Maximum hops for message propagation
+    #  max_stored_messages: 100        # Local message buffer size
+    #  rebroadcast: true               # Re-broadcast received emergencies
+    #  rebroadcast_delay: 5            # Seconds to wait before re-broadcasting
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

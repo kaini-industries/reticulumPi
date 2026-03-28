@@ -1,5 +1,7 @@
 """MeshChat Server plugin - manages a MeshChat web UI as a subprocess."""
 
+from __future__ import annotations
+
 import os
 import subprocess
 from typing import Any
@@ -131,10 +133,11 @@ class MeshChatServer(PluginBase):
     def _launch_process(self, cmd: list[str]) -> None:
         self._process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
         self._pid = self._process.pid
+        self._start_log_reader(self._process, prefix="meshchat")
 
     def _terminate_process(self) -> None:
         if self._process is None:
@@ -145,10 +148,18 @@ class MeshChatServer(PluginBase):
         except subprocess.TimeoutExpired:
             self.log.warning("MeshChat did not stop gracefully, sending SIGKILL")
             self._process.kill()
-            self._process.wait(timeout=5)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.log.warning("MeshChat process did not exit after SIGKILL")
         except Exception:
             self.log.exception("Error stopping MeshChat process")
         finally:
+            if self._process and self._process.stdout:
+                try:
+                    self._process.stdout.close()
+                except Exception:
+                    pass
             self._process = None
 
     def _health_monitor(self) -> None:

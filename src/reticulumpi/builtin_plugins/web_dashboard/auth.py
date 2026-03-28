@@ -1,5 +1,7 @@
 """Authentication: password hashing, session token management, rate limiting."""
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import os

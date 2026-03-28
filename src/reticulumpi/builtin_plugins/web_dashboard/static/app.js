@@ -208,6 +208,310 @@
     $('iface-count').textContent = interfaces.length + ' active';
   }
 
+  // Mesh node sorting state
+  var _meshNodes = [];
+  var _meshPeers = {};  // destination_hash -> telemetry data
+  var _meshSortKey = 'hops';
+  var _meshSortAsc = true;
+  var _meshExpandedHash = null;
+
+  function sortMeshNodes(nodes, key, asc) {
+    return nodes.slice().sort(function(a, b) {
+      var va, vb;
+      if (key === 'hops') {
+        va = a.hops != null ? a.hops : 9999;
+        vb = b.hops != null ? b.hops : 9999;
+      } else if (key === 'last_seen') {
+        va = a.last_seen || 0;
+        vb = b.last_seen || 0;
+      } else if (key === 'announce_count') {
+        va = a.announce_count || 0;
+        vb = b.announce_count || 0;
+      } else {
+        return 0;
+      }
+      return asc ? va - vb : vb - va;
+    });
+  }
+
+  function _di(label, value, cls) {
+    return '<div class="node-detail-item">'
+      + '<span class="node-detail-label">' + label + '</span>'
+      + '<span class="node-detail-value' + (cls ? ' ' + cls : '') + '">' + value + '</span>'
+      + '</div>';
+  }
+
+  function buildNodeDetailHTML(node) {
+    var peer = _meshPeers[node.destination_hash];
+    var firstSeen = node.first_seen ? new Date(node.first_seen * 1000).toLocaleString() : '--';
+    var lastSeen = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
+
+    var h = '<div class="node-detail-section">Identity</div>'
+      + '<div class="node-detail-grid">'
+      + _di('Address', esc(node.destination_hash || '--'))
+      + _di('Name', esc(node.app_data || '--'))
+      + _di('App', esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : ''))
+      + '</div>'
+      + '<div class="node-detail-section">Network</div>'
+      + '<div class="node-detail-grid">'
+      + _di('Hops', node.hops != null ? node.hops : '--')
+      + _di('First Seen', firstSeen)
+      + _di('Last Seen', lastSeen)
+      + _di('Announces', node.announce_count || 0)
+      + '</div>';
+
+    if (peer) {
+      h += '<div class="node-detail-section">Telemetry</div>'
+        + '<div class="node-detail-grid">';
+      if (peer.cpu != null) h += _di('CPU', peer.cpu.toFixed(1) + '%', metricClass(peer.cpu, 70, 90));
+      if (peer.temp != null) h += _di('Temperature', peer.temp.toFixed(1) + '\u00B0C', metricClass(peer.temp, 65, 80));
+      if (peer.mem != null) h += _di('Memory', peer.mem.toFixed(1) + '%', metricClass(peer.mem, 70, 90));
+      if (peer.disk != null) h += _di('Disk', peer.disk.toFixed(1) + '%', metricClass(peer.disk, 80, 95));
+      if (peer.uptime != null) h += _di('Uptime', formatUptime(peer.uptime));
+      if (peer.v) h += _di('Version', esc(peer.v));
+      if (peer.plugins != null) h += _di('Plugins', peer.plugins);
+      h += '</div>';
+    }
+
+    return h;
+  }
+
+  function renderMeshNodes(nodes) {
+    var tbody = $('mesh-table');
+    if (!tbody) return;
+    if (!nodes || nodes.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6">No nodes discovered yet</td></tr>';
+      $('mesh-count').textContent = '0';
+      return;
+    }
+    // Build rows, preserving expanded state
+    tbody.innerHTML = '';
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      var hash = node.destination_hash || '';
+      var ago = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
+      var isExpanded = (hash === _meshExpandedHash);
+
+      var tr = document.createElement('tr');
+      if (isExpanded) tr.className = 'node-row-active';
+      tr.setAttribute('data-hash', hash);
+      tr.innerHTML =
+          '<td class="addr">' + esc(hash || '--') + '</td>'
+        + '<td class="col-truncate" title="' + esc(node.app_data || '') + '">' + esc(node.app_data || '--') + '</td>'
+        + '<td>' + esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : '') + '</td>'
+        + '<td>' + (node.hops != null ? node.hops : '--') + '</td>'
+        + '<td>' + ago + '</td>'
+        + '<td>' + (node.announce_count || 0) + '</td>';
+      tr.style.cursor = 'pointer';
+      (function(n, h) {
+        tr.addEventListener('click', function() { toggleNodeDetail(n, h); });
+      })(node, hash);
+      tbody.appendChild(tr);
+
+      if (isExpanded) {
+        var detailTr = document.createElement('tr');
+        detailTr.className = 'node-detail';
+        detailTr.id = 'node-detail-' + hash;
+        var td = document.createElement('td');
+        td.colSpan = 6;
+        td.innerHTML = buildNodeDetailHTML(node);
+        detailTr.appendChild(td);
+        tbody.appendChild(detailTr);
+      }
+    }
+    $('mesh-count').textContent = nodes.length + ' nodes';
+    updateMeshSortIndicators();
+  }
+
+  function toggleNodeDetail(node, hash) {
+    if (_meshExpandedHash === hash) {
+      _meshExpandedHash = null;
+    } else {
+      _meshExpandedHash = hash;
+    }
+    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
+    renderMeshNodes(sorted);
+  }
+
+  function updateMeshNodes(nodes) {
+    _meshNodes = nodes || [];
+    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
+    renderMeshNodes(sorted);
+  }
+
+  function cacheMeshPeers(peers) {
+    _meshPeers = {};
+    if (!peers) return;
+    for (var i = 0; i < peers.length; i++) {
+      var p = peers[i];
+      if (p.destination_hash) _meshPeers[p.destination_hash] = p;
+    }
+  }
+
+  function onMeshSort(key) {
+    if (_meshSortKey === key) {
+      _meshSortAsc = !_meshSortAsc;
+    } else {
+      _meshSortKey = key;
+      _meshSortAsc = (key === 'hops');  // hops default asc, others desc
+    }
+    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
+    renderMeshNodes(sorted);
+  }
+
+  function updateMeshSortIndicators() {
+    var headers = document.querySelectorAll('#mesh-section th[data-sort]');
+    for (var i = 0; i < headers.length; i++) {
+      var th = headers[i];
+      var arrow = th.querySelector('.sort-arrow');
+      if (th.getAttribute('data-sort') === _meshSortKey) {
+        arrow.textContent = _meshSortAsc ? ' \u25B2' : ' \u25BC';
+      } else {
+        arrow.textContent = '';
+      }
+    }
+  }
+
+  function updatePeerTelemetry(peers) {
+    var grid = $('peer-metrics-grid');
+    if (!grid) return;
+    if (!peers || peers.length === 0) {
+      grid.innerHTML = '<div class="config-content">No peer telemetry received yet</div>';
+      $('telemetry-count').textContent = '0';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < peers.length; i++) {
+      var p = peers[i];
+      var name = p.name || p.destination_hash || 'Unknown';
+      var hops = p.hops != null ? p.hops + ' hops' : '';
+      html += '<div class="metric-card">'
+        + '<div class="label">' + esc(name) + (hops ? ' <small>(' + hops + ')</small>' : '') + '</div>'
+        + '<div class="peer-stats">';
+      if (p.cpu != null) html += '<span class="' + metricClass(p.cpu, 70, 90) + '">CPU: ' + p.cpu.toFixed(1) + '%</span> ';
+      if (p.temp != null) html += '<span class="' + metricClass(p.temp, 65, 80) + '">Temp: ' + p.temp.toFixed(1) + '\u00B0C</span> ';
+      if (p.mem != null) html += '<span class="' + metricClass(p.mem, 70, 90) + '">Mem: ' + p.mem.toFixed(1) + '%</span> ';
+      if (p.disk != null) html += '<span class="' + metricClass(p.disk, 80, 95) + '">Disk: ' + p.disk.toFixed(1) + '%</span>';
+      if (p.uptime != null) html += ' <small>' + formatUptime(p.uptime) + '</small>';
+      html += '</div></div>';
+    }
+    grid.innerHTML = html;
+    $('telemetry-count').textContent = peers.length + ' peers';
+  }
+
+  function updateAlerts(alertData) {
+    var el = $('alerts-info');
+    if (!el) return;
+    if (!alertData || alertData.message === 'alert_system plugin not available') {
+      el.textContent = 'Alert system not enabled';
+      $('alerts-count').textContent = '';
+      return;
+    }
+    var html = 'Alerts sent: ' + (alertData.alerts_sent || 0);
+    if (alertData.last_alert) {
+      html += ' | Last: ' + esc(alertData.last_alert.message || '')
+        + ' (' + formatTimeAgo(alertData.last_alert.time) + ')';
+    }
+    html += ' | Recipients: ' + (alertData.recipients || 0);
+    el.innerHTML = html;
+    $('alerts-count').textContent = (alertData.alerts_sent || 0) + ' sent';
+  }
+
+  function updateSharedFiles(files) {
+    var tbody = $('files-table');
+    if (!tbody) return;
+    if (!files || files.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="3">No shared files</td></tr>';
+      $('files-count').textContent = '0';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      html += '<tr>'
+        + '<td>' + esc(f.name) + '</td>'
+        + '<td>' + formatBytes(f.size) + '</td>'
+        + '<td>' + (f.modified ? formatTimeAgo(f.modified) : '--') + '</td>'
+        + '</tr>';
+    }
+    tbody.innerHTML = html;
+    $('files-count').textContent = files.length + ' files';
+  }
+
+  function updateSensors(sensors) {
+    var grid = $('sensors-grid');
+    if (!grid) return;
+    if (!sensors || Object.keys(sensors).length === 0) {
+      grid.innerHTML = '<div class="metric-card"><div class="label">No sensor data</div></div>';
+      $('sensors-count').textContent = '0';
+      return;
+    }
+    var html = '';
+    var names = Object.keys(sensors);
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      var reading = sensors[name];
+      html += '<div class="metric-card">'
+        + '<div class="label">' + esc(name) + '</div>'
+        + '<div class="peer-stats">';
+      if (reading.error) {
+        html += '<span class="warn">' + esc(reading.error) + '</span>';
+      } else {
+        var keys = Object.keys(reading);
+        for (var j = 0; j < keys.length; j++) {
+          var k = keys[j];
+          if (k === 'timestamp') continue;
+          var v = reading[k];
+          if (typeof v === 'number') {
+            html += '<span>' + esc(k) + ': ' + v.toFixed(2) + '</span> ';
+          }
+        }
+      }
+      html += '</div></div>';
+    }
+    grid.innerHTML = html;
+    $('sensors-count').textContent = names.length + ' sensors';
+  }
+
+  var PRIORITY_NAMES = {0: 'INFO', 1: 'WARNING', 2: 'CRITICAL', 3: 'EMERGENCY'};
+  var PRIORITY_CLASSES = {0: '', 1: 'warn', 2: 'crit', 3: 'crit'};
+
+  function updateEmergency(data) {
+    var tbody = $('emergency-table');
+    if (!tbody) return;
+    var messages = data.messages || [];
+    if (messages.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5">No emergency broadcasts</td></tr>';
+      $('emergency-count').textContent = '0';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < messages.length; i++) {
+      var m = messages[i];
+      var pName = PRIORITY_NAMES[m.priority] || 'UNKNOWN';
+      var pClass = PRIORITY_CLASSES[m.priority] || '';
+      html += '<tr>'
+        + '<td><span class="' + pClass + '">' + esc(pName) + '</span></td>'
+        + '<td>' + esc(m.message || '') + '</td>'
+        + '<td>' + esc(m.origin_name || m.origin || 'Unknown') + '</td>'
+        + '<td>' + formatTimeAgo(m.timestamp) + '</td>'
+        + '<td>' + (m.ttl || 0) + '</td>'
+        + '</tr>';
+    }
+    tbody.innerHTML = html;
+    $('emergency-count').textContent = messages.length + ' messages';
+  }
+
+  function formatTimeAgo(timestamp) {
+    if (!timestamp) return '--';
+    var seconds = Math.floor(Date.now() / 1000 - timestamp);
+    if (seconds < 0) seconds = 0;
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+  }
+
   function setConnStatus(state) {
     var el = $('conn-status');
     if (!el) return;
@@ -248,6 +552,43 @@
     api('/api/metrics').then(function(r) {
       if (!r || !r.ok) return;
       updateMetrics(r.data);
+    });
+
+    // Mesh nodes
+    api('/api/mesh/nodes').then(function(r) {
+      if (!r || !r.ok) return;
+      updateMeshNodes(r.data.nodes);
+    });
+
+    // Peer telemetry
+    api('/api/mesh/telemetry').then(function(r) {
+      if (!r || !r.ok) return;
+      cacheMeshPeers(r.data.peers);
+      updatePeerTelemetry(r.data.peers);
+    });
+
+    // Alerts
+    api('/api/alerts').then(function(r) {
+      if (!r || !r.ok) return;
+      updateAlerts(r.data);
+    });
+
+    // Shared files
+    api('/api/files').then(function(r) {
+      if (!r || !r.ok) return;
+      updateSharedFiles(r.data.files);
+    });
+
+    // Sensors
+    api('/api/sensors').then(function(r) {
+      if (!r || !r.ok) return;
+      updateSensors(r.data.sensors);
+    });
+
+    // Emergency broadcasts
+    api('/api/emergency').then(function(r) {
+      if (!r || !r.ok) return;
+      updateEmergency(r.data);
     });
   }
 
@@ -294,6 +635,12 @@
         if (msg.type === 'update' && msg.data) {
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
           if (msg.data.interfaces) updateInterfaces(msg.data.interfaces);
+          if (msg.data.mesh) {
+            if (msg.data.mesh.peers) cacheMeshPeers(msg.data.mesh.peers);
+            if (msg.data.mesh.nodes) updateMeshNodes(msg.data.mesh.nodes);
+          }
+          if (msg.data.sensors) updateSensors(msg.data.sensors);
+          if (msg.data.emergency) updateEmergency(msg.data.emergency);
         }
       } catch(e) { /* ignore parse errors */ }
     };
@@ -356,6 +703,16 @@
 
   // --- Init ---
   // Auth is handled by the server middleware (cookie-based).
+  // Wire up sortable mesh table headers
+  var sortHeaders = document.querySelectorAll('#mesh-section th[data-sort]');
+  for (var i = 0; i < sortHeaders.length; i++) {
+    (function(th) {
+      th.addEventListener('click', function() {
+        onMeshSort(th.getAttribute('data-sort'));
+      });
+    })(sortHeaders[i]);
+  }
+
   // If we reached this page, the cookie is valid.
   fetchNode();
   fetchAll();

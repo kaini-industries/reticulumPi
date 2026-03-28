@@ -8,6 +8,7 @@ AUTO_START=false
 WITH_NOMADNET=false
 WITH_MESHCHAT=false
 WITH_DASHBOARD=false
+WITH_LORA=false
 INSTALL_DIR="/opt/reticulumpi"
 NODE_NAME=""
 while [[ $# -gt 0 ]]; do
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
         --with-nomadnet) WITH_NOMADNET=true ;;
         --with-meshchat) WITH_MESHCHAT=true ;;
         --with-dashboard) WITH_DASHBOARD=true ;;
+        --with-lora) WITH_LORA=true ;;
         --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift ;;
         --install-dir=*) INSTALL_DIR="${1#*=}" ;;
         --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift ;;
@@ -120,6 +122,12 @@ fi
 if [ "$WITH_DASHBOARD" = true ]; then
     echo "[4d/7] Installing web dashboard dependencies..."
     sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install "aiohttp>=3.9,<4.0"
+fi
+
+# 4e. Optional: Install LoRa/RNode tools
+if [ "$WITH_LORA" = true ]; then
+    echo "[4e/7] Installing LoRa/RNode tools (rnodeconf)..."
+    sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install rnodeconf
 fi
 
 # 5. Config directories
@@ -368,6 +376,16 @@ else
     echo ""
     echo "Optional — for web dashboard monitoring:"
     echo "  Re-run with: sudo bash $0 --with-dashboard"
+fi
+
+if [ "$WITH_LORA" = true ]; then
+    echo ""
+    echo "LoRa/RNode tools installed. To flash a device:"
+    echo "  sudo -u $SERVICE_USER $INSTALL_DIR/.venv/bin/rnodeconf --autoinstall"
+else
+    echo ""
+    echo "Optional — for LoRa/RNode support:"
+    echo "  Re-run with: sudo bash $0 --with-lora"
 fi
 
 echo ""

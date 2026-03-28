@@ -7,10 +7,16 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **Six built-in plugins** -- heartbeat announce, LXMF message echo, info bot, system metrics, NomadNet page server, MeshChat web UI
+- **14 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast
+- **Mesh-aware** -- passively maps network topology, shares telemetry with peers, broadcasts emergencies across the mesh
+- **Remote management** -- manage nodes over Reticulum Links with zero IP dependency (SSH not required)
+- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, mesh node and sensor views
+- **Event bus** -- decoupled inter-plugin communication via publish/subscribe
+- **Plugin hot-reload** -- enable/disable plugins at runtime without restarting
 - **Persistent identity** -- stable cryptographic identity across restarts
 - **Shared or standalone mode** -- coexists with `rnsd` or runs interfaces directly
 - **Deployment automation** -- bootstrap script, systemd service, Docker support
+- **CI/CD** -- GitHub Actions with lint + test matrix (Python 3.9--3.12)
 - **No Reticulum fork** -- installs `rns` as a pip dependency, always upgradeable
 
 ## Requirements
@@ -55,6 +61,9 @@ sudo bash scripts/bootstrap.sh --with-meshchat
 # With both NomadNet and MeshChat:
 sudo bash scripts/bootstrap.sh --with-nomadnet --with-meshchat
 
+# With LoRa/RNode support (installs rnodeconf for firmware flashing):
+sudo bash scripts/bootstrap.sh --with-lora
+
 # Set a custom node name (default: ReticulumPi-<hostname>):
 sudo bash scripts/bootstrap.sh --node-name "MyCabin" --with-nomadnet
 
@@ -70,7 +79,7 @@ This will:
 1. Install system packages (`python3`, `python3-venv`, `git`, + `nodejs`/`npm` if `--with-meshchat`)
 2. Create a `reticulumpi` system user with hardware access groups (`dialout`, `gpio`, `spi`, `i2c`)
 3. Copy the project to the install directory (default `/opt/reticulumpi`, or in-place with `--install-dir .`)
-4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`)
+4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`, + `rnodeconf` if `--with-lora`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
 6. Set the node name (from `--node-name`, interactive prompt, or default `ReticulumPi-<hostname>`)
 7. Create all runtime directories required by the systemd service sandboxing
@@ -730,15 +739,135 @@ reticulumpi:
 
 After starting, access the web UI at `http://<pi-ip>:8000`. MeshChat manages its own Reticulum identity in its storage directory, separate from the reticulumPi node identity.
 
+### Web Dashboard
+
+Secure real-time web UI for monitoring your node. Shows system metrics, plugin status, Reticulum interfaces, mesh nodes, peer telemetry, sensor data, and emergency broadcasts -- all updating live over WebSocket.
+
+**Requires:** `pip install aiohttp` (or `--with-dashboard` during bootstrap)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `host` | 127.0.0.1 | Listen address (`0.0.0.0` to expose on network) |
+| `port` | 8080 | Web UI port |
+| `session_timeout` | 86400 | Session lifetime in seconds (24h) |
+| `max_sessions` | 5 | Maximum concurrent sessions |
+| `metrics_interval` | 5 | WebSocket push interval in seconds |
+| `max_websocket_clients` | 10 | Maximum concurrent WebSocket connections |
+
+Password is auto-generated on first start and logged once. To reset, delete `~/.config/reticulumpi/dashboard_secret` and restart. Access at `http://<pi-ip>:8080`.
+
+### Network Map
+
+Passively monitors all Reticulum announces to build a live map of every reachable node on the mesh. Tracks destination hashes, hop counts, app names, and announce frequency. Stores history in SQLite for trend analysis. Discovered nodes appear in the web dashboard.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `db_path` | ~/.local/share/reticulumpi/network_map.db | SQLite database path |
+| `max_history_days` | 30 | Days to retain node and interface history |
+
+### Mesh Telemetry
+
+Broadcasts your node's system metrics (CPU, temperature, memory, disk) over Reticulum announces. Receiving nodes store peer metrics, creating a distributed monitoring network where any node can see the health of all reachable nodes. No IP connectivity needed.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `announce_interval` | 300 | Seconds between telemetry announces |
+| `include_metrics` | all four | List of metrics to broadcast |
+
+Reads from the `system_monitor` plugin -- enable both for full functionality.
+
+### Remote Control
+
+Accept authenticated RNS Link connections for remote node management over Reticulum. Only identities in `allowed_identities` can connect. All communication is encrypted end-to-end. No IP, SSH, or VPN required.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `allowed_identities` | [] | List of hex identity hashes authorized to connect |
+| `log_buffer_lines` | 500 | Number of log lines to keep in ring buffer |
+
+Available remote commands: `ping`, `status`, `metrics`, `plugins`, `interfaces`, `config`, `logs`, `announce`, `enable <plugin>`, `disable <plugin>`.
+
+Connect from another machine:
+
+```bash
+reticulumpi --remote <destination_hash>              # interactive shell
+reticulumpi --remote <destination_hash> --command ping  # single command
+```
+
+### Alert System
+
+Sends LXMF messages to configured recipients when thresholds are breached. Monitors CPU temperature, memory, disk usage, plugin crashes, and node reboots. Supports configurable rules with cooldown to prevent alert storms.
+
+**Requires:** `pip install lxmf`
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `recipients` | [] | LXMF address hashes to notify |
+| `cooldown_seconds` | 300 | Minimum seconds between duplicate alerts |
+| `rules` | cpu_temp>80, disk>90, mem>90 | List of threshold rules |
+| `alert_on_plugin_crash` | true | Alert when a plugin crashes |
+| `alert_on_reboot` | true | Alert on node reboot detection |
+
+### File Transfer
+
+Send and receive files between nodes over Reticulum using RNS.Resource for chunked, compressed transfers with integrity checking. Files land in a shared directory.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `shared_dir` | ~/.local/share/reticulumpi/shared_files | Directory for shared files |
+| `max_file_size_mb` | 50 | Maximum accepted file size |
+| `allowed_identities` | [] | Empty = accept from anyone |
+| `auto_accept` | true | Automatically accept incoming files |
+
+### Sensor Framework
+
+Config-driven sensor reading with SQLite/CSV logging and optional mesh broadcast. Supports DS18B20 (1-Wire), BME280 (I2C), ADC (sysfs), and custom shell commands. Readings are published on the event bus and visible in the dashboard.
+
+**Requires:** `smbus2` for I2C sensors (`pip install smbus2`)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `read_interval` | 60 | Seconds between sensor reads |
+| `sensors` | [] | List of sensor configurations |
+| `storage.type` | sqlite | Storage backend: sqlite, csv, or none |
+| `storage.retention_days` | 30 | Days to retain readings |
+| `broadcast.enabled` | false | Broadcast readings over Reticulum |
+| `broadcast.interval` | 300 | Seconds between broadcasts |
+
+Example sensor config:
+
+```yaml
+sensors:
+  - name: cpu_temp
+    driver: command
+    command: "cat /sys/class/thermal/thermal_zone0/temp | awk '{printf \"%.1f\", $1/1000}'"
+    reading_name: temperature
+  - name: outdoor_temp
+    driver: ds18b20
+    address: "28-0000abcdef"
+```
+
+### Emergency Broadcast
+
+Flood-style priority messaging across the mesh. Emergency messages propagate via announce re-broadcasting with TTL decrement. Deduplication via SHA-256 message IDs prevents broadcast storms. Messages are stored locally for review via the dashboard or API.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `max_ttl` | 5 | Maximum hops for message propagation |
+| `max_stored_messages` | 100 | Local message buffer size |
+| `rebroadcast` | true | Re-broadcast received emergencies |
+| `rebroadcast_delay` | 5 | Seconds to wait before re-broadcasting |
+
 ## Node Identities
 
 A deployed ReticulumPi node has multiple Reticulum identities. Each LXMF plugin creates its own identity so that plugins can run independently without destination collisions.
 
 | Service | Purpose | Identity File |
 |---|---|---|
-| **reticulumpi** (node) | Shared node identity for RNS destinations (heartbeat, etc.) | `~/.config/reticulumpi/identity` |
+| **reticulumpi** (node) | Shared node identity for RNS destinations (heartbeat, mesh telemetry, network map, remote control, file transfer, sensors, emergency) | `~/.config/reticulumpi/identity` |
 | **message_echo** | Echo bot — replies to LXMF messages | `~/.local/share/reticulumpi/lxmf/identity` |
 | **info_bot** | Info bot — responds to `!` commands | `~/.local/share/reticulumpi/info_bot_lxmf/identity` |
+| **alert_system** | LXMF alerts — separate identity for sending | Creates its own `RNS.Identity()` at runtime |
 | **NomadNet daemon** | Page server — browsable via NomadNet TUI | `~/.nomadnet/storage/identity` |
 | **NomadNet TUI** | Browse-only client (no node hosting) | `~/.nomadnet-tui/storage/identity` |
 | **MeshChat** | Web UI chat over LXMF | `<install_dir>/storage/identity` |
@@ -815,6 +944,7 @@ Every plugin receives these through its constructor:
 | `self.identity` | RNS.Identity | The node's persistent identity |
 | `self.config` | dict | This plugin's config section from YAML |
 | `self.log` | logging.Logger | Logger namespaced to `reticulumpi.plugin.<name>` |
+| `self.event_bus` | EventBus | Publish/subscribe bus for inter-plugin events |
 
 #### Lifecycle
 
@@ -825,7 +955,7 @@ Every plugin receives these through its constructor:
 
 #### Inter-Plugin Communication
 
-Plugins can query other running plugins:
+Plugins can query other running plugins directly:
 
 ```python
 monitor = self.app.get_plugin("system_monitor")
@@ -833,6 +963,23 @@ if monitor:
     metrics = monitor.latest_metrics
     cpu = metrics.get("cpu_percent", 0)
 ```
+
+Or use the event bus for decoupled communication:
+
+```python
+from reticulumpi import events
+
+# Subscribe to events (in start())
+self.event_bus.subscribe(events.SENSOR_READING, self._on_sensor_reading)
+
+# Publish events
+self.event_bus.publish(events.ALERT_TRIGGERED, {"message": "CPU hot!", "time": time.time()})
+
+# Unsubscribe (in stop())
+self.event_bus.unsubscribe(events.SENSOR_READING, self._on_sensor_reading)
+```
+
+Available event types: `PLUGIN_STARTED`, `PLUGIN_STOPPED`, `PLUGIN_CRASHED`, `METRICS_UPDATED`, `NODE_DISCOVERED`, `NODE_METRICS_RECEIVED`, `ALERT_TRIGGERED`, `FILE_RECEIVED`, `LINK_ESTABLISHED`, `LINK_CLOSED`, `SENSOR_READING`, `EMERGENCY_RECEIVED`.
 
 #### Optional Status Method
 
@@ -891,6 +1038,7 @@ reticulumPi/
 ├── Makefile                        # install, dev, test, lint, format targets
 ├── LICENSE                         # MIT license
 ├── CHANGELOG.md                    # Version history
+├── .github/workflows/ci.yml       # GitHub Actions: lint + test (Python 3.9-3.12)
 ├── docs/
 │   └── install-layout.md           # Detailed install directory & file flow docs
 ├── config/
@@ -900,22 +1048,33 @@ reticulumPi/
 │   │   ├── config.example          # Reticulum interface config (all interfaces)
 │   │   └── config.minimal          # Minimal safe config (AutoInterface only)
 │   └── reticulumpi/
-│       └── config.example.yaml     # App + plugin config
+│       └── config.example.yaml     # App + plugin config (all plugins documented)
 ├── src/reticulumpi/
 │   ├── __init__.py                 # Package version
-│   ├── app.py                      # Core orchestrator
-│   ├── cli.py                      # CLI entry point
+│   ├── app.py                      # Core orchestrator (plugin hot-reload)
+│   ├── cli.py                      # CLI entry point (+ remote control client)
 │   ├── config.py                   # YAML config loader with validation
+│   ├── event_bus.py                # Thread-safe publish/subscribe event bus
+│   ├── events.py                   # Event type constants
 │   ├── identity_manager.py         # Persistent identity
 │   ├── plugin_base.py              # Abstract plugin base class
 │   ├── plugin_loader.py            # Plugin discovery
+│   ├── remote_client.py            # Remote control CLI client
 │   └── builtin_plugins/            # Built-in plugins (shipped with package)
 │       ├── heartbeat_announce.py   # Network presence announcer
 │       ├── message_echo.py         # LXMF echo responder
 │       ├── info_bot.py             # LXMF command bot (weather, etc.)
 │       ├── system_monitor.py       # System metrics collector
 │       ├── nomadnet_server.py      # NomadNet page server manager
-│       ├── meshchat_server.py     # MeshChat web UI manager
+│       ├── meshchat_server.py      # MeshChat web UI manager
+│       ├── network_map.py          # Passive mesh topology mapper
+│       ├── mesh_telemetry.py       # Distributed node metrics sharing
+│       ├── remote_control.py       # Remote management over RNS Links
+│       ├── alert_system.py         # LXMF threshold alerts
+│       ├── file_transfer.py        # File transfer via RNS.Resource
+│       ├── sensor_framework.py     # Config-driven sensor reading + logging
+│       ├── emergency_broadcast.py  # Mesh-wide flood-style messaging
+│       ├── web_dashboard/          # Secure web dashboard (aiohttp)
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
 │   └── example_plugin.py           # Scaffold copy (for easy access)
@@ -930,7 +1089,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/
+└── tests/                          # 280 tests (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -938,17 +1097,30 @@ reticulumPi/
     ├── test_config_validation.py    # Config error-path tests
     ├── test_plugin_base.py          # Base class helper tests
     ├── test_plugin_loader.py
+    ├── test_event_bus.py            # Event bus thread-safety tests
     ├── test_message_echo.py         # LXMF echo + propagation selection tests
     ├── test_info_bot.py             # Info bot command + weather tests
     ├── test_nomadnet_server.py      # NomadNet plugin tests
     ├── test_meshchat_server.py      # MeshChat plugin tests
-    └── test_identity_manager.py
+    ├── test_identity_manager.py
+    ├── test_network_map.py          # Network map + SQLite tests
+    ├── test_mesh_telemetry.py       # Mesh telemetry tests
+    ├── test_remote_control.py       # Remote control auth + handler tests
+    ├── test_remote_client.py        # Remote client format + command tests
+    ├── test_alert_system.py         # Alert rules + cooldown tests
+    ├── test_file_transfer.py        # File transfer + safety tests
+    ├── test_sensor_framework.py     # Sensor drivers + storage tests
+    ├── test_emergency_broadcast.py  # Emergency flood + dedup tests
+    └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests
 ```
 
 ## CLI Usage
 
 ```
-reticulumpi [--version] [--config PATH] [--reticulum-config DIR] [--log-level 0-7] [--check] [--list-plugins]
+reticulumpi [--version] [--config PATH] [--reticulum-config DIR] [--log-level 0-7]
+            [--check] [--list-plugins]
+            [--remote HASH] [--command CMD] [--timeout SECS]
+            [--backup-identity PATH] [--restore-identity PATH] [--hash-password]
 ```
 
 | Flag | Description |
@@ -959,6 +1131,12 @@ reticulumpi [--version] [--config PATH] [--reticulum-config DIR] [--log-level 0-
 | `--log-level` | Override log level: 0=critical, 1=error, 2-3=warning, 4=info, 5-7=debug |
 | `--check` | Validate configuration and plugin discovery without starting (dry run) |
 | `--list-plugins` | List all discoverable plugins and exit |
+| `--remote HASH` | Connect to a remote node's `remote_control` plugin over Reticulum |
+| `--command CMD` | Execute a single remote command and exit (use with `--remote`) |
+| `--timeout SECS` | Remote connection timeout in seconds (default: 30) |
+| `--backup-identity PATH` | Back up the node identity file to the given path |
+| `--restore-identity PATH` | Restore a node identity from the given path |
+| `--hash-password` | Hash a password for use in web_dashboard config (interactive) |
 
 ## Architecture
 
@@ -973,10 +1151,13 @@ The application lifecycle:
 1. Load YAML config
 2. Initialize `RNS.Reticulum` (connects to `rnsd` or opens interfaces directly)
 3. Load or create a persistent `RNS.Identity`
-4. Discover and instantiate enabled plugins
-5. Call `start()` on each plugin
-6. Wait for SIGTERM/SIGINT
-7. Call `stop()` on each plugin in reverse order
+4. Create the event bus for inter-plugin communication
+5. Discover and instantiate enabled plugins
+6. Call `start()` on each plugin (publishes `PLUGIN_STARTED` events)
+7. Wait for SIGTERM/SIGINT
+8. Call `stop()` on each plugin in reverse order (publishes `PLUGIN_STOPPED` events)
+
+Plugins can be enabled/disabled at runtime via `app.enable_plugin(name)` / `app.disable_plugin(name)` (used by the remote control plugin).
 
 ## License
 

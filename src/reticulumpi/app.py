@@ -1,5 +1,7 @@
 """Core reticulumPi application orchestrator."""
 
+from __future__ import annotations
+
 import logging
 import os
 import signal
@@ -8,8 +10,9 @@ from typing import Any
 
 import RNS
 
-from reticulumpi import identity_manager
+from reticulumpi import events, identity_manager
 from reticulumpi.config import AppConfig
+from reticulumpi.event_bus import EventBus
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.plugin_loader import PluginLoader
 
@@ -32,9 +35,11 @@ class ReticulumPiApp:
         self.reticulum: RNS.Reticulum | None = None
         self.identity: RNS.Identity | None = None
         self.plugins: dict[str, PluginBase] = {}
+        self._plugins_lock = threading.Lock()
         self._failed_plugins: list[tuple[str, str]] = []
         self._shutdown_event = threading.Event()
         self._plugin_loader = PluginLoader()
+        self.event_bus = EventBus()
 
     def start(self) -> None:
         """Initialize Reticulum, load identity, start plugins, and enter the run loop."""
@@ -56,10 +61,15 @@ class ReticulumPiApp:
             try:
                 plugin.start()
                 log.info("Started plugin: %s", name)
+                self.event_bus.publish(events.PLUGIN_STARTED, {"name": name})
             except Exception as exc:
                 reason = f"start() failed: {exc}"
                 self._failed_plugins.append((name, reason))
                 log.exception("Failed to start plugin: %s", name)
+                self.event_bus.publish(
+                    events.PLUGIN_CRASHED,
+                    {"name": name, "error": reason},
+                )
                 try:
                     plugin.stop()
                 except Exception:
@@ -78,6 +88,7 @@ class ReticulumPiApp:
             try:
                 plugin.stop()
                 log.info("Stopped plugin: %s", name)
+                self.event_bus.publish(events.PLUGIN_STOPPED, {"name": name})
             except Exception:
                 log.exception("Error stopping plugin: %s", name)
         self._shutdown_event.set()
@@ -103,6 +114,54 @@ class ReticulumPiApp:
             except Exception:
                 status["plugins"][name] = {"error": "status collection failed"}
         return status
+
+    def enable_plugin(self, name: str) -> None:
+        """Instantiate, start, and register a plugin by name at runtime.
+
+        Raises KeyError if the plugin is not discoverable, RuntimeError if
+        it is already running, or propagates any exception from instantiation
+        or start().
+        """
+        with self._plugins_lock:
+            if name in self.plugins:
+                raise RuntimeError(f"Plugin '{name}' is already running")
+
+            available = self._plugin_loader.discover(self._get_plugin_search_dirs())
+            if name not in available:
+                raise KeyError(f"Plugin '{name}' not found in plugin directories")
+
+            plugin_config = self.config.plugins.get(name, {})
+            plugin_cls = available[name]
+            instance = plugin_cls(self, plugin_config)
+            try:
+                instance.start()
+            except Exception:
+                try:
+                    instance.stop()
+                except Exception:
+                    pass
+                raise
+            self.plugins[name] = instance
+
+        log.info("Hot-loaded plugin: %s", name)
+        self.event_bus.publish(events.PLUGIN_STARTED, {"name": name})
+
+    def disable_plugin(self, name: str) -> None:
+        """Stop and unregister a running plugin by name.
+
+        Raises KeyError if the plugin is not currently running.
+        """
+        with self._plugins_lock:
+            plugin = self.plugins.pop(name, None)
+            if plugin is None:
+                raise KeyError(f"Plugin '{name}' is not running")
+
+        try:
+            plugin.stop()
+        except Exception:
+            log.exception("Error stopping plugin '%s' during disable", name)
+        log.info("Disabled plugin: %s", name)
+        self.event_bus.publish(events.PLUGIN_STOPPED, {"name": name})
 
     def _get_plugin_search_dirs(self) -> list[str]:
         """Return the list of directories to search for plugins."""

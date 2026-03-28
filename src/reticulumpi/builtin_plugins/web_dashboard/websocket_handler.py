@@ -122,12 +122,53 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             # Collect interface traffic data
             interfaces = _collect_interfaces()
 
+            # Collect mesh data (if plugins available)
+            mesh_data: dict = {}
+            network_map = plugin.app.get_plugin("network_map")
+            if network_map and hasattr(network_map, "get_known_nodes"):
+                nodes = network_map.get_known_nodes()
+                mesh_data["nodes"] = nodes
+                mesh_data["known_nodes"] = len(nodes)
+
+            telemetry = plugin.app.get_plugin("mesh_telemetry")
+            if telemetry and hasattr(telemetry, "get_peer_metrics"):
+                peers = telemetry.get_peer_metrics()
+                mesh_data["peers"] = peers
+                mesh_data["peer_count"] = len(peers)
+
+            alert_sys = plugin.app.get_plugin("alert_system")
+            if alert_sys:
+                try:
+                    alert_status = alert_sys.get_status()
+                    mesh_data["alerts_sent"] = alert_status.get("alerts_sent", 0)
+                    mesh_data["last_alert"] = alert_status.get("last_alert")
+                except Exception:
+                    pass
+
+            # Collect sensor data (if plugin available)
+            sensor_data: dict = {}
+            sensor_fw = plugin.app.get_plugin("sensor_framework")
+            if sensor_fw and hasattr(sensor_fw, "get_latest_readings"):
+                sensor_data = sensor_fw.get_latest_readings()
+
+            # Collect emergency data (if plugin available)
+            emergency_data: dict = {}
+            emergency = plugin.app.get_plugin("emergency_broadcast")
+            if emergency and hasattr(emergency, "get_status"):
+                try:
+                    emergency_data = emergency.get_status()
+                except Exception:
+                    pass
+
             message = json.dumps({
                 "type": "update",
                 "data": {
                     "metrics": metrics,
                     "plugins": plugin_statuses,
                     "interfaces": interfaces,
+                    "mesh": mesh_data,
+                    "sensors": sensor_data,
+                    "emergency": emergency_data,
                 },
                 "timestamp": time.time(),
             })

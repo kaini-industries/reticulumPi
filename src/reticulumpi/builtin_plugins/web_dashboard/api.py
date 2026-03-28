@@ -42,6 +42,13 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/plugins/{name}", handle_plugin_detail)
     app.router.add_get("/api/interfaces", handle_interfaces)
     app.router.add_get("/api/config", handle_config)
+    # Mesh awareness endpoints
+    app.router.add_get("/api/mesh/nodes", handle_mesh_nodes)
+    app.router.add_get("/api/mesh/telemetry", handle_mesh_telemetry)
+    app.router.add_get("/api/alerts", handle_alerts)
+    app.router.add_get("/api/files", handle_files)
+    app.router.add_get("/api/sensors", handle_sensors)
+    app.router.add_get("/api/emergency", handle_emergency)
 
 
 def _ok(data: Any) -> aiohttp.web.Response:
@@ -156,7 +163,12 @@ async def handle_form_login(request: aiohttp.web.Request) -> aiohttp.web.Respons
 async def handle_logout(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """POST /api/auth/logout — invalidate current session."""
     plugin = _get_plugin(request)
-    token = request.get("token", "")
+    # Extract token from Authorization header or session cookie
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.cookies.get("session", "")
     if token:
         plugin._auth.logout(token)
 
@@ -304,3 +316,64 @@ async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:
         "plugins": plugins_config,
     }
     return _ok(data)
+
+
+# --- Mesh awareness endpoints ---
+
+
+async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/mesh/nodes — known nodes from network_map plugin."""
+    plugin = _get_plugin(request)
+    network_map = plugin.app.get_plugin("network_map")
+    if not network_map or not hasattr(network_map, "get_known_nodes"):
+        return _ok({"nodes": [], "message": "network_map plugin not available"})
+    return _ok({"nodes": network_map.get_known_nodes()})
+
+
+async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/mesh/telemetry — peer metrics from mesh_telemetry plugin."""
+    plugin = _get_plugin(request)
+    telemetry = plugin.app.get_plugin("mesh_telemetry")
+    if not telemetry or not hasattr(telemetry, "get_peer_metrics"):
+        return _ok({"peers": [], "message": "mesh_telemetry plugin not available"})
+    return _ok({"peers": telemetry.get_peer_metrics()})
+
+
+async def handle_alerts(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/alerts — alert system status."""
+    plugin = _get_plugin(request)
+    alert_sys = plugin.app.get_plugin("alert_system")
+    if not alert_sys:
+        return _ok({"status": None, "message": "alert_system plugin not available"})
+    try:
+        status = alert_sys.get_status()
+    except Exception:
+        status = {"error": "status collection failed"}
+    return _ok(status)
+
+
+async def handle_files(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/files — shared files from file_transfer plugin."""
+    plugin = _get_plugin(request)
+    ft = plugin.app.get_plugin("file_transfer")
+    if not ft or not hasattr(ft, "get_shared_files"):
+        return _ok({"files": [], "message": "file_transfer plugin not available"})
+    return _ok({"files": ft.get_shared_files()})
+
+
+async def handle_sensors(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/sensors — latest sensor readings from sensor_framework plugin."""
+    plugin = _get_plugin(request)
+    sf = plugin.app.get_plugin("sensor_framework")
+    if not sf or not hasattr(sf, "get_latest_readings"):
+        return _ok({"sensors": {}, "message": "sensor_framework plugin not available"})
+    return _ok({"sensors": sf.get_latest_readings()})
+
+
+async def handle_emergency(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/emergency — recent emergency broadcast messages."""
+    plugin = _get_plugin(request)
+    eb = plugin.app.get_plugin("emergency_broadcast")
+    if not eb or not hasattr(eb, "get_messages"):
+        return _ok({"messages": [], "message": "emergency_broadcast plugin not available"})
+    return _ok({"messages": eb.get_messages(), "status": eb.get_status()})

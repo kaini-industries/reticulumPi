@@ -75,6 +75,84 @@
       </table>
     </div>
 
+    <!-- Mesh Network -->
+    <div class="section" id="mesh-section">
+      <div class="section-header">
+        <span>Mesh Network</span>
+        <span class="count" id="mesh-count"></span>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Node</th>
+              <th>Name</th>
+              <th>App</th>
+              <th class="sortable" data-sort="hops">Hops<span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="last_seen">Last Seen<span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="announce_count">Announces<span class="sort-arrow"></span></th>
+            </tr>
+          </thead>
+          <tbody id="mesh-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Mesh Telemetry (peer metrics) -->
+    <div class="section" id="telemetry-section">
+      <div class="section-header">
+        <span>Peer Telemetry</span>
+        <span class="count" id="telemetry-count"></span>
+      </div>
+      <div class="metrics-grid" id="peer-metrics-grid"></div>
+    </div>
+
+    <!-- Alerts -->
+    <div class="section" id="alerts-section">
+      <div class="section-header">
+        <span>Alerts</span>
+        <span class="count" id="alerts-count"></span>
+      </div>
+      <div id="alerts-info" class="config-content">No alerts configured</div>
+    </div>
+
+    <!-- Shared Files -->
+    <div class="section" id="files-section">
+      <div class="section-header">
+        <span>Shared Files</span>
+        <span class="count" id="files-count"></span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+        </thead>
+        <tbody id="files-table"></tbody>
+      </table>
+    </div>
+
+    <!-- Sensors -->
+    <div class="section" id="sensors-section">
+      <div class="section-header">
+        <span>Sensors</span>
+        <span class="count" id="sensors-count"></span>
+      </div>
+      <div class="metrics-grid" id="sensors-grid"></div>
+    </div>
+
+    <!-- Emergency Broadcasts -->
+    <div class="section" id="emergency-section">
+      <div class="section-header">
+        <span>Emergency Broadcasts</span>
+        <span class="count" id="emergency-count"></span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
+        </thead>
+        <tbody id="emergency-table"></tbody>
+      </table>
+    </div>
+
     <!-- Config (collapsible) -->
     <div class="section">
       <div class="section-header">

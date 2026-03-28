@@ -1,5 +1,7 @@
 """CLI entry point for reticulumPi."""
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
@@ -66,6 +68,41 @@ def main() -> None:
         default=False,
         help="Generate a password hash for the web_dashboard plugin and exit",
     )
+    parser.add_argument(
+        "--backup-identity",
+        metavar="PATH",
+        default=None,
+        help="Back up the node identity file to PATH and exit",
+    )
+    parser.add_argument(
+        "--restore-identity",
+        metavar="PATH",
+        default=None,
+        help="Restore the node identity file from PATH and exit",
+    )
+    parser.add_argument(
+        "--log-format",
+        choices=["text", "json"],
+        default=None,
+        help="Log output format (overrides config; default: text)",
+    )
+    parser.add_argument(
+        "--remote",
+        metavar="HASH",
+        default=None,
+        help="Connect to a remote ReticulumPi node via Reticulum Link for management",
+    )
+    parser.add_argument(
+        "--command",
+        default=None,
+        help="Execute a single remote command (use with --remote). Without this, opens interactive shell.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Timeout in seconds for remote operations (default: 30)",
+    )
     args = parser.parse_args()
 
     if args.hash_password:
@@ -82,6 +119,76 @@ def main() -> None:
         print()
         print("Add this to your config.yaml under plugins.web_dashboard:")
         print(f"  password_hash: \"{hash_password(pw)}\"")
+        sys.exit(0)
+
+    if args.remote:
+        from reticulumpi.remote_client import RemoteClient, run_interactive, run_single_command
+
+        reticulum_config = args.reticulum_config
+        client = RemoteClient(
+            destination_hex=args.remote,
+            reticulum_config_dir=reticulum_config,
+            timeout=args.timeout,
+        )
+        if not client.connect():
+            sys.exit(1)
+        try:
+            if args.command:
+                parts = args.command.strip().split(None, 1)
+                cmd = parts[0]
+                cmd_args = parts[1] if len(parts) > 1 else ""
+                rc = run_single_command(client, cmd, cmd_args)
+                sys.exit(rc)
+            else:
+                run_interactive(client)
+        finally:
+            client.close()
+        sys.exit(0)
+
+    if args.backup_identity:
+        import os
+        import shutil
+        config_path_tmp = args.config
+        if config_path_tmp is None:
+            default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
+            if os.path.isfile(default_path):
+                config_path_tmp = default_path
+        tmp_app = ReticulumPiApp(config_path=config_path_tmp)
+        src = tmp_app.config.identity_path
+        if not os.path.isfile(src):
+            print(f"Error: identity file not found at {src}")
+            sys.exit(1)
+        dst = os.path.expanduser(args.backup_identity)
+        shutil.copy2(src, dst)
+        print(f"Identity backed up: {src} -> {dst}")
+        sys.exit(0)
+
+    if args.restore_identity:
+        import os
+        import shutil
+        config_path_tmp = args.config
+        if config_path_tmp is None:
+            default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
+            if os.path.isfile(default_path):
+                config_path_tmp = default_path
+        tmp_app = ReticulumPiApp(config_path=config_path_tmp)
+        src = os.path.expanduser(args.restore_identity)
+        if not os.path.isfile(src):
+            print(f"Error: backup file not found at {src}")
+            sys.exit(1)
+        # Validate the backup is a loadable RNS identity
+        try:
+            import RNS
+            test_id = RNS.Identity.from_file(src)
+            if test_id is None:
+                raise ValueError("Identity.from_file returned None")
+        except Exception as e:
+            print(f"Error: invalid identity file: {e}")
+            sys.exit(1)
+        dst = tmp_app.config.identity_path
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"Identity restored: {src} -> {dst}")
         sys.exit(0)
 
     config_path = args.config
@@ -101,11 +208,30 @@ def main() -> None:
     rns_level = args.log_level if args.log_level is not None else app.config.log_level
     python_level = _RNS_TO_LOGGING.get(rns_level, logging.INFO)
 
-    logging.basicConfig(
-        level=python_level,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    log_format = args.log_format or app.config._data.get("log_format", "text")
+    if log_format == "json":
+        import json as _json
+        import time as _time
+
+        class _JsonFormatter(logging.Formatter):
+            def format(self, record: logging.LogRecord) -> str:
+                return _json.dumps({
+                    "ts": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(record.created)),
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "msg": record.getMessage(),
+                })
+
+        handler = logging.StreamHandler()
+        handler.setFormatter(_JsonFormatter())
+        logging.root.addHandler(handler)
+        logging.root.setLevel(python_level)
+    else:
+        logging.basicConfig(
+            level=python_level,
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
 
     if args.check:
         success = app.check()
