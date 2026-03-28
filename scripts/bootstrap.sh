@@ -7,6 +7,7 @@ set -euo pipefail
 AUTO_START=false
 WITH_NOMADNET=false
 WITH_MESHCHAT=false
+WITH_DASHBOARD=false
 INSTALL_DIR="/opt/reticulumpi"
 NODE_NAME=""
 while [[ $# -gt 0 ]]; do
@@ -14,6 +15,7 @@ while [[ $# -gt 0 ]]; do
         --start) AUTO_START=true ;;
         --with-nomadnet) WITH_NOMADNET=true ;;
         --with-meshchat) WITH_MESHCHAT=true ;;
+        --with-dashboard) WITH_DASHBOARD=true ;;
         --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift ;;
         --install-dir=*) INSTALL_DIR="${1#*=}" ;;
         --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift ;;
@@ -112,6 +114,12 @@ if [ "$WITH_MESHCHAT" = true ]; then
         sudo -u "$SERVICE_USER" npm run build-frontend
         cd - >/dev/null
     fi
+fi
+
+# 4d. Optional: Install web dashboard dependencies
+if [ "$WITH_DASHBOARD" = true ]; then
+    echo "[4d/7] Installing web dashboard dependencies..."
+    sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install "aiohttp>=3.9,<4.0"
 fi
 
 # 5. Config directories
@@ -230,6 +238,34 @@ MESHCHAT
     echo "  Enabled meshchat_server plugin in $CONFIG_DIR/config.yaml"
 fi
 
+# 6d. Web Dashboard config (if enabled)
+if [ "$WITH_DASHBOARD" = true ]; then
+    echo "[6d/7] Setting up web dashboard..."
+
+    # Enable the web_dashboard plugin in config (no password needed — auto-generated on first run)
+    if grep -q '#web_dashboard:' "$CONFIG_DIR/config.yaml"; then
+        sudo sed -i '/^    #web_dashboard:$/,/^    #    cert_dir:/{
+s/^    #web_dashboard:/    web_dashboard:/
+s/^    #  enabled: false/      enabled: true/
+s/^    #  host:/      host:/
+s/^    #  port:/      port:/
+s/^    #  session_timeout:/      session_timeout:/
+s/^    #  max_sessions:/      max_sessions:/
+s/^    #  metrics_interval:/      metrics_interval:/
+s/^    #  max_websocket_clients:/      max_websocket_clients:/
+}' "$CONFIG_DIR/config.yaml"
+    elif ! grep -q 'web_dashboard:' "$CONFIG_DIR/config.yaml"; then
+        cat >> "$CONFIG_DIR/config.yaml" <<DASHBOARD
+
+    web_dashboard:
+      enabled: true
+      host: "127.0.0.1"
+      port: 8080
+DASHBOARD
+    fi
+    echo "  Enabled web_dashboard plugin in $CONFIG_DIR/config.yaml"
+fi
+
 # 7. Install systemd services (template paths to match INSTALL_DIR)
 echo "[7/7] Installing systemd services..."
 sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/reticulumpi.service" \
@@ -318,6 +354,20 @@ else
     echo ""
     echo "Optional — for MeshChat web messaging:"
     echo "  Re-run with: sudo bash $0 --with-meshchat"
+fi
+
+if [ "$WITH_DASHBOARD" = true ]; then
+    echo ""
+    echo "Web Dashboard is installed and configured."
+    echo "  Dashboard: http://127.0.0.1:8080"
+    echo "  Password is auto-generated on first start — check the logs:"
+    echo "    journalctl -u reticulumpi | grep 'dashboard password'"
+    echo "  To expose on the network, change host to 0.0.0.0 in $CONFIG_DIR/config.yaml"
+    echo "  To reset password: delete /home/$SERVICE_USER/.config/reticulumpi/dashboard_secret"
+else
+    echo ""
+    echo "Optional — for web dashboard monitoring:"
+    echo "  Re-run with: sudo bash $0 --with-dashboard"
 fi
 
 echo ""

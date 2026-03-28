@@ -20,6 +20,9 @@ dependencies = [
 nomadnet = [
     "nomadnet",
 ]
+dashboard = [
+    "aiohttp>=3.9,<4.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

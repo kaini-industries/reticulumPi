@@ -60,7 +60,29 @@ def main() -> None:
         default=False,
         help="List all discoverable plugins and exit",
     )
+    parser.add_argument(
+        "--hash-password",
+        action="store_true",
+        default=False,
+        help="Generate a password hash for the web_dashboard plugin and exit",
+    )
     args = parser.parse_args()
+
+    if args.hash_password:
+        import getpass
+        from reticulumpi.builtin_plugins.web_dashboard.auth import hash_password
+        pw = getpass.getpass("Enter dashboard password: ")
+        if not pw:
+            print("Error: password cannot be empty")
+            sys.exit(1)
+        pw2 = getpass.getpass("Confirm password: ")
+        if pw != pw2:
+            print("Error: passwords do not match")
+            sys.exit(1)
+        print()
+        print("Add this to your config.yaml under plugins.web_dashboard:")
+        print(f"  password_hash: \"{hash_password(pw)}\"")
+        sys.exit(0)
 
     config_path = args.config
     if config_path is None:

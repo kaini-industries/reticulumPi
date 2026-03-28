@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ReticulumPi Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="dashboard">
+    <!-- Header -->
+    <div class="header">
+      <div>
+        <h1 id="node-name">ReticulumPi</h1>
+        <div class="node-info">
+          <span class="badge badge-version" id="version"></span>
+          <span class="badge badge-hash" id="identity-hash"></span>
+          <span class="uptime" id="uptime"></span>
+          <span class="conn-status conn-off" id="conn-status" title="Connection status">disconnected</span>
+        </div>
+      </div>
+      <button id="logout-btn">Logout</button>
+    </div>
+
+    <!-- Failed plugins alert -->
+    <div id="failed-alert" class="alert hidden">
+      <strong>Failed Plugins:</strong> <span id="failed-list"></span>
+    </div>
+
+    <!-- System metrics -->
+    <div class="metrics-grid" id="metrics-grid">
+      <div class="metric-card">
+        <div class="label">CPU</div>
+        <div class="value" id="m-cpu">--<span class="unit">%</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="label">Temperature</div>
+        <div class="value" id="m-temp">--<span class="unit">&deg;C</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="label">Memory</div>
+        <div class="value" id="m-mem">--<span class="unit">%</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="label">Disk</div>
+        <div class="value" id="m-disk">--<span class="unit">%</span></div>
+      </div>
+    </div>
+
+    <!-- Plugins -->
+    <div class="section" id="plugins-section">
+      <div class="section-header">
+        <span>Plugins</span>
+        <span class="count" id="plugin-count"></span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Name</th><th>Version</th><th>Status</th><th>Address</th><th>Details</th></tr>
+        </thead>
+        <tbody id="plugins-table"></tbody>
+      </table>
+    </div>
+
+    <!-- Network Interfaces -->
+    <div class="section" id="interfaces-section">
+      <div class="section-header">
+        <span>Network Interfaces</span>
+        <span class="count" id="iface-count"></span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Name</th><th>Type</th><th>Status</th><th>Traffic</th></tr>
+        </thead>
+        <tbody id="interfaces-table"></tbody>
+      </table>
+    </div>
+
+    <!-- Config (collapsible) -->
+    <div class="section">
+      <div class="section-header">
+        <span>Configuration</span>
+        <button class="config-toggle" id="config-toggle">Show</button>
+      </div>
+      <div class="config-content hidden" id="config-content">Loading...</div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

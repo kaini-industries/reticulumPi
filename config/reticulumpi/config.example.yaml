@@ -88,6 +88,29 @@ reticulumpi:
     #  auto_restart: true
     #  max_restarts: 5
 
+    # Web Dashboard — secure web UI for node monitoring.
+    # Requires: pip install aiohttp (or --with-dashboard during bootstrap).
+    # Password priority: env var > config > auto-generate on first start.
+    #   Env var:  RETICULUMPI_DASHBOARD_PASSWORD or _PASSWORD_HASH
+    #   Config:   password_hash below (generate with: reticulumpi --hash-password)
+    #   Auto:     logged once on first start, hash saved to ~/.config/reticulumpi/dashboard_secret
+    #   Reset:    delete ~/.config/reticulumpi/dashboard_secret and restart
+    #web_dashboard:
+    #  enabled: false
+    #  host: "127.0.0.1"          # Bind to localhost only (change to 0.0.0.0 to expose)
+    #  port: 8080
+    #  # password_hash: "scrypt:..."  # Optional — overrides auto-generated password
+    #  session_timeout: 86400      # Session lifetime in seconds (default: 24h)
+    #  max_sessions: 5
+    #  metrics_interval: 5         # WebSocket push interval in seconds
+    #  max_websocket_clients: 10
+    #  ssl:
+    #    enabled: false
+    #    cert_file: null
+    #    key_file: null
+    #    auto_generate: false      # Auto-generate self-signed cert
+    #    cert_dir: ~/.config/reticulumpi/web_certs
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

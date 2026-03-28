@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ReticulumPi — Login</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <h1>ReticulumPi</h1>
+    <p class="subtitle">Node Dashboard</p>
+    <form id="login-form" method="POST" action="/auth/login">
+      <input type="password" name="password" id="password" placeholder="Password" autofocus required>
+      <button type="submit" id="login-btn">Login</button>
+      <div id="error" class="error" hidden></div>
+    </form>
+  </div>
+  <script>
+    (function() {
+      var params = new URLSearchParams(window.location.search);
+      var err = params.get('error');
+      if (err) {
+        var el = document.getElementById('error');
+        if (err === 'rate_limited') el.textContent = 'Too many attempts. Please wait and try again.';
+        else if (err === 'empty') el.textContent = 'Password is required.';
+        else el.textContent = 'Invalid password.';
+        el.hidden = false;
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -53,6 +53,12 @@ fi
 # Ensure the service user can read installed packages
 sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$VENV"
 
+# Upgrade aiohttp if installed (web dashboard)
+if sudo "$VENV/bin/pip" show aiohttp &>/dev/null; then
+    echo "  Upgrading aiohttp (web dashboard)..."
+    sudo "$VENV/bin/pip" install --upgrade "aiohttp>=3.9,<4.0"
+fi
+
 # Upgrade NomadNet if installed
 if sudo "$VENV/bin/pip" show nomadnet &>/dev/null; then
     echo "  Upgrading NomadNet..."
