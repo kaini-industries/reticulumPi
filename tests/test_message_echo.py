@@ -1,6 +1,5 @@
 """Tests for the message_echo plugin's propagation node auto-selection."""
 
-import os
 from unittest.mock import MagicMock, patch, call
 
 import pytest

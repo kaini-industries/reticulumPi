@@ -1,7 +1,6 @@
 """Tests for the NetworkMap plugin."""
 
 import sqlite3
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -847,7 +847,7 @@ class InfoBot(PluginBase):
 
         except urllib.error.URLError as exc:
             self.log.warning("Weather fetch failed for %r: %s", location, exc)
-            return f"Could not fetch weather (network error). Try again later."
+            return "Could not fetch weather (network error). Try again later."
         except (KeyError, TypeError, ValueError) as exc:
             self.log.warning("Weather parse error for %r: %s", location, exc)
             return f"Could not parse weather data for: {location}"

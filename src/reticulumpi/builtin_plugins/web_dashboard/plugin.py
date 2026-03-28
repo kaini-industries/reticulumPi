@@ -1,7 +1,6 @@
 """Web Dashboard plugin — secure web UI for node monitoring."""
 
 import asyncio
-import threading
 import time
 from typing import Any
 
@@ -165,7 +164,6 @@ class WebDashboardPlugin(PluginBase):
 
     def _run_server(self) -> None:
         """Run the aiohttp server in a dedicated asyncio event loop."""
-        import aiohttp.web
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)

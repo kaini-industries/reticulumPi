@@ -1,8 +1,7 @@
 """Tests for the remote control client."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 
 def test_format_response():

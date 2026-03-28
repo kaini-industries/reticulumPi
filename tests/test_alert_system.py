@@ -1,8 +1,7 @@
 """Tests for the AlertSystem plugin."""
 
 import os
-import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

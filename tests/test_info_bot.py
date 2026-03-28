@@ -6,7 +6,6 @@ import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
-import RNS
 
 
 @pytest.fixture

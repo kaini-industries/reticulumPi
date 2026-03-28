@@ -1,6 +1,5 @@
 """Tests for the SensorFramework plugin."""
 
-import os
 import sqlite3
 import time
 from unittest.mock import MagicMock, patch
