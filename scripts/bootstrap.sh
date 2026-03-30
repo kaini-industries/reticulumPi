@@ -9,6 +9,7 @@ WITH_NOMADNET=false
 WITH_MESHCHAT=false
 WITH_DASHBOARD=false
 WITH_LORA=false
+WITH_I2P=false
 INSTALL_DIR="/opt/reticulumpi"
 NODE_NAME=""
 while [[ $# -gt 0 ]]; do
@@ -18,6 +19,7 @@ while [[ $# -gt 0 ]]; do
         --with-meshchat) WITH_MESHCHAT=true ;;
         --with-dashboard) WITH_DASHBOARD=true ;;
         --with-lora) WITH_LORA=true ;;
+        --with-i2p) WITH_I2P=true ;;
         --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift ;;
         --install-dir=*) INSTALL_DIR="${1#*=}" ;;
         --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift ;;
@@ -128,6 +130,31 @@ fi
 if [ "$WITH_LORA" = true ]; then
     echo "[4e/7] Installing LoRa/RNode tools (rnodeconf)..."
     sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/pip" install rnodeconf
+fi
+
+# 4f. Optional: Install I2P transport
+if [ "$WITH_I2P" = true ]; then
+    echo "[4f/7] Installing I2P router (i2pd)..."
+    sudo apt-get install -y i2pd
+
+    # Ensure SAM API is explicitly enabled (required by RNS I2PInterface)
+    if grep -q '^\[sam\]' /etc/i2pd/i2pd.conf 2>/dev/null; then
+        sudo sed -i '/^\[sam\]/,/^$/{
+s/^# enabled = false/enabled = true/
+s/^# address = 127.0.0.1/address = 127.0.0.1/
+s/^# port = 7656/port = 7656/
+}' /etc/i2pd/i2pd.conf
+        echo "  Enabled SAM API in /etc/i2pd/i2pd.conf"
+    fi
+
+    sudo systemctl enable --now i2pd
+    # Verify SAM API is available
+    sleep 3
+    if nc -z 127.0.0.1 7656 2>/dev/null; then
+        echo "  I2P SAM API is available on port 7656"
+    else
+        echo "  Warning: I2P SAM API not yet available. It may take a moment to start."
+    fi
 fi
 
 # 5. Config directories
@@ -388,8 +415,12 @@ else
     echo "  Re-run with: sudo bash $0 --with-lora"
 fi
 
-echo ""
-echo "Optional — for I2P anonymous networking support:"
-echo "  sudo apt install i2pd"
-echo "  sudo systemctl enable --now i2pd"
-echo "  Then uncomment the [I2P Interface] section in $RETICULUM_DIR/config"
+if [ "$WITH_I2P" = true ]; then
+    echo ""
+    echo "I2P transport installed. The I2P interface will bootstrap automatically"
+    echo "on next rnsd start (takes 2-5 minutes for initial tunnel setup)."
+else
+    echo ""
+    echo "Optional — for I2P anonymous networking support:"
+    echo "  Re-run with: sudo bash $0 --with-i2p"
+fi

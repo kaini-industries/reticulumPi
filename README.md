@@ -7,10 +7,10 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **14 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast
+- **16 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor
 - **Mesh-aware** -- passively maps network topology, shares telemetry with peers, broadcasts emergencies across the mesh
 - **Remote management** -- manage nodes over Reticulum Links with zero IP dependency (SSH not required)
-- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, mesh node and sensor views
+- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, routing table visualization, mesh node and sensor views
 - **Event bus** -- decoupled inter-plugin communication via publish/subscribe
 - **Plugin hot-reload** -- enable/disable plugins at runtime without restarting
 - **Persistent identity** -- stable cryptographic identity across restarts
@@ -64,6 +64,9 @@ sudo bash scripts/bootstrap.sh --with-nomadnet --with-meshchat
 # With LoRa/RNode support (installs rnodeconf for firmware flashing):
 sudo bash scripts/bootstrap.sh --with-lora
 
+# With I2P anonymous networking (installs i2pd for global overlay transport):
+sudo bash scripts/bootstrap.sh --with-i2p
+
 # Set a custom node name (default: ReticulumPi-<hostname>):
 sudo bash scripts/bootstrap.sh --node-name "MyCabin" --with-nomadnet
 
@@ -79,7 +82,7 @@ This will:
 1. Install system packages (`python3`, `python3-venv`, `git`, + `nodejs`/`npm` if `--with-meshchat`)
 2. Create a `reticulumpi` system user with hardware access groups (`dialout`, `gpio`, `spi`, `i2c`)
 3. Copy the project to the install directory (default `/opt/reticulumpi`, or in-place with `--install-dir .`)
-4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`, + `rnodeconf` if `--with-lora`)
+4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`, + `rnodeconf` if `--with-lora`, + `i2pd` if `--with-i2p`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
 6. Set the node name (from `--node-name`, interactive prompt, or default `ReticulumPi-<hostname>`)
 7. Create all runtime directories required by the systemd service sandboxing
@@ -741,7 +744,7 @@ After starting, access the web UI at `http://<pi-ip>:8000`. MeshChat manages its
 
 ### Web Dashboard
 
-Secure real-time web UI for monitoring your node. Shows system metrics, plugin status, Reticulum interfaces, mesh nodes, peer telemetry, sensor data, and emergency broadcasts -- all updating live over WebSocket.
+Secure real-time web UI for monitoring your node. Shows system metrics, plugin status, Reticulum interfaces, connectivity health, routing table with hop/interface distribution charts, transport hub status, mesh nodes, peer telemetry, sensor data, and emergency broadcasts -- all updating live over WebSocket.
 
 **Requires:** `pip install aiohttp` (or `--with-dashboard` during bootstrap)
 
@@ -857,6 +860,47 @@ Flood-style priority messaging across the mesh. Emergency messages propagate via
 | `max_stored_messages` | 100 | Local message buffer size |
 | `rebroadcast` | true | Re-broadcast received emergencies |
 | `rebroadcast_delay` | 5 | Seconds to wait before re-broadcasting |
+
+### Transport Monitor
+
+Watches TCP transport hub health and automatically connects to fallback hubs when all primary connections are down. Publishes events on hub state transitions so the alert system can notify operators. Shows real-time hub status on the dashboard.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `check_interval` | 15 | Seconds between health checks |
+| `down_threshold` | 60 | Seconds all primaries must be down before fallback activates |
+| `auto_teardown_fallback` | true | Tear down fallback when a primary recovers |
+| `fallback_hubs` | [] | Ordered list of fallback hubs (`name`, `target_host`, `target_port`) |
+
+### Connectivity Monitor
+
+Continuously monitors the health of the entire transport stack -- rnsd availability, interface status, I2P tunnel state, and the full routing table. Provides detailed routing diagnostics including hop distribution, per-interface path counts, path freshness, rate limiting, and blackhole tracking. Writes a dedicated log file for link failure diagnosis. All data surfaces in the web dashboard's Connectivity Health and Routing sections.
+
+The plugin is read-only -- it queries RNS state via `get_path_table()`, `get_interface_stats()`, `get_rate_table()`, etc. but never modifies routing tables, drops paths, or interferes with Reticulum's self-healing transport.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `check_interval` | 30 | Seconds between diagnostic cycles |
+| `log_path` | ~/.local/share/reticulumpi/connectivity.log | Dedicated diagnostic log file (5 MB rotating) |
+| `sam_port` | 7656 | i2pd SAM API port to probe |
+
+**Routing data exposed via `/api/routing`:**
+
+- Full path table with pagination, sorting, and filtering (by hop count, interface, hash prefix)
+- Hop distribution bucketed into ranges (local, 1-2, 3-4, 5-6, 7-10, 11+)
+- Per-interface path breakdown
+- Path freshness statistics (newest, oldest, average age, expiring soon)
+- Active link count, rate-limited destinations, blackholed identities
+- Transport identity and uptime
+
+**Diagnostic rules:**
+
+- Path table empty (node isolated)
+- All paths via single interface (single point of failure)
+- Destination table stale (no announces received)
+- Rate-limited destinations detected
+- Blackholed identities detected
+- Paths expiring soon
 
 ## Node Identities
 
@@ -979,7 +1023,7 @@ self.event_bus.publish(events.ALERT_TRIGGERED, {"message": "CPU hot!", "time": t
 self.event_bus.unsubscribe(events.SENSOR_READING, self._on_sensor_reading)
 ```
 
-Available event types: `PLUGIN_STARTED`, `PLUGIN_STOPPED`, `PLUGIN_CRASHED`, `METRICS_UPDATED`, `NODE_DISCOVERED`, `NODE_METRICS_RECEIVED`, `ALERT_TRIGGERED`, `FILE_RECEIVED`, `LINK_ESTABLISHED`, `LINK_CLOSED`, `SENSOR_READING`, `EMERGENCY_RECEIVED`.
+Available event types: `PLUGIN_STARTED`, `PLUGIN_STOPPED`, `PLUGIN_CRASHED`, `METRICS_UPDATED`, `NODE_DISCOVERED`, `NODE_METRICS_RECEIVED`, `ALERT_TRIGGERED`, `FILE_RECEIVED`, `LINK_ESTABLISHED`, `LINK_CLOSED`, `SENSOR_READING`, `EMERGENCY_RECEIVED`, `HUB_ONLINE`, `HUB_OFFLINE`, `FALLBACK_ACTIVATED`, `FALLBACK_DEACTIVATED`, `RNSD_DOWN`, `RNSD_RECOVERED`, `INTERFACE_OFFLINE`, `I2P_NO_PEERS`, `PATH_TABLE_EMPTY`, `PATHS_STALE`, `SINGLE_INTERFACE_SPOF`.
 
 #### Optional Status Method
 
@@ -1074,6 +1118,8 @@ reticulumPi/
 │       ├── file_transfer.py        # File transfer via RNS.Resource
 │       ├── sensor_framework.py     # Config-driven sensor reading + logging
 │       ├── emergency_broadcast.py  # Mesh-wide flood-style messaging
+│       ├── transport_monitor.py    # TCP hub health + automatic failover
+│       ├── connectivity_monitor.py # Transport health + routing diagnostics
 │       ├── web_dashboard/          # Secure web dashboard (aiohttp)
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
@@ -1089,7 +1135,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 280 tests (pytest)
+└── tests/                          # 337 tests (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -1111,6 +1157,9 @@ reticulumPi/
     ├── test_file_transfer.py        # File transfer + safety tests
     ├── test_sensor_framework.py     # Sensor drivers + storage tests
     ├── test_emergency_broadcast.py  # Emergency flood + dedup tests
+    ├── test_transport_monitor.py    # Transport hub health + failover tests
+    ├── test_connectivity_monitor.py # Connectivity + routing data tests
+    ├── test_routing_api.py          # Routing API endpoint tests
     └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests
 ```
 

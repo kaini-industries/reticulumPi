@@ -204,6 +204,28 @@ reticulumpi:
     #  rebroadcast: true               # Re-broadcast received emergencies
     #  rebroadcast_delay: 5            # Seconds to wait before re-broadcasting
 
+    # Connectivity Monitor — diagnoses link failures, logs transport health.
+    # Writes detailed diagnostics to a dedicated log file.
+    # Monitors rnsd, I2P, SAM API, interface health, and path table.
+    #connectivity_monitor:
+    #  enabled: false
+    #  check_interval: 30              # Seconds between diagnostic checks
+    #  log_path: ~/.local/share/reticulumpi/connectivity.log
+    #  sam_port: 7656                  # i2pd SAM API port
+    #  shared_instance_port: 37428     # rnsd shared instance port
+
+    # Transport Monitor — watches TCP hub health and activates fallback hubs.
+    # Automatically connects to a fallback when all primary hubs are down.
+    #transport_monitor:
+    #  enabled: false
+    #  check_interval: 15              # Seconds between health checks
+    #  down_threshold: 60              # Seconds all primaries must be down before fallback
+    #  auto_teardown_fallback: true    # Tear down fallback when primary recovers
+    #  fallback_hubs:
+    #    - name: "Community Hub"
+    #      target_host: "rns.example.com"
+    #      target_port: 4242
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import aiohttp.web
@@ -17,11 +17,37 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _collect_interfaces() -> list[dict]:
-    """Collect current RNS interface data for broadcast."""
+def _collect_interfaces(reticulum_instance: Any = None) -> list[dict]:
+    """Collect current RNS interface data for broadcast.
+
+    In shared-instance mode, ``RNS.Transport.interfaces`` only contains the
+    local client connection to rnsd.  ``Reticulum.get_interface_stats()``
+    returns the full list of interfaces from the shared instance, including
+    TCP, I2P, LoRa, etc.
+    """
     try:
         import RNS
 
+        # Prefer the Reticulum stats API (works across shared instance boundary)
+        if reticulum_instance and hasattr(reticulum_instance, "get_interface_stats"):
+            stats = reticulum_instance.get_interface_stats()
+            interfaces = []
+            for entry in stats.get("interfaces", []):
+                itype = entry.get("type", "")
+                # Skip internal local-client/local-server interfaces
+                if itype in ("LocalClientInterface", "LocalServerInterface"):
+                    continue
+                interfaces.append({
+                    "name": entry.get("name", "?"),
+                    "type": itype,
+                    "online": entry.get("status", False),
+                    "bitrate": entry.get("bitrate"),
+                    "rxb": entry.get("rxb", 0),
+                    "txb": entry.get("txb", 0),
+                })
+            return interfaces
+
+        # Fallback: direct interface iteration (standalone mode)
         interfaces = []
         for iface in RNS.Transport.interfaces:
             info: dict = {
@@ -120,7 +146,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                     plugin_statuses[name] = {"active": False}
 
             # Collect interface traffic data
-            interfaces = _collect_interfaces()
+            interfaces = _collect_interfaces(plugin.app.reticulum)
 
             # Collect mesh data (if plugins available)
             mesh_data: dict = {}
@@ -160,6 +186,28 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
+            transport_data: dict = {}
+            transport_mon = plugin.app.get_plugin("transport_monitor")
+            if transport_mon and hasattr(transport_mon, "get_hub_health"):
+                try:
+                    transport_data = transport_mon.get_hub_health()
+                except Exception:
+                    pass
+
+            # Collect connectivity diagnostics (if plugin available)
+            connectivity_data: dict = {}
+            conn_mon = plugin.app.get_plugin("connectivity_monitor")
+            if conn_mon and hasattr(conn_mon, "get_health"):
+                try:
+                    connectivity_data = conn_mon.get_health()
+                except Exception:
+                    pass
+
+            # Extract routing summary from connectivity data (no extra RPC)
+            routing_data: dict = {}
+            if connectivity_data:
+                routing_data = connectivity_data.get("routing", {})
+
             message = json.dumps({
                 "type": "update",
                 "data": {
@@ -169,6 +217,9 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                     "mesh": mesh_data,
                     "sensors": sensor_data,
                     "emergency": emergency_data,
+                    "transport": transport_data,
+                    "connectivity": connectivity_data,
+                    "routing": routing_data,
                 },
                 "timestamp": time.time(),
             })

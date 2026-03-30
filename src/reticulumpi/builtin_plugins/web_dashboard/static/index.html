@@ -53,12 +53,14 @@
         <span>Plugins</span>
         <span class="count" id="plugin-count"></span>
       </div>
-      <table class="data-table">
-        <thead>
-          <tr><th>Name</th><th>Version</th><th>Status</th><th>Address</th><th>Details</th></tr>
-        </thead>
-        <tbody id="plugins-table"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Name</th><th>Version</th><th>Status</th><th>Address</th><th>Details</th></tr>
+          </thead>
+          <tbody id="plugins-table"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Network Interfaces -->
@@ -67,12 +69,133 @@
         <span>Network Interfaces</span>
         <span class="count" id="iface-count"></span>
       </div>
-      <table class="data-table">
-        <thead>
-          <tr><th>Name</th><th>Type</th><th>Status</th><th>Traffic</th></tr>
-        </thead>
-        <tbody id="interfaces-table"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Name</th><th>Type</th><th>Status</th><th>Traffic</th></tr>
+          </thead>
+          <tbody id="interfaces-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Connectivity Health -->
+    <div class="section" id="connectivity-section">
+      <div class="section-header">
+        <span>Connectivity Health</span>
+        <span class="count" id="connectivity-status"></span>
+      </div>
+      <div id="connectivity-content" class="connectivity-grid">
+        <div class="connectivity-indicators" id="connectivity-indicators">
+          <span class="conn-indicator" id="ci-rnsd" title="rnsd shared instance">rnsd: --</span>
+          <span class="conn-indicator" id="ci-i2p" title="I2P overlay transport">I2P: --</span>
+          <span class="conn-indicator" id="ci-sam" title="i2pd SAM API">SAM: --</span>
+          <span class="conn-indicator" id="ci-ifaces" title="Network interfaces">Interfaces: --</span>
+          <span class="conn-indicator" id="ci-paths" title="Known destinations">Paths: --</span>
+        </div>
+        <div id="connectivity-issues" class="connectivity-issues"></div>
+      </div>
+    </div>
+
+    <!-- Routing -->
+    <div class="section" id="routing-section">
+      <div class="section-header">
+        <span>Routing</span>
+        <span class="count" id="routing-status"></span>
+      </div>
+      <div class="routing-content">
+        <!-- Transport identity / uptime bar -->
+        <div class="routing-identity" id="routing-identity"></div>
+
+        <!-- Key stats as metric cards -->
+        <div class="routing-stats-grid">
+          <div class="routing-stat" id="ri-paths">
+            <div class="routing-stat-value">--</div>
+            <div class="routing-stat-label">Paths</div>
+          </div>
+          <div class="routing-stat" id="ri-links">
+            <div class="routing-stat-value">--</div>
+            <div class="routing-stat-label">Active Links</div>
+          </div>
+          <div class="routing-stat" id="ri-rate">
+            <div class="routing-stat-value">--</div>
+            <div class="routing-stat-label">Rate-limited</div>
+          </div>
+          <div class="routing-stat" id="ri-blackhole">
+            <div class="routing-stat-value">--</div>
+            <div class="routing-stat-label">Blackholed</div>
+          </div>
+        </div>
+
+        <!-- Charts side by side -->
+        <div class="routing-charts">
+          <div class="routing-chart-box">
+            <div class="routing-chart-title">Hop Distribution</div>
+            <div class="hop-chart" id="hop-chart"></div>
+          </div>
+          <div class="routing-chart-box">
+            <div class="routing-chart-title">Paths by Interface</div>
+            <div class="iface-chart" id="iface-chart"></div>
+          </div>
+        </div>
+
+        <!-- Path freshness -->
+        <div class="routing-freshness" id="routing-freshness"></div>
+
+        <!-- Routing diagnostics -->
+        <div id="routing-diagnostics" class="connectivity-issues"></div>
+
+        <!-- Expandable path table -->
+        <div class="routing-table-controls">
+          <button class="config-toggle" id="routing-table-toggle">Show Path Table</button>
+          <span id="routing-table-info" class="text-muted"></span>
+        </div>
+        <div class="hidden" id="routing-table-wrapper">
+          <div class="routing-filters">
+            <input type="text" id="rt-search" placeholder="Search hash..." class="rt-input">
+            <select id="rt-iface-filter" class="rt-select"><option value="">All interfaces</option></select>
+            <select id="rt-hops-filter" class="rt-select">
+              <option value="">All hops</option>
+              <option value="1">1 hop</option>
+              <option value="2">2 hops</option>
+              <option value="3">3 hops</option>
+              <option value="4">4+ hops</option>
+            </select>
+          </div>
+          <div class="table-scroll" style="max-height:500px;overflow-y:auto">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="sortable" data-rt-sort="hash">Destination</th>
+                  <th class="sortable" data-rt-sort="hops">Hops</th>
+                  <th class="sortable" data-rt-sort="via">Next Hop</th>
+                  <th>Interface</th>
+                  <th class="sortable" data-rt-sort="timestamp">Age</th>
+                  <th class="sortable" data-rt-sort="expires">Expires</th>
+                </tr>
+              </thead>
+              <tbody id="routing-table-body"></tbody>
+            </table>
+          </div>
+          <div class="routing-pagination" id="routing-pagination"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Transport Health -->
+    <div class="section" id="transport-section">
+      <div class="section-header">
+        <span>Transport Hubs</span>
+        <span class="count" id="transport-count"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Hub</th><th>Host</th><th>Status</th><th>Traffic</th></tr>
+          </thead>
+          <tbody id="transport-table"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Mesh Network -->
@@ -122,12 +245,14 @@
         <span>Shared Files</span>
         <span class="count" id="files-count"></span>
       </div>
-      <table class="data-table">
-        <thead>
-          <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
-        </thead>
-        <tbody id="files-table"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+          </thead>
+          <tbody id="files-table"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Sensors -->
@@ -145,12 +270,14 @@
         <span>Emergency Broadcasts</span>
         <span class="count" id="emergency-count"></span>
       </div>
-      <table class="data-table">
-        <thead>
-          <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
-        </thead>
-        <tbody id="emergency-table"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
+          </thead>
+          <tbody id="emergency-table"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Config (collapsible) -->

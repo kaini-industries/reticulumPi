@@ -1,15 +1,29 @@
 [Unit]
 Description=Reticulum Network Stack Daemon
-After=network-online.target
+After=network-online.target i2pd.service
 Wants=network-online.target
+# If i2pd is installed, wait for it to start (SAM API needs to be ready)
+# This is a soft dependency — rnsd still starts without i2pd
+After=i2pd.service
 
 [Service]
 Type=simple
 User=reticulumpi
 Group=reticulumpi
 ExecStart=/opt/reticulumpi/.venv/bin/rnsd
+
+# Ensure Python tracebacks and RNS logs appear in journalctl
+StandardOutput=journal
+StandardError=journal
+
+# Restart policy with backoff to prevent crash-loop storms
 Restart=on-failure
-RestartSec=5
+RestartSec=10
+StartLimitBurst=10
+StartLimitIntervalSec=300
+
+# Give I2P interface time to connect to SAM API on restart
+ExecStartPre=/bin/sleep 3
 
 # Security hardening
 NoNewPrivileges=yes

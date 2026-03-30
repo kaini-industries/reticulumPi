@@ -49,6 +49,9 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/files", handle_files)
     app.router.add_get("/api/sensors", handle_sensors)
     app.router.add_get("/api/emergency", handle_emergency)
+    app.router.add_get("/api/transport", handle_transport)
+    app.router.add_get("/api/connectivity", handle_connectivity)
+    app.router.add_get("/api/routing", handle_routing)
 
 
 def _ok(data: Any) -> aiohttp.web.Response:
@@ -268,28 +271,48 @@ async def handle_plugin_detail(request: aiohttp.web.Request) -> aiohttp.web.Resp
 
 
 async def handle_interfaces(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    """GET /api/interfaces — active RNS network interfaces."""
+    """GET /api/interfaces — active RNS network interfaces.
+
+    In shared-instance mode, queries rnsd for the full interface list
+    (TCP, I2P, LoRa, etc.) via ``Reticulum.get_interface_stats()``.
+    """
     import RNS
+
+    plugin = _get_plugin(request)
+    rns_instance = getattr(plugin.app, "reticulum", None)
 
     interfaces = []
     try:
-        for iface in RNS.Transport.interfaces:
-            info: dict[str, Any] = {
-                "name": str(iface),
-                "type": iface.__class__.__name__,
-                "online": getattr(iface, "online", None),
-            }
-            if hasattr(iface, "bitrate"):
-                info["bitrate"] = iface.bitrate
-            if hasattr(iface, "peers"):
-                info["peers"] = len(iface.peers) if iface.peers else 0
-            if hasattr(iface, "IN") and hasattr(iface, "OUT"):
-                info["direction"] = "bidirectional"
-            if hasattr(iface, "rxb"):
-                info["rxb"] = iface.rxb
-            if hasattr(iface, "txb"):
-                info["txb"] = iface.txb
-            interfaces.append(info)
+        # Prefer the Reticulum stats API (works across shared instance)
+        if rns_instance and hasattr(rns_instance, "get_interface_stats"):
+            stats = rns_instance.get_interface_stats()
+            for entry in stats.get("interfaces", []):
+                itype = entry.get("type", "")
+                if itype in ("LocalClientInterface", "LocalServerInterface"):
+                    continue
+                interfaces.append({
+                    "name": entry.get("name", "?"),
+                    "type": itype,
+                    "online": entry.get("status", False),
+                    "bitrate": entry.get("bitrate"),
+                    "rxb": entry.get("rxb", 0),
+                    "txb": entry.get("txb", 0),
+                })
+        else:
+            # Fallback: direct iteration (standalone mode)
+            for iface in RNS.Transport.interfaces:
+                info: dict[str, Any] = {
+                    "name": str(iface),
+                    "type": iface.__class__.__name__,
+                    "online": getattr(iface, "online", None),
+                }
+                if hasattr(iface, "bitrate"):
+                    info["bitrate"] = iface.bitrate
+                if hasattr(iface, "rxb"):
+                    info["rxb"] = iface.rxb
+                if hasattr(iface, "txb"):
+                    info["txb"] = iface.txb
+                interfaces.append(info)
     except Exception as exc:
         return _ok({"interfaces": interfaces, "error": f"Partial collection: {exc}"})
 
@@ -377,3 +400,81 @@ async def handle_emergency(request: aiohttp.web.Request) -> aiohttp.web.Response
     if not eb or not hasattr(eb, "get_messages"):
         return _ok({"messages": [], "message": "emergency_broadcast plugin not available"})
     return _ok({"messages": eb.get_messages(), "status": eb.get_status()})
+
+
+async def handle_transport(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/transport — transport hub health and fallback status."""
+    plugin = _get_plugin(request)
+    mon = plugin.app.get_plugin("transport_monitor")
+    if not mon or not hasattr(mon, "get_hub_health"):
+        return _ok({"primaries": [], "fallback_active": False, "message": "transport_monitor plugin not available"})
+    return _ok(mon.get_hub_health())
+
+
+async def handle_connectivity(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/connectivity — connectivity diagnostics and health."""
+    plugin = _get_plugin(request)
+    conn_mon = plugin.app.get_plugin("connectivity_monitor")
+    if not conn_mon or not hasattr(conn_mon, "get_health"):
+        return _ok({"issues": [], "message": "connectivity_monitor plugin not available"})
+    return _ok(conn_mon.get_health())
+
+
+async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/routing — routing table with pagination, filtering, and sorting.
+
+    Query parameters:
+        page: Page number (default 1)
+        per_page: Items per page (default 100, max 500, 0=summary only)
+        sort: Sort field — hops, timestamp, expires, hash, interface (default hops)
+        order: Sort order — asc or desc (default asc)
+        interface: Substring filter on interface name
+        min_hops: Minimum hop count filter
+        max_hops: Maximum hop count filter
+        search: Hex prefix filter on destination hash
+    """
+    plugin = _get_plugin(request)
+    conn_mon = plugin.app.get_plugin("connectivity_monitor")
+    if not conn_mon or not hasattr(conn_mon, "get_routing_data"):
+        return _ok({
+            "summary": {},
+            "paths": [],
+            "total_paths": 0,
+            "page": 1,
+            "per_page": 0,
+            "pages": 0,
+            "rate_table": [],
+            "blackholed": {},
+            "message": "connectivity_monitor plugin not available",
+        })
+
+    # Parse query parameters
+    def _int_param(name: str, default: int) -> int:
+        try:
+            return int(request.query.get(name, default))
+        except (ValueError, TypeError):
+            return default
+
+    page = _int_param("page", 1)
+    per_page = _int_param("per_page", 100)
+    sort = request.query.get("sort", "hops")
+    order = request.query.get("order", "asc")
+    iface_filter = request.query.get("interface", "")
+    search = request.query.get("search", "")
+
+    min_hops_raw = request.query.get("min_hops")
+    max_hops_raw = request.query.get("max_hops")
+    min_hops = int(min_hops_raw) if min_hops_raw is not None else None
+    max_hops = int(max_hops_raw) if max_hops_raw is not None else None
+
+    data = conn_mon.get_routing_data(
+        page=page,
+        per_page=per_page,
+        sort=sort,
+        order=order,
+        iface_filter=iface_filter,
+        min_hops=min_hops,
+        max_hops=max_hops,
+        search=search,
+    )
+    return _ok(data)
