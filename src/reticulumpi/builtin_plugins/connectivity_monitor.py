@@ -26,15 +26,13 @@ _I2P_BOOTSTRAP_GRACE = 600  # 10 minutes
 # Paths expiring within this many seconds are flagged
 _EXPIRING_SOON_THRESHOLD = 600  # 10 minutes
 
-# Destination table file staleness threshold (seconds).
-# rnsd flushes this file to disk periodically, not on every announce.
-# After restarts or low-traffic periods, the mtime can lag significantly.
-# 2 hours avoids false alarms while still catching real problems.
-_DEST_TABLE_STALE_THRESHOLD = 7200  # 2 hours
-
 # Path data staleness threshold (seconds) — if ALL paths in the routing
 # table are older than this, transport may not be receiving announces.
 _PATH_STALE_THRESHOLD = 1800  # 30 minutes
+
+# Consecutive zero-traffic-delta checks before warning about a TCP hub.
+# At the default 30s check interval, 3 checks = ~90s of silence.
+_HUB_STALE_CHECKS = 3
 
 
 def _hex_hash(raw: Any) -> str:
@@ -132,6 +130,8 @@ class ConnectivityMonitorPlugin(PluginBase):
 
         # Previous interface traffic for delta calculation
         self._prev_iface_traffic: dict[str, dict[str, int]] = {}
+        # Consecutive zero-delta checks per TCP hub (warn after 3 = ~90s)
+        self._hub_zero_delta_count: dict[str, int] = {}
 
         # Set up dedicated connectivity log file
         self._conn_log = self._setup_log_file()
@@ -431,7 +431,9 @@ class ConnectivityMonitorPlugin(PluginBase):
 
                     self._prev_iface_traffic["i2p"] = {"rxb": rxb, "txb": txb}
 
-                # Track TCP client traffic
+                # Track TCP client traffic — only warn after several
+                # consecutive zero-delta checks to avoid false alarms
+                # during normal quiet periods.
                 if itype == "TCPClientInterface":
                     rxb = entry.get("rxb", 0)
                     txb = entry.get("txb", 0)
@@ -440,10 +442,15 @@ class ConnectivityMonitorPlugin(PluginBase):
                         delta_rx = rxb - prev.get("rxb", 0)
                         delta_tx = txb - prev.get("txb", 0)
                         if delta_rx == 0 and delta_tx == 0:
-                            issues.append(
-                                f"TCP hub '{name}' has 0 traffic delta — "
-                                "may be stale"
-                            )
+                            count = self._hub_zero_delta_count.get(name, 0) + 1
+                            self._hub_zero_delta_count[name] = count
+                            if count >= _HUB_STALE_CHECKS:
+                                issues.append(
+                                    f"TCP hub '{name}' has had 0 traffic "
+                                    f"for {count} checks — may be stale"
+                                )
+                        else:
+                            self._hub_zero_delta_count[name] = 0
                     self._prev_iface_traffic[name] = {"rxb": rxb, "txb": txb}
 
             with self._lock:
@@ -622,25 +629,10 @@ class ConnectivityMonitorPlugin(PluginBase):
                     with self._lock:
                         self._health["transport_active"] = False
 
-            # Check destination table file for freshness.
-            # rnsd flushes this file periodically, not on every announce,
-            # so the mtime can lag even when rnsd is healthy.  Use a
-            # generous threshold (2 hours) to avoid false alarms.
-            reticulum_dir = getattr(rns_instance, "configdir", None)
-            if reticulum_dir:
-                dt_path = os.path.join(reticulum_dir, "storage", "destination_table")
-                if os.path.exists(dt_path):
-                    dt_mtime = os.path.getmtime(dt_path)
-                    age = time.time() - dt_mtime
-                    if age > _DEST_TABLE_STALE_THRESHOLD:
-                        issues.append(
-                            f"Destination table not updated in {age / 60:.0f} min"
-                        )
-                        self._conn_log.warning(
-                            "Destination table stale (%.0f min) — "
-                            "transport may not be receiving announces",
-                            age / 60,
-                        )
+            # Note: We previously checked the destination_table file mtime
+            # here, but rnsd flushes that file very infrequently (can be 9+
+            # hours between writes even when healthy).  Actual path freshness
+            # is now checked in _collect_routing_data() using live RPC data.
 
         except Exception:
             self.log.debug("Error analyzing path table", exc_info=True)
@@ -817,10 +809,9 @@ class ConnectivityMonitorPlugin(PluginBase):
                     f"{len(blackholed_clean)} identity(ies) are blackholed"
                 )
 
-            if expiring_soon > 0:
-                routing_diags.append(
-                    f"{expiring_soon} path(s) expiring within 10 minutes"
-                )
+            # Note: "paths expiring soon" is normal Reticulum lifecycle
+            # behaviour — it's already visible in the freshness stats
+            # (expiring_soon count) so we don't flag it as a diagnostic.
 
             # 12. Store everything
             routing_summary = {

@@ -54,6 +54,31 @@ class MeshChatServer(PluginBase):
         self._meshchat_script = meshchat_script
         self._python_bin = python_bin
 
+        # Resolve the launcher wrapper (lives in ReticulumPi's tree, not MeshChat's)
+        project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        )
+        launcher = os.path.join(project_root, "scripts", "meshchat_launcher.py")
+        if os.path.isfile(launcher):
+            self._launcher_script = launcher
+        else:
+            self.log.warning(
+                "meshchat_launcher.py not found at %s — "
+                "falling back to direct meshchat.py (timeouts will not be patched)",
+                launcher,
+            )
+            self._launcher_script = None
+
+        link_timeout = self.config.get("link_timeout", 75)
+        if not isinstance(link_timeout, (int, float)) or link_timeout <= 0:
+            raise ValueError("link_timeout must be a positive number")
+        self._link_timeout = link_timeout
+
+        path_lookup_timeout = self.config.get("path_lookup_timeout", 15)
+        if not isinstance(path_lookup_timeout, (int, float)) or path_lookup_timeout <= 0:
+            raise ValueError("path_lookup_timeout must be a positive number")
+        self._path_lookup_timeout = path_lookup_timeout
+
         port = self.config.get("port", 8000)
         if not isinstance(port, int) or port < 1 or port > 65535:
             raise ValueError("port must be an integer between 1 and 65535")
@@ -90,16 +115,21 @@ class MeshChatServer(PluginBase):
             "~/.reticulum"
         )
 
+        script = self._launcher_script or self._meshchat_script
         cmd = [
             self._python_bin,
-            self._meshchat_script,
+            script,
             "--headless",
             "--host", self._host,
             "--port", str(self._port),
             "--storage-dir", self._storage_dir,
             "--reticulum-config-dir", rns_config_dir,
         ]
-        self._launch_process(cmd)
+        env = os.environ.copy()
+        env["MESHCHAT_DIR"] = self._install_dir
+        env["MESHCHAT_LINK_TIMEOUT"] = str(int(self._link_timeout))
+        env["MESHCHAT_PATH_LOOKUP_TIMEOUT"] = str(int(self._path_lookup_timeout))
+        self._launch_process(cmd, env=env)
         self._cmd = cmd
 
         self._start_thread(self._health_monitor, "meshchat-monitor")
@@ -130,11 +160,12 @@ class MeshChatServer(PluginBase):
             "restart_count": self._restart_count,
         }
 
-    def _launch_process(self, cmd: list[str]) -> None:
+    def _launch_process(self, cmd: list[str], env: dict[str, str] | None = None) -> None:
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=env,
         )
         self._pid = self._process.pid
         self._start_log_reader(self._process, prefix="meshchat")

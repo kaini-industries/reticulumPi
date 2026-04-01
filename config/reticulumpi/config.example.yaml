@@ -87,6 +87,12 @@ reticulumpi:
     #  health_check_interval: 10
     #  auto_restart: true
     #  max_restarts: 5
+    #  # NomadNet page download timeouts (seconds).
+    #  # link_timeout: how long to wait for link establishment (default: 75).
+    #  # RNS allows ~6s per hop; 75s covers up to 12 hops with margin.
+    #  # path_lookup_timeout: how long to wait for path discovery (default: 15).
+    #  link_timeout: 75
+    #  path_lookup_timeout: 15
 
     # Web Dashboard — secure web UI for node monitoring.
     # Requires: pip install aiohttp (or --with-dashboard during bootstrap).

@@ -23,6 +23,10 @@ def meshchat_install(tmp_path):
     python_bin.write_text("#!/bin/sh\n")
     python_bin.chmod(0o755)
 
+    # Create dummy launcher script where the plugin expects it
+    # (project_root/scripts/meshchat_launcher.py — project_root is 4 levels
+    # above the plugin source file, but in tests we mock this via monkeypatch)
+
     return str(install_dir)
 
 
@@ -90,13 +94,28 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="max_restarts"):
             _make_plugin(mock_app, meshchat_config)
 
+    def test_raises_on_invalid_link_timeout(self, mock_app, meshchat_config):
+        meshchat_config["link_timeout"] = -5
+        with pytest.raises(ValueError, match="link_timeout"):
+            _make_plugin(mock_app, meshchat_config)
+
+    def test_raises_on_zero_link_timeout(self, mock_app, meshchat_config):
+        meshchat_config["link_timeout"] = 0
+        with pytest.raises(ValueError, match="link_timeout"):
+            _make_plugin(mock_app, meshchat_config)
+
+    def test_raises_on_invalid_path_lookup_timeout(self, mock_app, meshchat_config):
+        meshchat_config["path_lookup_timeout"] = "bad"
+        with pytest.raises(ValueError, match="path_lookup_timeout"):
+            _make_plugin(mock_app, meshchat_config)
+
     def test_valid_config_succeeds(self, mock_app, meshchat_config):
         plugin = _make_plugin(mock_app, meshchat_config)
         assert plugin.plugin_name == "meshchat_server"
 
 
 class TestStart:
-    def test_launches_subprocess(self, mock_app, meshchat_config):
+    def test_launches_subprocess_with_launcher(self, mock_app, meshchat_config):
         mock_app._reticulum_config_dir = "/tmp/reticulum"
         plugin = _make_plugin(mock_app, meshchat_config)
 
@@ -108,7 +127,7 @@ class TestStart:
             plugin.start()
 
         args = mock_popen.call_args[0][0]
-        assert args[1].endswith("meshchat.py")
+        assert args[1].endswith("meshchat_launcher.py")
         assert "--headless" in args
         assert "--host" in args
         assert "--port" in args
@@ -117,7 +136,34 @@ class TestStart:
         assert plugin._pid == 12345
         assert plugin._active is True
 
+        # Verify env vars were passed
+        env = mock_popen.call_args[1].get("env") or mock_popen.call_args.kwargs.get("env")
+        assert env is not None
+        assert env["MESHCHAT_DIR"] == meshchat_config["install_dir"]
+        assert env["MESHCHAT_LINK_TIMEOUT"] == "75"
+        assert env["MESHCHAT_PATH_LOOKUP_TIMEOUT"] == "15"
+
         # Cleanup
+        plugin._active = False
+        plugin._join_threads()
+
+    def test_custom_timeouts_passed_as_env(self, mock_app, meshchat_config):
+        mock_app._reticulum_config_dir = "/tmp/reticulum"
+        meshchat_config["link_timeout"] = 120
+        meshchat_config["path_lookup_timeout"] = 30
+        plugin = _make_plugin(mock_app, meshchat_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 1
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            plugin.start()
+
+        env = mock_popen.call_args[1].get("env") or mock_popen.call_args.kwargs.get("env")
+        assert env["MESHCHAT_LINK_TIMEOUT"] == "120"
+        assert env["MESHCHAT_PATH_LOOKUP_TIMEOUT"] == "30"
+
         plugin._active = False
         plugin._join_threads()
 

@@ -725,6 +725,12 @@ Manages a [MeshChat](https://github.com/liamcottle/reticulum-meshchat) web UI se
 | `health_check_interval` | 10 | Seconds between process health checks |
 | `auto_restart` | true | Restart MeshChat if it crashes |
 | `max_restarts` | 5 | Maximum restart attempts before giving up |
+| `link_timeout` | 75 | Seconds to wait for link establishment when browsing NomadNet pages |
+| `path_lookup_timeout` | 15 | Seconds to wait for path discovery |
+
+ReticulumPi launches MeshChat through a wrapper (`scripts/meshchat_launcher.py`) that patches MeshChat's NomadNet page download timeouts and adds detailed connection logging. The wrapper survives MeshChat upstream updates since it lives in ReticulumPi's tree, not MeshChat's. If MeshChat changes its internals, the wrapper falls back gracefully to MeshChat's built-in defaults.
+
+> **Tip:** MeshChat's built-in link timeout is 15 seconds, which is too short for destinations at 3+ hops (RNS allows ~6s per hop). The default `link_timeout: 75` covers up to 12 hops. Connection attempts, failures, and page downloads are logged to the reticulumpi journal -- use `journalctl -u reticulumpi -f | grep meshchat_launcher` to monitor.
 
 Example config:
 
@@ -738,6 +744,8 @@ reticulumpi:
       install_dir: /opt/reticulumpi/meshchat
       host: "0.0.0.0"
       port: 8000
+      # link_timeout: 75        # Increase for very high-hop networks
+      # path_lookup_timeout: 15
 ```
 
 After starting, access the web UI at `http://<pi-ip>:8000`. MeshChat manages its own Reticulum identity in its storage directory, separate from the reticulumPi node identity.

@@ -171,6 +171,65 @@ class TestInterfaceCheck:
         plugin.stop()
 
 
+    def test_tcp_hub_stale_after_consecutive_checks(self, plugin):
+        """TCP hub only warns after _HUB_STALE_CHECKS consecutive zero-delta checks."""
+        plugin.start()
+        stats = {
+            "interfaces": [
+                {"name": "Hub1", "type": "TCPClientInterface", "status": True, "rxb": 500, "txb": 300},
+            ]
+        }
+        plugin.app.reticulum.get_interface_stats.return_value = stats
+
+        # First call seeds previous traffic — no warning possible
+        issues = plugin._check_interfaces()
+        assert not any("stale" in i for i in issues)
+
+        # Next 2 calls with same traffic — still under threshold (3)
+        for _ in range(2):
+            issues = plugin._check_interfaces()
+            assert not any("stale" in i for i in issues)
+
+        # 3rd consecutive zero-delta check — NOW it warns
+        issues = plugin._check_interfaces()
+        assert any("stale" in i for i in issues)
+        plugin.stop()
+
+    def test_tcp_hub_stale_resets_on_traffic(self, plugin):
+        """Counter resets when traffic resumes."""
+        plugin.start()
+        stats_idle = {
+            "interfaces": [
+                {"name": "Hub1", "type": "TCPClientInterface", "status": True, "rxb": 500, "txb": 300},
+            ]
+        }
+        plugin.app.reticulum.get_interface_stats.return_value = stats_idle
+
+        # Seed + 2 idle checks
+        plugin._check_interfaces()
+        plugin._check_interfaces()
+        plugin._check_interfaces()
+
+        # Traffic resumes
+        stats_active = {
+            "interfaces": [
+                {"name": "Hub1", "type": "TCPClientInterface", "status": True, "rxb": 600, "txb": 400},
+            ]
+        }
+        plugin.app.reticulum.get_interface_stats.return_value = stats_active
+        issues = plugin._check_interfaces()
+        assert not any("stale" in i for i in issues)
+
+        # Back to idle — counter should have reset, so 1 idle check is fine
+        plugin.app.reticulum.get_interface_stats.return_value = stats_idle
+        # Re-seed with new baseline
+        stats_idle["interfaces"][0]["rxb"] = 600
+        stats_idle["interfaces"][0]["txb"] = 400
+        issues = plugin._check_interfaces()
+        assert not any("stale" in i for i in issues)
+        plugin.stop()
+
+
 class TestI2PCheck:
     def test_sam_reachable_and_ok(self, plugin):
         plugin.start()
@@ -245,31 +304,29 @@ class TestI2PCheck:
 
 
 class TestPathCheck:
-    def test_stale_destination_table(self, plugin):
+    def test_transport_active_detected(self, plugin):
         plugin.start()
         plugin._last_iface_stats = {"transport_id": b"\x01" * 16}
-        storage_dir = os.path.join(plugin.app.reticulum.configdir, "storage")
-        dt_path = os.path.join(storage_dir, "destination_table")
-        with open(dt_path, "wb") as f:
-            f.write(b"\x00" * 100)
-        # Make it older than the 2-hour threshold
-        old_time = time.time() - 8000
-        os.utime(dt_path, (old_time, old_time))
 
-        issues = plugin._check_paths()
-        assert any("not updated" in i.lower() for i in issues)
+        plugin._check_paths()
+        assert plugin._health["transport_active"] is True
         plugin.stop()
 
-    def test_fresh_destination_table(self, plugin):
+    def test_transport_inactive_detected(self, plugin):
+        plugin.start()
+        plugin._last_iface_stats = {"transport_id": None}
+
+        plugin._check_paths()
+        assert plugin._health["transport_active"] is False
+        plugin.stop()
+
+    def test_no_issues_returned(self, plugin):
+        """_check_paths no longer checks file mtime — should return no issues."""
         plugin.start()
         plugin._last_iface_stats = {"transport_id": b"\x01" * 16}
-        storage_dir = os.path.join(plugin.app.reticulum.configdir, "storage")
-        dt_path = os.path.join(storage_dir, "destination_table")
-        with open(dt_path, "wb") as f:
-            f.write(b"\x00" * 100)
 
         issues = plugin._check_paths()
-        assert not any("not updated" in i.lower() for i in issues)
+        assert issues == []
         plugin.stop()
 
 
