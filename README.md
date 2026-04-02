@@ -8,6 +8,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
 - **16 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor
+- **Auto-discovery** -- automatically maintains a pool of community hub connections with health probing, exponential backoff, regional diversity, and peer-to-peer hub exchange
 - **Mesh-aware** -- passively maps network topology, shares telemetry with peers, broadcasts emergencies across the mesh
 - **Remote management** -- manage nodes over Reticulum Links with zero IP dependency (SSH not required)
 - **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, routing table visualization, mesh node and sensor views
@@ -369,6 +370,8 @@ This is enabled by default in the example config. For most local setups, this is
 Connect to remote Reticulum nodes anywhere on the Internet. The **TCP Server** listens for incoming connections (open port 4242 on your router). The **TCP Client** connects outbound to an existing Reticulum transport hub or another Pi node.
 
 Combine with other interfaces to create an Internet gateway -- for example, a Pi with both an RNode radio and a TCP Server bridges local LoRa traffic to the wider Internet-connected Reticulum network.
+
+> **Tip:** Instead of manually configuring TCP Client hubs, enable the [Transport Monitor's auto-discovery](#auto-discovery) feature. It automatically maintains a pool of healthy community hub connections, replacing downed hubs and spreading connections across regions -- no manual hub management needed.
 
 ### LoRa Radio with RNode
 
@@ -752,7 +755,7 @@ After starting, access the web UI at `http://<pi-ip>:8000`. MeshChat manages its
 
 ### Web Dashboard
 
-Secure real-time web UI for monitoring your node. Shows system metrics, plugin status, Reticulum interfaces, connectivity health, routing table with hop/interface distribution charts, transport hub status, mesh nodes, peer telemetry, sensor data, and emergency broadcasts -- all updating live over WebSocket.
+Secure real-time web UI for monitoring your node. Shows system metrics, plugin status, Reticulum interfaces, connectivity health, routing table with hop/interface distribution charts, transport hub status with live throughput rates, auto-discovery pool status, mesh nodes, peer telemetry, sensor data, and emergency broadcasts -- all updating live over WebSocket.
 
 **Requires:** `pip install aiohttp` (or `--with-dashboard` during bootstrap)
 
@@ -871,7 +874,7 @@ Flood-style priority messaging across the mesh. Emergency messages propagate via
 
 ### Transport Monitor
 
-Watches TCP transport hub health and automatically connects to fallback hubs when all primary connections are down. Publishes events on hub state transitions so the alert system can notify operators. Shows real-time hub status on the dashboard.
+Watches TCP transport hub health and automatically connects to fallback hubs when all primary connections are down. Publishes events on hub state transitions so the alert system can notify operators. Shows real-time hub status and throughput on the dashboard.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -879,6 +882,63 @@ Watches TCP transport hub health and automatically connects to fallback hubs whe
 | `down_threshold` | 60 | Seconds all primaries must be down before fallback activates |
 | `auto_teardown_fallback` | true | Tear down fallback when a primary recovers |
 | `fallback_hubs` | [] | Ordered list of fallback hubs (`name`, `target_host`, `target_port`) |
+
+#### Auto-Discovery
+
+The transport monitor can automatically maintain a pool of healthy community hub connections. It draws from a bundled list of known community TCP hubs, probes them for reachability, and keeps a target number of connections active at all times. When a pool hub goes down, it is replaced with a new one from the pool after a cooldown period.
+
+Hubs operate in three independent tiers:
+
+1. **Pinned** -- hubs in your Reticulum config (never touched by auto-discovery)
+2. **Primary/Fallback** -- hubs in the transport_monitor config (existing failover behavior)
+3. **Auto-discovered pool** -- transient runtime connections, fully automatic
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `auto_discovery.enabled` | false | Enable automatic hub pool management |
+| `auto_discovery.target_connections` | 3 | Number of pool connections to maintain |
+| `auto_discovery.probe_interval` | 120 | Seconds between health probes |
+| `auto_discovery.cooldown_seconds` | 300 | Minimum wait before retrying a failed hub |
+| `auto_discovery.max_cooldown_seconds` | 3600 | Backoff cap (uses exponential backoff) |
+| `auto_discovery.prefer_diverse_regions` | true | Spread connections across geographic regions |
+| `auto_discovery.extra_hubs` | [] | Additional hubs (same format as `community_hubs.yaml`) |
+| `auto_discovery.hub_list_path` | null | Override path to hub list YAML |
+| `auto_discovery.exchange_interval` | 900 | Seconds between hub exchange rounds |
+
+**Regional diversity:** When `prefer_diverse_regions` is enabled, the pool prefers hubs from regions not already represented in active connections. This improves resilience against regional outages.
+
+**Exponential backoff:** Failed hubs are placed in cooldown starting at `cooldown_seconds`, doubling on each consecutive failure up to `max_cooldown_seconds`. This prevents hammering unreachable hubs while allowing recovery.
+
+Example config:
+
+```yaml
+transport_monitor:
+  enabled: true
+  check_interval: 15
+  down_threshold: 60
+  auto_discovery:
+    enabled: true
+    target_connections: 5
+    probe_interval: 120
+    prefer_diverse_regions: true
+```
+
+#### Hub Exchange Protocol
+
+When auto-discovery is enabled, nodes can share their working hub lists with each other over Reticulum Links. This extends discovery beyond the bundled hub list -- if a peer knows about a hub you don't have, it gets added to your pool automatically.
+
+The protocol works as follows:
+
+1. Each node registers an RNS Destination with the `reticulumpi.hubexchange` aspect
+2. Nodes announce their presence periodically (discovered peers are tracked)
+3. On each exchange interval, the node queries known peers for their hub lists
+4. New hubs received from peers are merged into the local pool (deduplicated by `host:port`)
+
+Hub exchange is opportunistic -- it enhances the pool but the system works fine with only the bundled hub list. The exchange interval defaults to 900 seconds (15 minutes).
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `auto_discovery.exchange_interval` | 900 | Seconds between peer hub exchange rounds |
 
 ### Connectivity Monitor
 
@@ -1031,7 +1091,7 @@ self.event_bus.publish(events.ALERT_TRIGGERED, {"message": "CPU hot!", "time": t
 self.event_bus.unsubscribe(events.SENSOR_READING, self._on_sensor_reading)
 ```
 
-Available event types: `PLUGIN_STARTED`, `PLUGIN_STOPPED`, `PLUGIN_CRASHED`, `METRICS_UPDATED`, `NODE_DISCOVERED`, `NODE_METRICS_RECEIVED`, `ALERT_TRIGGERED`, `FILE_RECEIVED`, `LINK_ESTABLISHED`, `LINK_CLOSED`, `SENSOR_READING`, `EMERGENCY_RECEIVED`, `HUB_ONLINE`, `HUB_OFFLINE`, `FALLBACK_ACTIVATED`, `FALLBACK_DEACTIVATED`, `RNSD_DOWN`, `RNSD_RECOVERED`, `INTERFACE_OFFLINE`, `I2P_NO_PEERS`, `PATH_TABLE_EMPTY`, `PATHS_STALE`, `SINGLE_INTERFACE_SPOF`.
+Available event types: `PLUGIN_STARTED`, `PLUGIN_STOPPED`, `PLUGIN_CRASHED`, `METRICS_UPDATED`, `NODE_DISCOVERED`, `NODE_METRICS_RECEIVED`, `ALERT_TRIGGERED`, `FILE_RECEIVED`, `LINK_ESTABLISHED`, `LINK_CLOSED`, `SENSOR_READING`, `EMERGENCY_RECEIVED`, `HUB_ONLINE`, `HUB_OFFLINE`, `FALLBACK_ACTIVATED`, `FALLBACK_DEACTIVATED`, `HUB_POOL_CONNECTED`, `HUB_POOL_DISCONNECTED`, `HUB_POOL_EXHAUSTED`, `HUB_POOL_DISCOVERED`, `RNSD_DOWN`, `RNSD_RECOVERED`, `INTERFACE_OFFLINE`, `I2P_NO_PEERS`, `PATH_TABLE_EMPTY`, `PATHS_STALE`, `SINGLE_INTERFACE_SPOF`.
 
 #### Optional Status Method
 
@@ -1112,6 +1172,8 @@ reticulumPi/
 │   ├── plugin_base.py              # Abstract plugin base class
 │   ├── plugin_loader.py            # Plugin discovery
 │   ├── remote_client.py            # Remote control CLI client
+│   ├── data/
+│   │   └── community_hubs.yaml     # Curated community TCP hub list for auto-discovery
 │   └── builtin_plugins/            # Built-in plugins (shipped with package)
 │       ├── heartbeat_announce.py   # Network presence announcer
 │       ├── message_echo.py         # LXMF echo responder
@@ -1126,7 +1188,7 @@ reticulumPi/
 │       ├── file_transfer.py        # File transfer via RNS.Resource
 │       ├── sensor_framework.py     # Config-driven sensor reading + logging
 │       ├── emergency_broadcast.py  # Mesh-wide flood-style messaging
-│       ├── transport_monitor.py    # TCP hub health + automatic failover
+│       ├── transport_monitor.py    # TCP hub health + failover + auto-discovery + hub exchange
 │       ├── connectivity_monitor.py # Transport health + routing diagnostics
 │       ├── web_dashboard/          # Secure web dashboard (aiohttp)
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
@@ -1143,7 +1205,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 337 tests (pytest)
+└── tests/                          # 387 tests (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -1165,7 +1227,7 @@ reticulumPi/
     ├── test_file_transfer.py        # File transfer + safety tests
     ├── test_sensor_framework.py     # Sensor drivers + storage tests
     ├── test_emergency_broadcast.py  # Emergency flood + dedup tests
-    ├── test_transport_monitor.py    # Transport hub health + failover tests
+    ├── test_transport_monitor.py    # Transport hub health + failover + auto-discovery + hub exchange tests
     ├── test_connectivity_monitor.py # Connectivity + routing data tests
     ├── test_routing_api.py          # Routing API endpoint tests
     └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests
