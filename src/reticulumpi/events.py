@@ -42,6 +42,12 @@ RNSD_RECOVERED = "connectivity.rnsd_recovered"
 INTERFACE_OFFLINE = "connectivity.interface_offline"
 I2P_NO_PEERS = "connectivity.i2p_no_peers"
 
+# Hub pool auto-discovery
+HUB_POOL_CONNECTED = "hub_pool.connected"
+HUB_POOL_DISCONNECTED = "hub_pool.disconnected"
+HUB_POOL_EXHAUSTED = "hub_pool.exhausted"
+HUB_POOL_DISCOVERED = "hub_pool.discovered"
+
 # Routing diagnostics
 PATH_TABLE_EMPTY = "routing.path_table_empty"
 PATHS_STALE = "routing.paths_stale"

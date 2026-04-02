@@ -67,6 +67,35 @@ def _collect_interfaces(reticulum_instance: Any = None) -> list[dict]:
         return []
 
 
+def _enrich_transport_traffic(transport_data: dict, interfaces: list[dict]) -> None:
+    """Add rxb/txb traffic stats to transport hub entries from interface data."""
+    traffic_map: dict[str, dict] = {}
+    for iface in interfaces:
+        if "TCPClient" not in iface.get("type", ""):
+            continue
+        name = iface.get("name", "")
+        traffic = {"rxb": iface.get("rxb", 0), "txb": iface.get("txb", 0)}
+        # Names: "TCPInterface[TCP Client label/host:port]" -> "host:port"
+        if "/" in name:
+            addr = name.split("/", 1)[1].rstrip("]")
+            traffic_map[addr] = traffic
+
+    def _enrich(hub: dict) -> None:
+        host = hub.get("target_host", "")
+        port = hub.get("target_port", 0)
+        t = traffic_map.get(f"{host}:{port}")
+        if t:
+            hub["rxb"] = t["rxb"]
+            hub["txb"] = t["txb"]
+
+    for h in transport_data.get("primaries", []):
+        _enrich(h)
+    for h in transport_data.get("active_fallbacks", []):
+        _enrich(h)
+    for h in transport_data.get("auto_discovery", {}).get("connected", []):
+        _enrich(h)
+
+
 def setup_websocket_routes(app: aiohttp.web.Application) -> None:
     """Register WebSocket routes."""
     app.router.add_get("/ws/metrics", websocket_metrics)
@@ -191,6 +220,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             if transport_mon and hasattr(transport_mon, "get_hub_health"):
                 try:
                     transport_data = transport_mon.get_hub_health()
+                    _enrich_transport_traffic(transport_data, interfaces)
                 except Exception:
                     pass
 

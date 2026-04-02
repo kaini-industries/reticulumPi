@@ -1,0 +1,70 @@
+# Community TCP Hubs for Reticulum
+# Last updated: 2026-04-01
+# Source: https://github.com/markqvist/Reticulum/wiki/Community-Node-List
+#
+# Fields:
+#   target_host/target_port: connection details (required)
+#   name: human-readable label (required)
+#   region: for diversity selection (optional)
+#     Values: na-east, na-west, eu-west, eu-north, asia, oceania
+
+hubs:
+  - name: "StoppedCold"
+    target_host: rns.stoppedcold.com
+    target_port: 4242
+    region: na-east
+
+  - name: "Beleth"
+    target_host: rns.beleth.net
+    target_port: 4242
+    region: na-east
+
+  - name: "N7EKB"
+    target_host: reticulum.n7ekb.net
+    target_port: 48086
+    region: na-west
+
+  - name: "bnZ Node01"
+    target_host: node01.rns.bnz.se
+    target_port: 4242
+    region: eu-north
+
+  - name: "Quixote Network"
+    target_host: reticulum.quixote.network
+    target_port: 4242
+    region: eu-west
+
+  - name: "jlamothe"
+    target_host: rns.jlamothe.net
+    target_port: 4242
+    region: na-east
+
+  - name: "g00n Dallas"
+    target_host: dfw.us.g00n.cloud
+    target_port: 6969
+    region: na-east
+
+  - name: "RNS Transport US-East"
+    target_host: 45.77.109.86
+    target_port: 4965
+    region: na-east
+
+  - name: "R-MAP World"
+    target_host: rmap.world
+    target_port: 4242
+    region: eu-west
+
+  - name: "Qortal"
+    target_host: reticulum.qortal.link
+    target_port: 4242
+    region: na-east
+
+  - name: "mobilefabrik"
+    target_host: phantom.mobilefabrik.com
+    target_port: 4242
+    region: eu-west
+
+  - name: "NomadNode SEAsia"
+    target_host: rns.jaykayenn.net
+    target_port: 4242
+    region: asia

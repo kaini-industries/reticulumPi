@@ -222,6 +222,7 @@ reticulumpi:
 
     # Transport Monitor — watches TCP hub health and activates fallback hubs.
     # Automatically connects to a fallback when all primary hubs are down.
+    # Auto-discovery maintains a pool of community hub connections automatically.
     #transport_monitor:
     #  enabled: false
     #  check_interval: 15              # Seconds between health checks
@@ -231,6 +232,22 @@ reticulumpi:
     #    - name: "Community Hub"
     #      target_host: "rns.example.com"
     #      target_port: 4242
+    #  # Auto-discovery — automatically maintains connections to community hubs.
+    #  # Draws from a bundled list of known hubs, probes for reachability, and
+    #  # keeps target_connections healthy links active at all times.
+    #  # Hubs in your Reticulum config are never touched (pinned).
+    #  auto_discovery:
+    #    enabled: true
+    #    target_connections: 3          # Maintain this many pool connections
+    #    probe_interval: 120            # Seconds between health probes
+    #    cooldown_seconds: 300          # Min wait before retrying a failed hub
+    #    max_cooldown_seconds: 3600     # Backoff cap
+    #    prefer_diverse_regions: true   # Spread connections across regions
+    #    extra_hubs: []                 # Additional hubs (same format as community_hubs.yaml)
+    #    hub_list_path: null            # Override path to hub list YAML
+    #    # Hub exchange — reticulumPi nodes share hub lists over RNS Links.
+    #    # Discovers peers via announces and queries them periodically.
+    #    exchange_interval: 900          # Seconds between exchange rounds
 
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.

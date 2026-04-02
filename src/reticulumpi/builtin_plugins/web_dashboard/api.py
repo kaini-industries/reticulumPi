@@ -30,6 +30,37 @@ def _get_plugin_address(p) -> str | None:
     return None
 
 
+def _build_traffic_map(plugin: Any) -> dict[str, dict]:
+    """Build a host:port -> {rxb, txb} map from Reticulum interface stats.
+
+    Interface names in shared-instance mode look like:
+        TCPInterface[TCP Client label/host:port]
+    We parse the host:port from after the '/' and strip the trailing ']'.
+    """
+    traffic_map: dict[str, dict] = {}
+    try:
+        rns_instance = getattr(plugin.app, "reticulum", None)
+        if not rns_instance or not hasattr(rns_instance, "get_interface_stats"):
+            return traffic_map
+        stats = rns_instance.get_interface_stats()
+        for entry in stats.get("interfaces", []):
+            if "TCPClient" not in entry.get("type", ""):
+                continue
+            traffic = {"rxb": entry.get("rxb", 0), "txb": entry.get("txb", 0)}
+            name = entry.get("name", "")
+            if "/" in name:
+                # "TCPInterface[TCP Client label/host:port]" -> "host:port"
+                addr = name.split("/", 1)[1].rstrip("]")
+                traffic_map[addr] = traffic
+            ip = entry.get("target_ip")
+            port = entry.get("target_port")
+            if ip and port:
+                traffic_map[f"{ip}:{port}"] = traffic
+    except Exception:
+        pass
+    return traffic_map
+
+
 def setup_api_routes(app: aiohttp.web.Application) -> None:
     """Register all API routes on the aiohttp application."""
     app.router.add_post("/api/auth/login", handle_login)
@@ -408,7 +439,32 @@ async def handle_transport(request: aiohttp.web.Request) -> aiohttp.web.Response
     mon = plugin.app.get_plugin("transport_monitor")
     if not mon or not hasattr(mon, "get_hub_health"):
         return _ok({"primaries": [], "fallback_active": False, "message": "transport_monitor plugin not available"})
-    return _ok(mon.get_hub_health())
+
+    data = mon.get_hub_health()
+
+    # Enrich hub entries with traffic stats from interface stats
+    traffic_map: dict[str, dict] = _build_traffic_map(plugin)
+
+    # Also enrich primaries from interface stats for the "Interfaces" section
+    # data which is already collected
+
+    def _enrich(hub: dict) -> None:
+        host = hub.get("target_host", "")
+        port = hub.get("target_port", 0)
+        key = f"{host}:{port}"
+        t = traffic_map.get(key)
+        if t:
+            hub["rxb"] = t["rxb"]
+            hub["txb"] = t["txb"]
+
+    for h in data.get("primaries", []):
+        _enrich(h)
+    for h in data.get("active_fallbacks", []):
+        _enrich(h)
+    for h in data.get("auto_discovery", {}).get("connected", []):
+        _enrich(h)
+
+    return _ok(data)
 
 
 async def handle_connectivity(request: aiohttp.web.Request) -> aiohttp.web.Response:

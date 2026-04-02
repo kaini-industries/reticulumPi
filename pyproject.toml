@@ -40,6 +40,9 @@ dev = [
 [project.scripts]
 reticulumpi = "reticulumpi.cli:main"
 
+[tool.setuptools.package-data]
+reticulumpi = ["data/*.yaml"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

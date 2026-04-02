@@ -123,7 +123,7 @@
         html += '<tr>'
           + '<td>' + esc(name) + '</td>'
           + '<td>' + esc(p.version || '--') + '</td>'
-          + '<td><span class="status-dot ' + dotClass + '"></span>' + statusText + '</td>'
+          + '<td><span class="status-dot ' + dotClass + '" title="' + statusText + '"></span></td>'
           + '<td class="addr">' + esc(addr || '--') + '</td>'
           + '<td>' + esc(details.join(', ') || p.description || '') + '</td>'
           + '</tr>';
@@ -137,7 +137,7 @@
         html += '<tr>'
           + '<td>' + esc(fp.name) + '</td>'
           + '<td>--</td>'
-          + '<td><span class="status-dot status-failed"></span>Failed</td>'
+          + '<td><span class="status-dot status-failed" title="Failed"></span></td>'
           + '<td>--</td>'
           + '<td>' + esc(fp.error) + '</td>'
           + '</tr>';
@@ -588,36 +588,87 @@
     }
   }
 
+  // Track previous traffic values for rate calculation
+  var _prevTraffic = {};
+  var _prevTrafficTime = 0;
+
   function updateTransport(data) {
     var tbody = $('transport-table');
     if (!tbody) return;
     var primaries = data.primaries || [];
     var fallbacks = data.active_fallbacks || [];
-    var all = primaries.concat(fallbacks.map(function(f) { f._fallback = true; return f; }));
+    var ad = data.auto_discovery || {};
+    var poolHubs = ad.connected || [];
+
+    var all = primaries
+      .concat(fallbacks.map(function(f) { f._tag = 'fallback'; return f; }))
+      .concat(poolHubs.map(function(p) { p._tag = 'pool'; p.online = true; return p; }));
+
     if (all.length === 0) {
       tbody.innerHTML = '<tr><td colspan="4">No TCP transport hubs</td></tr>';
       $('transport-count').textContent = '0';
+      _updatePoolStatus(ad);
       return;
     }
+
+    var now = Date.now() / 1000;
+    var dt = _prevTrafficTime > 0 ? now - _prevTrafficTime : 0;
+
     var html = '';
     for (var i = 0; i < all.length; i++) {
       var h = all[i];
+      var key = (h.target_host || '') + ':' + (h.target_port || '');
       var label = esc(h.name || '--');
-      if (h._fallback) label += ' <small>(fallback)</small>';
+      if (h._tag === 'fallback') label += ' <small>(fallback)</small>';
+      if (h._tag === 'pool') label += ' <small>(pool)</small>';
       var statusCls = h.online ? 'status-ok' : (h.reconnecting ? 'status-warn' : 'status-err');
       var statusTxt = h.online ? 'Online' : (h.reconnecting ? 'Reconnecting' : 'Offline');
-      var rx = h.rxb != null ? formatBytes(h.rxb) : '--';
-      var tx = h.txb != null ? formatBytes(h.txb) : '--';
+
+      var txRate = '--', rxRate = '--';
+      if (h.rxb != null && h.txb != null) {
+        var prev = _prevTraffic[key];
+        if (prev && dt > 0) {
+          var txPerSec = Math.max(0, (h.txb - prev.txb) / dt);
+          var rxPerSec = Math.max(0, (h.rxb - prev.rxb) / dt);
+          txRate = formatRate(txPerSec);
+          rxRate = formatRate(rxPerSec);
+        } else {
+          txRate = '...';
+          rxRate = '...';
+        }
+        _prevTraffic[key] = { rxb: h.rxb, txb: h.txb };
+      }
+
       html += '<tr>'
         + '<td>' + label + '</td>'
         + '<td class="addr">' + esc(h.target_host || '--') + ':' + (h.target_port || '') + '</td>'
         + '<td><span class="' + statusCls + '">' + statusTxt + '</span></td>'
-        + '<td>\u2191' + tx + ' \u2193' + rx + '</td>'
+        + '<td>\u2191' + txRate + ' \u2193' + rxRate + '</td>'
         + '</tr>';
     }
+    _prevTrafficTime = now;
+
     tbody.innerHTML = html;
     var online = primaries.filter(function(p) { return p.online; }).length;
-    $('transport-count').textContent = online + '/' + primaries.length + ' online';
+    var countText = online + '/' + primaries.length + ' primary';
+    if (poolHubs.length > 0) countText += ' + ' + poolHubs.length + ' pool';
+    $('transport-count').textContent = countText;
+    _updatePoolStatus(ad);
+  }
+
+  function _updatePoolStatus(ad) {
+    var el = $('pool-status');
+    if (!el) return;
+    if (!ad.enabled) { el.style.display = 'none'; return; }
+    var connected = (ad.connected || []).length;
+    var target = ad.target_connections || 0;
+    var pool = ad.pool_size || 0;
+    var cooldowns = ad.cooldowns ? Object.keys(ad.cooldowns).length : 0;
+    var parts = ['Auto-discovery: ' + connected + '/' + target + ' target'];
+    parts.push(pool + ' in pool');
+    if (cooldowns > 0) parts.push(cooldowns + ' in cooldown');
+    el.textContent = parts.join(' \u00b7 ');
+    el.style.display = 'block';
   }
 
   function formatBytes(b) {
@@ -626,6 +677,13 @@
     if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
     if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
     return (b / 1073741824).toFixed(2) + ' GB';
+  }
+
+  function formatRate(bytesPerSec) {
+    if (bytesPerSec < 1) return '0 B/s';
+    if (bytesPerSec < 1024) return Math.round(bytesPerSec) + ' B/s';
+    if (bytesPerSec < 1048576) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+    return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
   }
 
   function formatTimeAgo(timestamp) {
@@ -771,6 +829,10 @@
       reconnectDelay = 1000;
       setConnStatus('live');
       stopPolling();
+      // Reset traffic rate tracking so we don't compute stale deltas
+      _prevTraffic = {};
+      _prevTrafficTime = 0;
+      prevIfaces = {};
     };
 
     ws.onmessage = function(ev) {
@@ -816,9 +878,7 @@
     if (pollTimer) return;
     setConnStatus('polling');
     pollTimer = setInterval(function() {
-      api('/api/metrics').then(function(r) {
-        if (r && r.ok) updateMetrics(r.data);
-      });
+      fetchAll();
     }, 10000);
   }
 
