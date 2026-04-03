@@ -65,6 +65,9 @@ sudo bash scripts/bootstrap.sh --with-nomadnet --with-meshchat
 # With LoRa/RNode support (installs rnodeconf for firmware flashing):
 sudo bash scripts/bootstrap.sh --with-lora
 
+# With the real-time web dashboard (installs aiohttp):
+sudo bash scripts/bootstrap.sh --with-dashboard
+
 # With I2P anonymous networking (installs i2pd for global overlay transport):
 sudo bash scripts/bootstrap.sh --with-i2p
 
@@ -701,6 +704,12 @@ reticulumpi:
 
 On first start, the plugin writes a NomadNet config with node hosting already enabled -- no manual config patching or restart needed. Pages are served from `~/.nomadnet/storage/pages/` (micron markup `.mu` files). Files are served from `~/.nomadnet/storage/files/`. Example pages are installed automatically on first start.
 
+#### Dynamic Pages
+
+NomadNet supports executable `.mu` pages -- Python scripts that generate content dynamically on each request. The included `status.mu` page shows live system stats (CPU, memory, disk, uptime) and Reticulum network status (interfaces, traffic, transport hash) to anyone browsing your node.
+
+To create your own dynamic pages, write a Python script with a `#!/path/to/python3` shebang, make it executable (`chmod +x`), and place it in the pages directory. The script's stdout becomes the page content (micron markup). Environment variables `remote_identity` and `link_id` are available for access control.
+
 #### Accessing the NomadNet TUI over SSH
 
 The plugin runs NomadNet in headless daemon mode. To launch the interactive TUI for browsing the network, use the included script:
@@ -1155,7 +1164,10 @@ reticulumPi/
 │   └── install-layout.md           # Detailed install directory & file flow docs
 ├── config/
 │   ├── nomadnet/
-│   │   └── pages/                  # Example NomadNet pages (.mu files)
+│   │   └── pages/                  # NomadNet pages (.mu files)
+│   │       ├── index.mu            # Landing page with navigation
+│   │       ├── help.mu             # Markup reference
+│   │       └── status.mu           # Dynamic system + network status page
 │   ├── reticulum/
 │   │   ├── config.example          # Reticulum interface config (all interfaces)
 │   │   └── config.minimal          # Minimal safe config (AutoInterface only)
@@ -1197,7 +1209,8 @@ reticulumPi/
 ├── scripts/
 │   ├── bootstrap.sh                # Fresh Pi setup
 │   ├── update.sh                   # Pull + upgrade + restart
-│   └── nomadnet-tui.sh             # Launch NomadNet TUI over SSH
+│   ├── nomadnet-tui.sh             # Launch NomadNet TUI over SSH
+│   └── meshchat_launcher.py        # MeshChat wrapper (timeout patching + logging)
 ├── systemd/
 │   ├── reticulumpi.service         # Systemd unit file
 │   └── rnsd.service                # Reticulum daemon (for shared instance mode)
