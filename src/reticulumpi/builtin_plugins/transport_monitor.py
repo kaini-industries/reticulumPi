@@ -369,6 +369,12 @@ class TransportMonitorPlugin(PluginBase):
             }
             try:
                 iface = TCPClientInterface(RNS.Transport, config)
+                # Set attributes normally applied by Reticulum._add_interface()
+                iface.announce_rate_target = None
+                iface.announce_rate_grace = None
+                iface.announce_rate_penalty = None
+                if not hasattr(iface, "announce_cap"):
+                    iface.announce_cap = RNS.Reticulum.ANNOUNCE_CAP / 100.0
                 RNS.Transport.interfaces.append(iface)
                 with self._lock:
                     self._active_fallbacks.append(iface)
@@ -631,6 +637,14 @@ class TransportMonitorPlugin(PluginBase):
         }
         try:
             iface = TCPClientInterface(RNS.Transport, config)
+            # Set attributes normally applied by Reticulum._add_interface()
+            # Without these, RNS will raise AttributeError when processing
+            # announces through this interface.
+            iface.announce_rate_target = None
+            iface.announce_rate_grace = None
+            iface.announce_rate_penalty = None
+            if not hasattr(iface, "announce_cap"):
+                iface.announce_cap = RNS.Reticulum.ANNOUNCE_CAP / 100.0
             RNS.Transport.interfaces.append(iface)
             with self._lock:
                 self._auto_interfaces[key] = iface
