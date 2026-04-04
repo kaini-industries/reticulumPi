@@ -7,7 +7,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **16 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor
+- **18 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health
 - **Auto-discovery** -- automatically maintains a pool of community hub connections with health probing, exponential backoff, regional diversity, and peer-to-peer hub exchange
 - **Mesh-aware** -- passively maps network topology, shares telemetry with peers, broadcasts emergencies across the mesh
 - **Remote management** -- manage nodes over Reticulum Links with zero IP dependency (SSH not required)
@@ -979,6 +979,39 @@ The plugin is read-only -- it queries RNS state via `get_path_table()`, `get_int
 - Blackholed identities detected
 - Paths expiring soon
 
+### Path Warmer
+
+Proactively refreshes paths to known and important nodes before they go stale. Periodically requests paths for priority nodes (configured by hash) and recently-seen nodes from the network map, sorted by staleness. Also exposes an `ensure_path()` method that LXMF-sending plugins (message echo, info bot, alert system) call before transmitting -- this blocks briefly to request the path if needed, improving first-message delivery reliability.
+
+The plugin is traffic-conservative: at most 10 lightweight path requests per 2-minute cycle. It reads cached routing data from connectivity_monitor rather than making duplicate RPC calls.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `warm_interval` | 120 | Seconds between warming cycles |
+| `max_requests_per_cycle` | 10 | Maximum path requests per cycle |
+| `path_age_threshold` | 1200 | Seconds before a path is considered stale (20 min) |
+| `pre_send_timeout` | 8 | Seconds to block in `ensure_path()` before giving up |
+| `request_timeout` | 10 | Seconds to wait for a path response during warming cycles |
+| `warm_recently_seen` | true | Also warm paths for recently-seen network_map nodes |
+| `warm_recent_hours` | 24 | How far back to look for recently-seen nodes |
+| `priority_nodes` | [] | List of hex destination hashes to always keep warm |
+
+### Transport Health
+
+Tracks the reliability of transport (relay) nodes in the mesh. Identifies relays by analyzing the `via` field in path table entries -- any node hash that appears as a next-hop for other destinations is a transport node. Monitors their availability over time and alerts when critical relays go down.
+
+Generates zero additional network traffic -- it only analyzes existing routing data from connectivity_monitor. Node records are persisted to SQLite and survive restarts.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `check_interval` | 60 | Seconds between health checks |
+| `db_path` | ~/.local/share/reticulumpi/transport_health.db | SQLite database path |
+| `history_retention_hours` | 168 | Hours of history to retain (7 days) |
+| `down_threshold_checks` | 3 | Consecutive absences before marking a node down |
+| `degraded_threshold_pct` | 80 | Availability percentage below which a node is degraded |
+| `alert_on_critical_down` | true | Log warnings when high-traffic relays go down |
+| `critical_path_count` | 5 | Minimum paths relayed to be considered critical |
+
 ## Node Identities
 
 A deployed ReticulumPi node has multiple Reticulum identities. Each LXMF plugin creates its own identity so that plugins can run independently without destination collisions.
@@ -1202,6 +1235,8 @@ reticulumPi/
 │       ├── emergency_broadcast.py  # Mesh-wide flood-style messaging
 │       ├── transport_monitor.py    # TCP hub health + failover + auto-discovery + hub exchange
 │       ├── connectivity_monitor.py # Transport health + routing diagnostics
+│       ├── path_warmer.py          # Proactive path refreshing for known nodes
+│       ├── transport_health.py     # Transport relay node reliability tracking
 │       ├── web_dashboard/          # Secure web dashboard (aiohttp)
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
@@ -1218,7 +1253,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 387 tests (pytest)
+└── tests/                          # 426 tests (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -1242,6 +1277,8 @@ reticulumPi/
     ├── test_emergency_broadcast.py  # Emergency flood + dedup tests
     ├── test_transport_monitor.py    # Transport hub health + failover + auto-discovery + hub exchange tests
     ├── test_connectivity_monitor.py # Connectivity + routing data tests
+    ├── test_path_warmer.py          # Path warming + ensure_path tests
+    ├── test_transport_health.py     # Transport node tracking + SQLite tests
     ├── test_routing_api.py          # Routing API endpoint tests
     └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests
 ```
