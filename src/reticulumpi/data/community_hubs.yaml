@@ -1,14 +1,17 @@
 # Community TCP Hubs for Reticulum
-# Last updated: 2026-04-01
+# Last updated: 2026-04-04
 # Source: https://github.com/markqvist/Reticulum/wiki/Community-Node-List
+#         + NomadNet node pages, directory.rns.recipes, community contributions
 #
 # Fields:
 #   target_host/target_port: connection details (required)
 #   name: human-readable label (required)
 #   region: for diversity selection (optional)
-#     Values: na-east, na-west, eu-west, eu-north, asia, oceania
+#     Values: na-east, na-west, eu-west, eu-central, eu-north, eu-east, asia, oceania, middle-east
 
 hubs:
+  # ── North America ─────────────────────────────────────────────────
+
   - name: "StoppedCold"
     target_host: rns.stoppedcold.com
     target_port: 4242
@@ -24,15 +27,10 @@ hubs:
     target_port: 48086
     region: na-west
 
-  - name: "bnZ Node01"
-    target_host: node01.rns.bnz.se
+  - name: "Qortal"
+    target_host: reticulum.qortal.link
     target_port: 4242
-    region: eu-north
-
-  - name: "Quixote Network"
-    target_host: reticulum.quixote.network
-    target_port: 4242
-    region: eu-west
+    region: na-east
 
   - name: "jlamothe"
     target_host: rns.jlamothe.net
@@ -49,22 +47,199 @@ hubs:
     target_port: 4965
     region: na-east
 
+  - name: "interloper"
+    target_host: intr.cx
+    target_port: 4242
+    region: na-east
+
+  - name: "RNS MNTL"
+    target_host: rns.mntl.top
+    target_port: 4242
+    region: na-east
+
+  - name: "michmesh"
+    target_host: rns.michmesh.net
+    target_port: 7822
+    region: na-east
+
+  - name: "RNS Faultline"
+    target_host: rns.faultline.dev
+    target_port: 4242
+    region: na-east
+
+  - name: "BetweenTheBorders"
+    target_host: reticulum.betweentheborders.com
+    target_port: 4242
+    region: na-east
+
+  - name: "1VPS"
+    target_host: 217.154.184.223
+    target_port: 45823
+    region: na-east
+
+  # ── Europe West ───────────────────────────────────────────────────
+
+  - name: "Quixote Network"
+    target_host: reticulum.quixote.network
+    target_port: 4242
+    region: eu-west
+
   - name: "R-MAP World"
     target_host: rmap.world
     target_port: 4242
     region: eu-west
-
-  - name: "Qortal"
-    target_host: reticulum.qortal.link
-    target_port: 4242
-    region: na-east
 
   - name: "mobilefabrik"
     target_host: phantom.mobilefabrik.com
     target_port: 4242
     region: eu-west
 
+  - name: "Derpy Cloud Spain"
+    target_host: rns.derps.me
+    target_port: 34242
+    region: eu-west
+
+  - name: "labfox France"
+    target_host: labfox.fr
+    target_port: 4242
+    region: eu-west
+
+  - name: "letsdecentralize"
+    target_host: letsdecentralize.org
+    target_port: 4242
+    region: eu-west
+
+  - name: "Dead Guru"
+    target_host: nomad.dead.guru
+    target_port: 4242
+    region: eu-west
+
+  # ── Europe Central ────────────────────────────────────────────────
+
+  - name: "RNS Germany 001"
+    target_host: 202.61.243.41
+    target_port: 4965
+    region: eu-central
+
+  - name: "RNS Germany 002"
+    target_host: 193.26.158.230
+    target_port: 4965
+    region: eu-central
+
+  - name: "dismail Germany"
+    target_host: rns.dismail.de
+    target_port: 7822
+    region: eu-central
+
+  - name: "SiSCD Germany"
+    target_host: rns-de.siscd.org
+    target_port: 4965
+    region: eu-central
+
+  - name: "SparkN0de"
+    target_host: aspark.uber.space
+    target_port: 44860
+    region: eu-central
+
+  - name: "Swiss Pi"
+    target_host: 31.164.110.176
+    target_port: 4242
+    region: eu-central
+
+  - name: "ChaosNet"
+    target_host: rns.c3.jitter.eu
+    target_port: 4242
+    region: eu-central
+
+  - name: "Rocket Tech"
+    target_host: reticulum.rocket-tech.net
+    target_port: 443
+    region: eu-central
+
+  # ── Europe North ──────────────────────────────────────────────────
+
+  - name: "bnZ Node01"
+    target_host: node01.rns.bnz.se
+    target_port: 4242
+    region: eu-north
+
+  - name: "bnZ NODE01 alt"
+    target_host: 91.207.113.250
+    target_port: 4242
+    region: eu-north
+
+  - name: "bnZ RET01"
+    target_host: 213.89.12.80
+    target_port: 4242
+    region: eu-north
+
+  # ── Europe East / Russia ──────────────────────────────────────────
+
+  - name: "RNS Moscow"
+    target_host: 217.70.19.114
+    target_port: 4242
+    region: eu-east
+
+  - name: "RNS M9"
+    target_host: 62.76.228.77
+    target_port: 4242
+    region: eu-east
+
+  - name: "RNS SPB"
+    target_host: 31.129.33.146
+    target_port: 4242
+    region: eu-east
+
+  - name: "artyom"
+    target_host: artyom.ddns.net
+    target_port: 4242
+    region: eu-east
+
+  - name: "RNS Moscow misc"
+    target_host: 176.119.157.246
+    target_port: 4242
+    region: eu-east
+
+  - name: "rns.smit.pro"
+    target_host: 37.204.142.194
+    target_port: 4242
+    region: eu-east
+
+  # ── Middle East / Turkey ──────────────────────────────────────────
+
+  - name: "R-Net Istanbul"
+    target_host: istanbul.reserve.network
+    target_port: 9034
+    region: middle-east
+
+  - name: "Reserve Ankara"
+    target_host: ankara.reserve.network
+    target_port: 9006
+    region: middle-east
+
+  - name: "Reserve Izmir"
+    target_host: izmir.reserve.network
+    target_port: 9035
+    region: middle-east
+
+  # ── Asia / Oceania ────────────────────────────────────────────────
+
   - name: "NomadNode SEAsia"
     target_host: rns.jaykayenn.net
     target_port: 4242
     region: asia
+
+  - name: "IGUS Japan 1"
+    target_host: 139.162.111.77
+    target_port: 4242
+    region: asia
+
+  - name: "IGUS Japan 2"
+    target_host: 118.27.10.175
+    target_port: 4242
+    region: asia
+
+  - name: "Sydney RNS"
+    target_host: sydney.reticulum.au
+    target_port: 4242
+    region: oceania
