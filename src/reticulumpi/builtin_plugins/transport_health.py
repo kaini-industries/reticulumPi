@@ -8,8 +8,6 @@ import threading
 import time
 from typing import Any
 
-import RNS
-
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
 
