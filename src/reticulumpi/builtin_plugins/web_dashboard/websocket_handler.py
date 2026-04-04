@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -152,6 +153,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     """Periodically broadcast system metrics to all connected WebSocket clients."""
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
+    prev_mesh_hash = ""
 
     while True:
         try:
@@ -177,7 +179,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             # Collect interface traffic data
             interfaces = _collect_interfaces(plugin.app.reticulum)
 
-            # Collect mesh data (if plugins available)
+            # Collect mesh data (if plugins available), skip if unchanged
             mesh_data: dict = {}
             network_map = plugin.app.get_plugin("network_map")
             if network_map and hasattr(network_map, "get_known_nodes"):
@@ -199,6 +201,12 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                     mesh_data["last_alert"] = alert_status.get("last_alert")
                 except Exception:
                     pass
+
+            # Hash mesh data and only include if changed since last broadcast
+            mesh_json = json.dumps(mesh_data, sort_keys=True)
+            mesh_hash = hashlib.md5(mesh_json.encode()).hexdigest()
+            mesh_changed = mesh_hash != prev_mesh_hash
+            prev_mesh_hash = mesh_hash
 
             # Collect sensor data (if plugin available)
             sensor_data: dict = {}
@@ -238,19 +246,43 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             if connectivity_data:
                 routing_data = connectivity_data.get("routing", {})
 
+            # Collect path warming stats (if plugin available)
+            path_warming_data: dict = {}
+            warmer = plugin.app.get_plugin("path_warmer")
+            if warmer and hasattr(warmer, "get_warming_stats"):
+                try:
+                    path_warming_data = warmer.get_warming_stats()
+                except Exception:
+                    pass
+
+            # Collect transport health summary (if plugin available)
+            transport_health_data: dict = {}
+            th = plugin.app.get_plugin("transport_health")
+            if th and hasattr(th, "get_transport_summary"):
+                try:
+                    transport_health_data = th.get_transport_summary()
+                except Exception:
+                    pass
+
+            data: dict[str, Any] = {
+                "metrics": metrics,
+                "plugins": plugin_statuses,
+                "interfaces": interfaces,
+                "sensors": sensor_data,
+                "emergency": emergency_data,
+                "transport": transport_data,
+                "connectivity": connectivity_data,
+                "routing": routing_data,
+                "path_warming": path_warming_data,
+                "transport_health": transport_health_data,
+            }
+            # Only include mesh data when it has changed
+            if mesh_changed:
+                data["mesh"] = mesh_data
+
             message = json.dumps({
                 "type": "update",
-                "data": {
-                    "metrics": metrics,
-                    "plugins": plugin_statuses,
-                    "interfaces": interfaces,
-                    "mesh": mesh_data,
-                    "sensors": sensor_data,
-                    "emergency": emergency_data,
-                    "transport": transport_data,
-                    "connectivity": connectivity_data,
-                    "routing": routing_data,
-                },
+                "data": data,
                 "timestamp": time.time(),
             })
 

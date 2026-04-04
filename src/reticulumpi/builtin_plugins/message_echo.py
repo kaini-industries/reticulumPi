@@ -73,6 +73,14 @@ class MessageEcho(PluginBase):
         self._join_threads()
 
     def _handle_message(self, message: LXMF.LXMessage) -> None:
+        # Warm path before reply if path_warmer is available (outside lock to avoid blocking)
+        warmer = self.app.get_plugin("path_warmer")
+        if warmer and hasattr(warmer, "ensure_path"):
+            try:
+                warmer.ensure_path(message.source_hash)
+            except Exception:
+                pass
+
         with self._lock:
             if not self._active:
                 return

@@ -249,6 +249,34 @@ reticulumpi:
     #    # Discovers peers via announces and queries them periodically.
     #    exchange_interval: 900          # Seconds between exchange rounds
 
+    # Path Warmer — proactively refreshes paths to known/important nodes.
+    # Prevents path expiry for nodes you communicate with regularly.
+    # Uses data from network_map (node discovery) and connectivity_monitor (path ages).
+    #path_warmer:
+    #  enabled: false
+    #  warm_interval: 120              # Seconds between warming cycles
+    #  max_requests_per_cycle: 10      # Cap path requests per cycle (traffic control)
+    #  path_age_threshold: 1200        # Warm paths older than this (seconds, 20min default)
+    #  pre_send_timeout: 8             # Seconds to wait for pre-send path ensure
+    #  request_timeout: 10             # Seconds per individual path request
+    #  warm_recently_seen: true        # Warm nodes seen via network_map
+    #  warm_recent_hours: 24           # How far back "recently seen" extends
+    #  priority_nodes: []              # Always-warm destination hashes (hex)
+    #    # - "abcdef0123456789..."
+
+    # Transport Health — monitors reliability of transport/relay nodes in the mesh.
+    # Tracks which transport nodes your paths route through and their stability.
+    # Uses path table data from connectivity_monitor.
+    #transport_health:
+    #  enabled: false
+    #  check_interval: 60              # Seconds between health assessments
+    #  db_path: ~/.local/share/reticulumpi/transport_health.db
+    #  history_retention_hours: 168    # Keep history for 7 days
+    #  down_threshold_checks: 3        # Consecutive absences to mark "down" (~3min)
+    #  degraded_threshold_pct: 80      # Availability below this % = "degraded"
+    #  alert_on_critical_down: true    # Alert when high-traffic relay goes down
+    #  critical_path_count: 5          # Paths via a node to consider it "critical"
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

@@ -214,6 +214,10 @@
   var _meshSortKey = 'hops';
   var _meshSortAsc = true;
   var _meshExpandedHash = null;
+  var _meshPageSize = 25;
+  var _meshVisible = 25;
+  var _peerPageSize = 12;
+  var _peerVisible = 12;
 
   function sortMeshNodes(nodes, key, asc) {
     return nodes.slice().sort(function(a, b) {
@@ -282,11 +286,16 @@
     if (!nodes || nodes.length === 0) {
       tbody.innerHTML = '<tr><td colspan="6">No nodes discovered yet</td></tr>';
       $('mesh-count').textContent = '0';
+      var showMore = $('mesh-show-more');
+      if (showMore) showMore.style.display = 'none';
       return;
     }
+    var total = nodes.length;
+    var limit = Math.min(_meshVisible, total);
+
     // Build rows, preserving expanded state
     tbody.innerHTML = '';
-    for (var i = 0; i < nodes.length; i++) {
+    for (var i = 0; i < limit; i++) {
       var node = nodes[i];
       var hash = node.destination_hash || '';
       var ago = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
@@ -319,8 +328,23 @@
         tbody.appendChild(detailTr);
       }
     }
-    $('mesh-count').textContent = nodes.length + ' nodes';
+    $('mesh-count').textContent = total + ' nodes';
     updateMeshSortIndicators();
+
+    // Show/hide "show more" control
+    var showMore = $('mesh-show-more');
+    if (showMore) {
+      var remaining = total - limit;
+      if (remaining > 0) {
+        showMore.style.display = '';
+        showMore.textContent = 'Show more (' + remaining + ' remaining)';
+      } else if (limit > _meshPageSize) {
+        showMore.style.display = '';
+        showMore.textContent = 'Show less';
+      } else {
+        showMore.style.display = 'none';
+      }
+    }
   }
 
   function toggleNodeDetail(node, hash) {
@@ -378,10 +402,14 @@
     if (!peers || peers.length === 0) {
       grid.innerHTML = '<div class="config-content">No peer telemetry received yet</div>';
       $('telemetry-count').textContent = '0';
+      var showMore = $('peer-show-more');
+      if (showMore) showMore.style.display = 'none';
       return;
     }
+    var total = peers.length;
+    var limit = Math.min(_peerVisible, total);
     var html = '';
-    for (var i = 0; i < peers.length; i++) {
+    for (var i = 0; i < limit; i++) {
       var p = peers[i];
       var name = p.name || p.destination_hash || 'Unknown';
       var hops = p.hops != null ? p.hops + ' hops' : '';
@@ -396,7 +424,22 @@
       html += '</div></div>';
     }
     grid.innerHTML = html;
-    $('telemetry-count').textContent = peers.length + ' peers';
+    $('telemetry-count').textContent = total + ' peers';
+
+    // Show/hide "show more" control
+    var showMore = $('peer-show-more');
+    if (showMore) {
+      var remaining = total - limit;
+      if (remaining > 0) {
+        showMore.style.display = '';
+        showMore.textContent = 'Show more (' + remaining + ' remaining)';
+      } else if (limit > _peerPageSize) {
+        showMore.style.display = '';
+        showMore.textContent = 'Show less';
+      } else {
+        showMore.style.display = 'none';
+      }
+    }
   }
 
   function updateAlerts(alertData) {
@@ -1323,6 +1366,26 @@
     _rtHopsFilter = this.value;
     _rtPage = 1;
     fetchRoutingTable();
+  });
+
+  // Mesh/peer pagination controls
+  $('mesh-show-more').addEventListener('click', function() {
+    if (_meshVisible >= _meshNodes.length) {
+      _meshVisible = _meshPageSize;  // collapse back
+    } else {
+      _meshVisible += _meshPageSize;  // show next page
+    }
+    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
+    renderMeshNodes(sorted);
+  });
+  $('peer-show-more').addEventListener('click', function() {
+    var peers = Object.values(_meshPeers);
+    if (_peerVisible >= peers.length) {
+      _peerVisible = _peerPageSize;  // collapse back
+    } else {
+      _peerVisible += _peerPageSize;  // show next page
+    }
+    updatePeerTelemetry(peers);
   });
 
   // If we reached this page, the cookie is valid.

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
   <div class="dashboard">
@@ -220,6 +220,7 @@
           <tbody id="mesh-table"></tbody>
         </table>
       </div>
+      <button id="mesh-show-more" class="show-more-btn" style="display:none">Show all</button>
     </div>
 
     <!-- Mesh Telemetry (peer metrics) -->
@@ -229,6 +230,7 @@
         <span class="count" id="telemetry-count"></span>
       </div>
       <div class="metrics-grid" id="peer-metrics-grid"></div>
+      <button id="peer-show-more" class="show-more-btn" style="display:none">Show all</button>
     </div>
 
     <!-- Alerts -->
@@ -291,6 +293,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=2"></script>
 </body>
 </html>

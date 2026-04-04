@@ -83,6 +83,8 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/transport", handle_transport)
     app.router.add_get("/api/connectivity", handle_connectivity)
     app.router.add_get("/api/routing", handle_routing)
+    app.router.add_get("/api/path_warming", handle_path_warming)
+    app.router.add_get("/api/transport_health", handle_transport_health)
 
 
 def _ok(data: Any) -> aiohttp.web.Response:
@@ -534,3 +536,24 @@ async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
         search=search,
     )
     return _ok(data)
+
+
+async def handle_path_warming(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/path_warming — path warmer stats."""
+    plugin = _get_plugin(request)
+    warmer = plugin.app.get_plugin("path_warmer")
+    if not warmer or not hasattr(warmer, "get_warming_stats"):
+        return _ok({"message": "path_warmer plugin not available"})
+    return _ok(warmer.get_warming_stats())
+
+
+async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/transport_health — transport node health data."""
+    plugin = _get_plugin(request)
+    th = plugin.app.get_plugin("transport_health")
+    if not th or not hasattr(th, "get_transport_nodes"):
+        return _ok({"nodes": [], "summary": {}, "message": "transport_health plugin not available"})
+    return _ok({
+        "nodes": th.get_transport_nodes(),
+        "summary": th.get_transport_summary(),
+    })

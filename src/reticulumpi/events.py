@@ -52,3 +52,14 @@ HUB_POOL_DISCOVERED = "hub_pool.discovered"
 PATH_TABLE_EMPTY = "routing.path_table_empty"
 PATHS_STALE = "routing.paths_stale"
 SINGLE_INTERFACE_SPOF = "routing.single_interface_spof"
+
+# Path warming
+PATH_WARMED = "path.warmed"
+PATH_WARM_FAILED = "path.warm_failed"
+PATH_WARMING_CYCLE = "path.warming_cycle"
+
+# Transport node health
+TRANSPORT_NODE_DOWN = "transport_node.down"
+TRANSPORT_NODE_RECOVERED = "transport_node.recovered"
+TRANSPORT_NODE_DEGRADED = "transport_node.degraded"
+TRANSPORT_NODE_DISCOVERED = "transport_node.discovered"

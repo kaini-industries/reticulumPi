@@ -179,6 +179,11 @@ class AlertSystemPlugin(PluginBase):
                     continue
 
             try:
+                # Warm path before sending if path_warmer is available
+                warmer = self.app.get_plugin("path_warmer")
+                if warmer and hasattr(warmer, "ensure_path"):
+                    warmer.ensure_path(recipient_hash)
+
                 # Create destination for recipient
                 dest_identity = RNS.Identity.recall(recipient_hash)
                 if dest_identity is None:
