@@ -211,8 +211,9 @@
   // Mesh node sorting state
   var _meshNodes = [];
   var _meshPeers = {};  // destination_hash -> telemetry data
-  var _meshSortKey = 'hops';
-  var _meshSortAsc = true;
+  var _reachScores = {};  // destination_hash -> {score, label, factors}
+  var _meshSortKey = 'score';
+  var _meshSortAsc = false;
   var _meshExpandedHash = null;
   var _meshPageSize = 25;
   var _meshVisible = 25;
@@ -222,7 +223,12 @@
   function sortMeshNodes(nodes, key, asc) {
     return nodes.slice().sort(function(a, b) {
       var va, vb;
-      if (key === 'hops') {
+      if (key === 'score') {
+        var ra = _reachScores[a.destination_hash];
+        var rb = _reachScores[b.destination_hash];
+        va = ra ? ra.score : -1;
+        vb = rb ? rb.score : -1;
+      } else if (key === 'hops') {
         va = a.hops != null ? a.hops : 9999;
         vb = b.hops != null ? b.hops : 9999;
       } else if (key === 'last_seen') {
@@ -245,12 +251,51 @@
       + '</div>';
   }
 
+  function _reachBadgeHTML(score, label) {
+    var cls = 'reach-' + (label || 'unlikely').toLowerCase();
+    return '<span class="reach-badge ' + cls + '">' + score + '</span>'
+      + ' <span class="reach-label ' + cls + '">' + esc(label) + '</span>';
+  }
+
+  function _reachFactorHTML(factors) {
+    if (!factors) return '';
+    var h = '<div class="reach-factors">';
+    var names = { path: 'Path', freshness: 'Freshness', hops: 'Hops', announce: 'Announce', relay: 'Relay' };
+    var order = ['path', 'freshness', 'hops', 'announce', 'relay'];
+    for (var i = 0; i < order.length; i++) {
+      var key = order[i];
+      var f = factors[key];
+      if (!f) continue;
+      var pct = f.max > 0 ? Math.round(f.points / f.max * 100) : 0;
+      h += '<div class="reach-factor">'
+        + '<span class="reach-factor-name">' + (names[key] || key) + '</span>'
+        + '<span class="reach-factor-bar"><span class="reach-factor-fill" style="width:' + pct + '%"></span></span>'
+        + '<span class="reach-factor-val">' + f.points + '/' + f.max + '</span>'
+        + '<span class="reach-factor-detail">' + esc(f.detail || '') + '</span>'
+        + '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
   function buildNodeDetailHTML(node) {
     var peer = _meshPeers[node.destination_hash];
+    var reach = _reachScores[node.destination_hash];
     var firstSeen = node.first_seen ? new Date(node.first_seen * 1000).toLocaleString() : '--';
     var lastSeen = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
 
-    var h = '<div class="node-detail-section">Identity</div>'
+    var h = '';
+
+    // Reachability section (show first if data available)
+    if (reach) {
+      h += '<div class="node-detail-section">Reachability</div>'
+        + '<div class="node-detail-grid">'
+        + _di('Score', _reachBadgeHTML(reach.score, reach.label))
+        + '</div>'
+        + _reachFactorHTML(reach.factors);
+    }
+
+    h += '<div class="node-detail-section">Identity</div>'
       + '<div class="node-detail-grid">'
       + _di('Address', esc(node.destination_hash || '--'))
       + _di('Name', esc(node.app_data || '--'))
@@ -284,7 +329,7 @@
     var tbody = $('mesh-table');
     if (!tbody) return;
     if (!nodes || nodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6">No nodes discovered yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7">No nodes discovered yet</td></tr>';
       $('mesh-count').textContent = '0';
       var showMore = $('mesh-show-more');
       if (showMore) showMore.style.display = 'none';
@@ -301,11 +346,20 @@
       var ago = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
       var isExpanded = (hash === _meshExpandedHash);
 
+      // Reachability score for this node
+      var reach = _reachScores[hash];
+      var reachCell = '--';
+      if (reach) {
+        var cls = 'reach-' + (reach.label || 'unlikely').toLowerCase();
+        reachCell = '<span class="reach-badge ' + cls + '">' + reach.score + '</span>';
+      }
+
       var tr = document.createElement('tr');
       if (isExpanded) tr.className = 'node-row-active';
       tr.setAttribute('data-hash', hash);
       tr.innerHTML =
-          '<td class="addr">' + esc(hash || '--') + '</td>'
+          '<td class="reach-col">' + reachCell + '</td>'
+        + '<td class="addr">' + esc(hash || '--') + '</td>'
         + '<td class="col-truncate" title="' + esc(node.app_data || '') + '">' + esc(node.app_data || '--') + '</td>'
         + '<td>' + esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : '') + '</td>'
         + '<td>' + (node.hops != null ? node.hops : '--') + '</td>'
@@ -322,7 +376,7 @@
         detailTr.className = 'node-detail';
         detailTr.id = 'node-detail-' + hash;
         var td = document.createElement('td');
-        td.colSpan = 6;
+        td.colSpan = 7;
         td.innerHTML = buildNodeDetailHTML(node);
         detailTr.appendChild(td);
         tbody.appendChild(detailTr);
@@ -834,6 +888,33 @@
     api('/api/routing?per_page=0').then(function(r) {
       if (!r || !r.ok) return;
       updateRoutingSummary(r.data.summary);
+    });
+
+    // Reachability scores
+    fetchReachability();
+  }
+
+  function fetchReachability() {
+    api('/api/reachability?limit=0').then(function(r) {
+      if (!r || !r.ok) return;
+      var nodes = r.data.nodes || [];
+      var lookup = {};
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.destination_hash) {
+          lookup[n.destination_hash] = {
+            score: n.score,
+            label: n.label,
+            factors: n.factors
+          };
+        }
+      }
+      _reachScores = lookup;
+      // Re-render mesh table with scores
+      if (_meshNodes.length > 0) {
+        var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
+        renderMeshNodes(sorted);
+      }
     });
   }
 
@@ -1395,5 +1476,8 @@
 
   // Refresh plugins and interfaces periodically
   setInterval(fetchAll, 30000);
+
+  // Refresh reachability scores every 60s (separate from mesh data)
+  setInterval(fetchReachability, 60000);
 
 })();

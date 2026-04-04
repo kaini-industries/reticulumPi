@@ -86,6 +86,13 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
             if path.startswith(prefix):
                 return await handler(request)
 
+        # Allow localhost requests for internal services (NomadNet pages, scripts)
+        if (
+            plugin.config.get("allow_localhost_api", True)
+            and request.remote in ("127.0.0.1", "::1")
+        ):
+            return await handler(request)
+
         # Extract token from Authorization header or cookie
         token = _extract_token(request)
         if token and plugin._auth.validate_token(token):

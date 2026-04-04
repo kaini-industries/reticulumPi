@@ -14,6 +14,15 @@ from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
 
 
+# Aspects registered by default.  Each gets its own handler so RNS
+# provides the aspect string with the announce, populating app_name.
+_DEFAULT_ASPECTS = [
+    "lxmf.delivery",
+    "lxmf.propagation",
+    "nomadnetwork.node",
+]
+
+
 class NetworkMapPlugin(PluginBase):
     """Passively monitors all Reticulum announces and builds a live map of
     known nodes, hop counts, and interface statistics.  Stores history in
@@ -21,7 +30,7 @@ class NetworkMapPlugin(PluginBase):
     """
 
     plugin_name = "network_map"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_description = "Passive network topology mapping via announce monitoring"
 
     def validate_config(self) -> None:
@@ -46,23 +55,38 @@ class NetworkMapPlugin(PluginBase):
         # Load previously known nodes from DB
         self._load_from_db()
 
-        # Register a wildcard announce handler
-        self._handler = _AnnounceHandler(self)
-        RNS.Transport.register_announce_handler(self._handler)
+        # Register per-aspect handlers so RNS provides the aspect string,
+        # plus a wildcard handler to catch custom/unknown aspects.
+        extra = self.config.get("extra_aspects", [])
+        aspects = list(dict.fromkeys(_DEFAULT_ASPECTS + list(extra)))
+
+        self._handlers: list = []
+        for aspect in aspects:
+            handler = _AspectHandler(self, aspect)
+            RNS.Transport.register_announce_handler(handler)
+            self._handlers.append(handler)
+
+        self._wildcard_handler = _WildcardHandler(self)
+        RNS.Transport.register_announce_handler(self._wildcard_handler)
+        self._handlers.append(self._wildcard_handler)
 
         # Background thread for periodic interface stats and DB pruning
         self._start_thread(self._maintenance_loop, "network-map")
 
         self.log.info(
-            "Network map active — monitoring announces (DB: %s)", db_path
+            "Network map active — monitoring announces for %d aspects + "
+            "wildcard (DB: %s)",
+            len(aspects),
+            db_path,
         )
 
     def stop(self) -> None:
         self._active = False
-        try:
-            RNS.Transport.deregister_announce_handler(self._handler)
-        except Exception:
-            pass
+        for handler in getattr(self, "_handlers", []):
+            try:
+                RNS.Transport.deregister_announce_handler(handler)
+            except Exception:
+                pass
         self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
@@ -118,8 +142,16 @@ class NetworkMapPlugin(PluginBase):
         identity: Any,
         app_data: bytes | None,
         aspect: str,
+        *,
+        from_wildcard: bool = False,
     ) -> None:
-        """Called by the announce handler when an announce is received."""
+        """Called by the announce handler when an announce is received.
+
+        Args:
+            from_wildcard: True when called by the wildcard handler. Used
+                to skip processing for nodes already classified by a
+                specific-aspect handler (avoids double-counting).
+        """
         now = time.time()
         hops = None
         try:
@@ -161,12 +193,29 @@ class NetworkMapPlugin(PluginBase):
         with self._nodes_lock:
             existing = self._known_nodes.get(destination_hash)
             if existing:
+                # The wildcard handler fires alongside specific-aspect
+                # handlers for the same announce.  Once a node has been
+                # classified by a specific handler (app_name is set),
+                # let only the specific handler process future updates
+                # to avoid double-counting.
+                if from_wildcard and existing.get("app_name"):
+                    return
+
                 existing["last_seen"] = now
                 existing["hops"] = hops
-                existing["announce_count"] = existing.get("announce_count", 0) + 1
-                existing["app_data_str"] = app_data_str
-                existing["app_name"] = app_name
-                existing["aspects"] = aspect_parts
+
+                # Only overwrite app info when we have actual data —
+                # the wildcard handler passes empty strings, so it must
+                # not clobber data set by a specific-aspect handler.
+                if app_name:
+                    existing["app_name"] = app_name
+                    existing["aspects"] = aspect_parts
+                if app_data_str:
+                    existing["app_data_str"] = app_data_str
+
+                existing["announce_count"] = (
+                    existing.get("announce_count", 0) + 1
+                )
                 is_new = False
             else:
                 self._known_nodes[destination_hash] = {
@@ -326,12 +375,43 @@ class NetworkMapPlugin(PluginBase):
                 cycles_since_prune = 0
 
 
-class _AnnounceHandler:
-    """Registered with RNS.Transport to receive all announces."""
+class _AspectHandler:
+    """Receives announces for a specific aspect (e.g. ``lxmf.delivery``).
+
+    Because ``aspect_filter`` is set, RNS guarantees that only announces
+    matching this aspect reach the handler, and we can pass the known
+    aspect string into ``record_announce``.
+    """
+
+    def __init__(self, plugin: NetworkMapPlugin, aspect: str):
+        self._plugin = plugin
+        self.aspect_filter = aspect
+        self._aspect = aspect
+
+    def received_announce(
+        self,
+        destination_hash: bytes,
+        announced_identity: Any,
+        app_data: bytes | None,
+    ) -> None:
+        try:
+            self._plugin.record_announce(
+                destination_hash, announced_identity, app_data, self._aspect
+            )
+        except Exception:
+            self._plugin.log.debug("Error handling announce", exc_info=True)
+
+
+class _WildcardHandler:
+    """Catches announces for any aspect, including unknown/custom ones.
+
+    The wildcard handler cannot determine the aspect from RNS, so it
+    passes an empty string.  ``record_announce`` will not overwrite
+    app_name data already set by a specific-aspect handler.
+    """
 
     def __init__(self, plugin: NetworkMapPlugin):
         self._plugin = plugin
-        # No aspect_filter means we receive all announces
         self.aspect_filter = None
 
     def received_announce(
@@ -341,21 +421,9 @@ class _AnnounceHandler:
         app_data: bytes | None,
     ) -> None:
         try:
-            # With aspect_filter=None, RNS does not provide the destination
-            # aspect directly to the handler. We record what we can; the aspect
-            # may be empty for wildcard handlers.
-            aspect = ""
-            try:
-                # Look up any locally-known destination matching this hash
-                if hasattr(RNS.Transport, "destination_table"):
-                    entry = RNS.Transport.destination_table.get(destination_hash)
-                    if entry and len(entry) > 4:
-                        aspect = entry[4] if isinstance(entry[4], str) else ""
-            except Exception:
-                pass
-
             self._plugin.record_announce(
-                destination_hash, announced_identity, app_data, aspect
+                destination_hash, announced_identity, app_data, "",
+                from_wildcard=True,
             )
         except Exception:
             self._plugin.log.debug("Error handling announce", exc_info=True)

@@ -297,6 +297,7 @@ def dashboard_plugin(dashboard_app):
         "max_sessions": 5,
         "metrics_interval": 5,
         "max_websocket_clients": 10,
+        "allow_localhost_api": False,  # Disable for tests so auth is enforced
     }
     plugin = WebDashboardPlugin(dashboard_app, config)
     plugin._start_time = time.time()

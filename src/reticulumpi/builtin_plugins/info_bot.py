@@ -214,6 +214,7 @@ class InfoBot(PluginBase):
             "joke": (self._cmd_joke, "Random joke"),
             "solar": (self._cmd_solar, "Solar/geomagnetic conditions"),
             "grid": (self._cmd_grid, "Maidenhead grid converter"),
+            "reach": (self._cmd_reach, "Node reachability (!reach [hash])"),
         }
 
         self._active = True
@@ -760,6 +761,114 @@ class InfoBot(PluginBase):
             return f"{grid.upper()} -> {lat:.4f}°N, {lon:.4f}°E"
         except ValueError as exc:
             return str(exc)
+
+    def _cmd_reach(self, args: str = "") -> str:
+        """Show reachability scores for known mesh nodes."""
+        from reticulumpi.reachability import (
+            fmt_age,
+            fmt_score_bar,
+            score_all_nodes,
+        )
+
+        # Gather data from sibling plugins
+        network_map = self.app.get_plugin("network_map")
+        if not network_map or not hasattr(network_map, "get_known_nodes"):
+            return "Network map plugin not available."
+
+        nodes = network_map.get_known_nodes()
+        if not nodes:
+            return "No known nodes in the network map."
+
+        # Path table
+        conn_mon = self.app.get_plugin("connectivity_monitor")
+        path_table: list = []
+        if conn_mon and hasattr(conn_mon, "get_routing_data"):
+            routing = conn_mon.get_routing_data(per_page=500)
+            path_table = routing.get("paths", [])
+
+        # Transport health
+        th = self.app.get_plugin("transport_health")
+        transport_nodes: list = []
+        if th and hasattr(th, "get_transport_nodes"):
+            transport_nodes = th.get_transport_nodes()
+
+        search = args.strip().lower()
+
+        # If searching for a specific node, show detailed view
+        if search:
+            scored = score_all_nodes(nodes, path_table, transport_nodes)
+            matches = [
+                n for n in scored
+                if search in n.get("destination_hash", "").lower().replace("<", "").replace(">", "")
+                or search in (n.get("app_data") or "").lower()
+                or search in (n.get("app_name") or "").lower()
+            ]
+            if not matches:
+                return f"No nodes matching: {search}"
+
+            # Show detailed view for first match (or all if few)
+            lines = [f"Reachability for '{search}' ({len(matches)} match{'es' if len(matches) != 1 else ''})"]
+            for entry in matches[:5]:
+                dest = entry.get("destination_hash", "?")
+                clean = dest.replace("<", "").replace(">", "").replace(" ", "")
+                name = entry.get("app_data") or entry.get("app_name") or ""
+                score = entry.get("score", 0)
+                label = entry.get("label", "?")
+                lines.append("")
+                if name:
+                    lines.append(f"  {name}")
+                lines.append(f"  {clean[:16]}...")
+                lines.append(f"  Score: {score}/100 {fmt_score_bar(score)} ({label})")
+                factors = entry.get("factors", {})
+                for fname, fdata in factors.items():
+                    pts = fdata.get("points", 0)
+                    mx = fdata.get("max", 0)
+                    detail = fdata.get("detail", "")
+                    lines.append(f"    {fname:<10} {pts:>2}/{mx:<2}  {detail}")
+            return "\n".join(lines)
+
+        # Default: show top nodes summary
+        scored = score_all_nodes(nodes, path_table, transport_nodes)
+
+        # Count by label
+        counts = {"High": 0, "Good": 0, "Fair": 0, "Low": 0, "Unlikely": 0}
+        for n in scored:
+            lbl = n.get("label", "Unlikely")
+            if lbl in counts:
+                counts[lbl] += 1
+
+        total = len(scored)
+        avg = sum(n["score"] for n in scored) / total if total else 0
+
+        lines = [
+            f"Network Reachability ({total} nodes)",
+            f"  Avg score: {avg:.0f}/100",
+            f"  High: {counts['High']}  Good: {counts['Good']}  Fair: {counts['Fair']}",
+            f"  Low: {counts['Low']}  Unlikely: {counts['Unlikely']}",
+            "",
+            "Top reachable nodes:",
+        ]
+
+        now = time.time()
+        for entry in scored[:15]:
+            score = entry.get("score", 0)
+            name = entry.get("app_data") or entry.get("app_name") or ""
+            if not name:
+                dest = entry.get("destination_hash", "")
+                name = dest.replace("<", "").replace(">", "").replace(" ", "")[:12]
+            else:
+                name = name[:16]
+            hops = entry.get("hops")
+            hops_str = f"{hops}h" if hops is not None else "?"
+            last = entry.get("last_seen")
+            seen_str = fmt_age(now - last) if last else "?"
+            bar = fmt_score_bar(score)
+            lines.append(f"  {score:>3} {bar} {name:<16} {hops_str:>3} {seen_str:>5}")
+
+        if total > 15:
+            lines.append(f"\n  ... {total - 15} more (use !reach <name> for details)")
+
+        return "\n".join(lines)
 
     def _cmd_weather(self, args: str) -> str:
         """Fetch current weather for a location using the Open-Meteo API."""

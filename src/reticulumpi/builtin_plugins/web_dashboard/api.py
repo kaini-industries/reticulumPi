@@ -85,6 +85,7 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/routing", handle_routing)
     app.router.add_get("/api/path_warming", handle_path_warming)
     app.router.add_get("/api/transport_health", handle_transport_health)
+    app.router.add_get("/api/reachability", handle_reachability)
 
 
 def _ok(data: Any) -> aiohttp.web.Response:
@@ -557,3 +558,78 @@ async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.R
         "nodes": th.get_transport_nodes(),
         "summary": th.get_transport_summary(),
     })
+
+
+async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/reachability — scored node reachability.
+
+    Query parameters:
+        limit: Max nodes to return (default 50, 0 = all)
+        search: Hex prefix filter on destination hash
+    """
+    from reticulumpi.reachability import score_all_nodes
+
+    plugin = _get_plugin(request)
+
+    # Gather data from plugins
+    network_map = plugin.app.get_plugin("network_map")
+    if not network_map or not hasattr(network_map, "get_known_nodes"):
+        return _ok({
+            "nodes": [],
+            "summary": {"total_scored": 0},
+            "message": "network_map plugin not available",
+        })
+
+    nodes = network_map.get_known_nodes()
+
+    # Path table from connectivity_monitor
+    conn_mon = plugin.app.get_plugin("connectivity_monitor")
+    path_table: list = []
+    if conn_mon and hasattr(conn_mon, "get_routing_data"):
+        routing = conn_mon.get_routing_data(per_page=500)
+        path_table = routing.get("paths", [])
+
+    # Transport node health
+    th = plugin.app.get_plugin("transport_health")
+    transport_nodes: list = []
+    if th and hasattr(th, "get_transport_nodes"):
+        transport_nodes = th.get_transport_nodes()
+
+    # Score all nodes
+    scored = score_all_nodes(nodes, path_table, transport_nodes)
+
+    # Apply search filter
+    search = request.query.get("search", "").lower()
+    if search:
+        scored = [
+            n for n in scored
+            if search in n.get("destination_hash", "").lower()
+            or search in (n.get("app_data") or "").lower()
+            or search in (n.get("app_name") or "").lower()
+        ]
+
+    # Build summary from ALL scored nodes (before limit)
+    total = len(scored)
+    all_scores = [n["score"] for n in scored]
+    label_counts = {"high": 0, "good": 0, "fair": 0, "low": 0, "unlikely": 0}
+    for n in scored:
+        key = n.get("label", "unlikely").lower()
+        if key in label_counts:
+            label_counts[key] += 1
+
+    summary = {
+        "total_scored": total,
+        "average_score": sum(all_scores) / len(all_scores) if all_scores else 0,
+        **label_counts,
+    }
+
+    # Apply limit
+    try:
+        limit = int(request.query.get("limit", 50))
+    except (ValueError, TypeError):
+        limit = 50
+    if limit > 0:
+        scored = scored[:limit]
+
+    summary["returned"] = len(scored)
+    return _ok({"nodes": scored, "summary": summary})

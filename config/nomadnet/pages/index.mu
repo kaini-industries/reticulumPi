@@ -9,8 +9,9 @@ or send an LXMF message to interact with this node's services.
 
 >>Node Pages
 
-  `[`:/page/status.mu`Node Status]  - Live system and network stats
-  `[`:/page/help.mu`Help]           - Page editing and markup reference
+  `[`:/page/status.mu`Node Status]      - Live system and network stats
+  `[`:/page/network.mu`Network Reach]   - Node reachability scores
+  `[`:/page/help.mu`Help]               - Page editing and markup reference
 
 >>Node Features
 
