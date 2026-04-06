@@ -149,6 +149,9 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     return ws
 
 
+_last_msg_ts: dict[str, float] = {"ts": 0}
+
+
 async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     """Periodically broadcast system metrics to all connected WebSocket clients."""
     plugin = app["plugin"]
@@ -166,7 +169,10 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             monitor = plugin.app.get_plugin("system_monitor")
             metrics = {}
             if monitor and hasattr(monitor, "latest_metrics"):
-                metrics = monitor.latest_metrics
+                try:
+                    metrics = monitor.latest_metrics
+                except Exception:
+                    pass
 
             # Collect plugin statuses
             plugin_statuses = {}
@@ -183,15 +189,21 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             mesh_data: dict = {}
             network_map = plugin.app.get_plugin("network_map")
             if network_map and hasattr(network_map, "get_known_nodes"):
-                nodes = network_map.get_known_nodes()
-                mesh_data["nodes"] = nodes
-                mesh_data["known_nodes"] = len(nodes)
+                try:
+                    nodes = network_map.get_known_nodes()
+                    mesh_data["nodes"] = nodes
+                    mesh_data["known_nodes"] = len(nodes)
+                except Exception:
+                    pass
 
             telemetry = plugin.app.get_plugin("mesh_telemetry")
             if telemetry and hasattr(telemetry, "get_peer_metrics"):
-                peers = telemetry.get_peer_metrics()
-                mesh_data["peers"] = peers
-                mesh_data["peer_count"] = len(peers)
+                try:
+                    peers = telemetry.get_peer_metrics()
+                    mesh_data["peers"] = peers
+                    mesh_data["peer_count"] = len(peers)
+                except Exception:
+                    pass
 
             alert_sys = plugin.app.get_plugin("alert_system")
             if alert_sys:
@@ -212,7 +224,10 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             sensor_data: dict = {}
             sensor_fw = plugin.app.get_plugin("sensor_framework")
             if sensor_fw and hasattr(sensor_fw, "get_latest_readings"):
-                sensor_data = sensor_fw.get_latest_readings()
+                try:
+                    sensor_data = sensor_fw.get_latest_readings()
+                except Exception:
+                    pass
 
             # Collect emergency data (if plugin available)
             emergency_data: dict = {}
@@ -264,6 +279,21 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
+            # Collect recent messages from messaging hub (if available)
+            messaging_data: dict = {}
+            msg_hub = plugin.app.get_plugin("messaging_hub")
+            if msg_hub and hasattr(msg_hub, "get_messages"):
+                try:
+                    recent = msg_hub.get_messages(limit=10, since=_last_msg_ts.get("ts", 0))
+                    if recent:
+                        messaging_data["messages"] = recent
+                        _last_msg_ts["ts"] = max(m["timestamp"] for m in recent)
+                    transports = msg_hub.get_transports()
+                    if transports:
+                        messaging_data["transports"] = transports
+                except Exception:
+                    pass
+
             data: dict[str, Any] = {
                 "metrics": metrics,
                 "plugins": plugin_statuses,
@@ -276,6 +306,8 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 "path_warming": path_warming_data,
                 "transport_health": transport_health_data,
             }
+            if messaging_data:
+                data["messaging"] = messaging_data
             # Only include mesh data when it has changed
             if mesh_changed:
                 data["mesh"] = mesh_data

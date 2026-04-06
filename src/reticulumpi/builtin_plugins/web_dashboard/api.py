@@ -79,6 +79,7 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/alerts", handle_alerts)
     app.router.add_get("/api/files", handle_files)
     app.router.add_get("/api/sensors", handle_sensors)
+    app.router.add_get("/api/sensors/history", handle_sensor_history)
     app.router.add_get("/api/emergency", handle_emergency)
     app.router.add_get("/api/transport", handle_transport)
     app.router.add_get("/api/connectivity", handle_connectivity)
@@ -92,6 +93,12 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     # Meshtastic gateway
     app.router.add_get("/api/meshtastic/status", handle_meshtastic_status)
     app.router.add_get("/api/meshtastic/nodes", handle_meshtastic_nodes)
+    # Messaging hub
+    app.router.add_get("/api/messages", handle_messages)
+    app.router.add_post("/api/messages/send", handle_send_message)
+    app.router.add_get("/api/messages/transports", handle_transports)
+    app.router.add_get("/api/messages/contacts", handle_contacts)
+    app.router.add_get("/api/messages/stats", handle_message_stats)
 
 
 def _ok(data: Any) -> aiohttp.web.Response:
@@ -140,6 +147,8 @@ async def handle_login(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
     if not password:
         return _error("Password is required", 400)
+    if len(password) > 256:
+        return _error("Password too long", 400)
 
     token = auth.login(password, remote_ip)
     if not token:
@@ -433,6 +442,29 @@ async def handle_sensors(request: aiohttp.web.Request) -> aiohttp.web.Response:
     return _ok({"sensors": sf.get_latest_readings()})
 
 
+async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/sensors/history — recent readings for a sensor.
+
+    Query params: sensor (required), limit (default 60).
+    """
+    plugin = _get_plugin(request)
+    sf = plugin.app.get_plugin("sensor_framework")
+    if not sf or not hasattr(sf, "get_sensor_history"):
+        return _ok({"history": [], "message": "sensor_framework plugin not available"})
+
+    sensor_name = request.query.get("sensor", "")
+    if not sensor_name:
+        return _error("sensor query param is required", 400)
+
+    try:
+        limit = min(int(request.query.get("limit", "60")), 500)
+    except (ValueError, TypeError):
+        limit = 60
+
+    history = sf.get_sensor_history(sensor_name, limit=limit)
+    return _ok({"sensor": sensor_name, "history": history})
+
+
 async def handle_emergency(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/emergency — recent emergency broadcast messages."""
     plugin = _get_plugin(request)
@@ -529,8 +561,12 @@ async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
     min_hops_raw = request.query.get("min_hops")
     max_hops_raw = request.query.get("max_hops")
-    min_hops = int(min_hops_raw) if min_hops_raw is not None else None
-    max_hops = int(max_hops_raw) if max_hops_raw is not None else None
+    try:
+        min_hops = int(min_hops_raw) if min_hops_raw is not None else None
+        max_hops = int(max_hops_raw) if max_hops_raw is not None else None
+    except (ValueError, TypeError):
+        min_hops = None
+        max_hops = None
 
     data = conn_mon.get_routing_data(
         page=page,
@@ -672,6 +708,8 @@ async def handle_nomadnet_auth_add(
         return _error("Invalid request body", 400)
     if not identity:
         return _error("identity field is required", 400)
+    if len(identity) > 128:
+        return _error("identity too long", 400)
     try:
         added = nn.add_allowed_identity(identity)
         return _ok({"added": added, "identity": identity.strip().lower()})
@@ -694,6 +732,8 @@ async def handle_nomadnet_auth_remove(
         return _error("Invalid request body", 400)
     if not identity:
         return _error("identity field is required", 400)
+    if len(identity) > 128:
+        return _error("identity too long", 400)
     removed = nn.remove_allowed_identity(identity)
     return _ok({"removed": removed, "identity": identity.strip().lower()})
 
@@ -721,3 +761,112 @@ async def handle_meshtastic_nodes(
     if not gw or not hasattr(gw, "get_meshtastic_nodes"):
         return _ok({"nodes": [], "message": "meshtastic_gateway plugin not enabled"})
     return _ok({"nodes": gw.get_meshtastic_nodes()})
+
+
+# ── Messaging Hub ────────────────────────────────────────────────────
+
+
+async def handle_messages(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages — Paginated message history.
+
+    Query params: limit, offset, transport, direction, since.
+    """
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_messages"):
+        return _ok({"messages": [], "message": "messaging_hub not enabled"})
+
+    try:
+        limit = min(int(request.query.get("limit", "50")), 200)
+        offset = max(int(request.query.get("offset", "0")), 0)
+    except (ValueError, TypeError):
+        return _error("limit and offset must be integers", 400)
+
+    transport = request.query.get("transport") or None
+    direction = request.query.get("direction") or None
+    since_str = request.query.get("since")
+    try:
+        since = float(since_str) if since_str else None
+    except (ValueError, TypeError):
+        return _error("since must be a numeric timestamp", 400)
+
+    messages = hub.get_messages(
+        limit=limit, offset=offset, transport=transport,
+        direction=direction, since=since,
+    )
+    return _ok({"messages": messages})
+
+
+async def handle_send_message(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/messages/send — Send a message via a transport.
+
+    Body: ``{"transport": "lxmf"|"meshtastic", "text": "...", "destination": "..."}``
+    """
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "send_message"):
+        return _error("messaging_hub not enabled", 503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+
+    transport = body.get("transport", "")
+    text = body.get("text", "").strip()
+    destination = body.get("destination", "").strip()
+
+    if not transport:
+        return _error("transport field is required", 400)
+    if not text:
+        return _error("text field is required", 400)
+    if len(text) > 5000:
+        return _error("text exceeds maximum length (5000 chars)", 400)
+    if not destination:
+        return _error("destination field is required", 400)
+
+    result = hub.send_message(transport, text, destination)
+    if result.get("sent"):
+        return _ok(result)
+    return _error(result.get("reason", "Send failed"), 400)
+
+
+async def handle_transports(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/transports — Available transports."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_transports"):
+        return _ok({"transports": []})
+    return _ok({"transports": hub.get_transports()})
+
+
+async def handle_contacts(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/contacts — Contacts across transports.
+
+    Query param: transport (optional filter).
+    """
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_contacts"):
+        return _ok({"contacts": []})
+    transport = request.query.get("transport") or None
+    return _ok({"contacts": hub.get_contacts(transport)})
+
+
+async def handle_message_stats(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/stats — Message counts by transport and direction."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_stats"):
+        return _ok({"stats": {}})
+    return _ok({"stats": hub.get_stats()})

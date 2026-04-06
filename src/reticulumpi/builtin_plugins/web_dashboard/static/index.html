@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=4">
+  <link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
   <div class="dashboard">
@@ -270,6 +270,40 @@
       <div class="metrics-grid" id="sensors-grid"></div>
     </div>
 
+    <!-- Messaging Hub -->
+    <div class="section" id="messaging-section" style="display:none">
+      <div class="section-header">
+        <span>Messages</span>
+        <span class="count" id="msg-count"></span>
+      </div>
+      <div class="msg-toolbar">
+        <select id="msg-transport-filter" class="rt-select">
+          <option value="">All Transports</option>
+        </select>
+        <select id="msg-direction-filter" class="rt-select">
+          <option value="">All</option>
+          <option value="sent">Sent</option>
+          <option value="received">Received</option>
+        </select>
+      </div>
+      <div class="msg-chat" id="msg-chat"></div>
+      <div class="msg-compose">
+        <div class="msg-compose-row">
+          <select id="msg-send-transport" class="rt-select"></select>
+          <select id="msg-send-dest" class="rt-select">
+            <option value="">Select recipient...</option>
+          </select>
+          <span class="msg-byte-count" id="msg-byte-count"></span>
+        </div>
+        <div class="msg-compose-row">
+          <input type="text" id="msg-send-text" class="rt-input"
+                 placeholder="Type a message..." autocomplete="off">
+          <button id="msg-send-btn" class="msg-send-btn" disabled>Send</button>
+        </div>
+        <div class="msg-feedback" id="msg-feedback"></div>
+      </div>
+    </div>
+
     <!-- Meshtastic Gateway -->
     <div class="section" id="meshtastic-section" style="display:none">
       <div class="section-header">
@@ -320,6 +354,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

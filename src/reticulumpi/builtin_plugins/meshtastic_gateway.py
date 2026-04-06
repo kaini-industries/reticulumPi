@@ -409,8 +409,17 @@ class _MeshtasticMQTTClient:
 
     # ── Message sending ─────────────────────────────────────────────
 
-    def sendText(self, text: str, channelIndex: int = 0, **kwargs) -> None:
-        """Publish a text message to the Meshtastic MQTT topic."""
+    def sendText(
+        self, text: str, channelIndex: int = 0, destinationId: Any = None, **kwargs: Any
+    ) -> None:
+        """Publish a text message to the Meshtastic MQTT topic.
+
+        Args:
+            text: Message text (truncated to MTU).
+            channelIndex: Meshtastic channel index (0-7).
+            destinationId: Target node (int, or ``"!abcd1234"`` hex string).
+                ``None`` sends a broadcast to all nodes.
+        """
         from meshtastic.mesh_pb2 import Data, MeshPacket
         from meshtastic.mqtt_pb2 import ServiceEnvelope
         from meshtastic.portnums_pb2 import TEXT_MESSAGE_APP
@@ -427,11 +436,21 @@ class _MeshtasticMQTTClient:
 
         # Use setattr for 'from' since it's a Python keyword
         setattr(packet, "from", self._my_node_num)
-        packet.to = _MESH_BROADCAST
+
+        # Set destination — broadcast or direct message
+        if destinationId is not None:
+            if isinstance(destinationId, str) and destinationId.startswith("!"):
+                packet.to = int(destinationId[1:], 16)
+            else:
+                packet.to = int(destinationId)
+            packet.want_ack = True
+        else:
+            packet.to = _MESH_BROADCAST
+            packet.want_ack = False
+
         packet.id = packet_id
         packet.channel = channelIndex
         packet.hop_limit = 3
-        packet.want_ack = False
 
         if self._aes_key:
             # Encrypt the payload
@@ -596,6 +615,7 @@ class MeshtasticGateway(PluginBase):
         # Stats
         self._msgs_mesh_to_lxmf = 0
         self._msgs_lxmf_to_mesh = 0
+        self._msgs_hub_to_mesh = 0
         self._msgs_rate_limited = 0
         self._connect_count = 0
         self._reconnect_failures = 0
@@ -1132,6 +1152,7 @@ class MeshtasticGateway(PluginBase):
                 "meshtastic_channel": self.config.get("meshtastic_channel", 0),
                 "msgs_mesh_to_lxmf": self._msgs_mesh_to_lxmf,
                 "msgs_lxmf_to_mesh": self._msgs_lxmf_to_mesh,
+                "msgs_hub_to_mesh": self._msgs_hub_to_mesh,
                 "msgs_rate_limited": self._msgs_rate_limited,
                 "connect_count": self._connect_count,
                 "reconnect_failures": self._reconnect_failures,
@@ -1189,6 +1210,65 @@ class MeshtasticGateway(PluginBase):
                     entry["is_self"] = True
                 nodes.append(entry)
             return nodes
+
+    # ── Public send API (for messaging hub / dashboard) ────────────
+
+    def send_message(
+        self,
+        text: str,
+        destination_id: str | None = None,
+        channel: int | None = None,
+    ) -> dict[str, Any]:
+        """Send a text message to the Meshtastic mesh.
+
+        Args:
+            text: Message text (truncated to MTU if needed).
+            destination_id: Target node ID (e.g. ``"!abcd1234"``) or ``None``
+                for broadcast.
+            channel: Channel index override.  Uses the configured default
+                if ``None``.
+
+        Returns:
+            ``{"sent": True, "truncated": bool}`` on success, or
+            ``{"sent": False, "reason": str}`` on failure.
+        """
+        if not self._check_send_rate_limit():
+            return {"sent": False, "reason": "rate_limited"}
+
+        with self._lock:
+            if not self._active or not self._connected or self._mesh_interface is None:
+                return {"sent": False, "reason": "not_connected"}
+            iface = self._mesh_interface
+
+        ch = channel if channel is not None else self.config.get("meshtastic_channel", 0)
+        truncated = len(text.encode("utf-8")) > MESHTASTIC_MTU
+
+        try:
+            if destination_id:
+                iface.sendText(
+                    text[:MESHTASTIC_MTU], channelIndex=ch,
+                    destinationId=destination_id,
+                )
+            else:
+                iface.sendText(text[:MESHTASTIC_MTU], channelIndex=ch)
+        except Exception as exc:
+            self.log.exception("Error sending Meshtastic message")
+            return {"sent": False, "reason": str(exc)}
+
+        dest_label = destination_id or "broadcast"
+        self.log.info("Sent Meshtastic message to %s on ch%d", dest_label, ch)
+
+        with self._lock:
+            self._msgs_hub_to_mesh += 1
+
+        self.event_bus.publish(events.MESHTASTIC_MESSAGE_SENT, {
+            "text": text[:100],
+            "destination": dest_label,
+            "channel": ch,
+            "source": "hub",
+        })
+
+        return {"sent": True, "truncated": truncated}
 
 
 # ---------------------------------------------------------------------------

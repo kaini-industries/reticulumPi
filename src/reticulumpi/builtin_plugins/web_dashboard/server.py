@@ -63,7 +63,7 @@ async def security_headers_middleware(
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; connect-src 'self' ws: wss:; "
-        "style-src 'self'"
+        "style-src 'self' 'unsafe-inline'"
     )
     response.headers["Referrer-Policy"] = "no-referrer"
     return response

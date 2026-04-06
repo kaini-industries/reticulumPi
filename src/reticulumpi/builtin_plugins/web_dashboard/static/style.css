@@ -189,7 +189,126 @@ body {
 }
 
 #sensors-section .metrics-grid {
-  padding: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+/* ── Sensor Cards ─────────────────────────────────────── */
+.sensor-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  position: relative;
+  overflow: hidden;
+}
+.sensor-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.sensor-name {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sensor-driver-badge {
+  font-size: 0.55rem;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  background: rgba(88,166,255,0.12);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.sensor-readings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  align-items: baseline;
+}
+.sensor-reading {
+  display: flex;
+  flex-direction: column;
+}
+.sensor-reading-value {
+  font-size: 1.75rem;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--text-bright);
+  line-height: 1.2;
+}
+.sensor-reading-value .sensor-unit {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.sensor-reading-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* Color thresholds */
+.sv-cold { color: var(--accent); }
+.sv-ok   { color: var(--green); }
+.sv-warm { color: var(--yellow); }
+.sv-hot  { color: var(--red); }
+
+.sv-dry  { color: var(--yellow); }
+.sv-wet  { color: var(--yellow); }
+.sv-damp { color: var(--red); }
+
+/* Sparkline */
+.sensor-sparkline {
+  width: 100%;
+  height: 36px;
+  margin-top: 0.15rem;
+}
+.sensor-sparkline svg {
+  width: 100%;
+  height: 100%;
+}
+.spark-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.spark-area {
+  fill: url(#spark-grad);
+  opacity: 0.15;
+}
+.spark-dot {
+  fill: var(--accent);
+}
+
+/* Freshness / error */
+.sensor-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+.sensor-stale { color: var(--yellow); }
+.sensor-error-card {
+  border-color: var(--red);
+}
+.sensor-error-card .sensor-reading-value {
+  font-size: 0.85rem;
+  color: var(--red);
+  font-family: var(--mono);
 }
 
 .metric-card .label {
@@ -489,6 +608,117 @@ body {
   letter-spacing: 0.04em;
 }
 .msh-self-row { background: rgba(74, 108, 247, 0.06); }
+
+/* ── Messaging Hub ────────────────────────────────────── */
+.msg-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.msg-chat {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.msg-chat:empty::after {
+  content: "No messages yet";
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 2rem 0;
+}
+
+.msg-bubble {
+  max-width: 80%;
+  padding: 0.4rem 0.65rem;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+.msg-bubble.sent {
+  align-self: flex-end;
+  background: #1a3a5c;
+  border: 1px solid var(--accent);
+}
+.msg-bubble.received {
+  align-self: flex-start;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+
+.msg-meta {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+}
+.msg-text { color: var(--text-bright); }
+
+.msg-transport-badge {
+  display: inline-block;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.msg-transport-badge.lxmf { background: #1a3352; color: var(--accent); }
+.msg-transport-badge.meshtastic { background: #2a3a1a; color: var(--green); }
+
+.msg-compose {
+  border-top: 1px solid var(--border);
+  padding: 0.75rem 1rem;
+}
+.msg-compose-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+.msg-compose-row:last-child { margin-bottom: 0; }
+.msg-compose-row .rt-input { flex: 1; }
+.msg-compose-row .rt-select { min-width: 120px; }
+
+.msg-send-btn {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.4rem 1rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.msg-send-btn:hover { filter: brightness(1.1); }
+.msg-send-btn:disabled { opacity: 0.4; cursor: default; }
+
+.msg-byte-count {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.msg-byte-count.near { color: var(--yellow); }
+.msg-byte-count.over { color: var(--red); }
+
+.msg-feedback {
+  font-size: 0.75rem;
+  min-height: 1em;
+  padding-top: 0.25rem;
+}
+.msg-feedback.ok { color: var(--green); }
+.msg-feedback.error { color: var(--red); }
+.msg-feedback.warn { color: var(--yellow); }
 
 /* Collapsible config */
 .config-toggle {
@@ -804,6 +1034,13 @@ body {
   .routing-stats-grid { grid-template-columns: repeat(2, 1fr); }
   .bar-label-iface { width: 90px; }
 
+  /* Messaging */
+  .msg-compose-row { flex-wrap: wrap; }
+  .msg-compose-row .rt-select { min-width: 100px; flex: 1; }
+
+  /* Sensors */
+  .sensor-reading-value { font-size: 1.4rem; }
+
   /* Node detail */
   .node-detail-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
 }
@@ -870,6 +1107,20 @@ body {
 
   /* Config */
   .config-content { font-size: 0.7rem; padding: 0.75rem; }
+
+  /* Messaging */
+  .msg-chat { max-height: 280px; }
+  .msg-toolbar { flex-wrap: wrap; gap: 0.35rem; }
+  .msg-compose-row .rt-select { min-width: 80px; }
+  .msg-bubble { max-width: 90%; font-size: 0.8rem; }
+  .msg-meta { font-size: 0.65rem; }
+
+  /* Sensors */
+  .sensor-card { padding: 0.75rem; }
+  .sensor-reading-value { font-size: 1.2rem; }
+  .sensor-reading-value .sensor-unit { font-size: 0.7rem; }
+  .sensor-reading-label { font-size: 0.6rem; }
+  .sensor-sparkline { height: 28px; }
 
   /* Node detail */
   .node-detail-grid { grid-template-columns: 1fr 1fr; gap: 0.3rem 1rem; }

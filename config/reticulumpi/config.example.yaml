@@ -328,6 +328,21 @@ reticulumpi:
     #  reconnect_delay: 10             # Seconds between reconnect attempts
     #  max_reconnect_attempts: 10      # 0 = unlimited
 
+    # Messaging Hub — unified message store and chat UI.
+    # Stores all messages in SQLite, bridges LXMF and Meshtastic.
+    # Provides transport-agnostic send/receive from the web dashboard.
+    # Requires: web_dashboard enabled for the chat UI.
+    #messaging_hub:
+    #  enabled: false
+    #  db_path: ~/.local/share/reticulumpi/messaging_hub.db
+    #  message_history_limit: 500    # Max stored messages (0 = unlimited)
+    #  lxmf:
+    #    enabled: true
+    #    storage_path: ~/.local/share/reticulumpi/messaging_hub_lxmf
+    #    display_name: "MyNode Messages"  # Defaults to "<node_name> Messages"
+    #  meshtastic:
+    #    enabled: true               # Bridges to meshtastic_gateway plugin
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

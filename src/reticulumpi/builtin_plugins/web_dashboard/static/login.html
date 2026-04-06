@@ -16,18 +16,6 @@
       <div id="error" class="error" hidden></div>
     </form>
   </div>
-  <script>
-    (function() {
-      var params = new URLSearchParams(window.location.search);
-      var err = params.get('error');
-      if (err) {
-        var el = document.getElementById('error');
-        if (err === 'rate_limited') el.textContent = 'Too many attempts. Please wait and try again.';
-        else if (err === 'empty') el.textContent = 'Password is required.';
-        else el.textContent = 'Invalid password.';
-        el.hidden = false;
-      }
-    })();
-  </script>
+  <script src="/static/login.js"></script>
 </body>
 </html>

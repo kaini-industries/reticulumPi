@@ -535,39 +535,188 @@
     $('files-count').textContent = files.length + ' files';
   }
 
+  // ── Sensor rendering ────────────────────────────────────
+
+  var _sensorHistory = {};   // { "sensorName:field": [value, value, ...] }
+  var _sensorHistoryMax = 60;
+
+  // Unit & threshold metadata per reading field name
+  var SENSOR_FIELDS = {
+    temperature: { unit: '\u00b0C', precision: 1,
+      thresh: function(v) { return v < 10 ? 'sv-cold' : v < 35 ? 'sv-ok' : v < 45 ? 'sv-warm' : 'sv-hot'; }
+    },
+    humidity: { unit: '%', precision: 1,
+      thresh: function(v) { return v < 25 ? 'sv-dry' : v < 65 ? 'sv-ok' : v < 80 ? 'sv-wet' : 'sv-damp'; }
+    },
+    pressure: { unit: ' hPa', precision: 1, thresh: function() { return ''; } },
+    voltage: { unit: ' V', precision: 2, thresh: function() { return ''; } },
+    current: { unit: ' A', precision: 3, thresh: function() { return ''; } },
+    power: { unit: ' W', precision: 1, thresh: function() { return ''; } },
+    quality: { unit: '', precision: 0, thresh: function() { return ''; } }
+  };
+
+  function sensorFieldMeta(key) {
+    if (SENSOR_FIELDS[key]) return SENSOR_FIELDS[key];
+    // Auto-detect from key name
+    if (/temp/i.test(key)) return SENSOR_FIELDS.temperature;
+    if (/humid/i.test(key)) return SENSOR_FIELDS.humidity;
+    if (/press/i.test(key)) return SENSOR_FIELDS.pressure;
+    if (/volt/i.test(key)) return SENSOR_FIELDS.voltage;
+    return { unit: '', precision: 2, thresh: function() { return ''; } };
+  }
+
+  function buildSparkline(values) {
+    if (!values || values.length < 2) return '';
+    var min = Infinity, max = -Infinity;
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] < min) min = values[i];
+      if (values[i] > max) max = values[i];
+    }
+    var range = max - min || 1;
+    var w = 200, h = 36, pad = 2;
+    var points = [];
+    for (var j = 0; j < values.length; j++) {
+      var x = (j / (values.length - 1)) * w;
+      var y = h - pad - ((values[j] - min) / range) * (h - pad * 2);
+      points.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    var polyline = points.join(' ');
+    // Area: close the path to the bottom
+    var area = polyline + ' ' + w + ',' + h + ' 0,' + h;
+    var last = values[values.length - 1];
+    var lastX = w;
+    var lastY = h - pad - ((last - min) / range) * (h - pad * 2);
+    return '<div class="sensor-sparkline">'
+      + '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">'
+      + '<defs><linearGradient id="spark-grad" x1="0" y1="0" x2="0" y2="1">'
+      + '<stop offset="0%" stop-color="var(--accent)"/>'
+      + '<stop offset="100%" stop-color="transparent"/>'
+      + '</linearGradient></defs>'
+      + '<polygon class="spark-area" points="' + area + '"/>'
+      + '<polyline class="spark-line" points="' + polyline + '"/>'
+      + '<circle class="spark-dot" cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="2.5"/>'
+      + '</svg></div>';
+  }
+
+  function fetchSensorHistory(sensorNames) {
+    for (var i = 0; i < sensorNames.length; i++) {
+      (function(name) {
+        api('/api/sensors/history?sensor=' + encodeURIComponent(name) + '&limit=' + _sensorHistoryMax)
+          .then(function(r) {
+            if (!r || !r.ok || !r.data.history) return;
+            // History comes newest-first; group by reading field and reverse
+            var byField = {};
+            var hist = r.data.history;
+            for (var j = hist.length - 1; j >= 0; j--) {
+              var key = name + ':' + hist[j].reading;
+              if (!byField[key]) byField[key] = [];
+              byField[key].push(hist[j].value);
+            }
+            for (var k in byField) {
+              _sensorHistory[k] = byField[k];
+            }
+            // Re-render with sparklines now available
+            if (_lastSensorData) renderSensorCards(_lastSensorData);
+          });
+      })(sensorNames[i]);
+    }
+  }
+
+  var _lastSensorData = null;
+
   function updateSensors(sensors) {
     var grid = $('sensors-grid');
     if (!grid) return;
     if (!sensors || Object.keys(sensors).length === 0) {
-      grid.innerHTML = '<div class="metric-card"><div class="label">No sensor data</div></div>';
-      $('sensors-count').textContent = '0';
+      grid.innerHTML = '<div class="sensor-card"><div class="sensor-name">No sensor data available</div></div>';
+      $('sensors-count').textContent = '';
       return;
     }
-    var html = '';
+    // Track history from live updates
     var names = Object.keys(sensors);
+    for (var i = 0; i < names.length; i++) {
+      var reading = sensors[names[i]];
+      if (reading.error) continue;
+      var fields = Object.keys(reading);
+      for (var j = 0; j < fields.length; j++) {
+        if (fields[j] === 'timestamp') continue;
+        var hk = names[i] + ':' + fields[j];
+        if (!_sensorHistory[hk]) _sensorHistory[hk] = [];
+        _sensorHistory[hk].push(reading[fields[j]]);
+        if (_sensorHistory[hk].length > _sensorHistoryMax) {
+          _sensorHistory[hk] = _sensorHistory[hk].slice(-_sensorHistoryMax);
+        }
+      }
+    }
+    _lastSensorData = sensors;
+    renderSensorCards(sensors);
+  }
+
+  function renderSensorCards(sensors) {
+    var grid = $('sensors-grid');
+    if (!grid) return;
+    var names = Object.keys(sensors);
+    var html = '';
     for (var i = 0; i < names.length; i++) {
       var name = names[i];
       var reading = sensors[name];
-      html += '<div class="metric-card">'
-        + '<div class="label">' + esc(name) + '</div>'
-        + '<div class="peer-stats">';
-      if (reading.error) {
-        html += '<span class="warn">' + esc(reading.error) + '</span>';
+      var hasError = !!reading.error;
+
+      html += '<div class="sensor-card' + (hasError ? ' sensor-error-card' : '') + '">';
+
+      // Header: name + driver badge
+      html += '<div class="sensor-card-header">'
+        + '<span class="sensor-name">' + esc(name.replace(/_/g, ' ')) + '</span>'
+        + '</div>';
+
+      if (hasError) {
+        html += '<div class="sensor-readings"><div class="sensor-reading">'
+          + '<div class="sensor-reading-value">' + esc(reading.error) + '</div>'
+          + '</div></div>';
       } else {
-        var keys = Object.keys(reading);
-        for (var j = 0; j < keys.length; j++) {
-          var k = keys[j];
+        // Reading values
+        html += '<div class="sensor-readings">';
+        var fields = Object.keys(reading);
+        var primaryField = null;
+        for (var j = 0; j < fields.length; j++) {
+          var k = fields[j];
           if (k === 'timestamp') continue;
           var v = reading[k];
-          if (typeof v === 'number') {
-            html += '<span>' + esc(k) + ': ' + v.toFixed(2) + '</span> ';
-          }
+          if (typeof v !== 'number') continue;
+          var meta = sensorFieldMeta(k);
+          var cls = meta.thresh(v);
+          if (!primaryField) primaryField = k;
+          html += '<div class="sensor-reading">'
+            + '<div class="sensor-reading-value ' + cls + '">'
+            + v.toFixed(meta.precision)
+            + '<span class="sensor-unit">' + esc(meta.unit) + '</span>'
+            + '</div>'
+            + '<div class="sensor-reading-label">' + esc(k) + '</div>'
+            + '</div>';
+        }
+        html += '</div>';
+
+        // Sparkline for primary field
+        var hk = name + ':' + primaryField;
+        if (_sensorHistory[hk] && _sensorHistory[hk].length >= 2) {
+          html += buildSparkline(_sensorHistory[hk]);
         }
       }
-      html += '</div></div>';
+
+      // Freshness
+      if (reading.timestamp) {
+        var age = (Date.now() / 1000) - reading.timestamp;
+        var stale = age > 300;
+        html += '<div class="sensor-meta">'
+          + '<span class="' + (stale ? 'sensor-stale' : '') + '">'
+          + (stale ? '\u26a0 ' : '') + formatTimeAgo(reading.timestamp)
+          + '</span></div>';
+      }
+
+      html += '</div>';
     }
     grid.innerHTML = html;
-    $('sensors-count').textContent = names.length + ' sensors';
+    $('sensors-count').textContent = names.length + (names.length === 1 ? ' sensor' : ' sensors');
   }
 
   var PRIORITY_NAMES = {0: 'INFO', 1: 'WARNING', 2: 'CRITICAL', 3: 'EMERGENCY'};
@@ -682,6 +831,244 @@
         statusEl.textContent = issues.length + ' issue(s)';
         statusEl.style.color = 'var(--yellow)';
       }
+    }
+  }
+
+  // --- Messaging Hub ---
+
+  var _messages = [];
+  var _msgTransports = [];
+  var _msgContacts = [];
+  var _msgSectionVisible = false;
+
+  function fetchMessages() {
+    var f = $('msg-transport-filter');
+    var d = $('msg-direction-filter');
+    var params = '?limit=100';
+    if (f && f.value) params += '&transport=' + encodeURIComponent(f.value);
+    if (d && d.value) params += '&direction=' + encodeURIComponent(d.value);
+    api('/api/messages' + params).then(function(r) {
+      if (!r || !r.ok) return;
+      _messages = r.data.messages || [];
+      renderMessages();
+    });
+  }
+
+  function fetchTransports() {
+    api('/api/messages/transports').then(function(r) {
+      if (!r || !r.ok) return;
+      _msgTransports = r.data.transports || [];
+      updateTransportDropdowns();
+      // Show section if any transports are registered
+      var section = $('messaging-section');
+      if (section && _msgTransports.length > 0) {
+        section.style.display = '';
+        _msgSectionVisible = true;
+      }
+    });
+  }
+
+  function fetchContacts(transport) {
+    var params = transport ? '?transport=' + encodeURIComponent(transport) : '';
+    api('/api/messages/contacts' + params).then(function(r) {
+      if (!r || !r.ok) return;
+      _msgContacts = r.data.contacts || [];
+      updateRecipientDropdown();
+    });
+  }
+
+  function updateTransportDropdowns() {
+    // Filter dropdown
+    var filter = $('msg-transport-filter');
+    if (filter) {
+      var curFilter = filter.value;
+      // Keep the "All" option, rebuild the rest
+      var opts = '<option value="">All Transports</option>';
+      for (var i = 0; i < _msgTransports.length; i++) {
+        var t = _msgTransports[i];
+        opts += '<option value="' + esc(t.name) + '">' + esc(t.display);
+        if (!t.available) opts += ' (offline)';
+        opts += '</option>';
+      }
+      filter.innerHTML = opts;
+      filter.value = curFilter;
+    }
+    // Send transport dropdown
+    var send = $('msg-send-transport');
+    if (send) {
+      var curSend = send.value;
+      var sendOpts = '';
+      for (var j = 0; j < _msgTransports.length; j++) {
+        var s = _msgTransports[j];
+        sendOpts += '<option value="' + esc(s.name) + '"';
+        if (!s.available) sendOpts += ' disabled';
+        sendOpts += '>' + esc(s.display);
+        if (s.address) sendOpts += ' (' + esc(s.address.substring(0, 12)) + '...)';
+        sendOpts += '</option>';
+      }
+      send.innerHTML = sendOpts;
+      if (curSend) send.value = curSend;
+    }
+  }
+
+  function updateRecipientDropdown() {
+    var sel = $('msg-send-dest');
+    if (!sel) return;
+    var curVal = sel.value;
+    var transport = $('msg-send-transport') ? $('msg-send-transport').value : '';
+    var html = '<option value="">Select recipient...</option>';
+    if (transport === 'meshtastic') {
+      html += '<option value="broadcast">Broadcast (all)</option>';
+    }
+    for (var i = 0; i < _msgContacts.length; i++) {
+      var c = _msgContacts[i];
+      if (transport && c.transport !== transport) continue;
+      html += '<option value="' + esc(c.id) + '">[' + esc(c.transport) + '] '
+              + esc(c.name) + '</option>';
+    }
+    sel.innerHTML = html;
+    sel.value = curVal;
+  }
+
+  function renderMessages() {
+    var chat = $('msg-chat');
+    if (!chat) return;
+
+    // Count badge
+    var count = $('msg-count');
+    if (count) count.textContent = _messages.length > 0 ? _messages.length : '';
+
+    if (_messages.length === 0) {
+      chat.innerHTML = '';
+      return;
+    }
+
+    // Messages come newest-first from API; reverse to show chronological
+    var sorted = _messages.slice().reverse();
+    var html = '';
+    for (var i = 0; i < sorted.length; i++) {
+      var m = sorted[i];
+      var isSent = m.direction === 'sent';
+      var cls = 'msg-bubble ' + (isSent ? 'sent' : 'received');
+      var badge = '<span class="msg-transport-badge ' + esc(m.transport) + '">'
+                  + esc(m.transport) + '</span>';
+
+      var senderLabel = '';
+      if (isSent) {
+        senderLabel = 'You';
+        if (m.to_name) senderLabel += ' → ' + esc(m.to_name);
+        else if (m.to_id && m.to_id !== 'self') senderLabel += ' → ' + esc(m.to_id);
+      } else {
+        senderLabel = m.from_name ? esc(m.from_name) : (m.from_id ? esc(m.from_id) : '?');
+      }
+
+      var timeStr = m.timestamp ? formatTimeAgo(m.timestamp) : '';
+
+      html += '<div class="' + cls + '">'
+            + '<div class="msg-meta">' + badge + ' <span>' + senderLabel + '</span>'
+            + '<span>' + timeStr + '</span></div>'
+            + '<div class="msg-text">' + esc(m.text) + '</div>'
+            + '</div>';
+    }
+    chat.innerHTML = html;
+    // Auto-scroll to bottom
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function sendMessage() {
+    var transportEl = $('msg-send-transport');
+    var destEl = $('msg-send-dest');
+    var textEl = $('msg-send-text');
+    var btn = $('msg-send-btn');
+    if (!transportEl || !destEl || !textEl) return;
+
+    var transport = transportEl.value;
+    var dest = destEl.value;
+    var text = textEl.value.trim();
+
+    if (!transport || !text || !dest) return;
+
+    btn.disabled = true;
+    showMsgFeedback('Sending...', '');
+
+    api('/api/messages/send', {
+      method: 'POST',
+      body: { transport: transport, text: text, destination: dest }
+    }).then(function(r) {
+      if (!r) { showMsgFeedback('Network error', 'error'); return; }
+      if (!r.ok) { showMsgFeedback(r.error || 'Send failed', 'error'); return; }
+      var d = r.data;
+      if (!d.sent) {
+        showMsgFeedback('Not sent: ' + (d.reason || 'unknown'), 'error');
+        return;
+      }
+      textEl.value = '';
+      updateMsgByteCount();
+      var note = d.truncated ? 'Sent (truncated)' : 'Sent';
+      showMsgFeedback(note, 'ok');
+      fetchMessages();
+    }).finally(function() {
+      btn.disabled = false;
+    });
+  }
+
+  function showMsgFeedback(text, cls) {
+    var el = $('msg-feedback');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'msg-feedback' + (cls ? ' ' + cls : '');
+    if (cls === 'ok') {
+      setTimeout(function() {
+        if (el.textContent === text) el.textContent = '';
+      }, 3000);
+    }
+  }
+
+  function updateMsgByteCount() {
+    var textEl = $('msg-send-text');
+    var byteEl = $('msg-byte-count');
+    var btn = $('msg-send-btn');
+    if (!textEl || !byteEl) return;
+    var text = textEl.value;
+    var bytes = new TextEncoder().encode(text).length;
+    var transport = $('msg-send-transport') ? $('msg-send-transport').value : '';
+
+    // Only show byte count for Meshtastic (237 byte MTU)
+    if (transport === 'meshtastic') {
+      byteEl.textContent = bytes + '/237';
+      byteEl.className = 'msg-byte-count' + (bytes > 237 ? ' over' : bytes > 200 ? ' near' : '');
+    } else {
+      byteEl.textContent = '';
+      byteEl.className = 'msg-byte-count';
+    }
+
+    // Enable send when there's text and a destination
+    var dest = $('msg-send-dest') ? $('msg-send-dest').value : '';
+    if (btn) btn.disabled = !text.trim() || !dest;
+  }
+
+  function updateMessaging(data) {
+    if (!data || !data.messages || data.messages.length === 0) return;
+    // Merge new messages, avoiding duplicates by id
+    var existing = {};
+    for (var i = 0; i < _messages.length; i++) {
+      existing[_messages[i].id] = true;
+    }
+    var added = false;
+    for (var j = 0; j < data.messages.length; j++) {
+      var m = data.messages[j];
+      if (!existing[m.id]) {
+        _messages.unshift(m); // Add to front (newest first)
+        added = true;
+      }
+    }
+    // Keep max 200 in memory
+    if (_messages.length > 200) _messages = _messages.slice(0, 200);
+    if (added) renderMessages();
+    // Update transport availability
+    if (data.transports) {
+      _msgTransports = data.transports;
+      updateTransportDropdowns();
     }
   }
 
@@ -1088,6 +1475,9 @@
     api('/api/sensors').then(function(r) {
       if (!r || !r.ok) return;
       updateSensors(r.data.sensors);
+      // Fetch history for sparklines
+      var sensorNames = Object.keys(r.data.sensors || {});
+      if (sensorNames.length > 0) fetchSensorHistory(sensorNames);
     });
 
     // Emergency broadcasts
@@ -1095,6 +1485,11 @@
       if (!r || !r.ok) return;
       updateEmergency(r.data);
     });
+
+    // Messaging hub
+    fetchTransports();
+    fetchMessages();
+    fetchContacts();
 
     // Meshtastic gateway
     api('/api/meshtastic/status').then(function(statusRes) {
@@ -1207,6 +1602,7 @@
           if (msg.data.transport) updateTransport(msg.data.transport);
           if (msg.data.connectivity) updateConnectivity(msg.data.connectivity);
           if (msg.data.routing) updateRoutingSummary(msg.data.routing);
+          if (msg.data.messaging) updateMessaging(msg.data.messaging);
         }
       } catch(e) { /* ignore parse errors */ }
     };
@@ -1714,6 +2110,20 @@
     }
     updatePeerTelemetry(peers);
   });
+
+  // Wire up messaging hub controls
+  $('msg-send-btn').addEventListener('click', sendMessage);
+  $('msg-send-text').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') sendMessage();
+  });
+  $('msg-send-text').addEventListener('input', updateMsgByteCount);
+  $('msg-transport-filter').addEventListener('change', fetchMessages);
+  $('msg-direction-filter').addEventListener('change', fetchMessages);
+  $('msg-send-transport').addEventListener('change', function() {
+    fetchContacts($('msg-send-transport').value);
+    updateMsgByteCount();
+  });
+  $('msg-send-dest').addEventListener('change', updateMsgByteCount);
 
   // Wire up sortable Meshtastic table headers
   var mshSortHeaders = document.querySelectorAll('#meshtastic-section th[data-sort]');

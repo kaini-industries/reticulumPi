@@ -75,3 +75,8 @@ MESHTASTIC_CONNECT_FAILED = "meshtastic.connect_failed"
 MESHTASTIC_MESSAGE_RECEIVED = "meshtastic.message_received"
 MESHTASTIC_MESSAGE_SENT = "meshtastic.message_sent"
 MESHTASTIC_NODEINFO_SENT = "meshtastic.nodeinfo_sent"
+
+# Messaging hub
+MESSAGE_RECEIVED = "messaging.message_received"
+MESSAGE_SENT = "messaging.message_sent"
+MESSAGE_FAILED = "messaging.message_failed"
