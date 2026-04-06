@@ -86,6 +86,12 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/path_warming", handle_path_warming)
     app.router.add_get("/api/transport_health", handle_transport_health)
     app.router.add_get("/api/reachability", handle_reachability)
+    app.router.add_get("/api/nomadnet/auth", handle_nomadnet_auth)
+    app.router.add_post("/api/nomadnet/auth/add", handle_nomadnet_auth_add)
+    app.router.add_post("/api/nomadnet/auth/remove", handle_nomadnet_auth_remove)
+    # Meshtastic gateway
+    app.router.add_get("/api/meshtastic/status", handle_meshtastic_status)
+    app.router.add_get("/api/meshtastic/nodes", handle_meshtastic_nodes)
 
 
 def _ok(data: Any) -> aiohttp.web.Response:
@@ -633,3 +639,85 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
 
     summary["returned"] = len(scored)
     return _ok({"nodes": scored, "summary": summary})
+
+
+# --- NomadNet auth endpoints ---
+
+
+async def handle_nomadnet_auth(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/nomadnet/auth — NomadNet page access control status."""
+    plugin = _get_plugin(request)
+    nn = plugin.app.get_plugin("nomadnet_server")
+    if not nn or not hasattr(nn, "get_allowed_identities"):
+        return _ok({"message": "nomadnet_server plugin not available"})
+    protected = nn._get_protected_pages() if hasattr(nn, "_get_protected_pages") else []
+    return _ok({
+        "allowed_identities": nn.get_allowed_identities(),
+        "protected_pages": protected,
+    })
+
+
+async def handle_nomadnet_auth_add(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/nomadnet/auth/add — add an identity to the allow list."""
+    plugin = _get_plugin(request)
+    nn = plugin.app.get_plugin("nomadnet_server")
+    if not nn or not hasattr(nn, "add_allowed_identity"):
+        return _error("nomadnet_server plugin not available", 503)
+    try:
+        body = await request.json()
+        identity = body.get("identity", "")
+    except Exception:
+        return _error("Invalid request body", 400)
+    if not identity:
+        return _error("identity field is required", 400)
+    try:
+        added = nn.add_allowed_identity(identity)
+        return _ok({"added": added, "identity": identity.strip().lower()})
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+
+async def handle_nomadnet_auth_remove(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/nomadnet/auth/remove — remove an identity from the allow list."""
+    plugin = _get_plugin(request)
+    nn = plugin.app.get_plugin("nomadnet_server")
+    if not nn or not hasattr(nn, "remove_allowed_identity"):
+        return _error("nomadnet_server plugin not available", 503)
+    try:
+        body = await request.json()
+        identity = body.get("identity", "")
+    except Exception:
+        return _error("Invalid request body", 400)
+    if not identity:
+        return _error("identity field is required", 400)
+    removed = nn.remove_allowed_identity(identity)
+    return _ok({"removed": removed, "identity": identity.strip().lower()})
+
+
+# ── Meshtastic gateway ────────────────────────────────────────────────
+
+
+async def handle_meshtastic_status(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshtastic/status — Meshtastic gateway status and message stats."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "get_status"):
+        return _ok({"available": False, "message": "meshtastic_gateway plugin not enabled"})
+    return _ok(gw.get_status())
+
+
+async def handle_meshtastic_nodes(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshtastic/nodes — Known Meshtastic mesh nodes."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "get_meshtastic_nodes"):
+        return _ok({"nodes": [], "message": "meshtastic_gateway plugin not enabled"})
+    return _ok({"nodes": gw.get_meshtastic_nodes()})

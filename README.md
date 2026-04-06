@@ -7,7 +7,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **18 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health
+- **19 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health, Meshtastic gateway
 - **Auto-discovery** -- automatically maintains a pool of community hub connections with health probing, exponential backoff, regional diversity, and peer-to-peer hub exchange
 - **Mesh-aware** -- passively maps network topology, shares telemetry with peers, broadcasts emergencies across the mesh
 - **Remote management** -- manage nodes over Reticulum Links with zero IP dependency (SSH not required)
@@ -658,6 +658,8 @@ Available commands:
 | Command | Example | Description |
 |---------|---------|-------------|
 | `!weather <location>` | `!weather Austin, TX` | Current temperature, conditions, humidity, wind |
+| `!mesh` | `!mesh` | Meshtastic gateway status (connection, mode, message counts) |
+| `!mesh nodes` | `!mesh nodes` | List discovered Meshtastic nodes (name, ID, SNR) |
 | `!help` | `!help` | List available commands |
 
 Messages without a `!` prefix receive a help response. The command system is extensible — new commands can be added to the plugin's command registry.
@@ -1012,6 +1014,135 @@ Generates zero additional network traffic -- it only analyzes existing routing d
 | `alert_on_critical_down` | true | Log warnings when high-traffic relays go down |
 | `critical_path_count` | 5 | Minimum paths relayed to be considered critical |
 
+### Meshtastic Gateway
+
+Bridges [Meshtastic](https://meshtastic.org/) LoRa mesh networks with Reticulum/LXMF. Text messages received on the Meshtastic side are forwarded as LXMF messages to configured recipients, and LXMF messages sent to the gateway's address are forwarded to the Meshtastic channel. This is an **application-layer gateway** -- both networks remain separate; the plugin translates text messages between them.
+
+**Requires:** `pip install meshtastic` (or `pip install reticulumpi[meshtastic]`)
+
+Two connection modes are supported:
+
+| Mode | Connection | Hardware | Best For |
+|------|-----------|----------|----------|
+| **serial** | USB to Meshtastic device | RAK 4631, T-Beam, Heltec, etc. with Meshtastic firmware | Production use, direct radio access |
+| **mqtt** | Meshtastic MQTT broker | None (network only) | Testing, remote monitoring, no-hardware setups |
+
+> **Warning (MQTT mode):** Messages published via MQTT may be rebroadcast over LoRa by any Meshtastic node with MQTT uplink enabled. This creates "MQTT pollution" on the regional LoRa mesh, which the Meshtastic community discourages. Use a private channel or keep rate limits low (`max_messages_per_minute: 2`) to minimize impact. Serial mode does not have this issue -- messages are transmitted once by your local radio only.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `mode` | serial | Connection mode: `serial` (USB device) or `mqtt` (network broker) |
+| `serial_port` | auto | Serial port or `auto` for auto-detection (serial mode only) |
+| `meshtastic_channel` | 0 | Meshtastic channel index (0--7) |
+| `display_name` | \<node_name\> Mesh Gateway | Name shown to LXMF senders and as Meshtastic long_name (MQTT mode) |
+| `short_name` | (derived) | 4-char Meshtastic abbreviation (MQTT mode, max 4 chars, auto-derived if omitted) |
+| `storage_path` | ~/.local/share/reticulumpi/meshtastic_gw_lxmf | LXMF identity and message storage |
+| `max_messages_per_minute` | 2 | Rate limit for LXMF-to-Meshtastic direction (0 = unlimited) |
+| `lxmf_recipients` | [] | LXMF address hashes to forward Meshtastic messages to |
+| `meshtastic_allow_list` | [] | Meshtastic node IDs to accept (empty = all). Format: `!abcd1234` |
+| `lxmf_allow_list` | [] | LXMF sender hashes allowed to forward to Meshtastic (empty = all) |
+| `meshtastic_prefix` | [Mesh] | Prefix added to messages forwarded from Meshtastic |
+| `lxmf_prefix` | [LXMF] | Prefix added to messages forwarded from LXMF |
+| `health_check_interval` | 15 | Seconds between connection health checks |
+| `reconnect_delay` | 10 | Seconds between reconnect attempts |
+| `max_reconnect_attempts` | 10 | Maximum reconnect attempts (0 = unlimited) |
+
+MQTT mode settings (only used when `mode: mqtt`):
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `mqtt.broker` | mqtt.meshtastic.org | MQTT broker hostname |
+| `mqtt.port` | 1883 | MQTT broker port |
+| `mqtt.username` | meshdev | MQTT username |
+| `mqtt.password` | large4cats | MQTT password |
+| `mqtt.root_topic` | msh/US/2/e/LongFast | Meshtastic channel topic |
+| `mqtt.channel_key` | AQ== | Base64 channel encryption key |
+
+**MQTT Identity:** In MQTT mode, the gateway generates a persistent Meshtastic node number on first startup and saves it to `storage_path/meshtastic_node_num`. This ensures the gateway appears as the same node (`!XXXXXXXX`) across restarts. The `display_name` is broadcast as the Meshtastic long_name so other mesh users can identify the gateway. The gateway announces its identity via NODEINFO on connection and every 15 minutes.
+
+#### Message Format
+
+Messages are tagged with sender information when forwarded:
+
+```
+Meshtastic → LXMF:
+[Mesh] NodeName (!abcd1234):
+Hello from Meshtastic
+
+LXMF → Meshtastic:
+[LXMF] <abcdef01234567..>:
+Hello from Reticulum
+```
+
+LXMF-to-Meshtastic messages are truncated to 237 bytes (Meshtastic text MTU) with UTF-8 safe truncation.
+
+#### Example: Serial Mode (USB LoRa Device)
+
+Connect a Meshtastic-firmware device (e.g., RAK 4631, T-Beam) to the Pi via USB. The device must be running **Meshtastic firmware**, not RNode firmware.
+
+```yaml
+plugins:
+  meshtastic_gateway:
+    enabled: true
+    mode: serial
+    serial_port: auto              # or /dev/ttyUSB0, /dev/ttyACM0
+    meshtastic_channel: 0
+    storage_path: ~/.local/share/reticulumpi/meshtastic_gw_lxmf
+    max_messages_per_minute: 2
+    lxmf_recipients:
+      - "abcdef0123456789abcdef0123456789"
+```
+
+#### Example: MQTT Mode (No Hardware)
+
+Connect to the public Meshtastic MQTT broker to monitor and bridge messages without any LoRa hardware:
+
+```yaml
+plugins:
+  meshtastic_gateway:
+    enabled: true
+    mode: mqtt
+    meshtastic_channel: 0
+    storage_path: ~/.local/share/reticulumpi/meshtastic_gw_lxmf
+    max_messages_per_minute: 2
+    mqtt:
+      broker: mqtt.meshtastic.org
+      port: 1883
+      username: meshdev
+      password: large4cats
+      root_topic: "msh/US/2/e/LongFast"
+      channel_key: "AQ=="
+    lxmf_recipients: []
+```
+
+#### Dual-Radio Setup
+
+A Raspberry Pi can run **both** networks simultaneously using two USB LoRa radios:
+
+```
+RAK 4631 (Meshtastic FW) ─── USB ──┐
+                                    ├── Raspberry Pi 5
+RAK 4631 (RNode FW) ─────── USB ──┘
+        │                               │
+        ▼                               ▼
+   meshtastic_gateway plugin    rnsd (Reticulum interfaces)
+   bridges text messages        handles RNS mesh traffic
+```
+
+One radio runs Meshtastic firmware (used by this plugin via serial mode), the other runs RNode firmware (used by Reticulum's `RNodeInterface`). The gateway plugin translates text messages between the two networks at the application layer.
+
+#### Info Bot Integration
+
+When both the Meshtastic gateway and info bot plugins are enabled, send `!mesh` to the info bot to check gateway status, or `!mesh nodes` to list connected Meshtastic nodes.
+
+#### Dashboard Integration
+
+The web dashboard shows a **Meshtastic Gateway** section when the plugin is enabled, displaying connection status, mode, message counts, rate limiting stats, and a table of discovered Meshtastic nodes with name, ID, hardware model, SNR, and last-heard time.
+
+API endpoints:
+- `GET /api/meshtastic/status` -- gateway status and message counters
+- `GET /api/meshtastic/nodes` -- list of known Meshtastic mesh nodes
+
 ## Node Identities
 
 A deployed ReticulumPi node has multiple Reticulum identities. Each LXMF plugin creates its own identity so that plugins can run independently without destination collisions.
@@ -1022,6 +1153,8 @@ A deployed ReticulumPi node has multiple Reticulum identities. Each LXMF plugin 
 | **message_echo** | Echo bot — replies to LXMF messages | `~/.local/share/reticulumpi/lxmf/identity` |
 | **info_bot** | Info bot — responds to `!` commands | `~/.local/share/reticulumpi/info_bot_lxmf/identity` |
 | **alert_system** | LXMF alerts — separate identity for sending | Creates its own `RNS.Identity()` at runtime |
+| **meshtastic_gateway** | Meshtastic↔LXMF bridge — receives LXMF messages to forward | `~/.local/share/reticulumpi/meshtastic_gw_lxmf/identity` |
+| **meshtastic_gateway** (MQTT node) | Persistent Meshtastic node number for MQTT mode | `~/.local/share/reticulumpi/meshtastic_gw_lxmf/meshtastic_node_num` |
 | **NomadNet daemon** | Page server — browsable via NomadNet TUI | `~/.nomadnet/storage/identity` |
 | **NomadNet TUI** | Browse-only client (no node hosting) | `~/.nomadnet-tui/storage/identity` |
 | **MeshChat** | Web UI chat over LXMF | `<install_dir>/storage/identity` |
@@ -1133,7 +1266,7 @@ self.event_bus.publish(events.ALERT_TRIGGERED, {"message": "CPU hot!", "time": t
 self.event_bus.unsubscribe(events.SENSOR_READING, self._on_sensor_reading)
 ```
 
-Available event types: `PLUGIN_STARTED`, `PLUGIN_STOPPED`, `PLUGIN_CRASHED`, `METRICS_UPDATED`, `NODE_DISCOVERED`, `NODE_METRICS_RECEIVED`, `ALERT_TRIGGERED`, `FILE_RECEIVED`, `LINK_ESTABLISHED`, `LINK_CLOSED`, `SENSOR_READING`, `EMERGENCY_RECEIVED`, `HUB_ONLINE`, `HUB_OFFLINE`, `FALLBACK_ACTIVATED`, `FALLBACK_DEACTIVATED`, `HUB_POOL_CONNECTED`, `HUB_POOL_DISCONNECTED`, `HUB_POOL_EXHAUSTED`, `HUB_POOL_DISCOVERED`, `RNSD_DOWN`, `RNSD_RECOVERED`, `INTERFACE_OFFLINE`, `I2P_NO_PEERS`, `PATH_TABLE_EMPTY`, `PATHS_STALE`, `SINGLE_INTERFACE_SPOF`.
+Available event types: `PLUGIN_STARTED`, `PLUGIN_STOPPED`, `PLUGIN_CRASHED`, `METRICS_UPDATED`, `NODE_DISCOVERED`, `NODE_METRICS_RECEIVED`, `ALERT_TRIGGERED`, `FILE_RECEIVED`, `LINK_ESTABLISHED`, `LINK_CLOSED`, `SENSOR_READING`, `EMERGENCY_RECEIVED`, `HUB_ONLINE`, `HUB_OFFLINE`, `FALLBACK_ACTIVATED`, `FALLBACK_DEACTIVATED`, `HUB_POOL_CONNECTED`, `HUB_POOL_DISCONNECTED`, `HUB_POOL_EXHAUSTED`, `HUB_POOL_DISCOVERED`, `RNSD_DOWN`, `RNSD_RECOVERED`, `INTERFACE_OFFLINE`, `I2P_NO_PEERS`, `PATH_TABLE_EMPTY`, `PATHS_STALE`, `SINGLE_INTERFACE_SPOF`, `MESHTASTIC_CONNECTED`, `MESHTASTIC_DISCONNECTED`, `MESHTASTIC_CONNECT_FAILED`, `MESHTASTIC_MESSAGE_RECEIVED`, `MESHTASTIC_MESSAGE_SENT`, `MESHTASTIC_NODEINFO_SENT`.
 
 #### Optional Status Method
 
@@ -1237,6 +1370,7 @@ reticulumPi/
 │       ├── connectivity_monitor.py # Transport health + routing diagnostics
 │       ├── path_warmer.py          # Proactive path refreshing for known nodes
 │       ├── transport_health.py     # Transport relay node reliability tracking
+│       ├── meshtastic_gateway.py  # Meshtastic LoRa ↔ LXMF bridge (serial + MQTT)
 │       ├── web_dashboard/          # Secure web dashboard (aiohttp)
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
@@ -1253,7 +1387,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 426 tests (pytest)
+└── tests/                          # 542 tests (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -1279,6 +1413,7 @@ reticulumPi/
     ├── test_connectivity_monitor.py # Connectivity + routing data tests
     ├── test_path_warmer.py          # Path warming + ensure_path tests
     ├── test_transport_health.py     # Transport node tracking + SQLite tests
+    ├── test_meshtastic_gateway.py   # Meshtastic gateway serial + MQTT + rate limiting tests
     ├── test_routing_api.py          # Routing API endpoint tests
     └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests
 ```

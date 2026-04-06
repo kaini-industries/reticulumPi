@@ -30,6 +30,11 @@ sensors = [
     "smbus2>=0.4",
     "RPi.GPIO>=0.7",
 ]
+meshtastic = [
+    "meshtastic>=2.0",
+    "paho-mqtt>=2.0",
+    "cryptography>=3.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

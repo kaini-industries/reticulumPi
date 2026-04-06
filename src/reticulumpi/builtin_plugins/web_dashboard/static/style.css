@@ -244,6 +244,26 @@ body {
   font-weight: 400;
 }
 
+/* Collapsible sections */
+.section-header.collapsible {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.section-header.collapsible:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.section-header .chevron {
+  display: inline-block;
+  transition: transform 0.2s ease;
+  font-size: 0.75rem;
+  margin-right: 0.25rem;
+  color: var(--text-muted);
+}
+.section-header.open .chevron {
+  transform: rotate(90deg);
+}
+
 /* Tables */
 .data-table {
   width: 100%;
@@ -431,6 +451,44 @@ body {
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
 }
+
+/* Meshtastic gateway overview */
+.meshtastic-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+.meshtastic-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 90px;
+}
+.meshtastic-stat .msh-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.meshtastic-stat .msh-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.msh-self-tag {
+  display: inline-block;
+  font-size: 0.6rem;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  background: var(--accent, #4a6cf7);
+  color: #fff;
+  vertical-align: middle;
+  letter-spacing: 0.04em;
+}
+.msh-self-row { background: rgba(74, 108, 247, 0.06); }
 
 /* Collapsible config */
 .config-toggle {

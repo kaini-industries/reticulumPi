@@ -277,6 +277,57 @@ reticulumpi:
     #  alert_on_critical_down: true    # Alert when high-traffic relay goes down
     #  critical_path_count: 5          # Paths via a node to consider it "critical"
 
+    # Meshtastic Gateway — bridges Meshtastic text messages with LXMF.
+    # Two connection modes:
+    #   serial — USB LoRa device (e.g. RAK 4631 with Meshtastic firmware)
+    #   mqtt   — Meshtastic MQTT broker (no hardware needed, good for testing)
+    # Requires: pip install meshtastic (or: pip install reticulumpi[meshtastic])
+    # Note: This is an application-layer gateway, not a transport bridge.
+    # Both networks remain separate; the gateway translates text messages.
+    #
+    # WARNING (MQTT mode): Messages published via MQTT may be rebroadcast
+    # over LoRa by any Meshtastic node with uplink enabled. Use a private
+    # channel or keep rate limits low to avoid flooding the regional mesh.
+    #meshtastic_gateway:
+    #  enabled: false
+    #  mode: serial                    # "serial" (USB device) or "mqtt" (network)
+    #  serial_port: "auto"             # Serial port or "auto" (serial mode only)
+    #  meshtastic_channel: 0           # Meshtastic channel index to use (0-7)
+    #  storage_path: ~/.local/share/reticulumpi/meshtastic_gw_lxmf
+    #  display_name: "MyNode Mesh GW"  # Defaults to "<node_name> Mesh Gateway"
+    #  short_name: "MNGW"             # 4-char Meshtastic abbreviation (auto-derived if omitted)
+    #  max_messages_per_minute: 2      # Rate limit LXMF->Mesh sends (0=unlimited)
+    #  # MQTT Identity: On first run in MQTT mode, a persistent Meshtastic
+    #  # node number is generated and saved to storage_path/meshtastic_node_num.
+    #  # This ensures the gateway appears as the same node across restarts.
+    #  # The display_name is broadcast as the Meshtastic long_name.
+    #  # MQTT mode settings (only used when mode: mqtt).
+    #  # Connects to a Meshtastic MQTT broker — no hardware required.
+    #  # mqtt:
+    #  #   broker: mqtt.meshtastic.org
+    #  #   port: 1883
+    #  #   username: meshdev
+    #  #   password: large4cats
+    #  #   root_topic: "msh/US/2/e/LongFast"  # Region/channel topic
+    #  #   channel_key: "AQ=="                 # Base64 channel encryption key
+    #  # LXMF destinations to forward Meshtastic messages to.
+    #  # Get addresses from Sideband, MeshChat, or the dashboard.
+    #  lxmf_recipients: []
+    #    # - "abcdef0123456789abcdef0123456789"
+    #  # Meshtastic node IDs allowed to forward (empty = all).
+    #  meshtastic_allow_list: []
+    #    # - "!abcd1234"
+    #  # LXMF sender hashes allowed to forward to Meshtastic (empty = all).
+    #  lxmf_allow_list: []
+    #    # - "abcdef0123456789abcdef0123456789"
+    #  # Message formatting prefixes
+    #  meshtastic_prefix: "[Mesh]"
+    #  lxmf_prefix: "[LXMF]"
+    #  # Connection management
+    #  health_check_interval: 15       # Seconds between health checks
+    #  reconnect_delay: 10             # Seconds between reconnect attempts
+    #  max_reconnect_attempts: 10      # 0 = unlimited
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

@@ -215,6 +215,8 @@ class InfoBot(PluginBase):
             "solar": (self._cmd_solar, "Solar/geomagnetic conditions"),
             "grid": (self._cmd_grid, "Maidenhead grid converter"),
             "reach": (self._cmd_reach, "Node reachability (!reach [hash])"),
+            "pageauth": (self._cmd_pageauth, "NomadNet page access (!pageauth)"),
+            "mesh": (self._cmd_mesh, "Meshtastic gateway (!mesh [nodes])"),
         }
 
         self._active = True
@@ -248,6 +250,8 @@ class InfoBot(PluginBase):
                 content = message.content_as_string().strip()
                 self.log.info("Received message from %s: %s", sender, content[:100])
 
+                # Store sender hash so commands can check identity
+                self._last_sender_hash = sender
                 response = self._route_command(content)
 
                 reply = LXMF.LXMessage(
@@ -868,6 +872,117 @@ class InfoBot(PluginBase):
         if total > 15:
             lines.append(f"\n  ... {total - 15} more (use !reach <name> for details)")
 
+        return "\n".join(lines)
+
+    def _cmd_pageauth(self, args: str = "") -> str:
+        """Manage NomadNet page access control."""
+        nn = self.app.get_plugin("nomadnet_server")
+        if not nn or not hasattr(nn, "get_allowed_identities"):
+            return "NomadNet server plugin not available."
+
+        parts = args.strip().split(None, 1)
+        subcmd = parts[0].lower() if parts else "status"
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcmd in ("status", ""):
+            protected = nn._get_protected_pages() if hasattr(nn, "_get_protected_pages") else []
+            ids = nn.get_allowed_identities()
+            lines = ["NomadNet Page Auth"]
+            lines.append(f"  Protected pages: {len(protected)}")
+            for p in protected[:10]:
+                lines.append(f"    - {p}")
+            lines.append(f"  Authorized identities: {len(ids)}")
+            return "\n".join(lines)
+
+        if subcmd == "list":
+            ids = nn.get_allowed_identities()
+            if not ids:
+                return "No authorized identities."
+            lines = [f"Authorized identities ({len(ids)}):"]
+            for h in ids:
+                lines.append(f"  {h}")
+            return "\n".join(lines)
+
+        # Admin-only commands: add/remove
+        admin_ids = self.config.get("admin_identities", [])
+        if admin_ids:
+            # Check sender identity (from the LXMF message context)
+            # The sender hash is available as the source of the message
+            sender = getattr(self, "_last_sender_hash", "")
+            if sender not in admin_ids:
+                return "Admin access required for add/remove."
+
+        if subcmd == "add":
+            if not arg:
+                return "Usage: !pageauth add <32-hex-hash>"
+            try:
+                added = nn.add_allowed_identity(arg)
+                return f"Identity added: {arg}" if added else f"Already authorized: {arg}"
+            except ValueError as e:
+                return str(e)
+
+        if subcmd == "remove":
+            if not arg:
+                return "Usage: !pageauth remove <32-hex-hash>"
+            removed = nn.remove_allowed_identity(arg)
+            return f"Identity removed: {arg}" if removed else f"Not found: {arg}"
+
+        return "Usage: !pageauth [status|list|add <hash>|remove <hash>]"
+
+    def _cmd_mesh(self, args: str = "") -> str:
+        """Show Meshtastic gateway status and nodes."""
+        gw = self.app.get_plugin("meshtastic_gateway")
+        if not gw or not hasattr(gw, "get_status"):
+            return "Meshtastic gateway plugin not available."
+
+        subcmd = args.strip().lower()
+
+        if subcmd == "nodes":
+            if not hasattr(gw, "get_meshtastic_nodes"):
+                return "Node listing not available."
+            nodes = gw.get_meshtastic_nodes()
+            if not nodes:
+                return "No Meshtastic nodes discovered."
+            lines = [f"Meshtastic Nodes ({len(nodes)}):"]
+            for n in nodes[:20]:
+                name = n.get("long_name") or n.get("short_name") or n["id"]
+                snr = n.get("snr")
+                snr_str = f" SNR:{snr}" if snr is not None else ""
+                lines.append(f"  {name} {n['id']}{snr_str}")
+            if len(nodes) > 20:
+                lines.append(f"  ... and {len(nodes) - 20} more")
+            return "\n".join(lines)
+
+        # Default: status summary
+        status = gw.get_status()
+        connected = "Connected" if status.get("connected") else "Disconnected"
+        mode = status.get("mode", "serial")
+        lines = [
+            "Meshtastic Gateway",
+            f"  Status: {connected}",
+            f"  Mode: {mode}",
+        ]
+        # Mode-specific connection info
+        if mode == "mqtt":
+            lines.append(f"  Broker: {status.get('mqtt_broker', '?')}")
+            lines.append(f"  Topic: {status.get('mqtt_topic', '?')}")
+        else:
+            lines.append(f"  Port: {status.get('serial_port', '?')}")
+        lines.append(f"  Channel: {status.get('meshtastic_channel', 0)}")
+        lines.append(f"  Mesh->LXMF: {status.get('msgs_mesh_to_lxmf', 0)} msgs")
+        lines.append(f"  LXMF->Mesh: {status.get('msgs_lxmf_to_mesh', 0)} msgs")
+        rate_limited = status.get("msgs_rate_limited", 0)
+        if rate_limited > 0:
+            lines.append(f"  Rate-limited: {rate_limited} msgs")
+        rate_limit = status.get("rate_limit_per_min")
+        if rate_limit:
+            lines.append(f"  Rate limit: {rate_limit}/min")
+        lines.append(f"  LXMF recipients: {status.get('lxmf_recipients', 0)}")
+        mesh_nodes = status.get("meshtastic_nodes")
+        if mesh_nodes is not None:
+            lines.append(f"  Mesh nodes: {mesh_nodes}")
+        lines.append("")
+        lines.append("Use !mesh nodes for node list")
         return "\n".join(lines)
 
     def _cmd_weather(self, args: str) -> str:

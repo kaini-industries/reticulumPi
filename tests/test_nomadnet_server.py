@@ -1,6 +1,7 @@
 """Tests for the NomadNet Server plugin."""
 
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -368,6 +369,237 @@ class TestWriteDefaultConfig:
 
         with open(config_file) as f:
             assert f.read() == "existing config"
+
+
+class TestAuth:
+    """Tests for the NomadNet page authentication system."""
+
+    def _make_auth_plugin(self, mock_app, tmp_path, auth_config=None):
+        """Create a plugin with auth config and a pages directory."""
+        pages_dir = tmp_path / "nomadnet" / "storage" / "pages"
+        pages_dir.mkdir(parents=True)
+        # Create some .mu pages
+        (pages_dir / "index.mu").write_text("`!Index")
+        (pages_dir / "status.mu").write_text("#!/usr/bin/env python3\nprint('ok')")
+        (pages_dir / "network.mu").write_text("#!/usr/bin/env python3\nprint('net')")
+        (pages_dir / "help.mu").write_text("`!Help")
+
+        config = {
+            "enabled": True,
+            "config_dir": str(tmp_path / "nomadnet"),
+            "health_check_interval": 10,
+            "max_restarts": 3,
+        }
+        if auth_config:
+            config["auth"] = auth_config
+
+        plugin = _make_plugin(mock_app, config)
+        plugin._pages_dir = str(pages_dir)
+        plugin._config_dir = str(tmp_path / "nomadnet")
+        return plugin
+
+    def test_sync_creates_allowed_shims(self, mock_app, tmp_path):
+        allow_path = str(tmp_path / "allowed_ids")
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": allow_path,
+            "protected_pages": ["status.mu", "network.mu"],
+        })
+        plugin._sync_allowed_files()
+
+        shim = os.path.join(plugin._pages_dir, "status.mu.allowed")
+        assert os.path.isfile(shim)
+        assert os.access(shim, os.X_OK)
+        with open(shim) as f:
+            content = f.read()
+        assert "#!/bin/sh" in content
+        assert allow_path in content
+
+        # index.mu should NOT have a shim
+        assert not os.path.isfile(
+            os.path.join(plugin._pages_dir, "index.mu.allowed")
+        )
+
+    def test_sync_removes_stale_shims(self, mock_app, tmp_path):
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": ["status.mu"],
+        })
+        # First sync: creates shim for status.mu
+        plugin._sync_allowed_files()
+        shim = os.path.join(plugin._pages_dir, "status.mu.allowed")
+        assert os.path.isfile(shim)
+
+        # Change config to un-protect status.mu
+        plugin.config["auth"]["protected_pages"] = []
+        plugin._sync_allowed_files()
+        assert not os.path.isfile(shim)
+
+    def test_sync_all_pages(self, mock_app, tmp_path):
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": "all",
+            "public_pages": ["index.mu", "help.mu"],
+        })
+        plugin._sync_allowed_files()
+
+        # status.mu and network.mu should be protected
+        assert os.path.isfile(
+            os.path.join(plugin._pages_dir, "status.mu.allowed")
+        )
+        assert os.path.isfile(
+            os.path.join(plugin._pages_dir, "network.mu.allowed")
+        )
+        # index.mu and help.mu should NOT be protected
+        assert not os.path.isfile(
+            os.path.join(plugin._pages_dir, "index.mu.allowed")
+        )
+        assert not os.path.isfile(
+            os.path.join(plugin._pages_dir, "help.mu.allowed")
+        )
+
+    def test_add_identity(self, mock_app, tmp_path):
+        allow_path = str(tmp_path / "allowed_ids")
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": allow_path,
+            "protected_pages": [],
+        })
+        result = plugin.add_allowed_identity("aa" * 16)
+        assert result is True
+        ids = plugin.get_allowed_identities()
+        assert "aa" * 16 in ids
+
+    def test_add_identity_invalid_format(self, mock_app, tmp_path):
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": [],
+        })
+        with pytest.raises(ValueError, match="Invalid identity hash"):
+            plugin.add_allowed_identity("not_hex")
+        with pytest.raises(ValueError, match="Invalid identity hash"):
+            plugin.add_allowed_identity("aa" * 8)  # too short (16 chars)
+
+    def test_add_identity_duplicate(self, mock_app, tmp_path):
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": [],
+        })
+        plugin.add_allowed_identity("bb" * 16)
+        result = plugin.add_allowed_identity("bb" * 16)
+        assert result is False
+        ids = plugin.get_allowed_identities()
+        assert ids.count("bb" * 16) == 1
+
+    def test_remove_identity(self, mock_app, tmp_path):
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": [],
+        })
+        plugin.add_allowed_identity("cc" * 16)
+        result = plugin.remove_allowed_identity("cc" * 16)
+        assert result is True
+        assert "cc" * 16 not in plugin.get_allowed_identities()
+
+    def test_remove_identity_not_found(self, mock_app, tmp_path):
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": [],
+        })
+        result = plugin.remove_allowed_identity("dd" * 16)
+        assert result is False
+
+    def test_shim_executes_correctly(self, mock_app, tmp_path):
+        allow_path = str(tmp_path / "allowed_ids")
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": allow_path,
+            "protected_pages": ["status.mu"],
+        })
+        # Add an identity, then sync shims
+        plugin.add_allowed_identity("ee" * 16)
+        plugin._sync_allowed_files()
+
+        # Execute the shim and check output
+        shim = os.path.join(plugin._pages_dir, "status.mu.allowed")
+        result = subprocess.run(
+            [shim], capture_output=True, text=True, timeout=5,
+        )
+        assert ("ee" * 16) in result.stdout
+
+    def test_missing_allow_file_denies_all(self, mock_app, tmp_path):
+        allow_path = str(tmp_path / "nonexistent_file")
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": allow_path,
+            "protected_pages": ["status.mu"],
+        })
+        plugin._sync_allowed_files()
+
+        shim = os.path.join(plugin._pages_dir, "status.mu.allowed")
+        result = subprocess.run(
+            [shim], capture_output=True, text=True, timeout=5,
+        )
+        assert result.stdout.strip() == ""
+
+    def test_get_status_includes_auth(self, mock_app, tmp_path):
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": ["status.mu"],
+        })
+        plugin._process = None
+        plugin._pid = None
+        plugin._restart_count = 0
+        plugin._active = True
+
+        status = plugin.get_status()
+        assert "auth" in status
+        assert status["auth"]["allowed_count"] == 0
+        assert "status.mu" in status["auth"]["protected_pages"]
+
+    def test_no_auth_config_skips_sync(self, mock_app, tmp_path):
+        """Plugin without auth config does not create .allowed files."""
+        plugin = self._make_auth_plugin(mock_app, tmp_path, auth_config=None)
+        plugin._sync_allowed_files()
+        # No .allowed files should exist
+        for f in os.listdir(plugin._pages_dir):
+            assert not f.endswith(".allowed")
+
+    def test_validate_config_invalid_protected_pages(self, mock_app, tmp_path):
+        from reticulumpi.builtin_plugins.nomadnet_server import NomadNetServer
+
+        config = {
+            "enabled": True,
+            "config_dir": str(tmp_path / "nomadnet"),
+            "auth": {"protected_pages": 123},
+        }
+        with patch("shutil.which", return_value="nomadnet"):
+            with pytest.raises(ValueError, match="protected_pages"):
+                NomadNetServer(mock_app, config)
+
+    def test_validate_config_invalid_public_pages(self, mock_app, tmp_path):
+        from reticulumpi.builtin_plugins.nomadnet_server import NomadNetServer
+
+        config = {
+            "enabled": True,
+            "config_dir": str(tmp_path / "nomadnet"),
+            "auth": {"public_pages": "not_a_list"},
+        }
+        with patch("shutil.which", return_value="nomadnet"):
+            with pytest.raises(ValueError, match="public_pages"):
+                NomadNetServer(mock_app, config)
+
+    def test_add_publishes_event(self, mock_app, tmp_path):
+        from reticulumpi.event_bus import EventBus
+
+        mock_app.event_bus = EventBus()
+        plugin = self._make_auth_plugin(mock_app, tmp_path, {
+            "allow_list_path": str(tmp_path / "allowed_ids"),
+            "protected_pages": [],
+        })
+        received = []
+        mock_app.event_bus.subscribe(
+            "nomadnet.auth.identity_added", lambda e, d: received.append(d)
+        )
+        plugin.add_allowed_identity("ff" * 16)
+        assert len(received) == 1
+        assert received[0]["identity"] == "ff" * 16
 
 
 class TestExamplePages:

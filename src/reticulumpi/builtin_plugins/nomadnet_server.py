@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
+import stat
 import subprocess
 from typing import Any
 
+from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
+
+_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
+_DEFAULT_ALLOW_LIST_PATH = "~/.config/reticulumpi/nomadnet_allowed_identities"
 
 # Minimal NomadNet config with node hosting enabled.
 # Written before first launch so NomadNet starts serving pages immediately
@@ -71,6 +77,17 @@ class NomadNetServer(PluginBase):
         if not isinstance(max_restarts, int) or max_restarts < 0:
             raise ValueError("max_restarts must be a non-negative integer")
 
+        auth = self.config.get("auth")
+        if auth:
+            pp = auth.get("protected_pages")
+            if pp is not None and pp != "all" and not isinstance(pp, list):
+                raise ValueError(
+                    "auth.protected_pages must be a list of filenames or 'all'"
+                )
+            pub = auth.get("public_pages")
+            if pub is not None and not isinstance(pub, list):
+                raise ValueError("auth.public_pages must be a list of filenames")
+
     def start(self) -> None:
         self._active = True
         self._process: subprocess.Popen[bytes] | None = None
@@ -86,6 +103,7 @@ class NomadNetServer(PluginBase):
         self._ensure_directories()
         self._write_default_config()
         self._install_example_pages()
+        self._sync_allowed_files()
 
         rns_config_dir = self.app._reticulum_config_dir or os.path.expanduser(
             "~/.reticulum"
@@ -114,13 +132,19 @@ class NomadNetServer(PluginBase):
 
     def get_status(self) -> dict[str, Any]:
         running = self._process is not None and self._process.poll() is None
-        return {
+        status: dict[str, Any] = {
             "active": self._active,
             "pid": self._pid,
             "running": running,
             "config_dir": getattr(self, "_config_dir", None),
             "restart_count": self._restart_count,
         }
+        if self.config.get("auth"):
+            status["auth"] = {
+                "allowed_count": len(self.get_allowed_identities()),
+                "protected_pages": self._get_protected_pages(),
+            }
+        return status
 
     def _launch_process(self, cmd: list[str]) -> None:
         self._process = subprocess.Popen(
@@ -188,6 +212,130 @@ class NomadNetServer(PluginBase):
                         "NomadNet exceeded max restarts (%d), giving up", max_restarts
                     )
                     self._active = False
+
+    # --- Page authentication ---
+
+    def _get_allow_list_path(self) -> str:
+        auth = self.config.get("auth", {})
+        return os.path.expanduser(
+            auth.get("allow_list_path", _DEFAULT_ALLOW_LIST_PATH)
+        )
+
+    def get_allowed_identities(self) -> list[str]:
+        """Return the current list of authorized identity hashes."""
+        return self._load_allowed_identities()
+
+    def add_allowed_identity(self, hex_hash: str) -> bool:
+        """Add an identity hash to the allow list.
+
+        Returns True if added, False if already present.
+        Raises ValueError for invalid hash format.
+        """
+        hex_hash = hex_hash.strip().lower()
+        if not _HASH_RE.match(hex_hash):
+            raise ValueError(
+                f"Invalid identity hash (need 32 lowercase hex chars): {hex_hash!r}"
+            )
+        identities = self._load_allowed_identities()
+        if hex_hash in identities:
+            return False
+        identities.append(hex_hash)
+        self._save_allowed_identities(identities)
+        self.log.info("Added allowed identity: %s", hex_hash[:16])
+        self.event_bus.publish(
+            events.NOMADNET_AUTH_IDENTITY_ADDED, {"identity": hex_hash}
+        )
+        return True
+
+    def remove_allowed_identity(self, hex_hash: str) -> bool:
+        """Remove an identity hash from the allow list.
+
+        Returns True if removed, False if not found.
+        """
+        hex_hash = hex_hash.strip().lower()
+        identities = self._load_allowed_identities()
+        if hex_hash not in identities:
+            return False
+        identities.remove(hex_hash)
+        self._save_allowed_identities(identities)
+        self.log.info("Removed allowed identity: %s", hex_hash[:16])
+        self.event_bus.publish(
+            events.NOMADNET_AUTH_IDENTITY_REMOVED, {"identity": hex_hash}
+        )
+        return True
+
+    def _load_allowed_identities(self) -> list[str]:
+        path = self._get_allow_list_path()
+        if not os.path.isfile(path):
+            return []
+        identities = []
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip().lower()
+                    if not line or line.startswith("#"):
+                        continue
+                    if _HASH_RE.match(line):
+                        identities.append(line)
+        except OSError:
+            self.log.debug("Could not read allow list at %s", path)
+        return identities
+
+    def _save_allowed_identities(self, identities: list[str]) -> None:
+        path = self._get_allow_list_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            for h in identities:
+                f.write(h + "\n")
+
+    def _get_protected_pages(self) -> list[str]:
+        auth = self.config.get("auth", {})
+        pp = auth.get("protected_pages")
+        if not pp:
+            return []
+        if pp == "all":
+            public = set(auth.get("public_pages", []))
+            pages_dir = getattr(self, "_pages_dir", "")
+            if not pages_dir or not os.path.isdir(pages_dir):
+                return []
+            return [
+                f
+                for f in os.listdir(pages_dir)
+                if f.endswith(".mu") and f not in public
+            ]
+        return list(pp) if isinstance(pp, list) else []
+
+    def _sync_allowed_files(self) -> None:
+        """Generate or remove .allowed shim scripts for protected pages."""
+        auth = self.config.get("auth")
+        if not auth:
+            return
+
+        pages_dir = getattr(self, "_pages_dir", "")
+        if not pages_dir or not os.path.isdir(pages_dir):
+            return
+
+        protected = set(self._get_protected_pages())
+        allow_list_path = self._get_allow_list_path()
+
+        shim_content = f"#!/bin/sh\ncat {allow_list_path} 2>/dev/null\n"
+
+        for mu_file in os.listdir(pages_dir):
+            if not mu_file.endswith(".mu"):
+                continue
+            allowed_path = os.path.join(pages_dir, mu_file + ".allowed")
+
+            if mu_file in protected:
+                # Write (or refresh) the shim
+                with open(allowed_path, "w") as f:
+                    f.write(shim_content)
+                os.chmod(allowed_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
+                self.log.debug("Wrote .allowed shim for %s", mu_file)
+            else:
+                # Remove stale shim if present
+                if os.path.isfile(allowed_path):
+                    os.remove(allowed_path)
+                    self.log.debug("Removed stale .allowed for %s", mu_file)
 
     def _ensure_directories(self) -> None:
         for d in (self._config_dir, self._pages_dir, self._files_dir):

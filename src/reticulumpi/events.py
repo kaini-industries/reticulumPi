@@ -63,3 +63,15 @@ TRANSPORT_NODE_DOWN = "transport_node.down"
 TRANSPORT_NODE_RECOVERED = "transport_node.recovered"
 TRANSPORT_NODE_DEGRADED = "transport_node.degraded"
 TRANSPORT_NODE_DISCOVERED = "transport_node.discovered"
+
+# NomadNet page auth
+NOMADNET_AUTH_IDENTITY_ADDED = "nomadnet.auth.identity_added"
+NOMADNET_AUTH_IDENTITY_REMOVED = "nomadnet.auth.identity_removed"
+
+# Meshtastic gateway
+MESHTASTIC_CONNECTED = "meshtastic.connected"
+MESHTASTIC_DISCONNECTED = "meshtastic.disconnected"
+MESHTASTIC_CONNECT_FAILED = "meshtastic.connect_failed"
+MESHTASTIC_MESSAGE_RECEIVED = "meshtastic.message_received"
+MESHTASTIC_MESSAGE_SENT = "meshtastic.message_sent"
+MESHTASTIC_NODEINFO_SENT = "meshtastic.nodeinfo_sent"

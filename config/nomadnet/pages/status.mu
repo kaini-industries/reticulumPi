@@ -288,6 +288,11 @@ else:
 print("-")
 
 # --- Footer ---
+viewer = os.environ.get("remote_identity", None)
+if viewer:
+    print(f"`c  Viewed by: {viewer[:16]}...")
+else:
+    print("`c  Viewed by: anonymous")
 print("")
 print("`cPowered by ReticulumPi")
 print("`c`[`:/page/index.mu`Return to Home]")
