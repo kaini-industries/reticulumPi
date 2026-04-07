@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import signal
 import threading
+import time
 from typing import Any
 
 import RNS
@@ -81,18 +83,67 @@ class ReticulumPiApp:
         log.info("ReticulumPi is running. Press Ctrl+C to stop.")
         self._shutdown_event.wait()
 
+    # Leave 5s headroom under systemd's TimeoutStopSec=30
+    SHUTDOWN_TIMEOUT: float = 25.0
+    PLUGIN_STOP_TIMEOUT: float = 10.0
+
     def shutdown(self) -> None:
         """Gracefully stop all plugins and signal the run loop to exit."""
-        log.info("Shutting down ReticulumPi...")
+        deadline = time.monotonic() + self.SHUTDOWN_TIMEOUT
+        log.info("Shutting down ReticulumPi (%.0fs budget)...", self.SHUTDOWN_TIMEOUT)
+
+        # Give plugins a chance to flush buffers, deregister from network, etc.
+        try:
+            self.event_bus.publish(events.SHUTDOWN_STARTING, {})
+        except Exception:
+            log.exception("Error publishing shutdown event")
+
+        # Stop plugins in reverse order with per-plugin timeout
         for name, plugin in reversed(list(self.plugins.items())):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.warning("Shutdown deadline reached — skipping remaining plugins")
+                break
+            timeout = min(self.PLUGIN_STOP_TIMEOUT, remaining)
             try:
-                plugin.stop()
-                log.info("Stopped plugin: %s", name)
-                self.event_bus.publish(events.PLUGIN_STOPPED, {"name": name})
+                self._stop_plugin_with_timeout(name, plugin, timeout)
             except Exception:
                 log.exception("Error stopping plugin: %s", name)
+
+        # Clean up Reticulum instance
+        self._cleanup_rns()
+
         self._shutdown_event.set()
-        log.info("ReticulumPi stopped.")
+        elapsed = self.SHUTDOWN_TIMEOUT - (deadline - time.monotonic())
+        log.info("ReticulumPi stopped in %.1fs.", elapsed)
+
+    def _stop_plugin_with_timeout(
+        self, name: str, plugin: PluginBase, timeout: float
+    ) -> None:
+        """Stop a single plugin, enforcing a wall-clock timeout."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(plugin.stop)
+            try:
+                future.result(timeout=timeout)
+                log.info("Stopped plugin: %s", name)
+                self.event_bus.publish(events.PLUGIN_STOPPED, {"name": name})
+            except concurrent.futures.TimeoutError:
+                log.warning(
+                    "Plugin '%s' did not stop within %.1fs — moving on", name, timeout
+                )
+            except Exception:
+                log.exception("Error stopping plugin: %s", name)
+
+    def _cleanup_rns(self) -> None:
+        """Tear down the Reticulum instance if we own it."""
+        if self.reticulum is None:
+            return
+        try:
+            RNS.Transport.exit_handler()
+            log.info("Reticulum transport cleaned up")
+        except Exception:
+            log.debug("Reticulum transport cleanup skipped", exc_info=True)
+        self.reticulum = None
 
     def get_plugin(self, name: str) -> PluginBase | None:
         """Get a running plugin by name, for inter-plugin communication."""

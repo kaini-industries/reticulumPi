@@ -76,6 +76,9 @@ MESHTASTIC_MESSAGE_RECEIVED = "meshtastic.message_received"
 MESHTASTIC_MESSAGE_SENT = "meshtastic.message_sent"
 MESHTASTIC_NODEINFO_SENT = "meshtastic.nodeinfo_sent"
 
+# Shutdown
+SHUTDOWN_STARTING = "shutdown.starting"
+
 # Messaging hub
 MESSAGE_RECEIVED = "messaging.message_received"
 MESSAGE_SENT = "messaging.message_sent"

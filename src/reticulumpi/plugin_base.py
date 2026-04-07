@@ -50,9 +50,24 @@ class PluginBase(ABC):
         return {"active": self._active}
 
     def _join_threads(self, timeout: float = 5.0) -> None:
-        """Wait for all tracked threads to finish."""
+        """Wait for all tracked threads to finish within a shared deadline.
+
+        The *timeout* is a total wall-clock budget shared across all threads,
+        not a per-thread allowance.  This prevents a plugin with many threads
+        from consuming N * timeout seconds.
+        """
+        deadline = time.monotonic() + timeout
         for thread in self._threads:
-            thread.join(timeout=timeout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.log.warning(
+                    "Thread join deadline reached — %d thread(s) still alive",
+                    sum(1 for t in self._threads if t.is_alive()),
+                )
+                break
+            thread.join(timeout=remaining)
+            if thread.is_alive():
+                self.log.warning("Thread '%s' did not exit in time", thread.name)
         self._threads.clear()
 
     def _sleep_while_active(self, seconds: float) -> None:
