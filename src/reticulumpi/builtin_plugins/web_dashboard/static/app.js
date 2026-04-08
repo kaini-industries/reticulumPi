@@ -10,6 +10,9 @@
   var uptimeStart = 0;
   var uptimeTimer = null;
   var prevIfaces = {};      // {name: {rxb, txb, time}} for rate calculation
+  var configIfaces = {};    // {name: {enabled, type, properties}} from config file
+  var pendingRestart = false;
+  var lastLiveIfaces = [];  // last live interfaces from RNS
 
   // --- Helpers ---
 
@@ -72,6 +75,28 @@
     return 'metric-ok';
   }
 
+  // --- Section freshness tracking ---
+
+  var _sectionUpdated = {};  // sectionId -> timestamp (seconds)
+  var _STALE_THRESHOLD = 30; // seconds before marking stale
+
+  function markUpdated(sectionId) {
+    _sectionUpdated[sectionId] = Date.now() / 1000;
+  }
+
+  function _refreshFreshness() {
+    var now = Date.now() / 1000;
+    for (var id in _sectionUpdated) {
+      var el = document.querySelector('#' + id + ' .freshness');
+      if (!el) continue;
+      var age = Math.floor(now - _sectionUpdated[id]);
+      if (age < 2) { el.textContent = 'just now'; el.className = 'freshness'; }
+      else if (age < 60) { el.textContent = age + 's ago'; el.className = 'freshness' + (age >= _STALE_THRESHOLD ? ' stale' : ''); }
+      else { el.textContent = Math.floor(age / 60) + 'm ago'; el.className = 'freshness stale'; }
+    }
+  }
+  setInterval(_refreshFreshness, 2000);
+
   // --- Rendering ---
 
   function setMetric(id, value, unit, warnAt, critAt) {
@@ -89,6 +114,7 @@
 
   function updateMetrics(metrics) {
     if (!metrics) return;
+    markUpdated('metrics-grid');
     setMetric('m-cpu', metrics.cpu_percent, '%', 70, 90);
     setMetric('m-temp', metrics.cpu_temp, '\u00B0C', 65, 80);
     setMetric('m-mem', metrics.memory_percent, '%', 70, 90);
@@ -161,51 +187,191 @@
   function updateInterfaces(interfaces) {
     var tbody = $('interfaces-table');
     if (!tbody) return;
-    if (!interfaces || interfaces.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4">No interfaces detected</td></tr>';
+    markUpdated('interfaces-section');
+    lastLiveIfaces = interfaces || [];
+
+    // Build merged list: union of config interfaces and live interfaces
+    var merged = [];
+    var liveByName = {};
+    for (var i = 0; i < lastLiveIfaces.length; i++) {
+      // Live interface names from rnsd look like "TCPInterface[TCP Client beleth/host:port]"
+      // Extract the label portion for matching against config names
+      var raw = lastLiveIfaces[i].name || '';
+      var label = _extractIfaceLabel(raw);
+      liveByName[label] = lastLiveIfaces[i];
+    }
+
+    // Start with config interfaces (preserves config order, shows disabled ones)
+    var seen = {};
+    var configNames = Object.keys(configIfaces);
+    for (var c = 0; c < configNames.length; c++) {
+      var cname = configNames[c];
+      var cfg = configIfaces[cname];
+      var live = liveByName[cname] || null;
+      merged.push({name: cname, cfg: cfg, live: live});
+      seen[cname] = true;
+    }
+    // Add any live interfaces not in config (shouldn't happen, but be safe)
+    for (var lname in liveByName) {
+      if (!seen[lname]) {
+        merged.push({name: lname, cfg: null, live: liveByName[lname]});
+      }
+    }
+
+    if (merged.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5">No interfaces detected</td></tr>';
       $('iface-count').textContent = '0';
       return;
     }
 
     var now = Date.now() / 1000;
     var html = '';
-    for (var i = 0; i < interfaces.length; i++) {
-      var iface = interfaces[i];
-      var online = iface.online !== false;
-      var dotClass = online ? 'status-active' : 'status-inactive';
+    var activeCount = 0;
+    for (var m = 0; m < merged.length; m++) {
+      var entry = merged[m];
+      var isEnabled = entry.cfg ? entry.cfg.enabled : true;
+      var isLive = entry.live != null;
+      var online = isLive && entry.live.online !== false;
+      var rowClass = isEnabled ? '' : ' class="row-disabled"';
 
+      // Toggle switch (no inline handler — CSP blocks inline scripts)
+      var toggleHtml = '';
+      if (entry.cfg) {
+        var checked = isEnabled ? ' checked' : '';
+        toggleHtml = '<label class="toggle-switch">'
+          + '<input type="checkbox"' + checked + ' data-iface="' + esc(entry.name) + '">'
+          + '<span class="toggle-slider"></span>'
+          + '</label>';
+      }
+
+      // Status
+      var statusHtml;
+      if (!isEnabled) {
+        statusHtml = '<span class="text-muted">Disabled</span>';
+      } else if (isLive) {
+        var dotClass = online ? 'status-active' : 'status-inactive';
+        statusHtml = '<span class="status-dot ' + dotClass + '"></span>' + (online ? 'Online' : 'Offline');
+        activeCount++;
+      } else {
+        statusHtml = '<span class="text-muted">Not active</span>';
+      }
+
+      // Traffic
       var traffic = '';
-      if (iface.rxb != null || iface.txb != null) {
-        // Calculate rates from previous reading
+      if (isLive && (entry.live.rxb != null || entry.live.txb != null)) {
         var rxRate = null, txRate = null;
-        var prev = prevIfaces[iface.name];
+        var prev = prevIfaces[entry.name];
         if (prev) {
           var dt = now - prev.time;
           if (dt > 0.5) {
-            rxRate = (iface.rxb - prev.rxb) / dt;
-            txRate = (iface.txb - prev.txb) / dt;
+            rxRate = (entry.live.rxb - prev.rxb) / dt;
+            txRate = (entry.live.txb - prev.txb) / dt;
           }
         }
-
-        traffic = 'RX: ' + formatBytes(iface.rxb);
+        traffic = 'RX: ' + formatBytes(entry.live.rxb);
         if (rxRate != null) traffic += ' (' + formatRate(rxRate) + ')';
-        traffic += ' / TX: ' + formatBytes(iface.txb);
+        traffic += ' / TX: ' + formatBytes(entry.live.txb);
         if (txRate != null) traffic += ' (' + formatRate(txRate) + ')';
-
-        // Store for next calculation
-        prevIfaces[iface.name] = {rxb: iface.rxb, txb: iface.txb, time: now};
+        prevIfaces[entry.name] = {rxb: entry.live.rxb, txb: entry.live.txb, time: now};
+      } else if (!isEnabled) {
+        traffic = '<span class="text-muted">\u2014</span>';
       }
 
-      html += '<tr>'
-        + '<td>' + esc(iface.name) + '</td>'
-        + '<td>' + esc(iface.type) + '</td>'
-        + '<td><span class="status-dot ' + dotClass + '"></span>' + (online ? 'Online' : 'Offline') + '</td>'
+      // Type from config or live
+      var ifaceType = (entry.cfg ? entry.cfg.type : '') || (entry.live ? entry.live.type : '');
+
+      html += '<tr' + rowClass + '>'
+        + '<td>' + toggleHtml + '</td>'
+        + '<td>' + esc(entry.name) + '</td>'
+        + '<td>' + esc(ifaceType) + '</td>'
+        + '<td>' + statusHtml + '</td>'
         + '<td>' + traffic + '</td>'
         + '</tr>';
     }
 
     tbody.innerHTML = html;
-    $('iface-count').textContent = interfaces.length + ' active';
+    var total = configNames.length || lastLiveIfaces.length;
+    $('iface-count').textContent = activeCount + '/' + total;
+  }
+
+  function _extractIfaceLabel(rnsName) {
+    // "TCPInterface[TCP Client beleth/host:port]" -> "TCP Client beleth"
+    // "AutoInterface[Auto Discovery Interface]" -> "Auto Discovery Interface"
+    var m = rnsName.match(/\[([^\]\/]+)/);
+    if (m) return m[1].trim();
+    return rnsName;
+  }
+
+  function fetchInterfacesConfig() {
+    api('/api/interfaces/config').then(function(r) {
+      if (!r || !r.ok) return;
+      configIfaces = {};
+      var ifaces = r.data.interfaces || [];
+      for (var i = 0; i < ifaces.length; i++) {
+        configIfaces[ifaces[i].name] = ifaces[i];
+      }
+      // Re-render with merged data
+      updateInterfaces(lastLiveIfaces);
+    });
+  }
+
+  window._toggleIface = function(name) {
+    // Optimistic update so WebSocket re-renders don't revert the toggle
+    var prev = configIfaces[name] ? configIfaces[name].enabled : true;
+    if (configIfaces[name]) configIfaces[name].enabled = !prev;
+    pendingRestart = true;
+    $('restart-banner').classList.remove('hidden');
+    updateInterfaces(lastLiveIfaces);
+
+    api('/api/interfaces/' + encodeURIComponent(name) + '/toggle', {method: 'POST'})
+      .then(function(r) {
+        if (!r || !r.ok) {
+          // Revert on failure
+          if (configIfaces[name]) configIfaces[name].enabled = prev;
+          updateInterfaces(lastLiveIfaces);
+          alert('Toggle failed: ' + (r ? r.error : 'no response'));
+          return;
+        }
+        // Confirm with server state
+        if (configIfaces[name]) configIfaces[name].enabled = r.data.enabled;
+      });
+  };
+
+  function doRestart() {
+    if (!confirm('Restart rnsd and reticulumpi? The dashboard will be briefly unavailable.')) return;
+    var btn = $('restart-btn');
+    btn.disabled = true;
+    btn.textContent = 'Restarting\u2026';
+    api('/api/services/restart', {method: 'POST'}).then(function() {
+      startRestartWatcher();
+    });
+  }
+
+  function startRestartWatcher() {
+    var attempts = 0;
+    var maxAttempts = 30;
+    var check = setInterval(function() {
+      attempts++;
+      fetch('/api/status', {credentials: 'same-origin'})
+        .then(function(r) {
+          if (r.ok) {
+            clearInterval(check);
+            pendingRestart = false;
+            $('restart-banner').classList.add('hidden');
+            var btn = $('restart-btn');
+            btn.disabled = false;
+            btn.textContent = 'Restart Services';
+            window.location.reload();
+          }
+        })
+        .catch(function() { /* still down */ });
+      if (attempts >= maxAttempts) {
+        clearInterval(check);
+        var btn = $('restart-btn');
+        btn.textContent = 'Restart timed out \u2014 refresh page';
+        btn.disabled = false;
+      }
+    }, 3000);
   }
 
   // Mesh node sorting state
@@ -412,6 +578,7 @@
   }
 
   function updateMeshNodes(nodes) {
+    markUpdated('mesh-section');
     _meshNodes = nodes || [];
     var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
     renderMeshNodes(sorted);
@@ -518,7 +685,7 @@
     var tbody = $('files-table');
     if (!tbody) return;
     if (!files || files.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="3">No shared files</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="3" class="text-muted">No shared files</td></tr>';
       $('files-count').textContent = '0';
       return;
     }
@@ -627,8 +794,9 @@
   function updateSensors(sensors) {
     var grid = $('sensors-grid');
     if (!grid) return;
+    markUpdated('sensors-section');
     if (!sensors || Object.keys(sensors).length === 0) {
-      grid.innerHTML = '<div class="sensor-card"><div class="sensor-name">No sensor data available</div></div>';
+      grid.innerHTML = '<div class="sensor-card"><div class="sensor-name text-muted">No sensor plugins active</div></div>';
       $('sensors-count').textContent = '';
       return;
     }
@@ -725,9 +893,10 @@
   function updateEmergency(data) {
     var tbody = $('emergency-table');
     if (!tbody) return;
+    markUpdated('emergency-section');
     var messages = data.messages || [];
     if (messages.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5">No emergency broadcasts</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No emergency broadcasts</td></tr>';
       $('emergency-count').textContent = '0';
       return;
     }
@@ -750,6 +919,7 @@
 
   function updateConnectivity(data) {
     if (!data || !$('connectivity-indicators')) return;
+    markUpdated('connectivity-section');
 
     // rnsd indicator
     var ciRnsd = $('ci-rnsd');
@@ -856,14 +1026,24 @@
 
   function fetchTransports() {
     api('/api/messages/transports').then(function(r) {
-      if (!r || !r.ok) return;
+      var section = $('messaging-section');
+      if (!r || !r.ok) {
+        // API unavailable — show disabled state
+        if (section) {
+          $('msg-count').textContent = 'unavailable';
+          $('msg-count').style.color = 'var(--text-muted)';
+        }
+        return;
+      }
       _msgTransports = r.data.transports || [];
       updateTransportDropdowns();
-      // Show section if any transports are registered
-      var section = $('messaging-section');
       if (section && _msgTransports.length > 0) {
-        section.style.display = '';
         _msgSectionVisible = true;
+        $('msg-count').textContent = '';
+        $('msg-count').style.color = '';
+      } else if (section) {
+        $('msg-count').textContent = 'no transports';
+        $('msg-count').style.color = 'var(--text-muted)';
       }
     });
   }
@@ -1235,12 +1415,15 @@
     var section = $('meshtastic-section');
     if (!section) return;
 
-    // Hide entire section if plugin is not available
+    // Show unavailable state if plugin is not available
     if (!status || status.available === false) {
-      section.style.display = 'none';
+      $('meshtastic-status').textContent = 'not installed';
+      $('meshtastic-status').className = 'count';
+      $('meshtastic-status').style.color = 'var(--text-muted)';
+      $('meshtastic-overview').innerHTML = '';
+      $('meshtastic-nodes-table').innerHTML = '<tr><td colspan="5" class="text-muted">Meshtastic gateway plugin not enabled</td></tr>';
       return;
     }
-    section.style.display = '';
 
     // Status badge
     var badge = $('meshtastic-status');
@@ -1303,17 +1486,19 @@
   function updateTransport(data) {
     var tbody = $('transport-table');
     if (!tbody) return;
+    markUpdated('transport-section');
     var primaries = data.primaries || [];
     var fallbacks = data.active_fallbacks || [];
     var ad = data.auto_discovery || {};
     var poolHubs = ad.connected || [];
+    var tcpDisabled = data.tcp_disabled || false;
 
     var all = primaries
       .concat(fallbacks.map(function(f) { f._tag = 'fallback'; return f; }))
       .concat(poolHubs.map(function(p) { p._tag = 'pool'; p.online = true; return p; }));
 
     if (all.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4">No TCP transport hubs</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" class="text-muted">No TCP transport hubs configured</td></tr>';
       $('transport-count').textContent = '0';
       _updatePoolStatus(ad);
       return;
@@ -1331,6 +1516,11 @@
       if (h._tag === 'pool') label += ' <small>(pool)</small>';
       var statusCls = h.online ? 'status-ok' : (h.reconnecting ? 'status-warn' : 'status-err');
       var statusTxt = h.online ? 'Online' : (h.reconnecting ? 'Reconnecting' : 'Offline');
+      if (tcpDisabled) {
+        statusCls = 'text-muted';
+        statusTxt = h.online ? 'Reachable' : 'Unreachable';
+      }
+      var probeTxt = ' <small class="text-muted">(TCP probe only)</small>';
 
       var txRate = '--', rxRate = '--';
       if (h.rxb != null && h.txb != null) {
@@ -1350,7 +1540,7 @@
       html += '<tr>'
         + '<td>' + label + '</td>'
         + '<td class="addr">' + esc(h.target_host || '--') + ':' + (h.target_port || '') + '</td>'
-        + '<td><span class="' + statusCls + '">' + statusTxt + '</span></td>'
+        + '<td><span class="' + statusCls + '">' + statusTxt + '</span>' + probeTxt + '</td>'
         + '<td>\u2191' + txRate + ' \u2193' + rxRate + '</td>'
         + '</tr>';
     }
@@ -1360,6 +1550,7 @@
     var online = primaries.filter(function(p) { return p.online; }).length;
     var countText = online + '/' + primaries.length + ' primary';
     if (poolHubs.length > 0) countText += ' + ' + poolHubs.length + ' pool';
+    if (tcpDisabled) countText += ' (not connected — no TCP interfaces enabled)';
     $('transport-count').textContent = countText;
     _updatePoolStatus(ad);
   }
@@ -1408,9 +1599,9 @@
     var el = $('conn-status');
     if (!el) return;
     el.className = 'conn-status';
-    if (state === 'live') { el.classList.add('conn-live'); el.textContent = 'live'; }
-    else if (state === 'polling') { el.classList.add('conn-poll'); el.textContent = 'polling'; }
-    else { el.classList.add('conn-off'); el.textContent = 'disconnected'; }
+    if (state === 'live') { el.classList.add('conn-live'); el.textContent = 'live'; el.title = 'WebSocket connected — updates every 5s'; }
+    else if (state === 'polling') { el.classList.add('conn-poll'); el.textContent = 'polling (10s)'; el.title = 'WebSocket down — polling every 10s'; }
+    else { el.classList.add('conn-off'); el.textContent = 'disconnected'; el.title = 'No connection to dashboard server'; }
   }
 
   // --- Data fetching ---
@@ -1527,6 +1718,7 @@
       if (!r || !r.ok) return;
       var nodes = r.data.nodes || [];
       var lookup = {};
+      var loraNodes = [];
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         if (n.destination_hash) {
@@ -1535,6 +1727,9 @@
             label: n.label,
             factors: n.factors
           };
+          if (n.interface && n.interface.indexOf('RNodeInterface') !== -1) {
+            loraNodes.push(n);
+          }
         }
       }
       _reachScores = lookup;
@@ -1543,7 +1738,46 @@
         var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
         renderMeshNodes(sorted);
       }
+      updateLoraNodes(loraNodes);
     });
+  }
+
+  function updateLoraNodes(nodes) {
+    var section = $('lora-section');
+    var tbody = $('lora-table');
+    var countEl = $('lora-count');
+    if (!section || !tbody) return;
+
+    countEl.textContent = nodes.length;
+
+    if (nodes.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6">No LoRa nodes discovered yet</td></tr>';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      var hash = n.destination_hash || '';
+      var shortHash = hash.length > 12 ? hash.slice(0, 12) + '\u2026' : hash;
+      var name = esc(n.app_data || '--');
+      var app = esc(n.app_name || '--');
+      var hops = n.hops != null ? n.hops : '--';
+      var ago = n.last_seen ? formatTimeAgo(n.last_seen) : '--';
+      var score = n.score != null ? n.score : 0;
+      var cls = score >= 80 ? 'reach-high' : score >= 60 ? 'reach-good'
+              : score >= 40 ? 'reach-fair' : score >= 20 ? 'reach-low' : 'reach-unlikely';
+
+      html += '<tr>'
+        + '<td><span class="reach-badge ' + cls + '">' + score + '</span></td>'
+        + '<td class="addr" title="' + esc(hash) + '">' + esc(shortHash) + '</td>'
+        + '<td>' + name + '</td>'
+        + '<td>' + app + '</td>'
+        + '<td>' + hops + '</td>'
+        + '<td>' + ago + '</td>'
+        + '</tr>';
+    }
+    tbody.innerHTML = html;
   }
 
   function fetchConfig() {
@@ -1646,6 +1880,7 @@
   var _rtTableOpen = false;
   var _rtDebounceTimer = null;
   var _rtKnownInterfaces = [];
+  var _rtAutoRefresh = null;
 
   function formatDuration(seconds) {
     if (seconds == null || seconds <= 0) return '--';
@@ -1705,6 +1940,7 @@
 
   function updateRoutingSummary(data) {
     if (!data || !$('routing-section')) return;
+    markUpdated('routing-section');
 
     // Transport identity bar
     var idEl = $('routing-identity');
@@ -2041,12 +2277,14 @@
       wrapper.classList.add('hidden');
       btn.textContent = 'Show Path Table';
       _rtTableOpen = false;
+      if (_rtAutoRefresh) { clearInterval(_rtAutoRefresh); _rtAutoRefresh = null; }
     } else {
       wrapper.classList.remove('hidden');
       btn.textContent = 'Hide Path Table';
       _rtTableOpen = true;
       _rtPage = 1;
       fetchRoutingTable();
+      _rtAutoRefresh = setInterval(fetchRoutingTable, 15000);
     }
   });
 
@@ -2142,6 +2380,16 @@
     }
     renderMeshtasticNodes();
   });
+
+  // Interface management — event delegation (CSP blocks inline handlers)
+  $('restart-btn').addEventListener('click', doRestart);
+  $('interfaces-table').addEventListener('change', function(ev) {
+    var cb = ev.target;
+    if (cb.tagName === 'INPUT' && cb.dataset.iface) {
+      window._toggleIface(cb.dataset.iface);
+    }
+  });
+  fetchInterfacesConfig();
 
   // If we reached this page, the cookie is valid.
   fetchNode();

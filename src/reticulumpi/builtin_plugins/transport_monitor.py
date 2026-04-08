@@ -133,6 +133,7 @@ class TransportMonitorPlugin(PluginBase):
         self._auto_teardown = self.config.get("auto_teardown_fallback", True)
         self._primary_hubs = self.config.get("primary_hubs", [])
         self._fallback_hubs = self.config.get("fallback_hubs", [])
+        self._tcp_disabled = False  # set dynamically in monitor loop
 
         # Per-hub status: keyed by "host:port"
         self._hub_status: dict[str, dict[str, Any]] = {}
@@ -246,6 +247,7 @@ class TransportMonitorPlugin(PluginBase):
                 "active_fallbacks": fallbacks,
                 "all_down_since": self._all_down_since,
                 "down_threshold": self._down_threshold,
+                "tcp_disabled": self._tcp_disabled,
                 "auto_discovery": {
                     "enabled": self._auto_enabled,
                     "target_connections": self._target_connections,
@@ -272,12 +274,33 @@ class TransportMonitorPlugin(PluginBase):
         except (OSError, socket.timeout):
             return False
 
+    def _has_user_tcp_interfaces(self) -> bool:
+        """Check if any user-configured TCP interfaces exist in RNS.
+
+        Returns False when the user has disabled all TCP interfaces in the
+        Reticulum config, which means we should not create auto-discovery
+        or fallback TCP interfaces either.  Excludes interfaces we created
+        ourselves (Pool-* and Fallback-*).
+        """
+        from RNS.Interfaces.TCPInterface import TCPClientInterface
+
+        our_prefixes = ("Pool-", "Fallback-")
+        for iface in RNS.Transport.interfaces:
+            if isinstance(iface, TCPClientInterface):
+                name = getattr(iface, "name", "")
+                if not any(name.startswith(p) for p in our_prefixes):
+                    return True
+        return False
+
     def _monitor_loop(self) -> None:
         """Periodically check hub health and manage failover."""
         while self._active:
             self._sleep_while_active(self._check_interval)
             if not self._active:
                 break
+
+            # Update TCP-disabled flag each cycle
+            self._tcp_disabled = not self._has_user_tcp_interfaces()
 
             try:
                 self._check_health()
@@ -347,6 +370,7 @@ class TransportMonitorPlugin(PluginBase):
                     elapsed >= self._down_threshold
                     and not self._fallback_active
                     and len(self._fallback_hubs) > 0
+                    and not self._tcp_disabled
                 )
 
             if should_failover:
@@ -504,6 +528,9 @@ class TransportMonitorPlugin(PluginBase):
         if not self._active:
             return
 
+        # Check TCP state before loading pool
+        self._tcp_disabled = not self._has_user_tcp_interfaces()
+
         self._build_pinned_set()
         self._load_hub_pool()
 
@@ -517,6 +544,15 @@ class TransportMonitorPlugin(PluginBase):
 
     def _auto_discovery_tick(self) -> None:
         """One cycle: probe existing pool connections, replace unhealthy ones."""
+        # Don't create TCP interfaces when user has disabled all TCP
+        if self._tcp_disabled:
+            # Tear down any pool interfaces we already created
+            with self._lock:
+                keys = list(self._auto_interfaces.keys())
+            for key in keys:
+                self._disconnect_auto_hub(key, "tcp_disabled")
+            return
+
         now = time.monotonic()
 
         # 1. Probe existing auto-discovered connections

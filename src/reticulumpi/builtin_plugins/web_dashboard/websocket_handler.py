@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import time
@@ -156,7 +155,6 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     """Periodically broadcast system metrics to all connected WebSocket clients."""
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
-    prev_mesh_hash = ""
 
     while True:
         try:
@@ -214,11 +212,9 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
-            # Hash mesh data and only include if changed since last broadcast
-            mesh_json = json.dumps(mesh_data, sort_keys=True)
-            mesh_hash = hashlib.md5(mesh_json.encode()).hexdigest()
-            mesh_changed = mesh_hash != prev_mesh_hash
-            prev_mesh_hash = mesh_hash
+            # Always include mesh data — the frontend relies on regular
+            # updates to keep "Last Seen" timestamps and reachability
+            # indicators current even when the node list hasn't changed.
 
             # Collect sensor data (if plugin available)
             sensor_data: dict = {}
@@ -308,8 +304,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             }
             if messaging_data:
                 data["messaging"] = messaging_data
-            # Only include mesh data when it has changed
-            if mesh_changed:
+            if mesh_data:
                 data["mesh"] = mesh_data
 
             message = json.dumps({

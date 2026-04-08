@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=7">
+  <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
   <div class="dashboard">
@@ -69,12 +69,16 @@
     <div class="section" id="interfaces-section">
       <div class="section-header">
         <span>Network Interfaces</span>
-        <span class="count" id="iface-count"></span>
+        <span class="count" id="iface-count"></span><span class="freshness"></span>
+      </div>
+      <div id="restart-banner" class="restart-banner hidden">
+        <span>Configuration changed — restart required to apply.</span>
+        <button id="restart-btn" class="restart-btn">Restart Services</button>
       </div>
       <div class="table-wrap">
         <table class="data-table">
           <thead>
-            <tr><th>Name</th><th>Type</th><th>Status</th><th>Traffic</th></tr>
+            <tr><th>Enabled</th><th>Name</th><th>Type</th><th>Status</th><th>Traffic</th></tr>
           </thead>
           <tbody id="interfaces-table"></tbody>
         </table>
@@ -85,7 +89,7 @@
     <div class="section" id="connectivity-section">
       <div class="section-header">
         <span>Connectivity Health</span>
-        <span class="count" id="connectivity-status"></span>
+        <span class="count" id="connectivity-status"></span><span class="freshness"></span>
       </div>
       <div id="connectivity-content" class="connectivity-grid">
         <div class="connectivity-indicators" id="connectivity-indicators">
@@ -103,7 +107,7 @@
     <div class="section" id="routing-section">
       <div class="section-header">
         <span>Routing</span>
-        <span class="count" id="routing-status"></span>
+        <span class="count" id="routing-status"></span><span class="freshness"></span>
       </div>
       <div class="routing-content">
         <!-- Transport identity / uptime bar -->
@@ -188,7 +192,7 @@
     <div class="section" id="transport-section">
       <div class="section-header">
         <span>Transport Hubs</span>
-        <span class="count" id="transport-count"></span>
+        <span class="count" id="transport-count"></span><span class="freshness"></span>
       </div>
       <div id="pool-status" style="display:none;"></div>
       <div class="table-wrap">
@@ -201,11 +205,34 @@
       </div>
     </div>
 
+    <!-- LoRa Nodes -->
+    <div class="section" id="lora-section">
+      <div class="section-header">
+        <span>LoRa Nodes</span>
+        <span class="count" id="lora-count"></span><span class="freshness"></span>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Reach</th>
+              <th>Node</th>
+              <th>Name</th>
+              <th>App</th>
+              <th>Hops</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id="lora-table"></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Mesh Network -->
     <div class="section" id="mesh-section">
       <div class="section-header">
         <span>Mesh Network</span>
-        <span class="count" id="mesh-count"></span>
+        <span class="count" id="mesh-count"></span><span class="freshness"></span>
       </div>
       <div class="table-scroll">
         <table class="data-table">
@@ -265,13 +292,13 @@
     <div class="section" id="sensors-section">
       <div class="section-header">
         <span>Sensors</span>
-        <span class="count" id="sensors-count"></span>
+        <span class="count" id="sensors-count"></span><span class="freshness"></span>
       </div>
       <div class="metrics-grid" id="sensors-grid"></div>
     </div>
 
     <!-- Messaging Hub -->
-    <div class="section" id="messaging-section" style="display:none">
+    <div class="section" id="messaging-section">
       <div class="section-header">
         <span>Messages</span>
         <span class="count" id="msg-count"></span>
@@ -305,7 +332,7 @@
     </div>
 
     <!-- Meshtastic Gateway -->
-    <div class="section" id="meshtastic-section" style="display:none">
+    <div class="section" id="meshtastic-section">
       <div class="section-header">
         <span>Meshtastic Gateway</span>
         <span class="count" id="meshtastic-status"></span>
@@ -354,6 +381,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

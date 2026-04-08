@@ -791,13 +791,18 @@ class ConnectivityMonitorPlugin(PluginBase):
                 self._publish_event(events.PATHS_STALE)
 
             # Single point of failure: all paths via one interface
+            # In shared-instance mode every path appears via LocalInterface
+            # because reticulumpi talks to rnsd over a local socket — the
+            # real interface diversity lives inside rnsd, so suppress the
+            # warning for LocalInterface.
             if path_count > 0 and len(iface_dist) == 1:
                 sole_iface = next(iter(iface_dist))
-                routing_diags.append(
-                    f"All {path_count} paths route via '{sole_iface}' — "
-                    "single point of failure"
-                )
-                self._publish_event(events.SINGLE_INTERFACE_SPOF)
+                if "LocalInterface" not in sole_iface:
+                    routing_diags.append(
+                        f"All {path_count} paths route via '{sole_iface}' — "
+                        "single point of failure"
+                    )
+                    self._publish_event(events.SINGLE_INTERFACE_SPOF)
 
             if len(rate_entries) > 0:
                 routing_diags.append(

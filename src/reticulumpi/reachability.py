@@ -205,6 +205,7 @@ def score_all_nodes(
             "hops": path.get("hops") if path else node.get("hops"),
             "last_seen": node.get("last_seen"),
             "announce_count": node.get("announce_count", 0),
+            "interface": path.get("interface", "") if path else "",
             "score": reach["score"],
             "label": reach["label"],
             "factors": reach["factors"],

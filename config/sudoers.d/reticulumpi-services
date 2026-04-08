@@ -1,0 +1,2 @@
+# Allow reticulumpi user to restart rnsd and reticulumpi services via dashboard
+reticulumpi ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rnsd, /usr/bin/systemctl restart reticulumpi

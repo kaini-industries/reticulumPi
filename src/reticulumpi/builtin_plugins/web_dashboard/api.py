@@ -72,6 +72,10 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/plugins", handle_plugins)
     app.router.add_get("/api/plugins/{name}", handle_plugin_detail)
     app.router.add_get("/api/interfaces", handle_interfaces)
+    app.router.add_get("/api/interfaces/config", handle_interfaces_config)
+    app.router.add_post("/api/interfaces/{name:.+}/toggle", handle_interface_toggle)
+    app.router.add_post("/api/interfaces/add", handle_interface_add)
+    app.router.add_post("/api/services/restart", handle_services_restart)
     app.router.add_get("/api/config", handle_config)
     # Mesh awareness endpoints
     app.router.add_get("/api/mesh/nodes", handle_mesh_nodes)
@@ -366,6 +370,160 @@ async def handle_interfaces(request: aiohttp.web.Request) -> aiohttp.web.Respons
         return _ok({"interfaces": interfaces, "error": f"Partial collection: {exc}"})
 
     return _ok({"interfaces": interfaces})
+
+
+def _rns_config_path(plugin) -> str:
+    """Resolve the path to the Reticulum config file."""
+    import os
+
+    config_dir = getattr(plugin.app, "_reticulum_config_dir", None)
+    if not config_dir:
+        config_dir = os.path.expanduser("~/.reticulum")
+    return os.path.join(config_dir, "config")
+
+
+async def handle_interfaces_config(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/interfaces/config — all interfaces from the Reticulum config file."""
+    from reticulumpi.rns_config import parse_rns_config
+
+    plugin = _get_plugin(request)
+    path = _rns_config_path(plugin)
+    try:
+        _, interfaces = parse_rns_config(path)
+    except FileNotFoundError:
+        return _error(f"Reticulum config not found: {path}", 404)
+    except Exception as exc:
+        return _error(f"Failed to parse config: {exc}", 500)
+
+    return _ok({
+        "interfaces": [
+            {
+                "name": e.name,
+                "type": e.iface_type,
+                "enabled": e.enabled,
+                "properties": {
+                    k: v for k, v in e.properties.items()
+                    if k not in ("type", "enabled", "password")
+                },
+            }
+            for e in interfaces
+        ],
+        "config_path": path,
+    })
+
+
+async def handle_interface_toggle(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/interfaces/{name}/toggle — toggle enabled yes/no in config."""
+    from reticulumpi.rns_config import (
+        parse_rns_config,
+        set_interface_enabled,
+        write_rns_config,
+    )
+
+    plugin = _get_plugin(request)
+    name = request.match_info["name"]
+    path = _rns_config_path(plugin)
+
+    try:
+        lines, interfaces = parse_rns_config(path)
+    except Exception as exc:
+        return _error(f"Failed to parse config: {exc}", 500)
+
+    entry = next((e for e in interfaces if e.name == name), None)
+    if entry is None:
+        return _error(f"Interface '{name}' not found in config", 404)
+
+    new_enabled = not entry.enabled
+    try:
+        new_lines = set_interface_enabled(lines, entry, new_enabled)
+        write_rns_config(path, new_lines)
+    except Exception as exc:
+        return _error(f"Failed to write config: {exc}", 500)
+
+    return _ok({
+        "name": name,
+        "enabled": new_enabled,
+        "restart_required": True,
+    })
+
+
+async def handle_interface_add(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/interfaces/add — add a new interface section to config.
+
+    Body: ``{"name": "...", "type": "...", "properties": {...}}``
+    """
+    from reticulumpi.rns_config import (
+        add_interface_section,
+        parse_rns_config,
+        write_rns_config,
+    )
+
+    plugin = _get_plugin(request)
+    path = _rns_config_path(plugin)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+
+    iface_name = body.get("name", "").strip()
+    iface_type = body.get("type", "").strip()
+    properties = body.get("properties", {})
+
+    if not iface_name:
+        return _error("name field is required", 400)
+    if not iface_type:
+        return _error("type field is required", 400)
+    if len(iface_name) > 100:
+        return _error("name too long", 400)
+
+    try:
+        lines, interfaces = parse_rns_config(path)
+    except Exception as exc:
+        return _error(f"Failed to parse config: {exc}", 500)
+
+    if any(e.name == iface_name for e in interfaces):
+        return _error(f"Interface '{iface_name}' already exists", 409)
+
+    try:
+        new_lines = add_interface_section(lines, iface_name, iface_type, properties)
+        write_rns_config(path, new_lines)
+    except Exception as exc:
+        return _error(f"Failed to write config: {exc}", 500)
+
+    return _ok({
+        "name": iface_name,
+        "type": iface_type,
+        "restart_required": True,
+    })
+
+
+async def handle_services_restart(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/services/restart — restart rnsd + reticulumpi."""
+    import asyncio
+
+    async def _do_restart() -> None:
+        await asyncio.sleep(2)  # let HTTP response flush
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "restart", "rnsd",
+        )
+        await proc.wait()
+        await asyncio.sleep(3)  # rnsd startup time
+        await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "restart", "reticulumpi",
+        )
+        # reticulumpi kills us — no await needed
+
+    asyncio.create_task(_do_restart())
+    return _ok({"message": "Restarting services..."})
 
 
 async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:

@@ -317,6 +317,16 @@ else
     sudo systemctl enable reticulumpi.service
 fi
 
+# 7b. Sudoers rule for dashboard service restart
+echo "  Installing sudoers rule for dashboard service restart..."
+sudo install -m 0440 "$INSTALL_DIR/config/sudoers.d/reticulumpi-services" /etc/sudoers.d/reticulumpi-services
+if sudo visudo -cf /etc/sudoers.d/reticulumpi-services >/dev/null 2>&1; then
+    echo "  Sudoers rule installed and validated"
+else
+    echo "  WARNING: sudoers syntax check failed — removing to prevent lockout"
+    sudo rm -f /etc/sudoers.d/reticulumpi-services
+fi
+
 echo ""
 echo "=== Bootstrap complete ==="
 echo ""
