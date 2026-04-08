@@ -374,41 +374,29 @@
     }, 3000);
   }
 
-  // Mesh node sorting state
-  var _meshNodes = [];
-  var _meshPeers = {};  // destination_hash -> telemetry data
-  var _reachScores = {};  // destination_hash -> {score, label, factors}
-  var _meshSortKey = 'score';
+  // Mesh node state — server-side pagination
+  var _meshNodes = [];       // current page of nodes from server
+  var _meshTotal = 0;        // total nodes on server
+  var _meshPage = 1;
+  var _meshPerPage = 25;
+  var _meshPages = 1;
+  var _meshPeers = {};       // destination_hash -> telemetry data
+  var _reachScores = {};     // destination_hash -> {score, label, factors}
+  var _meshSortKey = 'last_seen';
   var _meshSortAsc = false;
   var _meshExpandedHash = null;
-  var _meshPageSize = 25;
-  var _meshVisible = 25;
+  var _meshVersion = 0;      // tracks WS mesh version for change detection
+  var _meshSearch = '';
   var _peerPageSize = 12;
   var _peerVisible = 12;
 
-  function sortMeshNodes(nodes, key, asc) {
-    return nodes.slice().sort(function(a, b) {
-      var va, vb;
-      if (key === 'score') {
-        var ra = _reachScores[a.destination_hash];
-        var rb = _reachScores[b.destination_hash];
-        va = ra ? ra.score : -1;
-        vb = rb ? rb.score : -1;
-      } else if (key === 'hops') {
-        va = a.hops != null ? a.hops : 9999;
-        vb = b.hops != null ? b.hops : 9999;
-      } else if (key === 'last_seen') {
-        va = a.last_seen || 0;
-        vb = b.last_seen || 0;
-      } else if (key === 'announce_count') {
-        va = a.announce_count || 0;
-        vb = b.announce_count || 0;
-      } else {
-        return 0;
-      }
-      return asc ? va - vb : vb - va;
-    });
-  }
+  // Sorting is now server-side. This map translates UI sort keys to API params.
+  var _meshSortMap = {
+    'score': 'last_seen',  // score sort not available server-side, use last_seen
+    'hops': 'hops',
+    'last_seen': 'last_seen',
+    'announce_count': 'announce_count'
+  };
 
   function _di(label, value, cls) {
     return '<div class="node-detail-item">'
@@ -491,22 +479,21 @@
     return h;
   }
 
-  function renderMeshNodes(nodes) {
+  function renderMeshNodes() {
     var tbody = $('mesh-table');
     if (!tbody) return;
+    var nodes = _meshNodes;
     if (!nodes || nodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7">No nodes discovered yet</td></tr>';
-      $('mesh-count').textContent = '0';
+      tbody.innerHTML = '<tr><td colspan="7">' + (_meshTotal > 0 ? 'No nodes match filters' : 'No nodes discovered yet') + '</td></tr>';
+      $('mesh-count').textContent = _meshTotal > 0 ? '0/' + _meshTotal : '0';
       var showMore = $('mesh-show-more');
       if (showMore) showMore.style.display = 'none';
       return;
     }
-    var total = nodes.length;
-    var limit = Math.min(_meshVisible, total);
 
-    // Build rows, preserving expanded state
+    // Build rows using event delegation for clicks (no per-row listeners)
     tbody.innerHTML = '';
-    for (var i = 0; i < limit; i++) {
+    for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
       var hash = node.destination_hash || '';
       var ago = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
@@ -532,9 +519,6 @@
         + '<td>' + ago + '</td>'
         + '<td>' + (node.announce_count || 0) + '</td>';
       tr.style.cursor = 'pointer';
-      (function(n, h) {
-        tr.addEventListener('click', function() { toggleNodeDetail(n, h); });
-      })(node, hash);
       tbody.appendChild(tr);
 
       if (isExpanded) {
@@ -548,19 +532,19 @@
         tbody.appendChild(detailTr);
       }
     }
-    $('mesh-count').textContent = total + ' nodes';
+    $('mesh-count').textContent = _meshTotal + ' nodes';
     updateMeshSortIndicators();
 
-    // Show/hide "show more" control
+    // Pagination controls (replaces "show more" button)
     var showMore = $('mesh-show-more');
     if (showMore) {
-      var remaining = total - limit;
-      if (remaining > 0) {
+      if (_meshPages > 1) {
+        var pHtml = '';
+        if (_meshPage > 1) pHtml += '<span class="mesh-page-btn" data-mesh-page="' + (_meshPage - 1) + '">&lsaquo; Prev</span> ';
+        pHtml += 'Page ' + _meshPage + ' of ' + _meshPages;
+        if (_meshPage < _meshPages) pHtml += ' <span class="mesh-page-btn" data-mesh-page="' + (_meshPage + 1) + '">Next &rsaquo;</span>';
+        showMore.innerHTML = pHtml;
         showMore.style.display = '';
-        showMore.textContent = 'Show more (' + remaining + ' remaining)';
-      } else if (limit > _meshPageSize) {
-        showMore.style.display = '';
-        showMore.textContent = 'Show less';
       } else {
         showMore.style.display = 'none';
       }
@@ -573,15 +557,85 @@
     } else {
       _meshExpandedHash = hash;
     }
-    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
-    renderMeshNodes(sorted);
+    renderMeshNodes();
   }
 
-  function updateMeshNodes(nodes) {
+  function fetchMeshNodes() {
+    var sortField = _meshSortMap[_meshSortKey] || 'last_seen';
+    var order = _meshSortAsc ? 'asc' : 'desc';
+    var params = '?page=' + _meshPage + '&per_page=' + _meshPerPage
+      + '&sort=' + sortField + '&order=' + order;
+    if (_meshSearch) params += '&search=' + encodeURIComponent(_meshSearch);
+
+    api('/api/mesh/nodes' + params).then(function(r) {
+      if (!r || !r.ok) return;
+      markUpdated('mesh-section');
+      _meshNodes = r.data.nodes || [];
+      _meshTotal = r.data.total || _meshNodes.length;
+      _meshPage = r.data.page || 1;
+      _meshPages = r.data.pages || 1;
+      renderMeshNodes();
+      // Fetch reachability for visible nodes
+      fetchReachabilityForVisible();
+    });
+  }
+
+  function fetchReachabilityForVisible() {
+    if (_meshNodes.length === 0) return;
+    var hashes = _meshNodes.map(function(n) { return n.destination_hash; }).join(',');
+    api('/api/reachability?hashes=' + encodeURIComponent(hashes)).then(function(r) {
+      if (!r || !r.ok) return;
+      var nodes = r.data.nodes || [];
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.destination_hash) {
+          _reachScores[n.destination_hash] = {
+            score: n.score,
+            label: n.label,
+            factors: n.factors
+          };
+        }
+      }
+      renderMeshNodes();
+    });
+  }
+
+  function updateMeshFromWS(meshData) {
+    if (!meshData) return;
     markUpdated('mesh-section');
-    _meshNodes = nodes || [];
-    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
-    renderMeshNodes(sorted);
+
+    // Update total count from WS summary
+    if (meshData.known_nodes != null) {
+      _meshTotal = meshData.known_nodes;
+      $('mesh-count').textContent = _meshTotal + ' nodes';
+    }
+
+    // If server reports new version (data changed), re-fetch current page
+    if (meshData.version != null && meshData.version !== _meshVersion) {
+      _meshVersion = meshData.version;
+      fetchMeshNodes();
+    }
+
+    // Update any visible nodes from recent_announces delta
+    if (meshData.recent_announces && meshData.recent_announces.length > 0) {
+      var announceMap = {};
+      for (var i = 0; i < meshData.recent_announces.length; i++) {
+        var a = meshData.recent_announces[i];
+        announceMap[a.destination_hash] = a;
+      }
+      // Patch matching nodes in current page
+      var patched = false;
+      for (var j = 0; j < _meshNodes.length; j++) {
+        var update = announceMap[_meshNodes[j].destination_hash];
+        if (update) {
+          for (var key in update) {
+            _meshNodes[j][key] = update[key];
+          }
+          patched = true;
+        }
+      }
+      if (patched) renderMeshNodes();
+    }
   }
 
   function cacheMeshPeers(peers) {
@@ -600,8 +654,8 @@
       _meshSortKey = key;
       _meshSortAsc = (key === 'hops');  // hops default asc, others desc
     }
-    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
-    renderMeshNodes(sorted);
+    _meshPage = 1;  // reset to first page on sort change
+    fetchMeshNodes();
   }
 
   function updateMeshSortIndicators() {
@@ -1150,9 +1204,10 @@
             + '<div class="msg-text">' + esc(m.text) + '</div>'
             + '</div>';
     }
+    // Sticky scroll: only auto-scroll if user is already near the bottom
+    var wasAtBottom = (chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 40);
     chat.innerHTML = html;
-    // Auto-scroll to bottom
-    chat.scrollTop = chat.scrollHeight;
+    if (wasAtBottom) chat.scrollTop = chat.scrollHeight;
   }
 
   function sendMessage() {
@@ -1479,9 +1534,10 @@
     renderMeshtasticNodes();
   }
 
-  // Track previous traffic values for rate calculation
+  // Track previous traffic values for rate calculation (keyed by hub address)
+  // Each entry stores {rxb, txb, time} so rates are always computed from
+  // the *same* update source's last sample, avoiding WS/polling race conditions.
   var _prevTraffic = {};
-  var _prevTrafficTime = 0;
 
   function updateTransport(data) {
     var tbody = $('transport-table');
@@ -1505,7 +1561,6 @@
     }
 
     var now = Date.now() / 1000;
-    var dt = _prevTrafficTime > 0 ? now - _prevTrafficTime : 0;
 
     var html = '';
     for (var i = 0; i < all.length; i++) {
@@ -1525,16 +1580,22 @@
       var txRate = '--', rxRate = '--';
       if (h.rxb != null && h.txb != null) {
         var prev = _prevTraffic[key];
-        if (prev && dt > 0) {
-          var txPerSec = Math.max(0, (h.txb - prev.txb) / dt);
-          var rxPerSec = Math.max(0, (h.rxb - prev.rxb) / dt);
-          txRate = formatRate(txPerSec);
-          rxRate = formatRate(rxPerSec);
+        if (prev && prev.time) {
+          var dt = now - prev.time;
+          if (dt > 0.5) {
+            var txPerSec = Math.max(0, (h.txb - prev.txb) / dt);
+            var rxPerSec = Math.max(0, (h.rxb - prev.rxb) / dt);
+            txRate = formatRate(txPerSec);
+            rxRate = formatRate(rxPerSec);
+          } else {
+            txRate = prev.lastTx || '...';
+            rxRate = prev.lastRx || '...';
+          }
         } else {
           txRate = '...';
           rxRate = '...';
         }
-        _prevTraffic[key] = { rxb: h.rxb, txb: h.txb };
+        _prevTraffic[key] = { rxb: h.rxb, txb: h.txb, time: now, lastTx: txRate, lastRx: rxRate };
       }
 
       html += '<tr>'
@@ -1544,8 +1605,6 @@
         + '<td>\u2191' + txRate + ' \u2193' + rxRate + '</td>'
         + '</tr>';
     }
-    _prevTrafficTime = now;
-
     tbody.innerHTML = html;
     var online = primaries.filter(function(p) { return p.online; }).length;
     var countText = online + '/' + primaries.length + ' primary';
@@ -1570,20 +1629,7 @@
     el.style.display = 'block';
   }
 
-  function formatBytes(b) {
-    if (b == null) return '--';
-    if (b < 1024) return b + ' B';
-    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
-    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
-    return (b / 1073741824).toFixed(2) + ' GB';
-  }
-
-  function formatRate(bytesPerSec) {
-    if (bytesPerSec < 1) return '0 B/s';
-    if (bytesPerSec < 1024) return Math.round(bytesPerSec) + ' B/s';
-    if (bytesPerSec < 1048576) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
-    return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
-  }
+  // (formatBytes and formatRate defined above — single definition)
 
   function formatTimeAgo(timestamp) {
     if (!timestamp) return '--';
@@ -1629,6 +1675,7 @@
     api('/api/interfaces').then(function(r) {
       if (!r || !r.ok) return;
       updateInterfaces(r.data.interfaces);
+      updateLoraRadio(r.data.interfaces);
     });
 
     // Metrics
@@ -1637,11 +1684,8 @@
       updateMetrics(r.data);
     });
 
-    // Mesh nodes
-    api('/api/mesh/nodes').then(function(r) {
-      if (!r || !r.ok) return;
-      updateMeshNodes(r.data.nodes);
-    });
+    // Mesh nodes (server-side paginated)
+    fetchMeshNodes();
 
     // Peer telemetry
     api('/api/mesh/telemetry').then(function(r) {
@@ -1709,20 +1753,21 @@
       updateRoutingSummary(r.data.summary);
     });
 
-    // Reachability scores
-    fetchReachability();
+    // LoRa nodes panel (uses reachability with interface filter — smaller than full score)
+    fetchLoraReachability();
   }
 
-  function fetchReachability() {
-    api('/api/reachability?limit=0').then(function(r) {
+  function fetchLoraReachability() {
+    // Fetch a small page of reachability scores just for the LoRa nodes panel
+    api('/api/reachability?per_page=50').then(function(r) {
       if (!r || !r.ok) return;
       var nodes = r.data.nodes || [];
-      var lookup = {};
       var loraNodes = [];
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         if (n.destination_hash) {
-          lookup[n.destination_hash] = {
+          // Cache score for any node detail views
+          _reachScores[n.destination_hash] = {
             score: n.score,
             label: n.label,
             factors: n.factors
@@ -1732,14 +1777,246 @@
           }
         }
       }
-      _reachScores = lookup;
-      // Re-render mesh table with scores
-      if (_meshNodes.length > 0) {
-        var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
-        renderMeshNodes(sorted);
-      }
       updateLoraNodes(loraNodes);
     });
+  }
+
+  function updateLoraRadio(interfaces) {
+    var container = $('lora-radio-info');
+    if (!container) return;
+
+    // Find RNode interfaces
+    var rnodes = [];
+    for (var i = 0; i < interfaces.length; i++) {
+      if (interfaces[i].type === 'RNodeInterface') {
+        rnodes.push(interfaces[i]);
+      }
+    }
+
+    if (rnodes.length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+
+    var html = '';
+    for (var r = 0; r < rnodes.length; r++) {
+      var iface = rnodes[r];
+      var radio = iface.radio || {};
+      var online = iface.online !== false;
+      var statusCls = online ? 'status-active' : 'status-failed';
+      var statusText = online ? 'Online' : 'Offline';
+
+      // Extract label from name like "RNodeInterface[RNode LoRa Interface/dev/ttyACM1]"
+      var ifName = iface.name || 'RNode';
+      var nameMatch = ifName.match(/\[([^\]\/]+)/);
+      var label = nameMatch ? nameMatch[1] : ifName;
+
+      html += '<div class="lora-radio-card">';
+
+      // Header row: name + status
+      html += '<div class="lora-radio-header">'
+        + '<span class="lora-radio-name">' + esc(label) + '</span>'
+        + '<span class="lora-radio-status">'
+        + '<span class="status-dot ' + statusCls + '"></span> ' + statusText
+        + '</span>'
+        + '</div>';
+
+      // Radio parameters row
+      var hasRadio = radio.frequency || radio.bandwidth || radio.spreadingfactor;
+      if (hasRadio) {
+        html += '<div class="lora-radio-params">';
+        if (radio.frequency) {
+          var mhz = (radio.frequency / 1000000).toFixed(1);
+          html += '<div class="lora-param">'
+            + '<span class="lora-param-label">Freq</span>'
+            + '<span class="lora-param-value">' + mhz + '</span>'
+            + '<span class="lora-param-unit">MHz</span>'
+            + '</div>';
+        }
+        if (radio.bandwidth) {
+          var bwKhz = (radio.bandwidth / 1000).toFixed(0);
+          html += '<div class="lora-param">'
+            + '<span class="lora-param-label">BW</span>'
+            + '<span class="lora-param-value">' + bwKhz + '</span>'
+            + '<span class="lora-param-unit">kHz</span>'
+            + '</div>';
+        }
+        if (radio.spreadingfactor) {
+          html += '<div class="lora-param">'
+            + '<span class="lora-param-label">SF</span>'
+            + '<span class="lora-param-value">' + radio.spreadingfactor + '</span>'
+            + '</div>';
+        }
+        if (radio.codingrate) {
+          html += '<div class="lora-param">'
+            + '<span class="lora-param-label">CR</span>'
+            + '<span class="lora-param-value">4/' + radio.codingrate + '</span>'
+            + '</div>';
+        }
+        if (radio.txpower != null) {
+          html += '<div class="lora-param">'
+            + '<span class="lora-param-label">TX</span>'
+            + '<span class="lora-param-value">' + radio.txpower + '</span>'
+            + '<span class="lora-param-unit">dBm</span>'
+            + '</div>';
+        }
+        if (iface.bitrate) {
+          var br = iface.bitrate >= 1000 ? (iface.bitrate / 1000).toFixed(1) + ' kbps'
+                 : iface.bitrate + ' bps';
+          html += '<div class="lora-param">'
+            + '<span class="lora-param-label">Rate</span>'
+            + '<span class="lora-param-value">' + br + '</span>'
+            + '</div>';
+        }
+        html += '</div>';
+      }
+
+      // Runtime metrics row
+      var hasMetrics = iface.airtime_short != null || iface.channel_load_short != null
+                    || iface.noise_floor != null || iface.rxb > 0 || iface.txb > 0;
+      if (hasMetrics) {
+        html += '<div class="lora-radio-metrics">';
+
+        // Link budget & SNR margin (computed from txpower + noise floor)
+        if (radio.txpower != null && iface.noise_floor != null) {
+          var linkBudget = radio.txpower - iface.noise_floor;
+          var lbClass = linkBudget > 130 ? 'metric-ok' : linkBudget > 110 ? 'metric-warn' : 'metric-crit';
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Link Budget</span>'
+            + '<span class="lora-metric-value ' + lbClass + '">' + linkBudget + ' dB</span>'
+            + '</div>';
+        }
+
+        // Airtime (values from RNS are already percentages, e.g. 1.54 = 1.54%)
+        if (iface.airtime_short != null) {
+          var atS = iface.airtime_short.toFixed(1);
+          var atL = iface.airtime_long != null ? iface.airtime_long.toFixed(1) : '--';
+          var atClass = iface.airtime_short > 25 ? 'metric-crit'
+                      : iface.airtime_short > 10 ? 'metric-warn' : 'metric-ok';
+          // Trend indicator: short vs long
+          var atTrend = '';
+          if (iface.airtime_long != null && iface.airtime_long > 0) {
+            var atRatio = iface.airtime_short / iface.airtime_long;
+            if (atRatio > 1.3) atTrend = ' <span class="trend-up" title="Rising">\u2197</span>';
+            else if (atRatio < 0.7) atTrend = ' <span class="trend-down" title="Falling">\u2198</span>';
+          }
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Airtime' + atTrend + '</span>'
+            + '<div class="lora-bar-wrap">'
+            + '<span class="lora-metric-value ' + atClass + '">' + atS + '%</span>'
+            + _loraBar(iface.airtime_short, 50)
+            + '</div>'
+            + '<span class="lora-metric-sub">long: ' + atL + '%</span>'
+            + '</div>';
+        }
+
+        // Channel load (values from RNS are already percentages)
+        if (iface.channel_load_short != null) {
+          var clS = iface.channel_load_short.toFixed(1);
+          var clL = iface.channel_load_long != null ? iface.channel_load_long.toFixed(1) : '--';
+          var clClass = iface.channel_load_short > 50 ? 'metric-crit'
+                      : iface.channel_load_short > 20 ? 'metric-warn' : 'metric-ok';
+          var clTrend = '';
+          if (iface.channel_load_long != null && iface.channel_load_long > 0) {
+            var clRatio = iface.channel_load_short / iface.channel_load_long;
+            if (clRatio > 1.3) clTrend = ' <span class="trend-up" title="Rising">\u2197</span>';
+            else if (clRatio < 0.7) clTrend = ' <span class="trend-down" title="Falling">\u2198</span>';
+          }
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Channel Load' + clTrend + '</span>'
+            + '<div class="lora-bar-wrap">'
+            + '<span class="lora-metric-value ' + clClass + '">' + clS + '%</span>'
+            + _loraBar(iface.channel_load_short, 100)
+            + '</div>'
+            + '<span class="lora-metric-sub">long: ' + clL + '%</span>'
+            + '</div>';
+        }
+
+        // Noise floor
+        if (iface.noise_floor != null) {
+          var nf = iface.noise_floor;
+          var nfClass = nf > -90 ? 'metric-crit' : nf > -100 ? 'metric-warn' : 'metric-ok';
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Noise Floor</span>'
+            + '<span class="lora-metric-value ' + nfClass + '">' + nf + ' dBm</span>'
+            + '</div>';
+        }
+
+        // Interference (always show when available, not just non-zero)
+        if (iface.interference != null) {
+          var intVal = iface.interference;
+          var intClass = intVal > -80 ? 'metric-crit' : intVal > -95 ? 'metric-warn' : 'metric-ok';
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Interference</span>'
+            + '<span class="lora-metric-value ' + intClass + '">' + intVal + ' dBm</span>'
+            + '</div>';
+        }
+
+        // SNR margin (noise floor vs interference — how much room above noise)
+        if (iface.noise_floor != null && iface.interference != null) {
+          var snrMargin = iface.interference - iface.noise_floor;
+          var snrClass = snrMargin > 20 ? 'metric-crit' : snrMargin > 10 ? 'metric-warn' : 'metric-ok';
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">SNR Margin</span>'
+            + '<span class="lora-metric-value ' + snrClass + '">' + snrMargin + ' dB</span>'
+            + '</div>';
+        }
+
+        // Traffic
+        if (iface.txb > 0 || iface.rxb > 0) {
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">TX / RX</span>'
+            + '<span class="lora-metric-value">' + formatBytes(iface.txb || 0) + ' / ' + formatBytes(iface.rxb || 0) + '</span>'
+            + '</div>';
+        }
+
+        // Announce queue
+        if (iface.announce_queue != null) {
+          var aqClass = iface.announce_queue > 10 ? 'metric-warn' : '';
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Announce Queue</span>'
+            + '<span class="lora-metric-value ' + aqClass + '">' + iface.announce_queue + '</span>'
+            + '</div>';
+        }
+
+        // Held announces (backpressure indicator)
+        if (iface.held_announces != null && iface.held_announces > 0) {
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Held Announces</span>'
+            + '<span class="lora-metric-value metric-warn">' + iface.held_announces + '</span>'
+            + '</div>';
+        }
+
+        // Battery (show whenever available)
+        if (iface.battery_state != null || iface.battery_percent != null) {
+          var batParts = [];
+          if (iface.battery_state != null) {
+            var batStates = {0: 'Unknown', 1: 'Charging', 2: 'Charged', 3: 'Draining'};
+            batParts.push(batStates[iface.battery_state] || 'State ' + iface.battery_state);
+          }
+          if (iface.battery_percent != null) batParts.push(iface.battery_percent + '%');
+          var batClass = iface.battery_percent != null && iface.battery_percent < 20 ? 'metric-crit'
+                       : iface.battery_percent != null && iface.battery_percent < 50 ? 'metric-warn' : '';
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Battery</span>'
+            + '<span class="lora-metric-value ' + batClass + '">' + esc(batParts.join(' \u2022 ')) + '</span>'
+            + '</div>';
+        }
+
+        html += '</div>';
+      }
+
+      html += '</div>';
+    }
+
+    container.innerHTML = html;
+    markUpdated('lora-section');
+  }
+
+  function _loraBar(pct, maxPct) {
+    var w = Math.min(100, (pct / maxPct) * 100).toFixed(0);
+    var cls = pct > (maxPct * 0.5) ? 'bar-crit' : pct > (maxPct * 0.2) ? 'bar-warn' : 'bar-ok';
+    return '<span class="lora-bar"><span class="lora-bar-fill ' + cls + '" style="width:' + w + '%"></span></span>';
   }
 
   function updateLoraNodes(nodes) {
@@ -1817,7 +2094,6 @@
       stopPolling();
       // Reset traffic rate tracking so we don't compute stale deltas
       _prevTraffic = {};
-      _prevTrafficTime = 0;
       prevIfaces = {};
     };
 
@@ -1826,10 +2102,13 @@
         var msg = JSON.parse(ev.data);
         if (msg.type === 'update' && msg.data) {
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
-          if (msg.data.interfaces) updateInterfaces(msg.data.interfaces);
+          if (msg.data.interfaces) {
+            updateInterfaces(msg.data.interfaces);
+            updateLoraRadio(msg.data.interfaces);
+          }
           if (msg.data.mesh) {
             if (msg.data.mesh.peers) cacheMeshPeers(msg.data.mesh.peers);
-            if (msg.data.mesh.nodes) updateMeshNodes(msg.data.mesh.nodes);
+            updateMeshFromWS(msg.data.mesh);
           }
           if (msg.data.sensors) updateSensors(msg.data.sensors);
           if (msg.data.emergency) updateEmergency(msg.data.emergency);
@@ -2168,20 +2447,7 @@
         + '</tr>';
     }
     tbody.innerHTML = html;
-
-    // Copy hash on click
-    var cells = tbody.querySelectorAll('.hash-cell');
-    for (var j = 0; j < cells.length; j++) {
-      cells[j].addEventListener('click', function() {
-        var full = this.getAttribute('title');
-        if (full && navigator.clipboard) {
-          navigator.clipboard.writeText(full);
-          this.style.color = 'var(--green)';
-          var self = this;
-          setTimeout(function() { self.style.color = ''; }, 500);
-        }
-      });
-    }
+    // Hash-cell click-to-copy is handled by event delegation (see _initRoutingDelegation)
 
     renderRoutingPagination(data.pages || 1, data.page || 1);
   }
@@ -2208,18 +2474,7 @@
     html += '<button' + (currentPage >= totalPages ? ' disabled' : '') + ' data-rt-page="' + totalPages + '">&raquo;</button>';
 
     el.innerHTML = html;
-
-    // Wire up page buttons
-    var buttons = el.querySelectorAll('button[data-rt-page]');
-    for (var j = 0; j < buttons.length; j++) {
-      buttons[j].addEventListener('click', function() {
-        var pg = parseInt(this.getAttribute('data-rt-page'));
-        if (pg && pg !== _rtPage) {
-          _rtPage = pg;
-          fetchRoutingTable();
-        }
-      });
-    }
+    // Page button clicks handled by event delegation (see _initRoutingDelegation)
   }
 
   // --- Events ---
@@ -2268,6 +2523,29 @@
       });
     })(sortHeaders[i]);
   }
+
+  // Routing table — event delegation (replaces per-render listener binding)
+  // Hash cell click-to-copy
+  $('routing-table-body').addEventListener('click', function(ev) {
+    var cell = ev.target.closest('.hash-cell');
+    if (!cell) return;
+    var full = cell.getAttribute('title');
+    if (full && navigator.clipboard) {
+      navigator.clipboard.writeText(full);
+      cell.style.color = 'var(--green)';
+      setTimeout(function() { cell.style.color = ''; }, 500);
+    }
+  });
+  // Pagination button clicks
+  $('routing-pagination').addEventListener('click', function(ev) {
+    var btn = ev.target.closest('button[data-rt-page]');
+    if (!btn || btn.disabled) return;
+    var pg = parseInt(btn.getAttribute('data-rt-page'));
+    if (pg && pg !== _rtPage) {
+      _rtPage = pg;
+      fetchRoutingTable();
+    }
+  });
 
   // Routing table toggle
   $('routing-table-toggle').addEventListener('click', function() {
@@ -2329,15 +2607,28 @@
     fetchRoutingTable();
   });
 
-  // Mesh/peer/meshtastic pagination controls
-  $('mesh-show-more').addEventListener('click', function() {
-    if (_meshVisible >= _meshNodes.length) {
-      _meshVisible = _meshPageSize;  // collapse back
-    } else {
-      _meshVisible += _meshPageSize;  // show next page
+  // Mesh pagination — event delegation for page buttons
+  $('mesh-show-more').addEventListener('click', function(ev) {
+    var btn = ev.target.closest('[data-mesh-page]');
+    if (!btn) return;
+    var pg = parseInt(btn.getAttribute('data-mesh-page'));
+    if (pg && pg !== _meshPage) {
+      _meshPage = pg;
+      fetchMeshNodes();
     }
-    var sorted = sortMeshNodes(_meshNodes, _meshSortKey, _meshSortAsc);
-    renderMeshNodes(sorted);
+  });
+  // Mesh table row clicks — event delegation
+  $('mesh-table').addEventListener('click', function(ev) {
+    var row = ev.target.closest('tr[data-hash]');
+    if (!row) return;
+    var hash = row.getAttribute('data-hash');
+    if (!hash) return;
+    // Find the node in current data
+    var node = null;
+    for (var i = 0; i < _meshNodes.length; i++) {
+      if (_meshNodes[i].destination_hash === hash) { node = _meshNodes[i]; break; }
+    }
+    if (node) toggleNodeDetail(node, hash);
   });
   $('peer-show-more').addEventListener('click', function() {
     var peers = Object.values(_meshPeers);
@@ -2399,7 +2690,7 @@
   // Refresh plugins and interfaces periodically
   setInterval(fetchAll, 30000);
 
-  // Refresh reachability scores every 60s (separate from mesh data)
-  setInterval(fetchReachability, 60000);
+  // Refresh LoRa reachability scores every 60s
+  setInterval(fetchLoraReachability, 60000);
 
 })();

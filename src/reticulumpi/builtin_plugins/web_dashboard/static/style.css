@@ -1066,6 +1066,157 @@ body {
 .restart-btn:hover { filter: brightness(1.1); }
 .restart-btn:disabled { opacity: 0.5; cursor: default; }
 
+/* ── LoRa Radio Info Card ─────────────────────────────── */
+.lora-radio-card {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.lora-radio-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.lora-radio-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.lora-radio-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.lora-radio-status .status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+/* Radio parameters row */
+.lora-radio-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.85rem;
+}
+
+.lora-param {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid rgba(88, 166, 255, 0.15);
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+}
+
+.lora-param-value {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.lora-param-unit {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.lora-param-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 0.15rem;
+}
+
+/* Runtime metrics row */
+.lora-radio-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.6rem;
+}
+
+.lora-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.lora-metric-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.lora-metric-value {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.lora-metric-value.metric-ok { color: var(--green); }
+.lora-metric-value.metric-warn { color: var(--yellow); }
+.lora-metric-value.metric-crit { color: var(--red); }
+
+/* Mini bar for airtime/channel load */
+.lora-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.lora-bar {
+  flex: 1;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  overflow: hidden;
+  max-width: 60px;
+}
+
+.lora-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.lora-bar-fill.bar-ok { background: var(--green); }
+.lora-bar-fill.bar-warn { background: var(--yellow); }
+.lora-bar-fill.bar-crit { background: var(--red); }
+
+/* LoRa metric sub-labels (long-term values) */
+.lora-metric-sub {
+  font-size: 0.6rem;
+  opacity: 0.7;
+  display: block;
+}
+
+/* Trend indicators (arrows showing short vs long direction) */
+.trend-up { color: var(--red); font-size: 0.75rem; }
+.trend-down { color: var(--green); font-size: 0.75rem; }
+
+/* Mesh pagination controls */
+.mesh-page-btn {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.8rem;
+  transition: background 0.15s;
+}
+.mesh-page-btn:hover { background: var(--bg-hover); }
+
 .hidden { display: none; }
 
 /* ========== Responsive — Tablet ========== */
@@ -1098,6 +1249,12 @@ body {
 
   /* Node detail */
   .node-detail-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+
+  /* LoRa radio */
+  .lora-radio-params { gap: 0.4rem; }
+  .lora-param { padding: 0.25rem 0.5rem; }
+  .lora-param-value { font-size: 0.82rem; }
+  .lora-radio-metrics { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* ========== Responsive — Phone ========== */
@@ -1181,4 +1338,13 @@ body {
   .node-detail-grid { grid-template-columns: 1fr 1fr; gap: 0.3rem 1rem; }
   .node-detail-label { font-size: 0.6rem; }
   .node-detail-value { font-size: 0.75rem; }
+
+  /* LoRa radio */
+  .lora-radio-card { padding: 0.75rem; }
+  .lora-radio-params { gap: 0.35rem; }
+  .lora-param { padding: 0.2rem 0.45rem; }
+  .lora-param-value { font-size: 0.78rem; }
+  .lora-param-label { font-size: 0.55rem; }
+  .lora-radio-metrics { grid-template-columns: 1fr 1fr; gap: 0.4rem; }
+  .lora-metric-value { font-size: 0.78rem; }
 }

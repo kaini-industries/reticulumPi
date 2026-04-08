@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,89 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# ── RNode config cache ──────────────────────────────────────────────
+_rnode_config_cache: dict[str, dict] | None = None
+_rnode_config_mtime: float = 0
+
+_RETICULUM_CONFIG_PATHS = [
+    os.path.expanduser("~reticulumpi/.reticulum/config"),
+    os.path.expanduser("~/.reticulum/config"),
+]
+
+_RNODE_RADIO_KEYS = {
+    "frequency", "bandwidth", "txpower", "spreadingfactor", "codingrate",
+}
+
+
+def _parse_rnode_config() -> dict[str, dict]:
+    """Parse Reticulum config to extract RNode radio settings.
+
+    Returns a dict mapping section name → {frequency, bandwidth, ...}.
+    Results are cached and re-read only when the file changes.
+    """
+    global _rnode_config_cache, _rnode_config_mtime
+
+    config_path = None
+    for p in _RETICULUM_CONFIG_PATHS:
+        if os.path.isfile(p):
+            config_path = p
+            break
+    if not config_path:
+        return _rnode_config_cache or {}
+
+    try:
+        mtime = os.path.getmtime(config_path)
+        if _rnode_config_cache is not None and mtime == _rnode_config_mtime:
+            return _rnode_config_cache
+
+        result: dict[str, dict] = {}
+        current_section: str | None = None
+        current_data: dict[str, str] = {}
+
+        with open(config_path, "r") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("[[") and stripped.endswith("]]"):
+                    # Save previous section if it was an RNode
+                    if current_section and current_data.get("type") == "RNodeInterface":
+                        result[current_section] = _extract_radio(current_data)
+                    current_section = stripped[2:-2].strip()
+                    current_data = {}
+                elif stripped.startswith("[") and stripped.endswith("]"):
+                    if current_section and current_data.get("type") == "RNodeInterface":
+                        result[current_section] = _extract_radio(current_data)
+                    current_section = None
+                    current_data = {}
+                elif "=" in stripped and current_section:
+                    key, _, value = stripped.partition("=")
+                    current_data[key.strip()] = value.strip()
+
+        # Handle last section
+        if current_section and current_data.get("type") == "RNodeInterface":
+            result[current_section] = _extract_radio(current_data)
+
+        _rnode_config_cache = result
+        _rnode_config_mtime = mtime
+        return result
+    except Exception:
+        return _rnode_config_cache or {}
+
+
+def _extract_radio(data: dict[str, str]) -> dict[str, Any]:
+    """Extract and type-cast radio config fields."""
+    radio: dict[str, Any] = {}
+    for key in _RNODE_RADIO_KEYS:
+        val = data.get(key)
+        if val is not None:
+            try:
+                radio[key] = int(val)
+            except ValueError:
+                try:
+                    radio[key] = float(val)
+                except ValueError:
+                    radio[key] = val
+    return radio
+
 
 def _collect_interfaces(reticulum_instance: Any = None) -> list[dict]:
     """Collect current RNS interface data for broadcast.
@@ -24,9 +108,16 @@ def _collect_interfaces(reticulum_instance: Any = None) -> list[dict]:
     local client connection to rnsd.  ``Reticulum.get_interface_stats()``
     returns the full list of interfaces from the shared instance, including
     TCP, I2P, LoRa, etc.
+
+    For RNodeInterface entries, radio config from the Reticulum config file
+    is merged in (frequency, bandwidth, SF, CR, txpower) along with runtime
+    metrics (airtime, channel load, noise floor, etc.) from the stats API.
     """
     try:
         import RNS
+
+        # Load RNode radio config from the Reticulum config file (cached)
+        rnode_configs = _parse_rnode_config()
 
         # Prefer the Reticulum stats API (works across shared instance boundary)
         if reticulum_instance and hasattr(reticulum_instance, "get_interface_stats"):
@@ -37,20 +128,44 @@ def _collect_interfaces(reticulum_instance: Any = None) -> list[dict]:
                 # Skip internal local-client/local-server interfaces
                 if itype in ("LocalClientInterface", "LocalServerInterface"):
                     continue
-                interfaces.append({
+                info: dict[str, Any] = {
                     "name": entry.get("name", "?"),
                     "type": itype,
                     "online": entry.get("status", False),
                     "bitrate": entry.get("bitrate"),
                     "rxb": entry.get("rxb", 0),
                     "txb": entry.get("txb", 0),
-                })
+                }
+
+                # For RNode interfaces, include radio metrics and config
+                if itype == "RNodeInterface":
+                    # Runtime metrics from rnsd stats
+                    for key in (
+                        "airtime_short", "airtime_long",
+                        "channel_load_short", "channel_load_long",
+                        "noise_floor", "interference",
+                        "battery_state", "battery_percent",
+                        "announce_queue", "held_announces",
+                    ):
+                        if key in entry:
+                            info[key] = entry[key]
+
+                    # Radio config from parsed Reticulum config file
+                    # Match by checking if the config section name appears
+                    # in the interface name string
+                    iface_name = entry.get("name", "")
+                    for section_name, radio_cfg in rnode_configs.items():
+                        if section_name in iface_name:
+                            info["radio"] = radio_cfg
+                            break
+
+                interfaces.append(info)
             return interfaces
 
         # Fallback: direct interface iteration (standalone mode)
         interfaces = []
         for iface in RNS.Transport.interfaces:
-            info: dict = {
+            info = {
                 "name": str(iface),
                 "type": iface.__class__.__name__,
                 "online": getattr(iface, "online", None),
@@ -61,6 +176,34 @@ def _collect_interfaces(reticulum_instance: Any = None) -> list[dict]:
                 info["rxb"] = iface.rxb
             if hasattr(iface, "txb"):
                 info["txb"] = iface.txb
+
+            # For RNode: pull radio stats directly from the interface object
+            if iface.__class__.__name__ == "RNodeInterface":
+                for attr, key in [
+                    ("r_airtime_short", "airtime_short"),
+                    ("r_airtime_long", "airtime_long"),
+                    ("r_channel_load_short", "channel_load_short"),
+                    ("r_channel_load_long", "channel_load_long"),
+                    ("r_noise_floor", "noise_floor"),
+                    ("r_interference", "interference"),
+                    ("r_frequency", "frequency"),
+                    ("r_bandwidth", "bandwidth"),
+                    ("r_txpower", "txpower"),
+                    ("r_sf", "spreadingfactor"),
+                    ("r_cr", "codingrate"),
+                ]:
+                    val = getattr(iface, attr, None)
+                    if val is not None:
+                        info[key] = val
+                # Standalone mode: embed radio config directly
+                radio = {}
+                for k in ("frequency", "bandwidth", "txpower",
+                          "spreadingfactor", "codingrate"):
+                    if k in info:
+                        radio[k] = info[k]
+                if radio:
+                    info["radio"] = radio
+
             interfaces.append(info)
         return interfaces
     except Exception:
@@ -149,10 +292,14 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
 
 
 _last_msg_ts: dict[str, float] = {"ts": 0}
+_last_mesh_announce_ts: float = 0  # track last announce time for delta broadcasts
+_mesh_version: int = 0  # increments when mesh data changes
 
 
 async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     """Periodically broadcast system metrics to all connected WebSocket clients."""
+    global _last_mesh_announce_ts, _mesh_version
+
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
 
@@ -183,14 +330,29 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             # Collect interface traffic data
             interfaces = _collect_interfaces(plugin.app.reticulum)
 
-            # Collect mesh data (if plugins available), skip if unchanged
+            # Collect mesh data as SUMMARY + DELTAS (not full node list)
+            # This reduces broadcast size from ~100KB to ~1KB per cycle
             mesh_data: dict = {}
             network_map = plugin.app.get_plugin("network_map")
-            if network_map and hasattr(network_map, "get_known_nodes"):
+            if network_map:
                 try:
-                    nodes = network_map.get_known_nodes()
-                    mesh_data["nodes"] = nodes
-                    mesh_data["known_nodes"] = len(nodes)
+                    if hasattr(network_map, "get_node_count"):
+                        mesh_data["known_nodes"] = network_map.get_node_count()
+                    elif hasattr(network_map, "get_known_nodes"):
+                        mesh_data["known_nodes"] = len(network_map.get_known_nodes())
+
+                    # Send only recent announces (delta) instead of full list
+                    if hasattr(network_map, "get_recent_announces"):
+                        recent = network_map.get_recent_announces(
+                            since=_last_mesh_announce_ts, limit=20,
+                        )
+                        if recent:
+                            mesh_data["recent_announces"] = recent
+                            _mesh_version += 1
+                            _last_mesh_announce_ts = max(
+                                n.get("last_seen", 0) for n in recent
+                            )
+                    mesh_data["version"] = _mesh_version
                 except Exception:
                     pass
 
@@ -211,10 +373,6 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                     mesh_data["last_alert"] = alert_status.get("last_alert")
                 except Exception:
                     pass
-
-            # Always include mesh data — the frontend relies on regular
-            # updates to keep "Last Seen" timestamps and reachability
-            # indicators current even when the node list hasn't changed.
 
             # Collect sensor data (if plugin available)
             sensor_data: dict = {}

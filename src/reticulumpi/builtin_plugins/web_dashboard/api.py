@@ -328,46 +328,19 @@ async def handle_interfaces(request: aiohttp.web.Request) -> aiohttp.web.Respons
 
     In shared-instance mode, queries rnsd for the full interface list
     (TCP, I2P, LoRa, etc.) via ``Reticulum.get_interface_stats()``.
+    For RNode interfaces, radio config and runtime metrics are included.
     """
-    import RNS
+    from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
+        _collect_interfaces,
+    )
 
     plugin = _get_plugin(request)
     rns_instance = getattr(plugin.app, "reticulum", None)
 
-    interfaces = []
     try:
-        # Prefer the Reticulum stats API (works across shared instance)
-        if rns_instance and hasattr(rns_instance, "get_interface_stats"):
-            stats = rns_instance.get_interface_stats()
-            for entry in stats.get("interfaces", []):
-                itype = entry.get("type", "")
-                if itype in ("LocalClientInterface", "LocalServerInterface"):
-                    continue
-                interfaces.append({
-                    "name": entry.get("name", "?"),
-                    "type": itype,
-                    "online": entry.get("status", False),
-                    "bitrate": entry.get("bitrate"),
-                    "rxb": entry.get("rxb", 0),
-                    "txb": entry.get("txb", 0),
-                })
-        else:
-            # Fallback: direct iteration (standalone mode)
-            for iface in RNS.Transport.interfaces:
-                info: dict[str, Any] = {
-                    "name": str(iface),
-                    "type": iface.__class__.__name__,
-                    "online": getattr(iface, "online", None),
-                }
-                if hasattr(iface, "bitrate"):
-                    info["bitrate"] = iface.bitrate
-                if hasattr(iface, "rxb"):
-                    info["rxb"] = iface.rxb
-                if hasattr(iface, "txb"):
-                    info["txb"] = iface.txb
-                interfaces.append(info)
+        interfaces = _collect_interfaces(rns_instance)
     except Exception as exc:
-        return _ok({"interfaces": interfaces, "error": f"Partial collection: {exc}"})
+        return _ok({"interfaces": [], "error": f"Partial collection: {exc}"})
 
     return _ok({"interfaces": interfaces})
 
@@ -552,12 +525,54 @@ async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
 
 async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    """GET /api/mesh/nodes — known nodes from network_map plugin."""
+    """GET /api/mesh/nodes — known nodes from network_map plugin.
+
+    Supports server-side pagination, sorting, and filtering:
+        page: Page number (default 1)
+        per_page: Items per page (default 25, max 200, 0 = all)
+        sort: Sort field (last_seen, hops, announce_count, app_name, first_seen)
+        order: asc or desc (default desc)
+        search: Text search on hash, name, or app
+        app: Filter by app_name
+    """
     plugin = _get_plugin(request)
     network_map = plugin.app.get_plugin("network_map")
     if not network_map or not hasattr(network_map, "get_known_nodes"):
-        return _ok({"nodes": [], "message": "network_map plugin not available"})
-    return _ok({"nodes": network_map.get_known_nodes()})
+        return _ok({"nodes": [], "total": 0, "page": 1, "pages": 1,
+                     "message": "network_map plugin not available"})
+
+    # Check if paginated method is available (new) — fall back to full list
+    if not hasattr(network_map, "get_known_nodes_paginated"):
+        return _ok({"nodes": network_map.get_known_nodes()})
+
+    try:
+        page = max(1, int(request.query.get("page", 1)))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        per_page = int(request.query.get("per_page", 25))
+    except (ValueError, TypeError):
+        per_page = 25
+    # Clamp: 0 means "all" (legacy compat), otherwise max 200
+    if per_page < 0:
+        per_page = 25
+    elif per_page > 200 and per_page != 0:
+        per_page = 200
+
+    # If per_page=0, return full list for legacy callers
+    if per_page == 0:
+        return _ok({"nodes": network_map.get_known_nodes()})
+
+    sort = request.query.get("sort", "last_seen")
+    order = request.query.get("order", "desc")
+    search = request.query.get("search", "")
+    app_filter = request.query.get("app", "")
+
+    result = network_map.get_known_nodes_paginated(
+        page=page, per_page=per_page, sort=sort, order=order,
+        search=search, app_filter=app_filter,
+    )
+    return _ok(result)
 
 
 async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -764,8 +779,11 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
     """GET /api/reachability — scored node reachability.
 
     Query parameters:
-        limit: Max nodes to return (default 50, 0 = all)
-        search: Hex prefix filter on destination hash
+        page: Page number (default 1)
+        per_page: Items per page (default 50, 0 = all for legacy callers)
+        limit: Legacy alias for per_page (default 50, 0 = all)
+        search: Text filter on hash, name, or app
+        hashes: Comma-separated list of specific hashes to score (efficient)
     """
     from reticulumpi.reachability import score_all_nodes
 
@@ -780,8 +798,6 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
             "message": "network_map plugin not available",
         })
 
-    nodes = network_map.get_known_nodes()
-
     # Path table from connectivity_monitor
     conn_mon = plugin.app.get_plugin("connectivity_monitor")
     path_table: list = []
@@ -795,7 +811,24 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
     if th and hasattr(th, "get_transport_nodes"):
         transport_nodes = th.get_transport_nodes()
 
-    # Score all nodes
+    # Check if caller requested specific hashes (efficient path)
+    specific_hashes = request.query.get("hashes", "")
+    if specific_hashes:
+        # Normalize: strip <> and lowercase for comparison
+        hash_set = set(
+            h.strip().lower().strip("<>")
+            for h in specific_hashes.split(",") if h.strip()
+        )
+        all_nodes = network_map.get_known_nodes()
+        nodes = [
+            n for n in all_nodes
+            if n.get("destination_hash", "").lower().strip("<>") in hash_set
+        ]
+        scored = score_all_nodes(nodes, path_table, transport_nodes)
+        return _ok({"nodes": scored, "summary": {"total_scored": len(scored), "returned": len(scored)}})
+
+    # Full scoring with pagination
+    nodes = network_map.get_known_nodes()
     scored = score_all_nodes(nodes, path_table, transport_nodes)
 
     # Apply search filter
@@ -808,7 +841,7 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
             or search in (n.get("app_name") or "").lower()
         ]
 
-    # Build summary from ALL scored nodes (before limit)
+    # Build summary from ALL scored nodes (before pagination)
     total = len(scored)
     all_scores = [n["score"] for n in scored]
     label_counts = {"high": 0, "good": 0, "fair": 0, "low": 0, "unlikely": 0}
@@ -823,15 +856,27 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
         **label_counts,
     }
 
-    # Apply limit
+    # Support both legacy 'limit' and new 'per_page' + 'page' params
     try:
-        limit = int(request.query.get("limit", 50))
+        per_page = int(request.query.get("per_page", request.query.get("limit", 50)))
     except (ValueError, TypeError):
-        limit = 50
-    if limit > 0:
-        scored = scored[:limit]
+        per_page = 50
+    try:
+        page = max(1, int(request.query.get("page", 1)))
+    except (ValueError, TypeError):
+        page = 1
+
+    if per_page > 0:
+        pages = max(1, (total + per_page - 1) // per_page)
+        page = min(page, pages)
+        offset = (per_page * (page - 1))
+        scored = scored[offset:offset + per_page]
+    else:
+        pages = 1
 
     summary["returned"] = len(scored)
+    summary["page"] = page
+    summary["pages"] = pages
     return _ok({"nodes": scored, "summary": summary})
 
 

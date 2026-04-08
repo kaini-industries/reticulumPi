@@ -114,6 +114,123 @@ class NetworkMapPlugin(PluginBase):
             })
         return sorted(nodes, key=lambda n: n.get("last_seen", 0), reverse=True)
 
+    def get_known_nodes_paginated(
+        self,
+        page: int = 1,
+        per_page: int = 25,
+        sort: str = "last_seen",
+        order: str = "desc",
+        search: str = "",
+        app_filter: str = "",
+    ) -> dict[str, Any]:
+        """Return paginated nodes directly from SQLite for efficiency.
+
+        Returns dict with 'nodes', 'total', 'page', 'pages', 'per_page'.
+        """
+        allowed_sorts = {
+            "last_seen": "last_seen",
+            "first_seen": "first_seen",
+            "hops": "hops",
+            "announce_count": "announce_count",
+            "app_name": "app_name",
+        }
+        sort_col = allowed_sorts.get(sort, "last_seen")
+        sort_dir = "ASC" if order == "asc" else "DESC"
+
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.row_factory = sqlite3.Row
+
+                # Build WHERE clause
+                conditions = []
+                params: list = []
+                if search:
+                    conditions.append(
+                        "(destination_hash LIKE ? OR app_data_str LIKE ? OR app_name LIKE ?)"
+                    )
+                    like = f"%{search}%"
+                    params.extend([like, like, like])
+                if app_filter:
+                    conditions.append("app_name = ?")
+                    params.append(app_filter)
+
+                where = ""
+                if conditions:
+                    where = "WHERE " + " AND ".join(conditions)
+
+                # Count total
+                count_sql = f"SELECT COUNT(*) FROM known_nodes {where}"
+                total = conn.execute(count_sql, params).fetchone()[0]
+
+                # Paginate
+                pages = max(1, (total + per_page - 1) // per_page) if per_page > 0 else 1
+                page = max(1, min(page, pages))
+                offset = (page - 1) * per_page
+
+                # Handle NULL hops in sort (push NULLs to end)
+                if sort_col == "hops":
+                    order_clause = f"CASE WHEN hops IS NULL THEN 1 ELSE 0 END, hops {sort_dir}"
+                else:
+                    order_clause = f"{sort_col} {sort_dir}"
+
+                query = f"""
+                    SELECT * FROM known_nodes {where}
+                    ORDER BY {order_clause}
+                    LIMIT ? OFFSET ?
+                """
+                rows = conn.execute(query, params + [per_page, offset]).fetchall()
+
+                nodes = []
+                for row in rows:
+                    # Format hash with angle brackets to match get_known_nodes()
+                    raw_hash = row["destination_hash"] or ""
+                    fmt_hash = "<" + raw_hash + ">" if raw_hash else ""
+                    nodes.append({
+                        "destination_hash": fmt_hash,
+                        "app_name": row["app_name"] or "",
+                        "aspects": row["aspects"] or "",
+                        "hops": row["hops"],
+                        "last_seen": row["last_seen"],
+                        "first_seen": row["first_seen"],
+                        "announce_count": row["announce_count"] or 0,
+                        "app_data": row["app_data_str"] or "",
+                    })
+
+                return {
+                    "nodes": nodes,
+                    "total": total,
+                    "page": page,
+                    "pages": pages,
+                    "per_page": per_page,
+                }
+        except Exception:
+            self.log.exception("Error querying paginated nodes")
+            return {"nodes": [], "total": 0, "page": 1, "pages": 1, "per_page": per_page}
+
+    def get_node_count(self) -> int:
+        """Return the total number of known nodes (fast, for WS summary)."""
+        with self._nodes_lock:
+            return len(self._known_nodes)
+
+    def get_recent_announces(self, since: float = 0, limit: int = 10) -> list[dict[str, Any]]:
+        """Return nodes announced since a given timestamp (for WS deltas)."""
+        results = []
+        with self._nodes_lock:
+            items = list(self._known_nodes.items())
+        for dest_hash, info in items:
+            if info.get("last_seen", 0) > since:
+                results.append({
+                    "destination_hash": RNS.prettyhexrep(dest_hash),
+                    "app_name": info.get("app_name", ""),
+                    "aspects": info.get("aspects", ""),
+                    "hops": info.get("hops"),
+                    "last_seen": info.get("last_seen"),
+                    "announce_count": info.get("announce_count", 0),
+                    "app_data": info.get("app_data_str", ""),
+                })
+        results.sort(key=lambda n: n.get("last_seen", 0), reverse=True)
+        return results[:limit]
+
     def get_interface_stats(self) -> list[dict[str, Any]]:
         """Collect current interface statistics."""
         stats = []
