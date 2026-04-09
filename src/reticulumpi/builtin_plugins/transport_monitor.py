@@ -216,10 +216,35 @@ class TransportMonitorPlugin(PluginBase):
 
     def get_hub_health(self) -> dict[str, Any]:
         """Return structured health data for the dashboard."""
+        # Build a lookup of live interface traffic stats keyed by target_host:target_port.
+        # In shared-instance mode RNS.Transport.interfaces only shows the
+        # LocalClientInterface, but pool/fallback interfaces created by this
+        # plugin are tracked in _auto_interfaces and _active_fallbacks.
+        iface_stats: dict[str, dict[str, int]] = {}
+        try:
+            for iface in RNS.Transport.interfaces:
+                host = getattr(iface, "target_ip", None)
+                port = getattr(iface, "target_port", None)
+                if host and port:
+                    key = f"{host}:{port}"
+                    iface_stats[key] = {
+                        "rxb": getattr(iface, "rxb", 0),
+                        "txb": getattr(iface, "txb", 0),
+                    }
+        except Exception:
+            pass
+
         with self._lock:
             primaries = []
             for status in self._hub_status.values():
-                primaries.append(dict(status))
+                entry = dict(status)
+                # Try to attach traffic stats from matching live interface
+                key = f"{entry.get('target_host', '')}:{entry.get('target_port', '')}"
+                stats = iface_stats.get(key)
+                if stats:
+                    entry["rxb"] = stats["rxb"]
+                    entry["txb"] = stats["txb"]
+                primaries.append(entry)
 
             fallbacks = []
             for iface in self._active_fallbacks:
@@ -228,6 +253,8 @@ class TransportMonitorPlugin(PluginBase):
                     "online": getattr(iface, "online", False),
                     "target_host": getattr(iface, "target_ip", ""),
                     "target_port": getattr(iface, "target_port", 0),
+                    "rxb": getattr(iface, "rxb", 0),
+                    "txb": getattr(iface, "txb", 0),
                 })
 
             now = time.monotonic()
@@ -239,6 +266,8 @@ class TransportMonitorPlugin(PluginBase):
                     "online": True,
                     "target_host": getattr(iface, "target_ip", ""),
                     "target_port": getattr(iface, "target_port", 0),
+                    "rxb": getattr(iface, "rxb", 0),
+                    "txb": getattr(iface, "txb", 0),
                 })
 
             return {
@@ -275,22 +304,42 @@ class TransportMonitorPlugin(PluginBase):
             return False
 
     def _has_user_tcp_interfaces(self) -> bool:
-        """Check if any user-configured TCP interfaces exist in RNS.
+        """Check if any user-configured TCP client interfaces are enabled.
 
-        Returns False when the user has disabled all TCP interfaces in the
-        Reticulum config, which means we should not create auto-discovery
-        or fallback TCP interfaces either.  Excludes interfaces we created
-        ourselves (Pool-* and Fallback-*).
+        Returns False when the user has disabled all TCP client interfaces,
+        which means we should not create auto-discovery or fallback TCP
+        interfaces either.
+
+        In shared-instance mode, ``RNS.Transport.interfaces`` only contains
+        a ``LocalClientInterface`` (socket to rnsd) — the real TCP
+        interfaces are owned by rnsd and invisible here.  So we check the
+        Reticulum config file directly, which is always accurate.
         """
-        from RNS.Interfaces.TCPInterface import TCPClientInterface
+        try:
+            from reticulumpi.rns_config import parse_rns_config
+            import os
 
-        our_prefixes = ("Pool-", "Fallback-")
-        for iface in RNS.Transport.interfaces:
-            if isinstance(iface, TCPClientInterface):
-                name = getattr(iface, "name", "")
-                if not any(name.startswith(p) for p in our_prefixes):
+            config_dir = getattr(self.app, "_reticulum_config_dir", None)
+            if not config_dir:
+                config_dir = os.path.expanduser("~/.reticulum")
+            config_path = os.path.join(config_dir, "config")
+
+            _, interfaces = parse_rns_config(config_path)
+            for entry in interfaces:
+                if entry.iface_type == "TCPClientInterface" and entry.enabled:
                     return True
-        return False
+            return False
+        except Exception:
+            # Fallback: check live interfaces (works when not in shared mode)
+            from RNS.Interfaces.TCPInterface import TCPClientInterface
+
+            our_prefixes = ("Pool-", "Fallback-")
+            for iface in RNS.Transport.interfaces:
+                if isinstance(iface, TCPClientInterface):
+                    name = getattr(iface, "name", "")
+                    if not any(name.startswith(p) for p in our_prefixes):
+                        return True
+            return False
 
     def _monitor_loop(self) -> None:
         """Periodically check hub health and manage failover."""
@@ -963,6 +1012,9 @@ class TransportMonitorPlugin(PluginBase):
             self.log.debug("Hub exchange: failed to parse response from <%s>", dest_hex)
             return False
 
+    # Hard cap on hub pool size to prevent memory exhaustion via malicious peers
+    _MAX_HUB_POOL_SIZE = 500
+
     def _merge_exchanged_hubs(self, received: list[dict]) -> int:
         """Merge hubs received from a peer into our pool. Returns count of new hubs."""
         added = 0
@@ -971,8 +1023,15 @@ class TransportMonitorPlugin(PluginBase):
                 f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool
             }
             pinned = set(self._pinned_hubs)
+            pool_size = len(self._hub_pool)
 
         for entry in received:
+            if pool_size + added >= self._MAX_HUB_POOL_SIZE:
+                self.log.debug(
+                    "Hub pool cap reached (%d), ignoring remaining exchanged hubs",
+                    self._MAX_HUB_POOL_SIZE,
+                )
+                break
             host = entry.get("h", "")
             port = entry.get("p", 0)
             if not host or not port:

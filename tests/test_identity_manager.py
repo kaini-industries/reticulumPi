@@ -13,7 +13,12 @@ def test_creates_new_identity_when_file_missing(tmp_path):
         result = load_or_create(identity_path)
 
     assert result is mock_identity
-    mock_identity.to_file.assert_called_once_with(identity_path)
+    # Identity is now written to a temp file then renamed (atomic creation),
+    # so to_file is called with a temp path rather than the final path.
+    mock_identity.to_file.assert_called_once()
+    # The final file should exist after os.replace
+    actual_arg = mock_identity.to_file.call_args[0][0]
+    assert actual_arg.startswith(str(tmp_path / "subdir"))
 
 
 def test_loads_existing_identity(tmp_path):

@@ -60,3 +60,18 @@ class EventBus:
                     getattr(cb, "__qualname__", cb),
                     event_type,
                 )
+
+    def unsubscribe_all(self, callback: EventCallback) -> int:
+        """Remove *callback* from every event type it is subscribed to.
+
+        Useful during plugin shutdown to prevent stale callbacks from
+        accumulating across hot-reload cycles.  Returns the number of
+        subscriptions removed.
+        """
+        removed = 0
+        with self._lock:
+            for listeners in self._subscribers.values():
+                while callback in listeners:
+                    listeners.remove(callback)
+                    removed += 1
+        return removed

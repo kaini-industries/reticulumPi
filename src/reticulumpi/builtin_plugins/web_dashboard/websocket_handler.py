@@ -302,10 +302,13 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
+    _cycle_count = 0
 
     while True:
         try:
             await asyncio.sleep(interval)
+
+            _cycle_count += 1
 
             if not _ws_clients:
                 continue
@@ -353,6 +356,10 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                                 n.get("last_seen", 0) for n in recent
                             )
                     mesh_data["version"] = _mesh_version
+
+                    # Include summary stats every 3rd cycle (~15s) for live dashboard
+                    if _cycle_count % 3 == 0 and hasattr(network_map, "get_mesh_summary"):
+                        mesh_data["summary"] = network_map.get_mesh_summary()
                 except Exception:
                     pass
 

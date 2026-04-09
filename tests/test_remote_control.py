@@ -30,6 +30,22 @@ def plugin_config():
     }
 
 
+@pytest.fixture
+def authorized_identity():
+    """A mock identity whose hash is in the default plugin_config allowlist."""
+    identity = MagicMock()
+    identity.hash = bytes.fromhex("aa" * 16)
+    return identity
+
+
+@pytest.fixture
+def unauthorized_identity():
+    """A mock identity whose hash is NOT in the allowlist."""
+    identity = MagicMock()
+    identity.hash = b"\xff" * 16
+    return identity
+
+
 @patch("RNS.Transport")
 @patch("RNS.Destination")
 def test_start_stop(mock_dest, mock_transport, mock_app, plugin_config):
@@ -70,14 +86,14 @@ def test_no_allowed_identities_warning(mock_dest, mock_transport, mock_app):
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
-def test_handle_ping(mock_dest, mock_transport, mock_app, plugin_config):
+def test_handle_ping(mock_dest, mock_transport, mock_app, plugin_config, authorized_identity):
     from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
     import RNS.vendor.umsgpack as umsgpack
 
     plugin = RemoteControlPlugin(mock_app, plugin_config)
     plugin.start()
 
-    result = plugin._handle_ping("/ping", None, None, None, None, None)
+    result = plugin._handle_ping("/ping", None, None, None, authorized_identity, None)
     data = umsgpack.unpackb(result)
     assert data["ok"] is True
     assert data["node"] == "TestNode"
@@ -86,7 +102,39 @@ def test_handle_ping(mock_dest, mock_transport, mock_app, plugin_config):
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
-def test_handle_status(mock_dest, mock_transport, mock_app, plugin_config):
+def test_handle_ping_rejects_unauthorized(mock_dest, mock_transport, mock_app, plugin_config, unauthorized_identity):
+    from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+    import RNS.vendor.umsgpack as umsgpack
+
+    plugin = RemoteControlPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    result = plugin._handle_ping("/ping", None, None, None, unauthorized_identity, None)
+    data = umsgpack.unpackb(result)
+    assert data["ok"] is False
+    assert "unauthorized" in data.get("error", "")
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
+def test_handle_ping_rejects_no_identity(mock_dest, mock_transport, mock_app, plugin_config):
+    from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+    import RNS.vendor.umsgpack as umsgpack
+
+    plugin = RemoteControlPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    result = plugin._handle_ping("/ping", None, None, None, None, None)
+    data = umsgpack.unpackb(result)
+    assert data["ok"] is False
+    assert "identification" in data.get("error", "")
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
+def test_handle_status(mock_dest, mock_transport, mock_app, plugin_config, authorized_identity):
     from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
     import RNS.vendor.umsgpack as umsgpack
 
@@ -94,7 +142,7 @@ def test_handle_status(mock_dest, mock_transport, mock_app, plugin_config):
     plugin = RemoteControlPlugin(mock_app, plugin_config)
     plugin.start()
 
-    result = plugin._handle_status("/status", None, None, None, None, None)
+    result = plugin._handle_status("/status", None, None, None, authorized_identity, None)
     data = umsgpack.unpackb(result)
     assert data["ok"] is True
     assert "data" in data
@@ -103,14 +151,14 @@ def test_handle_status(mock_dest, mock_transport, mock_app, plugin_config):
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
-def test_handle_metrics_no_monitor(mock_dest, mock_transport, mock_app, plugin_config):
+def test_handle_metrics_no_monitor(mock_dest, mock_transport, mock_app, plugin_config, authorized_identity):
     from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
     import RNS.vendor.umsgpack as umsgpack
 
     plugin = RemoteControlPlugin(mock_app, plugin_config)
     plugin.start()
 
-    result = plugin._handle_metrics("/metrics", None, None, None, None, None)
+    result = plugin._handle_metrics("/metrics", None, None, None, authorized_identity, None)
     data = umsgpack.unpackb(result)
     assert data["ok"] is False
     plugin.stop()
@@ -118,7 +166,7 @@ def test_handle_metrics_no_monitor(mock_dest, mock_transport, mock_app, plugin_c
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
-def test_handle_plugins(mock_dest, mock_transport, mock_app, plugin_config):
+def test_handle_plugins(mock_dest, mock_transport, mock_app, plugin_config, authorized_identity):
     from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
     import RNS.vendor.umsgpack as umsgpack
 
@@ -131,7 +179,7 @@ def test_handle_plugins(mock_dest, mock_transport, mock_app, plugin_config):
     plugin = RemoteControlPlugin(mock_app, plugin_config)
     plugin.start()
 
-    result = plugin._handle_plugins("/plugins", None, None, None, None, None)
+    result = plugin._handle_plugins("/plugins", None, None, None, authorized_identity, None)
     data = umsgpack.unpackb(result)
     assert data["ok"] is True
     assert "test_plugin" in data["data"]

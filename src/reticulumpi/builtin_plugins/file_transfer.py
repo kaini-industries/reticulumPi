@@ -219,13 +219,15 @@ class FileTransferPlugin(PluginBase):
         except Exception:
             return umsgpack.packb({"ok": False, "error": "invalid request"})
 
-        # Prevent path traversal
+        # Prevent path traversal — basename + boundary check
         safe_name = os.path.basename(filename)
         filepath = os.path.join(self._shared_dir, safe_name)
+        if not self._is_within_shared_dir(filepath):
+            return umsgpack.packb({"ok": False, "error": "invalid filename"})
         if not os.path.isfile(filepath):
             return umsgpack.packb({"ok": False, "error": "file not found"})
 
-        stat = os.stat(filepath)
+        stat = os.lstat(filepath)  # lstat: don't follow symlinks
         return umsgpack.packb({"ok": True, "data": {
             "name": safe_name,
             "size": stat.st_size,
@@ -234,17 +236,35 @@ class FileTransferPlugin(PluginBase):
 
     # --- Helpers ---
 
+    def _is_within_shared_dir(self, filepath: str) -> bool:
+        """Verify that the resolved path is within the shared directory.
+
+        Resolves symlinks and normalises paths so that symlinks pointing
+        outside the shared directory are rejected.
+        """
+        real_shared = os.path.realpath(self._shared_dir)
+        real_file = os.path.realpath(filepath)
+        # Ensure the resolved path is a child of the shared dir
+        return real_file.startswith(real_shared + os.sep) or real_file == real_shared
+
     def _list_shared_files(self) -> list[dict[str, Any]]:
         files = []
         try:
             for entry in os.scandir(self._shared_dir):
-                if entry.is_file():
-                    stat = entry.stat()
-                    files.append({
-                        "name": entry.name,
-                        "size": stat.st_size,
-                        "modified": stat.st_mtime,
-                    })
+                # Use lstat to avoid following symlinks; skip non-regular files
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                # Reject symlinks pointing outside the shared directory
+                full = os.path.join(self._shared_dir, entry.name)
+                if entry.is_symlink() and not self._is_within_shared_dir(full):
+                    self.log.warning("Skipping symlink outside shared dir: %s", entry.name)
+                    continue
+                stat = entry.stat(follow_symlinks=False)
+                files.append({
+                    "name": entry.name,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                })
         except Exception:
             self.log.debug("Error listing shared files", exc_info=True)
         return sorted(files, key=lambda f: f.get("modified", 0), reverse=True)
@@ -269,6 +289,16 @@ class FileTransferPlugin(PluginBase):
             counter = 1
             while os.path.exists(os.path.join(self._shared_dir, f"{base}_{counter}{ext}")):
                 counter += 1
-            name = f"{base}_{counter}{ext}"
+                if counter > 9999:
+                    name = f"received_{int(time.time())}_{resource.size}b{ext}"
+                    break
+            else:
+                name = f"{base}_{counter}{ext}"
+
+        # Final boundary check after constructing the name
+        final_path = os.path.join(self._shared_dir, name)
+        if not self._is_within_shared_dir(final_path):
+            self.log.warning("Filename resolved outside shared dir, using fallback")
+            name = f"received_{int(time.time())}_{resource.size}b"
 
         return name

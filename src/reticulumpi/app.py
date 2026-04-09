@@ -61,7 +61,7 @@ class ReticulumPiApp:
 
         for name, plugin in list(self.plugins.items()):
             try:
-                plugin.start()
+                self._start_plugin_with_timeout(name, plugin, self.PLUGIN_START_TIMEOUT)
                 log.info("Started plugin: %s", name)
                 self.event_bus.publish(events.PLUGIN_STARTED, {"name": name})
             except Exception as exc:
@@ -86,6 +86,7 @@ class ReticulumPiApp:
     # Leave 5s headroom under systemd's TimeoutStopSec=30
     SHUTDOWN_TIMEOUT: float = 25.0
     PLUGIN_STOP_TIMEOUT: float = 10.0
+    PLUGIN_START_TIMEOUT: float = 30.0
 
     def shutdown(self) -> None:
         """Gracefully stop all plugins and signal the run loop to exit."""
@@ -116,6 +117,39 @@ class ReticulumPiApp:
         self._shutdown_event.set()
         elapsed = self.SHUTDOWN_TIMEOUT - (deadline - time.monotonic())
         log.info("ReticulumPi stopped in %.1fs.", elapsed)
+
+    def _start_plugin_with_timeout(
+        self, name: str, plugin: PluginBase, timeout: float
+    ) -> None:
+        """Start a single plugin, enforcing a wall-clock timeout.
+
+        Runs ``start()`` in a worker thread so that a hung plugin doesn't
+        block the entire boot.  If the plugin registers signal handlers
+        (only valid on the main thread), the worker will raise
+        ``ValueError`` — in that case we fall back to running ``start()``
+        directly on the main thread without a timeout.
+
+        Raises TimeoutError if the plugin does not start in time.
+        """
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(plugin.start)
+                future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(
+                f"Plugin '{name}' did not start within {timeout:.0f}s"
+            ) from None
+        except Exception as exc:
+            if "signal only works in main thread" in str(exc):
+                # Plugin uses signal handlers (e.g. LXMF router) — must
+                # run on the main thread.  Fall back without timeout.
+                log.debug(
+                    "Plugin '%s' requires main thread — retrying without timeout",
+                    name,
+                )
+                plugin.start()
+            else:
+                raise
 
     def _stop_plugin_with_timeout(
         self, name: str, plugin: PluginBase, timeout: float

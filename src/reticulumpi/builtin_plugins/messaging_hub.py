@@ -317,7 +317,24 @@ class LXMFAdapter(TransportAdapter):
             self._identity.to_file(identity_path)
             self._hub.log.info("Created new messaging LXMF identity at %s", identity_path)
 
-        self._router = LXMF.LXMRouter(storagepath=storage_path)
+        # LXMRouter.__init__ registers a SIGINT handler which only works
+        # on the main thread.  When plugin startup runs in a worker thread
+        # (for timeout enforcement), this raises ValueError.  Work around
+        # it by temporarily making signal.signal a no-op on failure.
+        import signal
+
+        _orig_signal = signal.signal
+        def _safe_signal(signum, handler):
+            try:
+                return _orig_signal(signum, handler)
+            except ValueError:
+                return None
+
+        signal.signal = _safe_signal
+        try:
+            self._router = LXMF.LXMRouter(storagepath=storage_path)
+        finally:
+            signal.signal = _orig_signal
         display_name = cfg.get("display_name") or f"{self._hub.app.node_name} Messages"
         self._destination = self._router.register_delivery_identity(
             self._identity, display_name=display_name,

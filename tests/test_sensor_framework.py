@@ -131,9 +131,18 @@ def test_ds18b20_driver_missing_device():
 def test_adc_driver_missing_path():
     from reticulumpi.builtin_plugins.sensor_framework import ADCDriver
 
-    driver = ADCDriver({"sysfs_path": "/nonexistent/path", "reading_name": "voltage"})
+    # Path must be under /sys/ to pass validation; use a nonexistent sysfs path
+    driver = ADCDriver({"sysfs_path": "/sys/bus/iio/devices/nonexistent", "reading_name": "voltage"})
     reading = driver.read()
     assert "error" in reading
+
+
+def test_adc_driver_rejects_non_sysfs_path():
+    from reticulumpi.builtin_plugins.sensor_framework import ADCDriver
+    import pytest
+
+    with pytest.raises(ValueError, match="sysfs_path must be under"):
+        ADCDriver({"sysfs_path": "/etc/passwd", "reading_name": "voltage"})
 
 
 @patch("RNS.Destination")

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=12">
+  <link rel="stylesheet" href="/static/style.css?v=15">
 </head>
 <body>
   <div class="dashboard">
@@ -235,6 +235,51 @@
         <span>Mesh Network</span>
         <span class="count" id="mesh-count"></span><span class="freshness"></span>
       </div>
+
+      <!-- Summary Strip -->
+      <div class="mesh-summary-strip" id="mesh-summary">
+        <div class="mesh-stat" id="ms-total">
+          <div class="mesh-stat-value">--</div>
+          <div class="mesh-stat-label">Total Nodes</div>
+        </div>
+        <div class="mesh-stat" id="ms-active">
+          <div class="mesh-stat-value">--</div>
+          <div class="mesh-stat-label">Active (1h)</div>
+        </div>
+        <div class="mesh-stat" id="ms-nearby">
+          <div class="mesh-stat-value">--</div>
+          <div class="mesh-stat-label">Nearby (&le;4 hops)</div>
+        </div>
+        <div class="mesh-stat" id="ms-new">
+          <div class="mesh-stat-value">--</div>
+          <div class="mesh-stat-label">New (24h)</div>
+        </div>
+      </div>
+
+      <!-- Visual Breakdown -->
+      <div class="mesh-charts" id="mesh-charts">
+        <div class="mesh-chart-box">
+          <div class="mesh-chart-title">App Types</div>
+          <div class="mesh-app-chart" id="mesh-app-chart"></div>
+        </div>
+        <div class="mesh-chart-box">
+          <div class="mesh-chart-title">Hop Distribution</div>
+          <div class="mesh-hop-chart" id="mesh-hop-chart"></div>
+        </div>
+      </div>
+
+      <!-- Filter Tabs + Search -->
+      <div class="mesh-filter-bar" id="mesh-filter-bar">
+        <button class="mesh-tab active" data-mesh-view="">All</button>
+        <button class="mesh-tab" data-mesh-view="hubs">Hubs</button>
+        <button class="mesh-tab" data-mesh-view="nearby">Nearby</button>
+        <button class="mesh-tab" data-mesh-view="recent">Active</button>
+        <button class="mesh-tab" data-mesh-view="lxmf">LXMF</button>
+        <button class="mesh-tab" data-mesh-view="nomadnet">NomadNet</button>
+        <input type="text" id="mesh-search" class="mesh-search-input" placeholder="Search nodes...">
+      </div>
+
+      <!-- Node Table -->
       <div class="table-scroll">
         <table class="data-table">
           <thead>
@@ -251,7 +296,7 @@
           <tbody id="mesh-table"></tbody>
         </table>
       </div>
-      <button id="mesh-show-more" class="show-more-btn" style="display:none">Show all</button>
+      <div id="mesh-show-more" class="show-more-btn" style="display:none"></div>
     </div>
 
     <!-- Mesh Telemetry (peer metrics) -->
@@ -382,6 +427,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=12"></script>
+  <script src="/static/app.js?v=15"></script>
 </body>
 </html>

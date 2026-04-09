@@ -7,11 +7,13 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **20 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health, Meshtastic gateway, messaging hub
+- **21 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health, Meshtastic gateway, messaging hub, example scaffold
+- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, interface management, routing table visualization, mesh topology, sensor sparklines, chat messaging, and LoRa radio telemetry
+- **Interface management** -- enable/disable Reticulum network interfaces from the dashboard with one-click service restart
+- **Server-side pagination** -- mesh network table with 11,000+ nodes paginated at the SQLite layer; targeted reachability scoring for visible nodes only
 - **Auto-discovery** -- automatically maintains a pool of community hub connections with health probing, exponential backoff, regional diversity, and peer-to-peer hub exchange
 - **Mesh-aware** -- passively maps network topology, shares telemetry with peers, broadcasts emergencies across the mesh
 - **Remote management** -- manage nodes over Reticulum Links with zero IP dependency (SSH not required)
-- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, routing table visualization, mesh node and sensor views
 - **Event bus** -- decoupled inter-plugin communication via publish/subscribe
 - **Plugin hot-reload** -- enable/disable plugins at runtime without restarting
 - **Persistent identity** -- stable cryptographic identity across restarts
@@ -24,7 +26,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 
 | Guide | Description |
 |-------|-------------|
-| **[Built-in Plugins](docs/plugins.md)** | All 20 plugins with configuration options |
+| **[Built-in Plugins](docs/plugins.md)** | All 21 plugins with configuration options |
 | **[Plugin Development](docs/plugin-development.md)** | Write your own plugin (lifecycle, events, LXMF, SQLite, testing) |
 | **[API Reference](docs/api-reference.md)** | REST API and WebSocket endpoint documentation |
 | **[Connectivity Guide](docs/connectivity-guide.md)** | LoRa, serial, packet radio, I2P hardware and setup |
@@ -106,6 +108,7 @@ This will:
 8. Set up NomadNet directories, example pages, and auto-configure `use_shared_instance: true` + enable the `nomadnet_server` plugin (if `--with-nomadnet`)
 9. Clone MeshChat, create isolated venv, build frontend, and auto-enable the `meshchat_server` plugin (if `--with-meshchat`)
 10. Install and enable systemd services (`reticulumpi` + `rnsd` if NomadNet or MeshChat enabled)
+11. Install sudoers rule for dashboard service restart (see [Interface Management](#interface-management))
 
 For a detailed explanation of how files move from your git clone through bootstrap to the running system, see [docs/install-layout.md](docs/install-layout.md).
 
@@ -156,6 +159,91 @@ sudo bash scripts/update.sh
 ```
 
 This pulls the repo, upgrades all dependencies (including NomadNet and MeshChat if installed), rebuilds the MeshChat frontend if source changed, syncs any changed systemd service files, and restarts the services.
+
+## Web Dashboard
+
+The web dashboard provides real-time monitoring and management of your ReticulumPi node. Enable it with `--with-dashboard` during bootstrap or by enabling the `web_dashboard` plugin in your config.
+
+### Dashboard Sections
+
+| Section | Description |
+|---------|-------------|
+| **System Metrics** | CPU, temperature, memory, disk usage |
+| **Network Interfaces** | Enable/disable interfaces, view status and traffic |
+| **Connectivity Health** | rnsd, I2P, SAM, interface, and path diagnostics |
+| **Routing** | Interactive path table with pagination, hop distribution and interface breakdown charts, path freshness stats |
+| **Transport Hubs** | Hub connection status, live throughput rates, auto-discovery pool |
+| **LoRa Nodes** | Discovered LoRa radio nodes with signal metrics |
+| **Mesh Network** | Server-side paginated topology view with sorting, filtering, reachability scores |
+| **Peer Telemetry** | Distributed node metrics from mesh peers |
+| **Alerts** | Threshold-based alerts for CPU, disk, crashes |
+| **Shared Files** | Files available via RNS.Resource transfer |
+| **Sensors** | Live sensor readings with sparkline trend charts |
+| **Messages** | Unified chat UI for LXMF and Meshtastic messages |
+| **Meshtastic Gateway** | Meshtastic node list with SNR and hardware info |
+| **Emergency Broadcasts** | Mesh-wide priority message log |
+| **Configuration** | Read-only view of current config |
+
+### Interface Management
+
+The dashboard lets you enable/disable Reticulum network interfaces (TCP, LoRa, I2P, etc.) directly from the UI. When you toggle an interface:
+
+1. The dashboard modifies the `enabled = yes/no` value in your Reticulum config file
+2. A "Configuration changed" banner appears with a **Restart Services** button
+3. Clicking restart triggers `sudo systemctl restart rnsd` followed by `sudo systemctl restart reticulumpi`
+
+**This requires a sudoers rule** so the `reticulumpi` system user can restart services without a password. The bootstrap script installs this automatically, but if you set up manually:
+
+```bash
+# Install the sudoers rule
+sudo install -m 0440 config/sudoers.d/reticulumpi-services /etc/sudoers.d/reticulumpi-services
+
+# Verify syntax (important -- a broken sudoers file can lock you out)
+sudo visudo -cf /etc/sudoers.d/reticulumpi-services
+```
+
+The rule grants only two specific commands:
+
+```
+reticulumpi ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rnsd, /usr/bin/systemctl restart reticulumpi
+```
+
+Without this rule, interface toggling still works (the config file is updated), but the "Restart Services" button will fail. You would need to restart manually:
+
+```bash
+sudo systemctl restart rnsd reticulumpi
+```
+
+### Dashboard Authentication
+
+The dashboard requires password authentication. Set your password hash in `config.yaml`:
+
+```bash
+# Generate a password hash interactively
+reticulumpi --hash-password
+```
+
+```yaml
+plugins:
+  web_dashboard:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8080
+    password_hash: "$argon2id$..."
+    session_timeout: 3600
+```
+
+### SSL/TLS
+
+For HTTPS, provide certificate and key paths:
+
+```yaml
+plugins:
+  web_dashboard:
+    enabled: true
+    ssl_cert: /etc/ssl/certs/reticulumpi.pem
+    ssl_key: /etc/ssl/private/reticulumpi.key
+```
 
 ## Docker
 
@@ -210,7 +298,7 @@ The Reticulum config (`~/.reticulum/config`) lives inside the container's home d
 ```bash
 # Optional: provide a custom Reticulum config
 docker compose run --rm reticulumpi sh -c \
-  "cp /dev/stdin ~/.reticulum/config" < ../config/reticulum/config.minimal
+  "cp /dev/stdin ~/.reticulum/config" < ../config/reticulum/config.example
 ```
 
 Or exec into a running container:
@@ -221,7 +309,7 @@ docker exec -it docker-reticulumpi-1 sh
 
 ### Networking
 
-Host networking is enabled by default (`network_mode: host`), which is required for Reticulum's AutoInterface (IPv6 multicast discovery), UDP, and TCP interfaces. This means the container shares your host's network stack — no port mapping needed.
+Host networking is enabled by default (`network_mode: host`), which is required for Reticulum's AutoInterface (IPv6 multicast discovery), UDP, and TCP interfaces. This means the container shares your host's network stack -- no port mapping needed.
 
 ### Serial Devices (LoRa, RNode)
 
@@ -351,7 +439,7 @@ reticulumpi:
 
 ### Reticulum Config (`~/.reticulum/config`)
 
-Standard Reticulum configuration. ReticulumPi does not modify this file. See the [Reticulum manual](https://reticulum.network/manual/interfaces.html) for full documentation.
+Standard Reticulum configuration. ReticulumPi does not modify this file (except when toggling interfaces from the dashboard). See the [Reticulum manual](https://reticulum.network/manual/interfaces.html) for full documentation.
 
 The included example enables AutoInterface and TCP Server by default. It also contains documented, commented-out blocks for every supported interface type: TCP Client, RNode LoRa, RNode Multi, Serial, KISS TNC, AX.25 KISS, UDP, I2P, Pipe, and Backbone. See the [Connectivity Guide](docs/connectivity-guide.md) for details on each.
 
@@ -374,7 +462,7 @@ For complete hardware recommendations, configuration examples, frequency guides,
 
 ## Built-in Plugins
 
-ReticulumPi ships with 20 built-in plugins. Enable any combination in your `config.yaml`:
+ReticulumPi ships with 21 built-in plugins. Enable any combination in your `config.yaml`:
 
 | Plugin | Description |
 |--------|-------------|
@@ -384,8 +472,8 @@ ReticulumPi ships with 20 built-in plugins. Enable any combination in your `conf
 | **system_monitor** | CPU, temp, memory, disk metric collection |
 | **nomadnet_server** | NomadNet page server (subprocess manager) |
 | **meshchat_server** | MeshChat web UI (subprocess manager) |
-| **web_dashboard** | Real-time monitoring web UI with auth + WebSocket |
-| **network_map** | Passive mesh topology mapper (SQLite) |
+| **web_dashboard** | Real-time monitoring web UI with auth + WebSocket + interface management |
+| **network_map** | Passive mesh topology mapper (SQLite, server-side pagination) |
 | **mesh_telemetry** | Distributed node metrics sharing |
 | **remote_control** | Remote management over RNS Links (no SSH needed) |
 | **alert_system** | LXMF threshold alerts (CPU, disk, crashes) |
@@ -398,6 +486,7 @@ ReticulumPi ships with 20 built-in plugins. Enable any combination in your `conf
 | **transport_health** | Transport relay node reliability tracking |
 | **meshtastic_gateway** | Meshtastic LoRa mesh bridge (serial + MQTT) |
 | **messaging_hub** | Unified message store + chat UI (LXMF + Meshtastic) |
+| **example_plugin** | Scaffold -- copy to start your own plugin |
 
 For complete configuration options, see **[docs/plugins.md](docs/plugins.md)** and the annotated `config/reticulumpi/config.example.yaml`.
 
@@ -408,14 +497,16 @@ A deployed ReticulumPi node has multiple Reticulum identities. Each LXMF plugin 
 | Service | Purpose | Identity File |
 |---|---|---|
 | **reticulumpi** (node) | Shared node identity for RNS destinations (heartbeat, mesh telemetry, network map, remote control, file transfer, sensors, emergency) | `~/.config/reticulumpi/identity` |
-| **message_echo** | Echo bot — replies to LXMF messages | `~/.local/share/reticulumpi/lxmf/identity` |
-| **info_bot** | Info bot — responds to `!` commands | `~/.local/share/reticulumpi/info_bot_lxmf/identity` |
-| **alert_system** | LXMF alerts — separate identity for sending | Creates its own `RNS.Identity()` at runtime |
-| **meshtastic_gateway** | Meshtastic↔LXMF bridge — receives LXMF messages to forward | `~/.local/share/reticulumpi/meshtastic_gw_lxmf/identity` |
+| **message_echo** | Echo bot -- replies to LXMF messages | `~/.local/share/reticulumpi/lxmf/identity` |
+| **info_bot** | Info bot -- responds to `!` commands | `~/.local/share/reticulumpi/info_bot_lxmf/identity` |
+| **alert_system** | LXMF alerts -- separate identity for sending | Creates its own `RNS.Identity()` at runtime |
+| **meshtastic_gateway** | Meshtastic<>LXMF bridge -- receives LXMF messages to forward | `~/.local/share/reticulumpi/meshtastic_gw_lxmf/identity` |
 | **meshtastic_gateway** (MQTT node) | Persistent Meshtastic node number for MQTT mode | `~/.local/share/reticulumpi/meshtastic_gw_lxmf/meshtastic_node_num` |
-| **NomadNet daemon** | Page server — browsable via NomadNet TUI | `~/.nomadnet/storage/identity` |
+| **NomadNet daemon** | Page server -- browsable via NomadNet TUI | `~/.nomadnet/storage/identity` |
 | **NomadNet TUI** | Browse-only client (no node hosting) | `~/.nomadnet-tui/storage/identity` |
 | **MeshChat** | Web UI chat over LXMF | `<install_dir>/storage/identity` |
+
+> **Note:** Reticulum interfaces (RNode, TCP, I2P) are transport pipes -- they do not have their own identities or addresses. Identities belong to destinations. The Transport Instance and Probe Responder hashes visible in `rnstatus` are destinations that *use* interfaces, not properties of the interfaces themselves.
 
 To find your LXMF plugin addresses, check the startup logs:
 
@@ -440,7 +531,7 @@ for label, path in [
 "
 ```
 
-The **message_echo** and **info_bot** LXMF addresses are the ones to give to other users — they can message them from [Sideband](https://unsigned.io/sideband/) or MeshChat.
+The **message_echo** and **info_bot** LXMF addresses are the ones to give to other users -- they can message them from [Sideband](https://unsigned.io/sideband/) or MeshChat.
 
 ## Writing Custom Plugins
 
@@ -479,6 +570,32 @@ Copy the scaffold to get started: `cp plugins/example_plugin.py ~/my_plugins/my_
 
 For the complete guide covering LXMF messaging, SQLite storage, background threads, event handling, testing patterns, and dashboard integration, see **[docs/plugin-development.md](docs/plugin-development.md)**.
 
+## REST API
+
+The web dashboard exposes a REST API and WebSocket endpoint. All endpoints require authentication via session cookie (obtained from `POST /api/login`).
+
+### Key Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/login` | Authenticate and receive session cookie |
+| `GET` | `/api/status` | Node status, metrics, plugins, interfaces |
+| `GET` | `/api/interfaces/config` | List all Reticulum interfaces from config file |
+| `POST` | `/api/interfaces/{name}/toggle` | Toggle interface enabled/disabled in config |
+| `POST` | `/api/interfaces/add` | Add a new interface section to config |
+| `POST` | `/api/services/restart` | Restart rnsd + reticulumpi (requires sudoers) |
+| `GET` | `/api/mesh/nodes` | Paginated mesh node list (`page`, `per_page`, `sort`, `order`, `search`) |
+| `GET` | `/api/reachability` | Node reachability scores (`hashes` for targeted, or paginated) |
+| `GET` | `/api/routing/table` | Paginated routing table with sort/filter |
+| `GET` | `/api/routing/stats` | Hop distribution and interface breakdown |
+| `GET` | `/api/sensors/history` | Time-series sensor data |
+| `GET` | `/api/messages` | Message history with transport/direction filters |
+| `POST` | `/api/messages/send` | Send a message via LXMF or Meshtastic |
+| `GET` | `/api/config` | Sanitized read-only config view |
+| `WS` | `/ws` | WebSocket for real-time updates (metrics, mesh deltas, messages) |
+
+For complete API documentation, see **[docs/api-reference.md](docs/api-reference.md)**.
+
 ## Project Structure
 
 ```
@@ -492,7 +609,7 @@ reticulumPi/
 ├── SECURITY.md                     # Security policy and best practices
 ├── docs/
 │   ├── install-layout.md           # Detailed install directory & file flow docs
-│   ├── plugins.md                  # Built-in plugin reference (all 20 plugins)
+│   ├── plugins.md                  # Built-in plugin reference (all 21 plugins)
 │   ├── plugin-development.md       # Plugin development guide (full walkthrough)
 │   ├── api-reference.md            # REST API & WebSocket documentation
 │   ├── connectivity-guide.md       # Hardware, radio, and interface guide
@@ -506,8 +623,10 @@ reticulumPi/
 │   ├── reticulum/
 │   │   ├── config.example          # Reticulum interface config (all interfaces)
 │   │   └── config.minimal          # Minimal safe config (AutoInterface only)
-│   └── reticulumpi/
-│       └── config.example.yaml     # App + plugin config (all plugins documented)
+│   ├── reticulumpi/
+│   │   └── config.example.yaml     # App + plugin config (all plugins documented)
+│   └── sudoers.d/
+│       └── reticulumpi-services    # Sudoers rule for dashboard service restart
 ├── src/reticulumpi/
 │   ├── __init__.py                 # Package version
 │   ├── app.py                      # Core orchestrator (plugin hot-reload)
@@ -518,7 +637,9 @@ reticulumPi/
 │   ├── identity_manager.py         # Persistent identity
 │   ├── plugin_base.py              # Abstract plugin base class
 │   ├── plugin_loader.py            # Plugin discovery
+│   ├── reachability.py             # Path discovery and scoring
 │   ├── remote_client.py            # Remote control CLI client
+│   ├── rns_config.py               # Reticulum config parser (line-preserving)
 │   ├── data/
 │   │   └── community_hubs.yaml     # Curated community TCP hub list for auto-discovery
 │   └── builtin_plugins/            # Built-in plugins (shipped with package)
@@ -535,29 +656,38 @@ reticulumPi/
 │       ├── file_transfer.py        # File transfer via RNS.Resource
 │       ├── sensor_framework.py     # Config-driven sensor reading + logging
 │       ├── emergency_broadcast.py  # Mesh-wide flood-style messaging
-│       ├── transport_monitor.py    # TCP hub health + failover + auto-discovery + hub exchange
+│       ├── transport_monitor.py    # TCP hub health + failover + auto-discovery
 │       ├── connectivity_monitor.py # Transport health + routing diagnostics
 │       ├── path_warmer.py          # Proactive path refreshing for known nodes
 │       ├── transport_health.py     # Transport relay node reliability tracking
-│       ├── meshtastic_gateway.py  # Meshtastic LoRa ↔ LXMF bridge (serial + MQTT)
-│       ├── messaging_hub.py        # Unified messaging store + LXMF/Meshtastic adapters
+│       ├── meshtastic_gateway.py   # Meshtastic LoRa ↔ LXMF bridge
+│       ├── messaging_hub.py        # Unified messaging store + adapters
 │       ├── web_dashboard/          # Secure web dashboard (aiohttp)
+│       │   ├── __init__.py         # Plugin class + aiohttp server lifecycle
+│       │   ├── api.py              # REST API handlers (36+ endpoints)
+│       │   ├── websocket_handler.py # WebSocket broadcast (delta mode)
+│       │   └── static/             # Frontend assets
+│       │       ├── index.html      # Dashboard layout
+│       │       ├── login.html      # Login page
+│       │       ├── login.js        # Login form handler (CSP-compliant)
+│       │       ├── app.js          # Dashboard logic (~2600 lines vanilla JS)
+│       │       └── style.css       # Dashboard styles
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
 │   └── example_plugin.py           # Scaffold copy (for easy access)
 ├── scripts/
-│   ├── bootstrap.sh                # Fresh Pi setup
+│   ├── bootstrap.sh                # Fresh Pi setup (system user, venv, systemd, sudoers)
 │   ├── update.sh                   # Pull + upgrade + restart
 │   ├── nomadnet-tui.sh             # Launch NomadNet TUI over SSH
 │   └── meshchat_launcher.py        # MeshChat wrapper (timeout patching + logging)
 ├── systemd/
-│   ├── reticulumpi.service         # Systemd unit file
+│   ├── reticulumpi.service         # Systemd unit file (security-hardened)
 │   └── rnsd.service                # Reticulum daemon (for shared instance mode)
 ├── docker/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 610+ tests (pytest)
+└── tests/                          # 627 tests across 30 files (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -579,13 +709,14 @@ reticulumPi/
     ├── test_file_transfer.py        # File transfer + safety tests
     ├── test_sensor_framework.py     # Sensor drivers + storage tests
     ├── test_emergency_broadcast.py  # Emergency flood + dedup tests
-    ├── test_transport_monitor.py    # Transport hub health + failover + auto-discovery + hub exchange tests
+    ├── test_transport_monitor.py    # Transport hub health + failover tests
     ├── test_connectivity_monitor.py # Connectivity + routing data tests
     ├── test_path_warmer.py          # Path warming + ensure_path tests
     ├── test_transport_health.py     # Transport node tracking + SQLite tests
-    ├── test_meshtastic_gateway.py   # Meshtastic gateway serial + MQTT + rate limiting tests
-    ├── test_messaging_hub.py        # Messaging hub + adapters + message store tests
+    ├── test_meshtastic_gateway.py   # Meshtastic gateway serial + MQTT tests
+    ├── test_messaging_hub.py        # Messaging hub + adapters tests
     ├── test_routing_api.py          # Routing API endpoint tests
+    ├── test_rns_config.py           # Config parser round-trip tests
     └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests
 ```
 
@@ -633,6 +764,14 @@ The application lifecycle:
 8. Call `stop()` on each plugin in reverse order (publishes `PLUGIN_STOPPED` events)
 
 Plugins can be enabled/disabled at runtime via `app.enable_plugin(name)` / `app.disable_plugin(name)` (used by the remote control plugin).
+
+### Key Design Decisions
+
+- **Line-preserving config parser** (`rns_config.py`): Reticulum uses an INI-like format with `[[double brackets]]` for interfaces. Python's `configparser` can't represent this and drops comments on round-trip. ReticulumPi uses a custom line-based parser that preserves every byte of the original file except the specific values it modifies. Config writes are atomic (write to temp file, then `os.replace`).
+
+- **WebSocket delta broadcasting**: The mesh network can have 10,000+ known nodes. Instead of broadcasting the full list every cycle, the WebSocket sends `{known_nodes: count, version: N, recent_announces: [...]}`. The frontend re-fetches the current page only when the version changes.
+
+- **Targeted reachability scoring**: Instead of scoring all known nodes (expensive path lookups), the frontend sends only the hashes of nodes currently visible on screen. The API scores just those, keeping response times fast even with large networks.
 
 ## License
 

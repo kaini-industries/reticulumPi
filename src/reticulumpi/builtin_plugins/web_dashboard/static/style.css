@@ -513,6 +513,128 @@ body {
 .reach-low { background: rgba(209, 134, 22, 0.2); color: var(--orange); }
 .reach-unlikely { background: rgba(248, 81, 73, 0.15); color: var(--red); }
 
+/* Local service badge */
+.local-badge {
+  display: inline-block;
+  min-width: 28px;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-align: center;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+}
+.local-service-row { border-left: 2px solid var(--accent); }
+
+/* ── Mesh Summary Strip ─────────────────────────────── */
+.mesh-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+.mesh-stat {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+  text-align: center;
+}
+.mesh-stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--text-bright, var(--text));
+  line-height: 1.2;
+}
+.mesh-stat-value.ms-ok { color: var(--green); }
+.mesh-stat-value.ms-warn { color: var(--yellow); }
+.mesh-stat-value.ms-info { color: var(--accent); }
+.mesh-stat-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 0.15rem;
+}
+
+/* ── Mesh Charts ────────────────────────────────────── */
+.mesh-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  padding: 0 1rem 0.75rem;
+}
+.mesh-chart-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+}
+.mesh-chart-title {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+/* App type bar colors */
+.bar-fill.ac-lxmf { background: var(--green); }
+.bar-fill.ac-nomadnet { background: #a371f7; }
+.bar-fill.ac-other { background: var(--text-muted); }
+.bar-label-app { width: 80px; }
+
+/* ── Mesh Filter Tabs ───────────────────────────────── */
+.mesh-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.mesh-tab {
+  padding: 0.25rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.mesh-tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.mesh-tab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
+.mesh-search-input {
+  margin-left: auto;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  width: 180px;
+}
+.mesh-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.mesh-search-input::placeholder { color: var(--text-muted); opacity: 0.6; }
+
 /* Reachability factor breakdown in detail view */
 .reach-factors {
   margin: 0.4rem 0 0.2rem 0;
@@ -1240,6 +1362,10 @@ body {
   .routing-stats-grid { grid-template-columns: repeat(2, 1fr); }
   .bar-label-iface { width: 90px; }
 
+  /* Mesh */
+  .mesh-summary-strip { grid-template-columns: repeat(2, 1fr); }
+  .mesh-charts { grid-template-columns: 1fr; }
+
   /* Messaging */
   .msg-compose-row { flex-wrap: wrap; }
   .msg-compose-row .rt-select { min-width: 100px; flex: 1; }
@@ -1290,6 +1416,18 @@ body {
   .connectivity-grid { padding: 0.5rem 0.75rem; }
   .connectivity-indicators { gap: 0.4rem; }
   .conn-indicator { font-size: 0.7rem; padding: 0.2rem 0.4rem; }
+
+  /* Mesh section */
+  .mesh-summary-strip { grid-template-columns: repeat(2, 1fr); gap: 0.5rem; padding: 0.5rem 0.75rem; }
+  .mesh-stat { padding: 0.4rem 0.5rem; }
+  .mesh-stat-value { font-size: 1.2rem; }
+  .mesh-stat-label { font-size: 0.6rem; }
+  .mesh-charts { grid-template-columns: 1fr; gap: 0.5rem; padding: 0 0.75rem 0.5rem; }
+  .mesh-chart-box { padding: 0.5rem; }
+  .mesh-filter-bar { padding: 0.4rem 0.75rem; gap: 0.25rem; }
+  .mesh-tab { font-size: 0.7rem; padding: 0.2rem 0.5rem; }
+  .mesh-search-input { width: 140px; font-size: 0.7rem; }
+  .bar-label-app { width: 65px; }
 
   /* Routing section */
   .routing-content { padding: 0.5rem 0.75rem; }

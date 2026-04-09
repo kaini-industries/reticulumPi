@@ -157,18 +157,30 @@ class ADCDriver(SensorDriver):
     """Generic ADC reading via sysfs (e.g. IIO subsystem).
 
     Reads from a configurable sysfs path. Applies optional scale and offset.
+    Only paths under ``/sys/`` are allowed to prevent arbitrary file reads.
     """
 
     driver_name = "adc"
+    # Allowed path prefixes for sysfs reads (prevents reading /etc/passwd etc.)
+    _ALLOWED_PREFIXES = ("/sys/",)
 
     def __init__(self, sensor_config: dict[str, Any]) -> None:
         super().__init__(sensor_config)
-        self._path = sensor_config.get("sysfs_path", "")
+        raw_path = sensor_config.get("sysfs_path", "")
         self._scale = sensor_config.get("scale", 1.0)
         self._offset = sensor_config.get("offset", 0.0)
         self._name = sensor_config.get("reading_name", "value")
+        # Resolve path and validate it's under an allowed prefix
+        self._path = os.path.realpath(raw_path) if raw_path else ""
+        if self._path and not any(self._path.startswith(p) for p in self._ALLOWED_PREFIXES):
+            raise ValueError(
+                f"ADC sysfs_path must be under {self._ALLOWED_PREFIXES}, "
+                f"got: {self._path}"
+            )
 
     def read(self) -> dict[str, Any]:
+        if not self._path:
+            return {"error": "no sysfs_path configured"}
         try:
             with open(self._path, "r") as f:
                 raw = float(f.read().strip())
@@ -180,26 +192,46 @@ class ADCDriver(SensorDriver):
 
 
 class CommandDriver(SensorDriver):
-    """Reads sensor data by executing a shell command.
+    """Reads sensor data by executing a command.
 
     The command should print a single numeric value to stdout.
+
+    By default the command string is split with :func:`shlex.split` and
+    executed **without a shell** to prevent shell injection.  If the command
+    needs shell features (pipes, redirection, subshells), set ``shell: true``
+    in the sensor config to opt in explicitly.
     """
 
     driver_name = "command"
 
     def __init__(self, sensor_config: dict[str, Any]) -> None:
         super().__init__(sensor_config)
-        self._command = sensor_config.get("command", "")
+        self._command_str = sensor_config.get("command", "")
         self._name = sensor_config.get("reading_name", "value")
+        self._use_shell: bool = bool(sensor_config.get("shell", False))
+        # Pre-parse only when not using shell mode
+        self._command_argv: list[str] = []
+        if self._command_str and not self._use_shell:
+            import shlex
+            self._command_argv = shlex.split(self._command_str)
 
     def read(self) -> dict[str, Any]:
-        if not self._command:
+        if not self._command_str:
+            return {"error": "no command configured"}
+        if not self._use_shell and not self._command_argv:
             return {"error": "no command configured"}
         try:
             import subprocess
-            result = subprocess.run(
-                self._command, shell=True, capture_output=True, text=True, timeout=10
-            )
+            if self._use_shell:
+                result = subprocess.run(
+                    self._command_str, shell=True,
+                    capture_output=True, text=True, timeout=10,
+                )
+            else:
+                result = subprocess.run(
+                    self._command_argv,
+                    capture_output=True, text=True, timeout=10,
+                )
             if result.returncode != 0:
                 return {"error": f"command failed: {result.stderr.strip()[:100]}"}
             return {self._name: float(result.stdout.strip())}

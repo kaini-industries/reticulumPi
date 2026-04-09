@@ -56,8 +56,11 @@ class EmergencyBroadcastPlugin(PluginBase):
     def start(self) -> None:
         self._active = True
         self._lock = threading.Lock()
-        # Seen message IDs for deduplication
-        self._seen_ids: set[str] = set()
+        # Seen message IDs for deduplication — maps msg_id → timestamp.
+        # Entries older than _seen_ttl seconds are pruned periodically.
+        self._seen_ids: dict[str, float] = {}
+        self._seen_ttl: float = self.config.get("seen_ttl_seconds", 86400.0)  # 24 hours
+        self._max_seen: int = 5000  # hard cap to prevent memory exhaustion
         # Stored messages (most recent first)
         self._messages: list[dict[str, Any]] = []
         self._max_stored = self.config.get("max_stored_messages", 100)
@@ -138,7 +141,7 @@ class EmergencyBroadcastPlugin(PluginBase):
         # Store locally
         with self._lock:
             self._store_message(msg)
-            self._seen_ids.add(msg_id)
+            self._seen_ids[msg_id] = time.time()
 
         # Broadcast
         self._broadcast_message(msg)
@@ -186,12 +189,12 @@ class EmergencyBroadcastPlugin(PluginBase):
                 self.log.debug("Ignoring duplicate emergency: %s", msg_id[:16])
                 return
 
-            self._seen_ids.add(msg_id)
+            now = time.time()
+            self._seen_ids[msg_id] = now
             self._messages_received += 1
 
-            # Prune seen_ids if it gets too large
-            if len(self._seen_ids) > self._max_stored * 10:
-                self._seen_ids = set(m.get("id", "") for m in self._messages)
+            # Prune expired entries and enforce hard cap
+            self._prune_seen_ids(now)
 
         priority = msg.get("priority", PRIORITY_INFO)
         self.log.warning(
@@ -250,6 +253,22 @@ class EmergencyBroadcastPlugin(PluginBase):
             self.destination.announce(app_data=payload)
         except Exception:
             self.log.exception("Failed to broadcast emergency message")
+
+    def _prune_seen_ids(self, now: float) -> None:
+        """Remove expired entries from _seen_ids and enforce hard cap.
+
+        Must be called while holding ``self._lock``.
+        """
+        cutoff = now - self._seen_ttl
+        expired = [k for k, ts in self._seen_ids.items() if ts < cutoff]
+        for k in expired:
+            del self._seen_ids[k]
+        # Hard cap: evict oldest if still over limit
+        if len(self._seen_ids) > self._max_seen:
+            by_age = sorted(self._seen_ids.items(), key=lambda x: x[1])
+            to_remove = len(self._seen_ids) - self._max_seen
+            for k, _ in by_age[:to_remove]:
+                del self._seen_ids[k]
 
     def _store_message(self, msg: dict[str, Any]) -> None:
         """Store a message in the local buffer."""

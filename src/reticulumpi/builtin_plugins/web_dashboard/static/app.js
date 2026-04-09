@@ -382,17 +382,21 @@
   var _meshPages = 1;
   var _meshPeers = {};       // destination_hash -> telemetry data
   var _reachScores = {};     // destination_hash -> {score, label, factors}
-  var _meshSortKey = 'last_seen';
+  var _localServices = [];   // local plugin destinations (0-hop)
+  var _meshSortKey = 'score';
   var _meshSortAsc = false;
   var _meshExpandedHash = null;
   var _meshVersion = 0;      // tracks WS mesh version for change detection
   var _meshSearch = '';
+  var _meshView = '';        // current view preset (hubs/nearby/recent/lxmf/nomadnet/'')
+  var _meshSummary = null;   // cached summary data from /api/mesh/summary
+  var _meshSearchTimer = null;
   var _peerPageSize = 12;
   var _peerVisible = 12;
 
   // Sorting is now server-side. This map translates UI sort keys to API params.
   var _meshSortMap = {
-    'score': 'last_seen',  // score sort not available server-side, use last_seen
+    'score': 'score',
     'hops': 'hops',
     'last_seen': 'last_seen',
     'announce_count': 'announce_count'
@@ -484,15 +488,49 @@
     if (!tbody) return;
     var nodes = _meshNodes;
     if (!nodes || nodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7">' + (_meshTotal > 0 ? 'No nodes match filters' : 'No nodes discovered yet') + '</td></tr>';
-      $('mesh-count').textContent = _meshTotal > 0 ? '0/' + _meshTotal : '0';
+      tbody.innerHTML = '';
+      // Still render local services even when no remote nodes exist
+      for (var li = 0; li < _localServices.length; li++) {
+        var ls = _localServices[li];
+        var ltr = document.createElement('tr');
+        ltr.className = 'local-service-row';
+        ltr.innerHTML =
+            '<td class="reach-col"><span class="local-badge">LOCAL</span></td>'
+          + '<td class="addr">' + esc(ls.destination_hash || '--') + '</td>'
+          + '<td class="col-truncate">' + esc(ls.plugin_name || '--') + '</td>'
+          + '<td>' + esc(ls.app_name || '--') + (ls.aspects ? '.' + esc(ls.aspects) : '') + '</td>'
+          + '<td>0</td><td>--</td><td>--</td>';
+        tbody.appendChild(ltr);
+      }
+      if (_localServices.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7">' + (_meshTotal > 0 ? 'No nodes match filters' : 'No nodes discovered yet') + '</td></tr>';
+      }
+      $('mesh-count').textContent = _localServices.length
+        ? _localServices.length + ' local' + (_meshTotal > 0 ? ' + ' + _meshTotal + ' remote' : '')
+        : (_meshTotal > 0 ? '0/' + _meshTotal : '0');
       var showMore = $('mesh-show-more');
       if (showMore) showMore.style.display = 'none';
+      if (_localServices.length === 0) return;
+      updateMeshSortIndicators();
       return;
     }
 
     // Build rows using event delegation for clicks (no per-row listeners)
     tbody.innerHTML = '';
+
+    // Pinned local service rows at the top
+    for (var li = 0; li < _localServices.length; li++) {
+      var ls = _localServices[li];
+      var ltr = document.createElement('tr');
+      ltr.className = 'local-service-row';
+      ltr.innerHTML =
+          '<td class="reach-col"><span class="local-badge">LOCAL</span></td>'
+        + '<td class="addr">' + esc(ls.destination_hash || '--') + '</td>'
+        + '<td class="col-truncate">' + esc(ls.plugin_name || '--') + '</td>'
+        + '<td>' + esc(ls.app_name || '--') + (ls.aspects ? '.' + esc(ls.aspects) : '') + '</td>'
+        + '<td>0</td><td>--</td><td>--</td>';
+      tbody.appendChild(ltr);
+    }
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
       var hash = node.destination_hash || '';
@@ -532,7 +570,9 @@
         tbody.appendChild(detailTr);
       }
     }
-    $('mesh-count').textContent = _meshTotal + ' nodes';
+    $('mesh-count').textContent = _localServices.length
+      ? _localServices.length + ' local + ' + _meshTotal + ' remote'
+      : _meshTotal + ' nodes';
     updateMeshSortIndicators();
 
     // Pagination controls (replaces "show more" button)
@@ -566,6 +606,7 @@
     var params = '?page=' + _meshPage + '&per_page=' + _meshPerPage
       + '&sort=' + sortField + '&order=' + order;
     if (_meshSearch) params += '&search=' + encodeURIComponent(_meshSearch);
+    if (_meshView) params += '&view=' + encodeURIComponent(_meshView);
 
     api('/api/mesh/nodes' + params).then(function(r) {
       if (!r || !r.ok) return;
@@ -574,6 +615,7 @@
       _meshTotal = r.data.total || _meshNodes.length;
       _meshPage = r.data.page || 1;
       _meshPages = r.data.pages || 1;
+      _localServices = r.data.local_services || [];
       renderMeshNodes();
       // Fetch reachability for visible nodes
       fetchReachabilityForVisible();
@@ -636,6 +678,133 @@
       }
       if (patched) renderMeshNodes();
     }
+
+    // Live summary update from WS
+    if (meshData.summary) {
+      _meshSummary = meshData.summary;
+      renderMeshSummary();
+    }
+  }
+
+  // ── Mesh Summary ──────────────────────────────────────────────────
+  function fetchMeshSummary() {
+    api('/api/mesh/summary').then(function(r) {
+      if (!r || !r.ok) return;
+      _meshSummary = r.data;
+      renderMeshSummary();
+    });
+  }
+
+  function _setMeshStat(id, value, cls) {
+    var el = $(id);
+    if (!el) return;
+    var valEl = el.querySelector('.mesh-stat-value');
+    if (valEl) {
+      valEl.textContent = value;
+      valEl.className = 'mesh-stat-value' + (cls ? ' ' + cls : '');
+    }
+  }
+
+  function renderMeshSummary() {
+    if (!_meshSummary) return;
+    var s = _meshSummary;
+
+    // Total nodes
+    _setMeshStat('ms-total', fmtK(s.total_nodes || 0), s.total_nodes > 0 ? 'ms-ok' : '');
+
+    // Active in last hour
+    var active = s.activity_stats ? (s.activity_stats.last_1h || 0) : 0;
+    _setMeshStat('ms-active', fmtK(active), active > 10 ? 'ms-ok' : active > 0 ? 'ms-warn' : '');
+
+    // Nearby (<=4 hops)
+    var nearby = s.nearby || 0;
+    _setMeshStat('ms-nearby', fmtK(nearby), nearby > 10 ? 'ms-ok' : nearby > 0 ? 'ms-info' : '');
+
+    // New in 24h
+    var newN = s.growth ? (s.growth.last_24h || 0) : 0;
+    _setMeshStat('ms-new', newN > 0 ? '+' + fmtK(newN) : '0', newN > 0 ? 'ms-info' : '');
+
+    // Charts
+    renderMeshAppChart(s.app_breakdown || {});
+    renderMeshHopChart(s.hop_distribution || {});
+  }
+
+  function fmtK(n) {
+    if (n >= 10000) return (n / 1000).toFixed(1) + 'k';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+    return '' + n;
+  }
+
+  function renderMeshAppChart(breakdown) {
+    var el = $('mesh-app-chart');
+    if (!el) return;
+    var keys = Object.keys(breakdown);
+    if (keys.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No data</div>';
+      return;
+    }
+    // Sort by count descending
+    keys.sort(function(a, b) { return breakdown[b] - breakdown[a]; });
+    var maxVal = breakdown[keys[0]] || 1;
+    var total = 0;
+    for (var i = 0; i < keys.length; i++) total += breakdown[keys[i]];
+
+    var labelMap = {'lxmf': 'LXMF', 'nomadnetwork': 'NomadNet', '': 'Other'};
+    var clsMap = {'lxmf': 'ac-lxmf', 'nomadnetwork': 'ac-nomadnet'};
+    var html = '';
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var count = breakdown[key];
+      var pct = maxVal > 0 ? (count / maxVal * 100) : 0;
+      var pctOfTotal = total > 0 ? Math.round(count / total * 100) : 0;
+      var label = labelMap[key] || esc(key || 'Other');
+      var colorCls = clsMap[key] || 'ac-other';
+      html += '<div class="bar-row">'
+        + '<div class="bar-label bar-label-app">' + label + '</div>'
+        + '<div class="bar-track"><div class="bar-fill ' + colorCls + '" style="width:' + pct + '%"></div></div>'
+        + '<div class="bar-count">' + fmtK(count) + '</div>'
+        + '<div class="bar-pct">' + pctOfTotal + '%</div>'
+        + '</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  function renderMeshHopChart(dist) {
+    var el = $('mesh-hop-chart');
+    if (!el) return;
+    var buckets = [
+      {label: 'Local', key: '0', cls: 'hc-near'},
+      {label: '1-3', key: '1-3', cls: 'hc-near'},
+      {label: '4-10', key: '4-10', cls: 'hc-mid'},
+      {label: '11-50', key: '11-50', cls: 'hc-far'},
+      {label: '51+', key: '51+', cls: 'hc-extreme'},
+    ];
+    var maxVal = 0, total = 0;
+    for (var i = 0; i < buckets.length; i++) {
+      var c = dist[buckets[i].key] || 0;
+      buckets[i].count = c;
+      if (c > maxVal) maxVal = c;
+      total += c;
+    }
+    // Filter empty buckets
+    buckets = buckets.filter(function(b) { return b.count > 0; });
+    if (buckets.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No data</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < buckets.length; i++) {
+      var b = buckets[i];
+      var pct = maxVal > 0 ? (b.count / maxVal * 100) : 0;
+      var pctOfTotal = total > 0 ? Math.round(b.count / total * 100) : 0;
+      html += '<div class="bar-row">'
+        + '<div class="bar-label bar-label-hop">' + b.label + '</div>'
+        + '<div class="bar-track"><div class="bar-fill ' + b.cls + '" style="width:' + pct + '%"></div></div>'
+        + '<div class="bar-count">' + fmtK(b.count) + '</div>'
+        + '<div class="bar-pct">' + pctOfTotal + '%</div>'
+        + '</div>';
+    }
+    el.innerHTML = html;
   }
 
   function cacheMeshPeers(peers) {
@@ -1684,8 +1853,9 @@
       updateMetrics(r.data);
     });
 
-    // Mesh nodes (server-side paginated)
+    // Mesh nodes (server-side paginated) + summary
     fetchMeshNodes();
+    fetchMeshSummary();
 
     // Peer telemetry
     api('/api/mesh/telemetry').then(function(r) {
@@ -1758,7 +1928,42 @@
   }
 
   function fetchLoraReachability() {
-    // Fetch a small page of reachability scores just for the LoRa nodes panel
+    // Use /api/paths which runs rnpath -t -j to get REAL interface names
+    // (not LocalInterface). Filter for RNodeInterface to show LoRa peers.
+    // Falls back to 0-hop filter from /api/reachability if /api/paths fails.
+    api('/api/paths?interface=RNode').then(function(r) {
+      if (!r || !r.ok) {
+        _fetchLoraFallback();
+        return;
+      }
+      markUpdated('lora-section');
+      var paths = r.data.paths || [];
+      var loraNodes = [];
+      for (var i = 0; i < paths.length; i++) {
+        var p = paths[i];
+        loraNodes.push({
+          destination_hash: '<' + (p.hash || '') + '>',
+          app_name: p.app_name || '',
+          app_data: p.app_data || '',
+          hops: p.hops,
+          last_seen: p.timestamp,
+          score: null,
+          interface: p['interface'] || ''
+        });
+      }
+      updateLoraNodes(loraNodes);
+
+      // Update count from interface summary
+      var summary = r.data.by_interface || {};
+      var rnodeCount = 0;
+      for (var iface in summary) {
+        if (iface.indexOf('RNode') !== -1) rnodeCount += summary[iface];
+      }
+      $('lora-count').textContent = rnodeCount;
+    });
+  }
+
+  function _fetchLoraFallback() {
     api('/api/reachability?per_page=50').then(function(r) {
       if (!r || !r.ok) return;
       var nodes = r.data.nodes || [];
@@ -1766,15 +1971,10 @@
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         if (n.destination_hash) {
-          // Cache score for any node detail views
           _reachScores[n.destination_hash] = {
-            score: n.score,
-            label: n.label,
-            factors: n.factors
+            score: n.score, label: n.label, factors: n.factors
           };
-          if (n.interface && n.interface.indexOf('RNodeInterface') !== -1) {
-            loraNodes.push(n);
-          }
+          if (n.hops === 0) loraNodes.push(n);
         }
       }
       updateLoraNodes(loraNodes);
@@ -2028,7 +2228,7 @@
     countEl.textContent = nodes.length;
 
     if (nodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6">No LoRa nodes discovered yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6">No LoRa peers discovered yet</td></tr>';
       return;
     }
 
@@ -2605,6 +2805,33 @@
     _rtHopsFilter = this.value;
     _rtPage = 1;
     fetchRoutingTable();
+  });
+
+  // Mesh filter tabs — event delegation
+  $('mesh-filter-bar').addEventListener('click', function(ev) {
+    var tab = ev.target.closest('[data-mesh-view]');
+    if (!tab) return;
+    var view = tab.getAttribute('data-mesh-view');
+    // Update active state
+    var tabs = document.querySelectorAll('.mesh-tab');
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
+    tab.classList.add('active');
+    // Cancel pending search if switching views
+    if (_meshSearchTimer) { clearTimeout(_meshSearchTimer); _meshSearchTimer = null; }
+    _meshView = view;
+    _meshPage = 1;
+    fetchMeshNodes();
+  });
+
+  // Mesh search — debounced input
+  $('mesh-search').addEventListener('input', function() {
+    var input = this;
+    if (_meshSearchTimer) clearTimeout(_meshSearchTimer);
+    _meshSearchTimer = setTimeout(function() {
+      _meshSearch = input.value.trim();
+      _meshPage = 1;
+      fetchMeshNodes();
+    }, 300);
   });
 
   // Mesh pagination — event delegation for page buttons

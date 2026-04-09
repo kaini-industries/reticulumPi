@@ -18,25 +18,25 @@ dependencies = [
 
 [project.optional-dependencies]
 nomadnet = [
-    "nomadnet",
+    "nomadnet>=0.5,<1.0",
 ]
 dashboard = [
     "aiohttp>=3.9,<4.0",
 ]
 lora = [
-    "rnodeconf",
+    "rnodeconf>=2.0,<3.0",
 ]
 sensors = [
-    "smbus2>=0.4",
-    "RPi.GPIO>=0.7",
+    "smbus2>=0.4,<1.0",
+    "RPi.GPIO>=0.7,<1.0",
 ]
 meshtastic = [
-    "meshtastic>=2.0",
-    "paho-mqtt>=2.0",
-    "cryptography>=3.0",
+    "meshtastic>=2.0,<3.0",
+    "paho-mqtt>=2.0,<3.0",
+    "cryptography>=3.0,<44.0",
 ]
 dev = [
-    "pytest>=7.0",
+    "pytest>=7.4,<9.0",
     "pytest-cov",
     "pytest-mock",
     "ruff",

@@ -122,17 +122,23 @@ class NetworkMapPlugin(PluginBase):
         order: str = "desc",
         search: str = "",
         app_filter: str = "",
+        view: str = "",
     ) -> dict[str, Any]:
         """Return paginated nodes directly from SQLite for efficiency.
 
         Returns dict with 'nodes', 'total', 'page', 'pages', 'per_page'.
         """
+        # Clamp pagination inputs to prevent DoS via absurd values
+        per_page = max(1, min(per_page, 500))
+        page = max(1, page)
+
         allowed_sorts = {
             "last_seen": "last_seen",
             "first_seen": "first_seen",
             "hops": "hops",
             "announce_count": "announce_count",
             "app_name": "app_name",
+            "score": "score",
         }
         sort_col = allowed_sorts.get(sort, "last_seen")
         sort_dir = "ASC" if order == "asc" else "DESC"
@@ -144,6 +150,27 @@ class NetworkMapPlugin(PluginBase):
                 # Build WHERE clause
                 conditions = []
                 params: list = []
+
+                # View presets add WHERE conditions + default sort
+                view_default_sort = ""
+                if view == "hubs":
+                    conditions.append("announce_count >= 50")
+                    view_default_sort = "announce_count DESC"
+                elif view == "nearby":
+                    conditions.append("hops IS NOT NULL AND hops <= 4")
+                    view_default_sort = "hops ASC, last_seen DESC"
+                elif view == "recent":
+                    conditions.append(
+                        f"last_seen > (strftime('%s','now') - 3600)"
+                    )
+                    view_default_sort = "last_seen DESC"
+                elif view == "lxmf":
+                    conditions.append("app_name = 'lxmf'")
+                    view_default_sort = "last_seen DESC"
+                elif view == "nomadnet":
+                    conditions.append("app_name = 'nomadnetwork'")
+                    view_default_sort = "last_seen DESC"
+
                 if search:
                     conditions.append(
                         "(destination_hash LIKE ? OR app_data_str LIKE ? OR app_name LIKE ?)"
@@ -167,9 +194,35 @@ class NetworkMapPlugin(PluginBase):
                 page = max(1, min(page, pages))
                 offset = (page - 1) * per_page
 
-                # Handle NULL hops in sort (push NULLs to end)
-                if sort_col == "hops":
+                # Build ORDER BY clause
+                if sort_col == "score":
+                    # Proxy reachability score: recency + proximity + activity
+                    order_clause = (
+                        "("
+                        "CASE WHEN last_seen IS NULL THEN 0 "
+                        "WHEN (strftime('%s','now') - last_seen) < 600 THEN 15 "
+                        "WHEN (strftime('%s','now') - last_seen) < 3600 THEN 12 "
+                        "WHEN (strftime('%s','now') - last_seen) < 14400 THEN 8 "
+                        "WHEN (strftime('%s','now') - last_seen) < 86400 THEN 4 "
+                        "ELSE 1 END "
+                        "+ CASE WHEN hops IS NULL THEN 0 "
+                        "WHEN hops <= 1 THEN 15 "
+                        "WHEN hops <= 3 THEN 12 "
+                        "WHEN hops <= 6 THEN 8 "
+                        "WHEN hops <= 10 THEN 4 "
+                        "ELSE 1 END "
+                        "+ CASE WHEN announce_count > 1000 THEN 10 "
+                        "WHEN announce_count > 100 THEN 7 "
+                        "WHEN announce_count > 10 THEN 4 "
+                        "ELSE 1 END"
+                        f") {sort_dir}"
+                    )
+                elif sort_col == "hops":
+                    # Push NULLs to end
                     order_clause = f"CASE WHEN hops IS NULL THEN 1 ELSE 0 END, hops {sort_dir}"
+                elif view_default_sort and sort == "last_seen" and order == "desc":
+                    # Use view's default sort when user hasn't explicitly changed sort
+                    order_clause = view_default_sort
                 else:
                     order_clause = f"{sort_col} {sort_dir}"
 
@@ -211,6 +264,92 @@ class NetworkMapPlugin(PluginBase):
         """Return the total number of known nodes (fast, for WS summary)."""
         with self._nodes_lock:
             return len(self._known_nodes)
+
+    def get_mesh_summary(self) -> dict[str, Any]:
+        """Return aggregate mesh stats for the dashboard summary strip."""
+        import time as _time
+        now = _time.time()
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.row_factory = sqlite3.Row
+
+                # Total nodes
+                total = conn.execute("SELECT COUNT(*) FROM known_nodes").fetchone()[0]
+
+                # App breakdown
+                app_rows = conn.execute(
+                    "SELECT COALESCE(app_name, '') AS app, COUNT(*) AS cnt "
+                    "FROM known_nodes GROUP BY app ORDER BY cnt DESC"
+                ).fetchall()
+                app_breakdown = {r["app"]: r["cnt"] for r in app_rows}
+
+                # Hop distribution (bucketed)
+                hop_rows = conn.execute(
+                    "SELECT "
+                    "SUM(CASE WHEN hops = 0 THEN 1 ELSE 0 END) AS h0, "
+                    "SUM(CASE WHEN hops BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS h1_3, "
+                    "SUM(CASE WHEN hops BETWEEN 4 AND 10 THEN 1 ELSE 0 END) AS h4_10, "
+                    "SUM(CASE WHEN hops BETWEEN 11 AND 50 THEN 1 ELSE 0 END) AS h11_50, "
+                    "SUM(CASE WHEN hops > 50 THEN 1 ELSE 0 END) AS h51, "
+                    "SUM(CASE WHEN hops IS NULL THEN 1 ELSE 0 END) AS h_null "
+                    "FROM known_nodes"
+                ).fetchone()
+                hop_distribution = {
+                    "0": hop_rows["h0"] or 0,
+                    "1-3": hop_rows["h1_3"] or 0,
+                    "4-10": hop_rows["h4_10"] or 0,
+                    "11-50": hop_rows["h11_50"] or 0,
+                    "51+": hop_rows["h51"] or 0,
+                    "unknown": hop_rows["h_null"] or 0,
+                }
+
+                # Activity stats
+                act_row = conn.execute(
+                    "SELECT "
+                    "SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS last_1h, "
+                    "SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS last_24h, "
+                    "SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS last_7d "
+                    "FROM known_nodes",
+                    (now - 3600, now - 86400, now - 604800),
+                ).fetchone()
+                activity_stats = {
+                    "last_1h": act_row["last_1h"] or 0,
+                    "last_24h": act_row["last_24h"] or 0,
+                    "last_7d": act_row["last_7d"] or 0,
+                }
+
+                # Growth (new nodes discovered)
+                growth_row = conn.execute(
+                    "SELECT "
+                    "SUM(CASE WHEN first_seen > ? THEN 1 ELSE 0 END) AS new_24h, "
+                    "SUM(CASE WHEN first_seen > ? THEN 1 ELSE 0 END) AS new_7d "
+                    "FROM known_nodes",
+                    (now - 86400, now - 604800),
+                ).fetchone()
+                growth = {
+                    "last_24h": growth_row["new_24h"] or 0,
+                    "last_7d": growth_row["new_7d"] or 0,
+                }
+
+                # Nearby count (hops <= 4)
+                nearby = conn.execute(
+                    "SELECT COUNT(*) FROM known_nodes "
+                    "WHERE hops IS NOT NULL AND hops <= 4"
+                ).fetchone()[0]
+
+                return {
+                    "total_nodes": total,
+                    "app_breakdown": app_breakdown,
+                    "hop_distribution": hop_distribution,
+                    "activity_stats": activity_stats,
+                    "growth": growth,
+                    "nearby": nearby,
+                }
+        except Exception:
+            self.log.exception("Error computing mesh summary")
+            return {"total_nodes": 0, "app_breakdown": {},
+                    "hop_distribution": {}, "activity_stats": {},
+                    "growth": {}, "nearby": 0}
 
     def get_recent_announces(self, since: float = 0, limit: int = 10) -> list[dict[str, Any]]:
         """Return nodes announced since a given timestamp (for WS deltas)."""

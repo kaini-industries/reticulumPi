@@ -177,6 +177,11 @@ reticulumpi:
     #  enabled: false
     #  read_interval: 60
     #  sensors:
+    #    - name: cpu_temp
+    #      driver: adc                   # reads sysfs file, applies scale
+    #      sysfs_path: /sys/class/thermal/thermal_zone0/temp
+    #      scale: 0.001                  # raw value is millidegrees
+    #      reading_name: temperature
     #    - name: outdoor_temp
     #      driver: ds18b20
     #      address: "28-0000abcdef"
@@ -191,8 +196,9 @@ reticulumpi:
     #      reading_name: voltage
     #    - name: signal_strength
     #      driver: command
-    #      command: "cat /proc/net/wireless | tail -1 | awk '{print $3}'"
+    #      command: "iwconfig wlan0 | grep Quality"
     #      reading_name: quality
+    #      # shell: true                 # uncomment if command needs pipes/redirection
     #  storage:
     #    type: sqlite                  # sqlite, csv, or none
     #    path: ~/.local/share/reticulumpi/sensor_data.db

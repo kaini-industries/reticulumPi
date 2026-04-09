@@ -19,7 +19,7 @@ class TestPasswordHashing:
         pw = "test-password-123"
         hashed = hash_password(pw)
         assert hashed.startswith("scrypt:")
-        assert len(hashed.split(":")) == 3
+        assert len(hashed.split(":")) == 6  # scrypt:<salt>:<n>:<r>:<p>:<hash>
         assert verify_password(pw, hashed)
 
     def test_wrong_password_fails(self):

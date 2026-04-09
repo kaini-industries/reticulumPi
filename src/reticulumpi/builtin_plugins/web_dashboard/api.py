@@ -30,6 +30,44 @@ def _get_plugin_address(p) -> str | None:
     return None
 
 
+def _collect_local_services(app) -> list[dict]:
+    """Collect RNS/LXMF destinations from active plugins (local 0-hop services)."""
+    import RNS
+
+    services: list[dict] = []
+    for name, p in app.plugins.items():
+        dest = getattr(p, "local_lxmf_destination", None)
+        if dest is None or not hasattr(dest, "hash"):
+            dest = getattr(p, "destination", None)
+        if dest is None or not hasattr(dest, "hash"):
+            continue
+        try:
+            dest_hash = RNS.prettyhexrep(dest.hash)
+        except Exception:
+            continue
+
+        # Parse app_name/aspects from dest.name ("app.aspect1.aspect2.hexhash")
+        app_name, aspects = "", ""
+        try:
+            raw_name = getattr(dest, "name", "") or ""
+            parts = raw_name.split(".") if raw_name else []
+            if len(parts) >= 2:
+                app_name = parts[0]
+                # Last segment is identity hex hash; middle segments are aspects
+                aspects = ".".join(parts[1:-1]) if len(parts) > 2 else parts[1]
+        except Exception:
+            pass
+
+        services.append({
+            "destination_hash": dest_hash,
+            "plugin_name": getattr(p, "plugin_name", name),
+            "app_name": app_name,
+            "aspects": aspects,
+            "is_local": True,
+        })
+    return services
+
+
 def _build_traffic_map(plugin: Any) -> dict[str, dict]:
     """Build a host:port -> {rxb, txb} map from Reticulum interface stats.
 
@@ -79,6 +117,7 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/config", handle_config)
     # Mesh awareness endpoints
     app.router.add_get("/api/mesh/nodes", handle_mesh_nodes)
+    app.router.add_get("/api/mesh/summary", handle_mesh_summary)
     app.router.add_get("/api/mesh/telemetry", handle_mesh_telemetry)
     app.router.add_get("/api/alerts", handle_alerts)
     app.router.add_get("/api/files", handle_files)
@@ -91,6 +130,7 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/path_warming", handle_path_warming)
     app.router.add_get("/api/transport_health", handle_transport_health)
     app.router.add_get("/api/reachability", handle_reachability)
+    app.router.add_get("/api/paths", handle_paths)
     app.router.add_get("/api/nomadnet/auth", handle_nomadnet_auth)
     app.router.add_post("/api/nomadnet/auth/add", handle_nomadnet_auth_add)
     app.router.add_post("/api/nomadnet/auth/remove", handle_nomadnet_auth_remove)
@@ -537,13 +577,17 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
     """
     plugin = _get_plugin(request)
     network_map = plugin.app.get_plugin("network_map")
+    local_services = _collect_local_services(plugin.app)
+
     if not network_map or not hasattr(network_map, "get_known_nodes"):
         return _ok({"nodes": [], "total": 0, "page": 1, "pages": 1,
+                     "local_services": local_services,
                      "message": "network_map plugin not available"})
 
     # Check if paginated method is available (new) — fall back to full list
     if not hasattr(network_map, "get_known_nodes_paginated"):
-        return _ok({"nodes": network_map.get_known_nodes()})
+        return _ok({"nodes": network_map.get_known_nodes(),
+                     "local_services": local_services})
 
     try:
         page = max(1, int(request.query.get("page", 1)))
@@ -561,18 +605,33 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
 
     # If per_page=0, return full list for legacy callers
     if per_page == 0:
-        return _ok({"nodes": network_map.get_known_nodes()})
+        return _ok({"nodes": network_map.get_known_nodes(),
+                     "local_services": local_services})
 
     sort = request.query.get("sort", "last_seen")
     order = request.query.get("order", "desc")
     search = request.query.get("search", "")
     app_filter = request.query.get("app", "")
+    view = request.query.get("view", "")
 
     result = network_map.get_known_nodes_paginated(
         page=page, per_page=per_page, sort=sort, order=order,
-        search=search, app_filter=app_filter,
+        search=search, app_filter=app_filter, view=view,
     )
+    result["local_services"] = local_services
     return _ok(result)
+
+
+async def handle_mesh_summary(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/mesh/summary — aggregate mesh stats for the summary strip."""
+    plugin = _get_plugin(request)
+    network_map = plugin.app.get_plugin("network_map")
+    if not network_map or not hasattr(network_map, "get_mesh_summary"):
+        return _ok({"message": "network_map plugin not available",
+                     "total_nodes": 0, "app_breakdown": {},
+                     "hop_distribution": {}, "activity_stats": {},
+                     "growth": {}, "nearby": 0})
+    return _ok(network_map.get_mesh_summary())
 
 
 async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -1073,3 +1132,90 @@ async def handle_message_stats(
     if not hub or not hasattr(hub, "get_stats"):
         return _ok({"stats": {}})
     return _ok({"stats": hub.get_stats()})
+
+
+# ── Path table with real interface names ──────────────────────────────
+
+
+# Cache to avoid running rnpath too often
+_paths_cache: dict[str, Any] = {"data": None, "time": 0.0}
+_PATHS_CACHE_TTL = 15.0  # seconds
+
+
+async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/paths — path table from rnsd with real interface names.
+
+    In shared-instance mode, ``RNS.Transport.path_table`` only shows
+    ``LocalClientInterface``.  This endpoint runs ``rnpath -t -j`` to get
+    the real interface names (RNodeInterface, TCPInterface, etc.).
+
+    Query parameters:
+        interface: substring filter (e.g. ``RNode`` or ``TCP``)
+    """
+    import asyncio
+    import json as _json
+    import os
+
+    now = time.time()
+    if _paths_cache["data"] is not None and now - _paths_cache["time"] < _PATHS_CACHE_TTL:
+        paths = _paths_cache["data"]
+    else:
+        # Find rnpath binary in the same venv
+        import sys
+        venv_bin = os.path.dirname(sys.executable)
+        rnpath_bin = os.path.join(venv_bin, "rnpath")
+        if not os.path.isfile(rnpath_bin):
+            return _error("rnpath binary not found", 503)
+
+        plugin = _get_plugin(request)
+        config_dir = getattr(plugin.app, "_reticulum_config_dir", None)
+        cmd = [rnpath_bin, "-t", "-j"]
+        if config_dir:
+            cmd.extend(["--config", config_dir])
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            paths = _json.loads(stdout)
+            _paths_cache["data"] = paths
+            _paths_cache["time"] = now
+        except asyncio.TimeoutError:
+            return _error("rnpath timed out", 504)
+        except Exception as exc:
+            return _error(f"rnpath failed: {exc}", 500)
+
+    # Optional interface filter
+    iface_filter = request.query.get("interface", "")
+    if iface_filter:
+        paths = [p for p in paths if iface_filter in p.get("interface", "")]
+
+    # Cross-reference with network_map for node names
+    network_map = _get_plugin(request).app.get_plugin("network_map")
+    if network_map and hasattr(network_map, "_known_nodes"):
+        with network_map._nodes_lock:
+            known = network_map._known_nodes
+            for p in paths:
+                h = p.get("hash", "")
+                try:
+                    node = known.get(bytes.fromhex(h))
+                    if node:
+                        p["app_name"] = node.get("app_name", "")
+                        p["app_data"] = node.get("app_data_str", "")
+                except (ValueError, TypeError):
+                    pass
+
+    # Group counts by interface for summary
+    by_iface: dict[str, int] = {}
+    for p in (_paths_cache["data"] or []):
+        iface = p.get("interface", "unknown")
+        by_iface[iface] = by_iface.get(iface, 0) + 1
+
+    return _ok({
+        "paths": paths,
+        "total": len(paths),
+        "by_interface": by_iface,
+    })

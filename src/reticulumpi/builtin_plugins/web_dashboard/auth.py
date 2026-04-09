@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import os
 import secrets
@@ -10,6 +11,21 @@ import time
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+def _normalize_ip(ip: str) -> str:
+    """Normalise an IP address so IPv4-mapped IPv6 variants share the same key.
+
+    ``::ffff:127.0.0.1`` and ``127.0.0.1`` collapse to the same string,
+    preventing rate-limit bypass via address format switching.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(addr)
+    except ValueError:
+        return ip
 
 SECRET_FILENAME = "dashboard_secret"
 
@@ -49,21 +65,46 @@ def load_or_create_password_hash(secret_dir: str) -> tuple[str, str | None]:
 
 
 def hash_password(password: str) -> str:
-    """Hash a password with scrypt. Returns 'scrypt:<salt_hex>:<hash_hex>'."""
+    """Hash a password with scrypt. Returns ``scrypt:<salt_hex>:<params>:<hash_hex>``.
+
+    Uses n=2^14, r=8, p=2 (doubled parallelism over the original p=1).
+    OpenSSL's scrypt enforces a 32 MB memory cap on many platforms (including
+    Raspberry Pi), so n cannot exceed 2^14 with r=8.  Doubling *p* compensates
+    by doubling the CPU time for each hash evaluation.
+
+    The parameter block ``<params>`` is stored in the hash so that
+    ``verify_password`` can handle both old and new formats transparently.
+    """
     salt = os.urandom(16)
-    dk = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
-    return f"scrypt:{salt.hex()}:{dk.hex()}"
+    n, r, p = 2**14, 8, 2
+    dk = hashlib.scrypt(password.encode(), salt=salt, n=n, r=r, p=p, dklen=32)
+    return f"scrypt:{salt.hex()}:{n}:{r}:{p}:{dk.hex()}"
 
 
 def verify_password(password: str, stored_hash: str) -> bool:
-    """Verify a password against a stored scrypt hash."""
+    """Verify a password against a stored scrypt hash.
+
+    Supports multiple formats for backward compatibility:
+      - ``scrypt:<salt>:<hash>``              (v1: n=16384, r=8, p=1)
+      - ``scrypt:<salt>:<n>:<r>:<p>:<hash>``  (v2: explicit params)
+    """
     try:
         parts = stored_hash.split(":")
-        if len(parts) != 3 or parts[0] != "scrypt":
+        if parts[0] != "scrypt":
             return False
-        salt = bytes.fromhex(parts[1])
-        expected = bytes.fromhex(parts[2])
-        dk = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
+        if len(parts) == 3:
+            # Legacy v1 format
+            salt = bytes.fromhex(parts[1])
+            expected = bytes.fromhex(parts[2])
+            n, r, p = 2**14, 8, 1
+        elif len(parts) == 6:
+            # Current v2 format: scrypt:<salt>:<n>:<r>:<p>:<hash>
+            salt = bytes.fromhex(parts[1])
+            n, r, p = int(parts[2]), int(parts[3]), int(parts[4])
+            expected = bytes.fromhex(parts[5])
+        else:
+            return False
+        dk = hashlib.scrypt(password.encode(), salt=salt, n=n, r=r, p=p, dklen=32)
         return secrets.compare_digest(dk, expected)
     except Exception:
         return False
@@ -79,6 +120,7 @@ class RateLimiter:
 
     def is_allowed(self, ip: str) -> bool:
         """Check if a login attempt from this IP is allowed."""
+        ip = _normalize_ip(ip)
         now = time.monotonic()
         self._cleanup(ip, now)
         attempts = self._attempts.get(ip, [])
@@ -86,12 +128,14 @@ class RateLimiter:
 
     def record_attempt(self, ip: str) -> None:
         """Record a failed login attempt."""
+        ip = _normalize_ip(ip)
         now = time.monotonic()
         self._cleanup(ip, now)
         self._attempts.setdefault(ip, []).append(now)
 
     def retry_after(self, ip: str) -> int:
         """Seconds until the oldest attempt expires (for Retry-After header)."""
+        ip = _normalize_ip(ip)
         attempts = self._attempts.get(ip, [])
         if not attempts:
             return 0
