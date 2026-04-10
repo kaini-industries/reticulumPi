@@ -216,9 +216,12 @@ class _MeshtasticMQTTClient:
 
     def _process_mqtt_message(self, topic: str, payload: bytes) -> None:
         """Parse a ServiceEnvelope and dispatch text messages via pubsub."""
-        from meshtastic.mesh_pb2 import Data, MeshPacket
-        from meshtastic.mqtt_pb2 import ServiceEnvelope
-        from meshtastic.portnums_pb2 import NODEINFO_APP, TEXT_MESSAGE_APP
+        from meshtastic.protobuf.mesh_pb2 import Data, MeshPacket
+        from meshtastic.protobuf.mqtt_pb2 import ServiceEnvelope
+        from meshtastic.protobuf.portnums_pb2 import PortNum
+
+        NODEINFO_APP = PortNum.NODEINFO_APP
+        TEXT_MESSAGE_APP = PortNum.TEXT_MESSAGE_APP
 
         envelope = ServiceEnvelope()
         envelope.ParseFromString(payload)
@@ -290,7 +293,7 @@ class _MeshtasticMQTTClient:
         """Decrypt a MeshPacket payload using AES-CTR."""
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-        from meshtastic.mesh_pb2 import Data
+        from meshtastic.protobuf.mesh_pb2 import Data
 
         # Nonce: 8 bytes packet_id (little-endian) + 8 bytes from_num (little-endian)
         nonce = packet_id.to_bytes(8, "little") + from_num.to_bytes(8, "little")
@@ -308,7 +311,7 @@ class _MeshtasticMQTTClient:
 
     def _handle_nodeinfo(self, from_num: int, payload: bytes) -> None:
         """Update node database from NODEINFO_APP payloads."""
-        from meshtastic.mesh_pb2 import HardwareModel, User
+        from meshtastic.protobuf.mesh_pb2 import HardwareModel, User
 
         try:
             user = User()
@@ -355,9 +358,11 @@ class _MeshtasticMQTTClient:
 
     def sendNodeInfo(self) -> None:
         """Broadcast a NODEINFO_APP packet with our identity to the mesh."""
-        from meshtastic.mesh_pb2 import Data, MeshPacket, User
-        from meshtastic.mqtt_pb2 import ServiceEnvelope
-        from meshtastic.portnums_pb2 import NODEINFO_APP
+        from meshtastic.protobuf.mesh_pb2 import Data, MeshPacket, User
+        from meshtastic.protobuf.mqtt_pb2 import ServiceEnvelope
+        from meshtastic.protobuf.portnums_pb2 import PortNum
+
+        NODEINFO_APP = PortNum.NODEINFO_APP
 
         user = User()
         user.id = f"!{self._my_node_num:08x}"
@@ -420,9 +425,11 @@ class _MeshtasticMQTTClient:
             destinationId: Target node (int, or ``"!abcd1234"`` hex string).
                 ``None`` sends a broadcast to all nodes.
         """
-        from meshtastic.mesh_pb2 import Data, MeshPacket
-        from meshtastic.mqtt_pb2 import ServiceEnvelope
-        from meshtastic.portnums_pb2 import TEXT_MESSAGE_APP
+        from meshtastic.protobuf.mesh_pb2 import Data, MeshPacket
+        from meshtastic.protobuf.mqtt_pb2 import ServiceEnvelope
+        from meshtastic.protobuf.portnums_pb2 import PortNum
+
+        TEXT_MESSAGE_APP = PortNum.TEXT_MESSAGE_APP
 
         # Build the Data payload
         data = Data()
@@ -1100,7 +1107,7 @@ class MeshtasticGateway(PluginBase):
                     dest,
                     self.local_lxmf_destination,
                     text,
-                    desired_method=LXMF.LXMessage.DIRECT,
+                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
                 )
                 self.lxmf_router.handle_outbound(msg)
                 self.log.debug("Forwarded to LXMF %s", RNS.prettyhexrep(recipient_hash))

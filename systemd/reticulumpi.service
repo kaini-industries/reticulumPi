@@ -32,8 +32,11 @@ ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulum
 PrivateTmp=yes
 
 # Resource limits — prevent runaway plugins from starving the system
-MemoryMax=512M
-TasksMax=128
+# NOTE: MeshChat spawns a thread per announce callback. With 3 subprocesses
+# (reticulumpi + nomadnet + meshchat) and an active mesh network, 128 tasks
+# and 512M are too low. Raised to 512 tasks and 1G.
+MemoryMax=1G
+TasksMax=512
 CPUQuota=90%
 
 [Install]

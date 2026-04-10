@@ -206,7 +206,7 @@ class AlertSystemPlugin(PluginBase):
                     dest,
                     self._lxmf_destination,
                     full_message,
-                    desired_method=LXMF.LXMessage.DIRECT,
+                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
                 )
                 self._lxmf_router.handle_outbound(lxm)
                 with self._lock:

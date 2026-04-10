@@ -258,7 +258,7 @@ class InfoBot(PluginBase):
                     message.source,
                     self.local_lxmf_destination,
                     response,
-                    desired_method=LXMF.LXMessage.DIRECT,
+                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
                 )
                 self.lxmf_router.handle_outbound(reply)
                 self.log.debug("Sent reply to %s", sender)
