@@ -464,6 +464,120 @@ async def handle_interface_toggle(
     })
 
 
+# ── Interface config validation ──────────────────────────────────────
+_INTERFACE_SCHEMAS: dict[str, dict] = {
+    "TCPClientInterface": {
+        "required": {"target_host": str, "target_port": int},
+        "optional": {"kiss_framing": bool, "connect_timeout": int,
+                      "max_reconnect_tries": int},
+    },
+    "TCPServerInterface": {
+        "required": {},
+        "optional": {"listen_ip": str, "listen_port": int,
+                      "kiss_framing": bool},
+    },
+    "RNodeInterface": {
+        "required": {"port": str, "frequency": int, "bandwidth": int,
+                      "txpower": int, "spreadingfactor": int, "codingrate": int},
+        "optional": {"id_callsign": str, "id_interval": int,
+                      "announce_cap": float, "airtime_limit_short": float,
+                      "airtime_limit_long": float},
+    },
+    "UDPInterface": {
+        "required": {},
+        "optional": {"listen_ip": str, "listen_port": int,
+                      "forward_ip": str, "forward_port": int},
+    },
+    "SerialInterface": {
+        "required": {"port": str},
+        "optional": {"speed": int, "databits": int, "parity": str,
+                      "stopbits": int},
+    },
+    "KISSInterface": {
+        "required": {"port": str},
+        "optional": {"speed": int, "databits": int, "parity": str,
+                      "stopbits": int, "preamble": int, "txtail": int,
+                      "persistence": int, "slottime": int},
+    },
+    "AutoInterface": {
+        "required": {},
+        "optional": {"group_id": str, "discovery_scope": str,
+                      "discovery_port": int, "data_port": int},
+    },
+    "I2PInterface": {
+        "required": {},
+        "optional": {"connectable": bool, "peers": str},
+    },
+}
+
+# RNode-specific value ranges
+_RNODE_RANGES = {
+    "frequency": (100_000_000, 1_000_000_000),  # 100 MHz – 1 GHz
+    "bandwidth": (7800, 500_000),                 # 7.8 kHz – 500 kHz
+    "txpower": (0, 22),
+    "spreadingfactor": (7, 12),
+    "codingrate": (5, 8),
+}
+
+
+def _validate_interface_config(iface_type: str, properties: dict) -> str | None:
+    """Return an error message if the interface config is invalid, or None."""
+    schema = _INTERFACE_SCHEMAS.get(iface_type)
+    if schema is None:
+        known = ", ".join(sorted(_INTERFACE_SCHEMAS))
+        return f"Unknown interface type '{iface_type}'. Valid types: {known}"
+
+    # Check required properties
+    for key, expected_type in schema.get("required", {}).items():
+        if key not in properties:
+            return f"Missing required property '{key}' for {iface_type}"
+        if not _check_type(properties[key], expected_type):
+            return f"Property '{key}' must be {expected_type.__name__}, got '{properties[key]}'"
+
+    # Type-check optional properties if present
+    all_props = {**schema.get("required", {}), **schema.get("optional", {})}
+    for key, val in properties.items():
+        if key.lower() in ("type", "enabled", "mode"):
+            continue
+        expected = all_props.get(key)
+        if expected and not _check_type(val, expected):
+            return f"Property '{key}' must be {expected.__name__}, got '{val}'"
+
+    # RNode range validation
+    if iface_type == "RNodeInterface":
+        for key, (lo, hi) in _RNODE_RANGES.items():
+            if key in properties:
+                try:
+                    v = int(properties[key])
+                    if v < lo or v > hi:
+                        return f"Property '{key}' must be between {lo} and {hi}, got {v}"
+                except (ValueError, TypeError):
+                    pass  # already caught by type check
+
+    return None
+
+
+def _check_type(value: str | int | float | bool, expected: type) -> bool:
+    """Check if a config value can be interpreted as the expected type."""
+    if expected is str:
+        return True
+    if expected is bool:
+        return str(value).lower() in ("true", "false", "yes", "no", "1", "0", "on", "off")
+    if expected is int:
+        try:
+            int(str(value))
+            return True
+        except (ValueError, TypeError):
+            return False
+    if expected is float:
+        try:
+            float(str(value))
+            return True
+        except (ValueError, TypeError):
+            return False
+    return True
+
+
 async def handle_interface_add(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
@@ -495,6 +609,11 @@ async def handle_interface_add(
         return _error("type field is required", 400)
     if len(iface_name) > 100:
         return _error("name too long", 400)
+
+    # Validate interface type and properties before writing
+    validation_err = _validate_interface_config(iface_type, properties)
+    if validation_err:
+        return _error(validation_err, 400)
 
     try:
         lines, interfaces = parse_rns_config(path)
@@ -1193,8 +1312,9 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
     if iface_filter:
         paths = [p for p in paths if iface_filter in p.get("interface", "")]
 
-    # Cross-reference with network_map for node names
-    network_map = _get_plugin(request).app.get_plugin("network_map")
+    # Cross-reference with network_map for node names + extra fields
+    plugin = _get_plugin(request)
+    network_map = plugin.app.get_plugin("network_map")
     if network_map and hasattr(network_map, "_known_nodes"):
         with network_map._nodes_lock:
             known = network_map._known_nodes
@@ -1205,8 +1325,45 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
                     if node:
                         p["app_name"] = node.get("app_name", "")
                         p["app_data"] = node.get("app_data_str", "")
+                        p["aspects"] = node.get("aspects", "")
+                        p["announce_count"] = node.get("announce_count", 0)
+                        p["first_seen"] = node.get("first_seen")
                 except (ValueError, TypeError):
                     pass
+
+    # Score reachability for filtered paths
+    if paths:
+        try:
+            from reticulumpi.reachability import score_all_nodes
+            conn_mon = plugin.app.get_plugin("connectivity_monitor")
+            path_table: list = []
+            if conn_mon and hasattr(conn_mon, "get_routing_data"):
+                routing = conn_mon.get_routing_data(per_page=500)
+                path_table = routing.get("paths", [])
+            th = plugin.app.get_plugin("transport_health")
+            transport_nodes = th.get_transport_nodes() if th and hasattr(th, "get_transport_nodes") else []
+            # Build mini node list for scoring
+            score_nodes = []
+            for p in paths:
+                score_nodes.append({
+                    "destination_hash": "<" + p.get("hash", "") + ">",
+                    "app_name": p.get("app_name", ""),
+                    "app_data": p.get("app_data", ""),
+                    "hops": p.get("hops"),
+                    "last_seen": p.get("timestamp"),
+                    "announce_count": p.get("announce_count", 0),
+                })
+            scored = score_all_nodes(score_nodes, path_table, transport_nodes)
+            score_map = {s["destination_hash"]: s for s in scored}
+            for p in paths:
+                key = "<" + p.get("hash", "") + ">"
+                s = score_map.get(key)
+                if s:
+                    p["score"] = s.get("score", 0)
+                    p["label"] = s.get("label", "unlikely")
+                    p["factors"] = s.get("factors")
+        except Exception:
+            pass  # Scoring is best-effort
 
     # Group counts by interface for summary
     by_iface: dict[str, int] = {}

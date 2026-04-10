@@ -483,6 +483,17 @@
     return h;
   }
 
+  function _updateMeshCount() {
+    var el = $('mesh-count');
+    if (!el) return;
+    if (_localServices.length) {
+      el.textContent = _localServices.length + ' local'
+        + (_meshTotal > 0 ? ' + ' + _meshTotal + ' remote' : '');
+    } else {
+      el.textContent = _meshTotal > 0 ? _meshTotal + ' nodes' : '0';
+    }
+  }
+
   function renderMeshNodes() {
     var tbody = $('mesh-table');
     if (!tbody) return;
@@ -505,9 +516,7 @@
       if (_localServices.length === 0) {
         tbody.innerHTML = '<tr><td colspan="7">' + (_meshTotal > 0 ? 'No nodes match filters' : 'No nodes discovered yet') + '</td></tr>';
       }
-      $('mesh-count').textContent = _localServices.length
-        ? _localServices.length + ' local' + (_meshTotal > 0 ? ' + ' + _meshTotal + ' remote' : '')
-        : (_meshTotal > 0 ? '0/' + _meshTotal : '0');
+      _updateMeshCount();
       var showMore = $('mesh-show-more');
       if (showMore) showMore.style.display = 'none';
       if (_localServices.length === 0) return;
@@ -570,9 +579,7 @@
         tbody.appendChild(detailTr);
       }
     }
-    $('mesh-count').textContent = _localServices.length
-      ? _localServices.length + ' local + ' + _meshTotal + ' remote'
-      : _meshTotal + ' nodes';
+    _updateMeshCount();
     updateMeshSortIndicators();
 
     // Pagination controls (replaces "show more" button)
@@ -616,17 +623,18 @@
       _meshPage = r.data.page || 1;
       _meshPages = r.data.pages || 1;
       _localServices = r.data.local_services || [];
-      renderMeshNodes();
-      // Fetch reachability for visible nodes
+      // Update count immediately (lightweight, no table rebuild)
+      _updateMeshCount();
+      // Single render after reachability scores arrive
       fetchReachabilityForVisible();
     });
   }
 
   function fetchReachabilityForVisible() {
-    if (_meshNodes.length === 0) return;
+    if (_meshNodes.length === 0) { renderMeshNodes(); return; }
     var hashes = _meshNodes.map(function(n) { return n.destination_hash; }).join(',');
     api('/api/reachability?hashes=' + encodeURIComponent(hashes)).then(function(r) {
-      if (!r || !r.ok) return;
+      if (!r || !r.ok) { renderMeshNodes(); return; }
       var nodes = r.data.nodes || [];
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
@@ -638,6 +646,20 @@
           };
         }
       }
+      // Re-sort the current page by full reachability score so the
+      // displayed reach badges appear in the correct visual order.
+      // The server used a proxy score (3 factors) for pagination
+      // boundaries; the full score (5 factors) is the display truth.
+      if (_meshSortKey === 'score' && _meshNodes.length > 1) {
+        _meshNodes.sort(function(a, b) {
+          var sa = (_reachScores[a.destination_hash] || {}).score || 0;
+          var sb = (_reachScores[b.destination_hash] || {}).score || 0;
+          return _meshSortAsc ? sa - sb : sb - sa;
+        });
+      }
+      renderMeshNodes();
+    }, function() {
+      // Network error fallback — render without scores
       renderMeshNodes();
     });
   }
@@ -649,17 +671,20 @@
     // Update total count from WS summary
     if (meshData.known_nodes != null) {
       _meshTotal = meshData.known_nodes;
-      $('mesh-count').textContent = _meshTotal + ' nodes';
+      _updateMeshCount();
     }
 
     // If server reports new version (data changed), re-fetch current page
+    var refetching = false;
     if (meshData.version != null && meshData.version !== _meshVersion) {
       _meshVersion = meshData.version;
       fetchMeshNodes();
+      refetching = true;
     }
 
     // Update any visible nodes from recent_announces delta
-    if (meshData.recent_announces && meshData.recent_announces.length > 0) {
+    // Skip if we're already refetching (avoids redundant render)
+    if (!refetching && meshData.recent_announces && meshData.recent_announces.length > 0) {
       var announceMap = {};
       for (var i = 0; i < meshData.recent_announces.length; i++) {
         var a = meshData.recent_announces[i];
@@ -749,8 +774,14 @@
     var total = 0;
     for (var i = 0; i < keys.length; i++) total += breakdown[keys[i]];
 
-    var labelMap = {'lxmf': 'LXMF', 'nomadnetwork': 'NomadNet', '': 'Other'};
-    var clsMap = {'lxmf': 'ac-lxmf', 'nomadnetwork': 'ac-nomadnet'};
+    var labelMap = {
+      'lxmf': 'LXMF', 'nomadnetwork': 'NomadNet', 'reticulumpi': 'ReticulumPi',
+      'sideband': 'Sideband', 'styrene': 'Styrene', '': 'Unclassified'
+    };
+    var clsMap = {
+      'lxmf': 'ac-lxmf', 'nomadnetwork': 'ac-nomadnet', 'reticulumpi': 'ac-rpi',
+      'sideband': 'ac-sideband', 'styrene': 'ac-styrene'
+    };
     var html = '';
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
@@ -1845,6 +1876,7 @@
       if (!r || !r.ok) return;
       updateInterfaces(r.data.interfaces);
       updateLoraRadio(r.data.interfaces);
+      updateLoraSignal(r.data.interfaces);
     });
 
     // Metrics
@@ -1944,10 +1976,15 @@
         loraNodes.push({
           destination_hash: '<' + (p.hash || '') + '>',
           app_name: p.app_name || '',
+          aspects: p.aspects || '',
           app_data: p.app_data || '',
           hops: p.hops,
           last_seen: p.timestamp,
-          score: null,
+          first_seen: p.first_seen || null,
+          announce_count: p.announce_count || 0,
+          score: p.score != null ? p.score : null,
+          label: p.label || '',
+          factors: p.factors || null,
           interface: p['interface'] || ''
         });
       }
@@ -2189,14 +2226,23 @@
 
         // Battery (show whenever available)
         if (iface.battery_state != null || iface.battery_percent != null) {
+          var batPct = iface.battery_percent;
+          var batState = iface.battery_state;
+          // 0% with no draining state typically means external/USB power (no battery)
+          var onExtPower = (batPct === 0 && batState !== 3);
           var batParts = [];
-          if (iface.battery_state != null) {
-            var batStates = {0: 'Unknown', 1: 'Charging', 2: 'Charged', 3: 'Draining'};
-            batParts.push(batStates[iface.battery_state] || 'State ' + iface.battery_state);
+          var batClass = '';
+          if (onExtPower) {
+            batParts.push('External Power');
+          } else {
+            if (batState != null) {
+              var batStates = {0: 'Unknown', 1: 'Charging', 2: 'Charged', 3: 'Draining'};
+              batParts.push(batStates[batState] || 'State ' + batState);
+            }
+            if (batPct != null) batParts.push(batPct + '%');
+            batClass = batPct != null && batPct < 20 ? 'metric-crit'
+                     : batPct != null && batPct < 50 ? 'metric-warn' : '';
           }
-          if (iface.battery_percent != null) batParts.push(iface.battery_percent + '%');
-          var batClass = iface.battery_percent != null && iface.battery_percent < 20 ? 'metric-crit'
-                       : iface.battery_percent != null && iface.battery_percent < 50 ? 'metric-warn' : '';
           html += '<div class="lora-metric">'
             + '<span class="lora-metric-label">Battery</span>'
             + '<span class="lora-metric-value ' + batClass + '">' + esc(batParts.join(' \u2022 ')) + '</span>'
@@ -2219,42 +2265,137 @@
     return '<span class="lora-bar"><span class="lora-bar-fill ' + cls + '" style="width:' + w + '%"></span></span>';
   }
 
+  var _loraNodes = [];
+  var _loraExpandedHash = null;
+  var _loraSignal = { rssi: null, snr: null }; // from interface stats
+
+  function updateLoraSignal(interfaces) {
+    // Extract last RSSI/SNR from the RNode interface for the Signal column
+    if (!interfaces) return;
+    for (var i = 0; i < interfaces.length; i++) {
+      var iface = interfaces[i];
+      if (iface.name && iface.name.indexOf('RNode') !== -1) {
+        if (iface.noise_floor != null) _loraSignal.noise = iface.noise_floor;
+        if (iface.interference_last_dbm != null) _loraSignal.rssi = iface.interference_last_dbm;
+        if (iface.rxb != null) _loraSignal.rxb = iface.rxb;
+        break;
+      }
+    }
+  }
+
   function updateLoraNodes(nodes) {
     var section = $('lora-section');
     var tbody = $('lora-table');
     var countEl = $('lora-count');
     if (!section || !tbody) return;
 
+    _loraNodes = nodes;
     countEl.textContent = nodes.length;
 
     if (nodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6">No LoRa peers discovered yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8">No LoRa peers discovered yet</td></tr>';
       return;
     }
 
-    var html = '';
+    tbody.innerHTML = '';
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i];
       var hash = n.destination_hash || '';
-      var shortHash = hash.length > 12 ? hash.slice(0, 12) + '\u2026' : hash;
-      var name = esc(n.app_data || '--');
-      var app = esc(n.app_name || '--');
+      var shortHash = hash.length > 14 ? hash.slice(1, 13) + '\u2026' : hash;
+      var name = n.app_data || '';
+      if (!name && n.app_name) {
+        name = n.app_name + (n.aspects ? '.' + n.aspects : '');
+      }
+      name = name || '--';
+      var appFull = n.app_name ? n.app_name + (n.aspects ? '.' + n.aspects : '') : '--';
       var hops = n.hops != null ? n.hops : '--';
       var ago = n.last_seen ? formatTimeAgo(n.last_seen) : '--';
+      var annCount = n.announce_count || 0;
       var score = n.score != null ? n.score : 0;
       var cls = score >= 80 ? 'reach-high' : score >= 60 ? 'reach-good'
               : score >= 40 ? 'reach-fair' : score >= 20 ? 'reach-low' : 'reach-unlikely';
+      var isExpanded = (hash === _loraExpandedHash);
 
-      html += '<tr>'
-        + '<td><span class="reach-badge ' + cls + '">' + score + '</span></td>'
+      // Signal column — show interface RSSI if we have RX data
+      var sigHtml = '--';
+      if (_loraSignal.rssi != null && _loraSignal.rxb > 0) {
+        var rssiCls = _loraSignal.rssi > -80 ? 'metric-ok' : _loraSignal.rssi > -100 ? 'metric-warn' : 'metric-crit';
+        sigHtml = '<span class="' + rssiCls + '">' + _loraSignal.rssi + ' dBm</span>';
+      }
+
+      var tr = document.createElement('tr');
+      if (isExpanded) tr.className = 'node-row-active';
+      tr.setAttribute('data-lora-hash', hash);
+      tr.style.cursor = 'pointer';
+      tr.innerHTML =
+          '<td class="reach-col"><span class="reach-badge ' + cls + '">' + score + '</span></td>'
         + '<td class="addr" title="' + esc(hash) + '">' + esc(shortHash) + '</td>'
-        + '<td>' + name + '</td>'
-        + '<td>' + app + '</td>'
+        + '<td class="col-truncate" title="' + esc(n.app_data || '') + '">' + esc(name) + '</td>'
+        + '<td>' + esc(appFull) + '</td>'
         + '<td>' + hops + '</td>'
+        + '<td>' + sigHtml + '</td>'
         + '<td>' + ago + '</td>'
-        + '</tr>';
+        + '<td>' + annCount + '</td>';
+      tbody.appendChild(tr);
+
+      // Expanded detail row
+      if (isExpanded) {
+        var detailTr = document.createElement('tr');
+        detailTr.className = 'node-detail';
+        var td = document.createElement('td');
+        td.colSpan = 8;
+        td.innerHTML = _buildLoraDetailHTML(n);
+        detailTr.appendChild(td);
+        tbody.appendChild(detailTr);
+      }
     }
-    tbody.innerHTML = html;
+  }
+
+  function _buildLoraDetailHTML(node) {
+    var h = '';
+
+    // Reachability
+    if (node.score != null && node.factors) {
+      h += '<div class="node-detail-section">Reachability</div>'
+        + '<div class="node-detail-grid">'
+        + _di('Score', _reachBadgeHTML(node.score, node.label))
+        + '</div>'
+        + _reachFactorHTML(node.factors);
+    }
+
+    // Identity
+    h += '<div class="node-detail-section">Identity</div>'
+      + '<div class="node-detail-grid">'
+      + _di('Address', esc(node.destination_hash || '--'))
+      + _di('Name', esc(node.app_data || '--'))
+      + _di('App', esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : ''))
+      + '</div>';
+
+    // Network
+    var firstSeen = node.first_seen ? new Date(node.first_seen * 1000).toLocaleString() : '--';
+    var lastSeen = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
+    h += '<div class="node-detail-section">Network</div>'
+      + '<div class="node-detail-grid">'
+      + _di('Hops', node.hops != null ? node.hops : '--')
+      + _di('First Seen', firstSeen)
+      + _di('Last Seen', lastSeen)
+      + _di('Announces', node.announce_count || 0)
+      + _di('Interface', esc(node.interface || '--'))
+      + '</div>';
+
+    // Signal
+    if (_loraSignal.rssi != null || _loraSignal.noise != null) {
+      h += '<div class="node-detail-section">Signal</div>'
+        + '<div class="node-detail-grid">';
+      if (_loraSignal.rssi != null) h += _di('Last RSSI', _loraSignal.rssi + ' dBm');
+      if (_loraSignal.noise != null) h += _di('Noise Floor', _loraSignal.noise + ' dBm');
+      if (_loraSignal.rssi != null && _loraSignal.noise != null) {
+        h += _di('SNR Margin', (_loraSignal.rssi - _loraSignal.noise) + ' dB');
+      }
+      h += '</div>';
+    }
+
+    return h;
   }
 
   function fetchConfig() {
@@ -2856,6 +2997,15 @@
       if (_meshNodes[i].destination_hash === hash) { node = _meshNodes[i]; break; }
     }
     if (node) toggleNodeDetail(node, hash);
+  });
+  // LoRa table row clicks — event delegation
+  $('lora-table').addEventListener('click', function(ev) {
+    var row = ev.target.closest('tr[data-lora-hash]');
+    if (!row) return;
+    var hash = row.getAttribute('data-lora-hash');
+    if (!hash) return;
+    _loraExpandedHash = (_loraExpandedHash === hash) ? null : hash;
+    updateLoraNodes(_loraNodes);
   });
   $('peer-show-more').addEventListener('click', function() {
     var peers = Object.values(_meshPeers);

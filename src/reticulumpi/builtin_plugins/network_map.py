@@ -20,7 +20,25 @@ _DEFAULT_ASPECTS = [
     "lxmf.delivery",
     "lxmf.propagation",
     "nomadnetwork.node",
+    "reticulumpi.node.heartbeat",
+    "reticulumpi.node.telemetry",
+    "reticulumpi.emergency.broadcast",
+    "reticulumpi.hubexchange",
 ]
+
+
+def _infer_app_from_data(app_data_str: str) -> tuple[str, str]:
+    """Infer app_name and aspects from app_data content when the announce
+    aspect is unknown (wildcard handler).  Returns (app_name, aspects)."""
+    if app_data_str.startswith("styrene:"):
+        return "styrene", "node"
+    if app_data_str.startswith("{") and '"h"' in app_data_str:
+        return "sideband", "presence"
+    if app_data_str.lower().strip() == "presence":
+        return "sideband", "presence"
+    if app_data_str.startswith("Anonymous Peer"):
+        return "sideband", "client"
+    return "", ""
 
 
 class NetworkMapPlugin(PluginBase):
@@ -54,6 +72,9 @@ class NetworkMapPlugin(PluginBase):
 
         # Load previously known nodes from DB
         self._load_from_db()
+
+        # One-time: reclassify unclassified nodes using app_data heuristics
+        self._reclassify_unclassified()
 
         # Register per-aspect handlers so RNS provides the aspect string,
         # plus a wildcard handler to catch custom/unknown aspects.
@@ -446,6 +467,11 @@ class NetworkMapPlugin(PluginBase):
         app_name = parts[0] if parts else ""
         aspect_parts = ".".join(parts[1:]) if len(parts) > 1 else ""
 
+        # Heuristic: infer app_name from app_data when wildcard handler
+        # couldn't determine the aspect (reduces "Other" in dashboard)
+        if not app_name and app_data_str and from_wildcard:
+            app_name, aspect_parts = _infer_app_from_data(app_data_str)
+
         with self._nodes_lock:
             existing = self._known_nodes.get(destination_hash)
             if existing:
@@ -551,6 +577,38 @@ class NetworkMapPlugin(PluginBase):
             self.log.info("Loaded %d known nodes from database", len(self._known_nodes))
         except Exception:
             self.log.exception("Error loading known nodes from database")
+
+    def _reclassify_unclassified(self) -> None:
+        """One-time pass: apply app_data heuristics to nodes with empty app_name."""
+        reclassified = 0
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                rows = conn.execute(
+                    "SELECT destination_hash, app_data_str FROM known_nodes "
+                    "WHERE (app_name = '' OR app_name IS NULL) "
+                    "AND app_data_str IS NOT NULL AND app_data_str != ''"
+                ).fetchall()
+                for dest_hex, app_data_str in rows:
+                    inferred_app, inferred_aspect = _infer_app_from_data(app_data_str)
+                    if inferred_app:
+                        conn.execute(
+                            "UPDATE known_nodes SET app_name = ?, aspects = ? "
+                            "WHERE destination_hash = ?",
+                            (inferred_app, inferred_aspect, dest_hex),
+                        )
+                        # Also update in-memory cache
+                        try:
+                            dest_hash = bytes.fromhex(dest_hex)
+                            if dest_hash in self._known_nodes:
+                                self._known_nodes[dest_hash]["app_name"] = inferred_app
+                                self._known_nodes[dest_hash]["aspects"] = inferred_aspect
+                        except (ValueError, KeyError):
+                            pass
+                        reclassified += 1
+            if reclassified:
+                self.log.info("Reclassified %d nodes from app_data heuristics", reclassified)
+        except Exception:
+            self.log.exception("Error reclassifying nodes")
 
     def _upsert_node(self, dest_hash: bytes, info: dict[str, Any]) -> None:
         try:

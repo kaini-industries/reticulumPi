@@ -586,8 +586,11 @@ body {
 /* App type bar colors */
 .bar-fill.ac-lxmf { background: var(--green); }
 .bar-fill.ac-nomadnet { background: #a371f7; }
+.bar-fill.ac-rpi { background: var(--accent); }
+.bar-fill.ac-sideband { background: var(--orange); }
+.bar-fill.ac-styrene { background: #39d2c0; }
 .bar-fill.ac-other { background: var(--text-muted); }
-.bar-label-app { width: 80px; }
+.bar-label-app { width: 100px; }
 
 /* ── Mesh Filter Tabs ───────────────────────────────── */
 .mesh-filter-bar {

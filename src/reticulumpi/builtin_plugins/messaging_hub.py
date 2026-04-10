@@ -394,7 +394,7 @@ class LXMFAdapter(TransportAdapter):
                 dest,
                 self._destination,
                 text,
-                desired_method=LXMF.LXMessage.DIRECT,
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
             )
             self._router.handle_outbound(msg)
             return {"sent": True, "destination": RNS.prettyhexrep(dest_hash)}
