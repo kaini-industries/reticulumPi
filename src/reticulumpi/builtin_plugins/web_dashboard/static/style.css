@@ -159,6 +159,7 @@ body {
 }
 .conn-live { color: var(--green); }
 .conn-poll { color: var(--yellow); }
+.conn-wait { color: var(--muted); }
 .conn-off { color: var(--red); }
 
 /* Alert banner */

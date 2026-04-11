@@ -1,6 +1,6 @@
 # Built-in Plugins
 
-ReticulumPi ships with 20 built-in plugins. Enable any combination in your `config.yaml`. For configuration syntax details, see the annotated `config/reticulumpi/config.example.yaml`.
+ReticulumPi ships with 22 built-in plugins. Enable any combination in your `config.yaml`. For configuration syntax details, see the annotated `config/reticulumpi/config.example.yaml`.
 
 For writing your own plugins, see the [Plugin Development Guide](plugin-development.md).
 
@@ -338,6 +338,28 @@ Unified message store and chat UI. Bridges LXMF and Meshtastic into a single con
 The messaging hub appears in the web dashboard as a chat interface with transport badges, contact selection, and real-time message delivery via WebSocket.
 
 Future transports can register via `hub.register_adapter()` with zero hub/dashboard changes.
+
+## Yggdrasil Transport
+
+Monitors the [Yggdrasil](https://yggdrasil-network.github.io/) encrypted IPv6 overlay network and optionally auto-configures a Reticulum TCP interface for global mesh reachability via the Yggdrasil address space.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `check_interval` | 30 | Health-check period in seconds (min 10) |
+| `admin_socket` | auto-detect | Path to Yggdrasil admin Unix socket |
+| `auto_configure_rns` | false | Automatically add a TCPServerInterface to Reticulum config |
+| `rns_listen_port` | 4242 | Port for the auto-configured Reticulum interface |
+
+The plugin queries the Yggdrasil admin API (Unix socket with `yggdrasilctl` CLI fallback) to collect:
+- IPv6 address and subnet
+- Connected peers and their addresses
+- Uptime, traffic counters, build version
+
+State transitions (online/offline, peer count changes) are published as events for other plugins to consume. Health data is exposed on the dashboard.
+
+**Auto-RNS configuration:** When `auto_configure_rns: true`, the plugin adds a `[[Yggdrasil TCP Interface]]` section to the Reticulum config on first run, listening on the node's Yggdrasil IPv6 address. This makes the node reachable by any other Reticulum node on the Yggdrasil network without manual config.
+
+**Requirements:** `sudo apt-get install yggdrasil && sudo systemctl enable --now yggdrasil`. The bootstrap script handles this with `--with-yggdrasil`.
 
 ## Example Plugin
 

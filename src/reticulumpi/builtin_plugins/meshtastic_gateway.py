@@ -650,6 +650,7 @@ class MeshtasticGateway(PluginBase):
         # Meshtastic state
         self._mesh_interface: Any = None
         self._connected = False
+        self._last_disconnect_time: float = 0.0
 
         # ── LXMF setup (same pattern as message_echo.py) ───────────
         default_storage = "~/.local/share/reticulumpi/meshtastic_gw_lxmf"
@@ -734,13 +735,57 @@ class MeshtasticGateway(PluginBase):
     # ── Device connection management ────────────────────────────────
 
     def _connection_loop(self) -> None:
-        """Background thread: connect to Meshtastic device/broker and monitor health."""
+        """Background thread: connect to Meshtastic device/broker and monitor health.
+
+        Reconnection strategy:
+        1. When paho detects a disconnect it auto-reconnects with exponential
+           backoff (1 s → 120 s).  We give it a **grace period** before tearing
+           down the client and creating a new one.
+        2. If the grace period expires without reconnection, we close the old
+           client cleanly (preventing paho loop-thread leaks) and create a fresh
+           connection with exponential backoff at the plugin layer.
+        """
         reconnect_delay = self.config.get("reconnect_delay", 10)
-        health_check_interval = self.config.get("health_check_interval", 15)
+        health_check_interval = self.config.get("health_check_interval", 30)
         max_attempts = self.config.get("max_reconnect_attempts", 10)
+        # Grace period: let paho auto-reconnect before we tear down and rebuild.
+        # Default 90 s covers paho's full backoff range (1 → 2 → … → 120 s).
+        grace_period = self.config.get("reconnect_grace_period", 90)
 
         while self._active:
             if not self._connected:
+                # ── Grace period: paho may be auto-reconnecting ────────
+                with self._lock:
+                    has_interface = self._mesh_interface is not None
+                    since_disconnect = (
+                        time.monotonic() - self._last_disconnect_time
+                        if self._last_disconnect_time > 0
+                        else float("inf")
+                    )
+
+                if has_interface and since_disconnect < grace_period:
+                    remaining = grace_period - since_disconnect
+                    self.log.debug(
+                        "Waiting for auto-reconnect (%.0fs of %ds grace remaining)",
+                        remaining,
+                        grace_period,
+                    )
+                    self._sleep_while_active(min(health_check_interval, remaining))
+                    if self._connected:
+                        self.log.info("Auto-reconnect succeeded")
+                        self._reconnect_failures = 0
+                        continue
+                    # Still disconnected — loop will re-check grace timer
+                    continue
+
+                # Grace period expired or no interface — tear down and rebuild
+                if has_interface:
+                    self.log.warning(
+                        "Auto-reconnect failed after %ds, creating new connection",
+                        grace_period,
+                    )
+                self._close_mesh_interface()
+
                 try:
                     self._connect_mesh_device()
                     self._reconnect_failures = 0
@@ -761,7 +806,13 @@ class MeshtasticGateway(PluginBase):
                         )
                         self._active = False
                         break
-                    self._sleep_while_active(reconnect_delay)
+                    # Exponential backoff: 10 → 20 → 40 → 80 → 160 → cap 300 s
+                    backoff = min(
+                        reconnect_delay * (2 ** min(self._reconnect_failures - 1, 5)),
+                        300,
+                    )
+                    self.log.debug("Reconnect backoff: %ds", backoff)
+                    self._sleep_while_active(backoff)
                     continue
 
             # Health check
@@ -1013,14 +1064,32 @@ class MeshtasticGateway(PluginBase):
         })
 
     def _on_mesh_connect(self, interface: Any = None, topic: Any = None) -> None:
-        """Pubsub callback when Meshtastic connection is established."""
-        self.log.debug("Meshtastic connection.established event")
+        """Pubsub callback when Meshtastic connection is (re-)established.
+
+        Paho-mqtt auto-reconnects with exponential backoff.  When it succeeds,
+        this callback fires — set ``_connected = True`` so the connection loop
+        knows the link is healthy again and does NOT tear everything down.
+        """
+        was_disconnected = False
+        with self._lock:
+            if not self._connected:
+                was_disconnected = True
+                self._connected = True
+        if was_disconnected:
+            self.log.info("Meshtastic connection re-established (auto-reconnect)")
+            self.event_bus.publish(events.MESHTASTIC_CONNECTED, {
+                "mode": self._mode,
+                "detail": "auto-reconnect",
+            })
+        else:
+            self.log.debug("Meshtastic connection.established event")
 
     def _on_mesh_disconnect(self, interface: Any = None, topic: Any = None) -> None:
         """Pubsub callback when Meshtastic connection is lost."""
         self.log.warning("Meshtastic connection lost")
         with self._lock:
             self._connected = False
+            self._last_disconnect_time = time.monotonic()
         self.event_bus.publish(events.MESHTASTIC_DISCONNECTED, {"reason": "connection_lost"})
 
     # ── LXMF delivery callback ──────────────────────────────────────

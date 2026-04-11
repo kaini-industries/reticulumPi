@@ -192,6 +192,44 @@ class TestAuthManager:
         with pytest.raises(ValueError, match="No password"):
             AuthManager()
 
+    def test_cleanup_expired_sessions_removes_stale(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="test", session_timeout=0.01)
+        t1 = mgr.login("test", "10.0.0.1")
+        t2 = mgr.login("test", "10.0.0.2")
+        assert len(mgr.sessions) == 2
+        time.sleep(0.05)
+        removed = mgr.cleanup_expired_sessions()
+        assert removed == 2
+        assert len(mgr.sessions) == 0
+
+    def test_cleanup_keeps_active_sessions(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="test", session_timeout=60)
+        t1 = mgr.login("test", "10.0.0.1")
+        t2 = mgr.login("test", "10.0.0.2")
+        removed = mgr.cleanup_expired_sessions()
+        assert removed == 0
+        assert len(mgr.sessions) == 2
+
+    def test_cleanup_mixed_expired_and_active(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="test", session_timeout=0.05)
+        old_token = mgr.login("test", "10.0.0.1")
+        time.sleep(0.06)
+        new_token = mgr.login("test", "10.0.0.2")
+        removed = mgr.cleanup_expired_sessions()
+        assert removed == 1
+        assert old_token not in mgr.sessions
+        assert new_token in mgr.sessions
+
+    def test_cleanup_returns_zero_when_empty(self):
+        mgr = self._make_manager()
+        assert mgr.cleanup_expired_sessions() == 0
+
 
 # --- Plugin config validation tests ---
 
@@ -246,6 +284,16 @@ class TestPluginValidation:
         config = {"enabled": True, "password": "test", "metrics_interval": 0.5}
         with pytest.raises(ValueError, match="metrics_interval"):
             self._make_plugin(mock_app, config)
+
+    def test_rejects_low_session_gc_interval(self, mock_app):
+        config = {"enabled": True, "password": "test", "session_gc_interval": 10}
+        with pytest.raises(ValueError, match="session_gc_interval"):
+            self._make_plugin(mock_app, config)
+
+    def test_accepts_valid_session_gc_interval(self, mock_app):
+        config = {"enabled": True, "password": "test", "session_gc_interval": 60}
+        plugin = self._make_plugin(mock_app, config)
+        assert plugin.plugin_name == "web_dashboard"
 
 
 # --- API response tests (mocked app) ---

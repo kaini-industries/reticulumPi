@@ -38,6 +38,13 @@ class WebDashboardPlugin(PluginBase):
         if not isinstance(max_sessions, int) or max_sessions < 1:
             raise ValueError("max_sessions must be a positive integer")
 
+        session_gc_interval = self.config.get("session_gc_interval", 300)
+        if (
+            not isinstance(session_gc_interval, (int, float))
+            or session_gc_interval < 30
+        ):
+            raise ValueError("session_gc_interval must be a number >= 30")
+
         metrics_interval = self.config.get("metrics_interval", 5)
         if not isinstance(metrics_interval, (int, float)) or metrics_interval < 1:
             raise ValueError("metrics_interval must be a number >= 1")
@@ -197,7 +204,32 @@ class WebDashboardPlugin(PluginBase):
         await site.start()
         self.log.info("Web dashboard listening on %s:%d", self._host, self._port)
 
+        # Start periodic session garbage collection
+        self._session_gc_task = asyncio.ensure_future(self._session_gc_loop())
+
+    async def _session_gc_loop(self) -> None:
+        """Periodically sweep expired sessions from memory."""
+        interval = self.config.get("session_gc_interval", 300)
+        while self._active:
+            await asyncio.sleep(interval)
+            try:
+                removed = self._auth.cleanup_expired_sessions()
+                if removed:
+                    self.log.info(
+                        "Session GC: removed %d expired session(s), %d active",
+                        removed,
+                        len(self._auth.sessions),
+                    )
+            except Exception:
+                self.log.exception("Session GC error")
+
     async def _shutdown(self) -> None:
+        if hasattr(self, "_session_gc_task") and self._session_gc_task:
+            self._session_gc_task.cancel()
+            try:
+                await self._session_gc_task
+            except asyncio.CancelledError:
+                pass
         if self._runner:
             await self._runner.cleanup()
 

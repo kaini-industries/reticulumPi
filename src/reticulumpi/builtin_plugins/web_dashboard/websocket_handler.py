@@ -273,7 +273,7 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         await ws.close(code=4002, message=b"Too many connections")
         return ws
 
-    ws = aiohttp.web.WebSocketResponse(heartbeat=30.0)
+    ws = aiohttp.web.WebSocketResponse(heartbeat=60.0)
     await ws.prepare(request)
     _ws_clients.add(ws)
     log.debug("WebSocket client connected (%d total)", len(_ws_clients))

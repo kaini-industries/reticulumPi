@@ -7,7 +7,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **21 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health, Meshtastic gateway, messaging hub, example scaffold
+- **22 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health, Meshtastic gateway, messaging hub, Yggdrasil transport, example scaffold
 - **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, interface management, routing table visualization, mesh topology, sensor sparklines, chat messaging, and LoRa radio telemetry
 - **Interface management** -- enable/disable Reticulum network interfaces from the dashboard with one-click service restart
 - **Server-side pagination** -- mesh network table with 11,000+ nodes paginated at the SQLite layer; targeted reachability scoring for visible nodes only
@@ -26,7 +26,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 
 | Guide | Description |
 |-------|-------------|
-| **[Built-in Plugins](docs/plugins.md)** | All 21 plugins with configuration options |
+| **[Built-in Plugins](docs/plugins.md)** | All 22 plugins with configuration options |
 | **[Plugin Development](docs/plugin-development.md)** | Write your own plugin (lifecycle, events, LXMF, SQLite, testing) |
 | **[API Reference](docs/api-reference.md)** | REST API and WebSocket endpoint documentation |
 | **[Connectivity Guide](docs/connectivity-guide.md)** | LoRa, serial, packet radio, I2P hardware and setup |
@@ -86,6 +86,13 @@ sudo bash scripts/bootstrap.sh --with-dashboard
 # With I2P anonymous networking (installs i2pd for global overlay transport):
 sudo bash scripts/bootstrap.sh --with-i2p
 
+# With Yggdrasil encrypted IPv6 overlay networking:
+sudo bash scripts/bootstrap.sh --with-yggdrasil
+
+# Full stack (all optional modules):
+sudo bash scripts/bootstrap.sh --with-nomadnet --with-meshchat --with-lora \
+  --with-dashboard --with-i2p --with-yggdrasil
+
 # Set a custom node name (default: ReticulumPi-<hostname>):
 sudo bash scripts/bootstrap.sh --node-name "MyCabin" --with-nomadnet
 
@@ -101,7 +108,7 @@ This will:
 1. Install system packages (`python3`, `python3-venv`, `git`, + `nodejs`/`npm` if `--with-meshchat`)
 2. Create a `reticulumpi` system user with hardware access groups (`dialout`, `gpio`, `spi`, `i2c`)
 3. Copy the project to the install directory (default `/opt/reticulumpi`, or in-place with `--install-dir .`)
-4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`, + `rnodeconf` if `--with-lora`, + `i2pd` if `--with-i2p`)
+4. Create a Python venv and install dependencies (+ NomadNet if `--with-nomadnet`, + MeshChat if `--with-meshchat`, + `rnodeconf` if `--with-lora`, + `i2pd` if `--with-i2p`, + Yggdrasil if `--with-yggdrasil`)
 5. Set up config directories at `/etc/reticulumpi/` and `/home/reticulumpi/.reticulum/`
 6. Set the node name (from `--node-name`, interactive prompt, or default `ReticulumPi-<hostname>`)
 7. Create all runtime directories required by the systemd service sandboxing
@@ -237,7 +244,7 @@ plugins:
     enabled: true
     host: "0.0.0.0"
     port: 8080
-    password_hash: "$argon2id$..."
+    password_hash: "scrypt:..."
     session_timeout: 3600
 ```
 
@@ -465,6 +472,7 @@ Reticulum can communicate over virtually any medium -- WiFi, Ethernet, LoRa radi
 | Serial / HC-12 | $5--50 | Varies | Cheap radio links |
 | KISS TNC | $35--500 | 10--50 km | Amateur radio |
 | I2P | Free | Global | Anonymous networking |
+| Yggdrasil | Free | Global | Encrypted IPv6 overlay |
 
 > **Best starter LoRa pick:** LilyGO T-Beam v1.1 (~$25) -- GPS, battery holder, excellent community support. Flash with RNode firmware and plug into USB.
 
@@ -472,7 +480,7 @@ For complete hardware recommendations, configuration examples, frequency guides,
 
 ## Built-in Plugins
 
-ReticulumPi ships with 21 built-in plugins. Enable any combination in your `config.yaml`:
+ReticulumPi ships with 22 built-in plugins. Enable any combination in your `config.yaml`:
 
 | Plugin | Description |
 |--------|-------------|
@@ -496,6 +504,7 @@ ReticulumPi ships with 21 built-in plugins. Enable any combination in your `conf
 | **transport_health** | Transport relay node reliability tracking |
 | **meshtastic_gateway** | Meshtastic LoRa mesh bridge (serial + MQTT) |
 | **messaging_hub** | Unified message store + chat UI (LXMF + Meshtastic) |
+| **yggdrasil_transport** | Yggdrasil IPv6 overlay monitoring + auto-RNS interface setup |
 | **example_plugin** | Scaffold -- copy to start your own plugin |
 
 For complete configuration options, see **[docs/plugins.md](docs/plugins.md)** and the annotated `config/reticulumpi/config.example.yaml`.
@@ -672,6 +681,7 @@ reticulumPi/
 │       ├── transport_health.py     # Transport relay node reliability tracking
 │       ├── meshtastic_gateway.py   # Meshtastic LoRa ↔ LXMF bridge
 │       ├── messaging_hub.py        # Unified messaging store + adapters
+│       ├── yggdrasil_transport.py  # Yggdrasil IPv6 overlay monitor + auto-RNS setup
 │       ├── web_dashboard/          # Secure web dashboard (aiohttp)
 │       │   ├── __init__.py         # Plugin class + aiohttp server lifecycle
 │       │   ├── api.py              # REST API handlers (36+ endpoints)
@@ -697,7 +707,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 630 tests across 30 files (pytest)
+└── tests/                          # 683 tests across 31 files (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -725,6 +735,7 @@ reticulumPi/
     ├── test_transport_health.py     # Transport node tracking + SQLite tests
     ├── test_meshtastic_gateway.py   # Meshtastic gateway serial + MQTT tests
     ├── test_messaging_hub.py        # Messaging hub + adapters tests
+    ├── test_yggdrasil_transport.py  # Yggdrasil transport monitor + auto-config tests
     ├── test_routing_api.py          # Routing API endpoint tests
     ├── test_rns_config.py           # Config parser round-trip tests
     └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests

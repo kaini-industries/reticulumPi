@@ -194,6 +194,26 @@
 #  enabled = no
 #  peers = i2p_endpoint_b32.b32.i2p
 
+# Yggdrasil TCP Interface — global reachability over Yggdrasil's encrypted
+# IPv6 mesh. Your Yggdrasil address is a persistent 200::/7 IPv6 address
+# derived from your ed25519 key pair. No public IP or port forwarding needed.
+# Install Yggdrasil: sudo apt-get install yggdrasil
+# Find your address: yggdrasilctl getself | grep address
+# Note: The yggdrasil_transport plugin can auto-configure this interface.
+#[[Yggdrasil TCP Interface]]
+#  type = TCPServerInterface
+#  enabled = no
+#  listen_host = YOUR_YGGDRASIL_IPV6_ADDRESS
+#  listen_port = 4242
+
+# Yggdrasil TCP Client — connect to a peer's Reticulum node over Yggdrasil.
+# Use the peer's Yggdrasil IPv6 address (ask for their peering URI).
+#[[Yggdrasil TCP Client]]
+#  type = TCPClientInterface
+#  enabled = no
+#  target_host = PEER_YGGDRASIL_IPV6_ADDRESS
+#  target_port = 4242
+
 # ============================================================
 # ADVANCED / EXPERIMENTAL INTERFACES
 # ============================================================

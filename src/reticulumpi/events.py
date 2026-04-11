@@ -76,6 +76,12 @@ MESHTASTIC_MESSAGE_RECEIVED = "meshtastic.message_received"
 MESHTASTIC_MESSAGE_SENT = "meshtastic.message_sent"
 MESHTASTIC_NODEINFO_SENT = "meshtastic.nodeinfo_sent"
 
+# Yggdrasil transport
+YGGDRASIL_ONLINE = "yggdrasil.online"
+YGGDRASIL_OFFLINE = "yggdrasil.offline"
+YGGDRASIL_PEERS_CHANGED = "yggdrasil.peers_changed"
+YGGDRASIL_RNS_CONFIGURED = "yggdrasil.rns_configured"
+
 # Shutdown
 SHUTDOWN_STARTING = "shutdown.starting"
 

@@ -10,6 +10,7 @@ WITH_MESHCHAT=false
 WITH_DASHBOARD=false
 WITH_LORA=false
 WITH_I2P=false
+WITH_YGGDRASIL=false
 INSTALL_DIR="/opt/reticulumpi"
 NODE_NAME=""
 while [[ $# -gt 0 ]]; do
@@ -20,6 +21,7 @@ while [[ $# -gt 0 ]]; do
         --with-dashboard) WITH_DASHBOARD=true ;;
         --with-lora) WITH_LORA=true ;;
         --with-i2p) WITH_I2P=true ;;
+        --with-yggdrasil) WITH_YGGDRASIL=true ;;
         --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift ;;
         --install-dir=*) INSTALL_DIR="${1#*=}" ;;
         --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift ;;
@@ -154,6 +156,45 @@ s/^# port = 7656/port = 7656/
         echo "  I2P SAM API is available on port 7656"
     else
         echo "  Warning: I2P SAM API not yet available. It may take a moment to start."
+    fi
+fi
+
+# 4g. Optional: Install Yggdrasil encrypted IPv6 overlay
+if [ "$WITH_YGGDRASIL" = true ]; then
+    echo "[4g/7] Installing Yggdrasil encrypted IPv6 overlay..."
+
+    # Add Yggdrasil repo key and source
+    sudo mkdir -p /usr/local/apt-keys
+    gpg --fetch-keys https://neilalexander.s3.dualstack.eu-west-2.amazonaws.com/deb/key.txt 2>/dev/null
+    gpg --export 1C5162E133015D81A811239D1840CDAC6011C5EA | \
+        sudo tee /usr/local/apt-keys/yggdrasil-keyring.gpg > /dev/null
+    echo 'deb [signed-by=/usr/local/apt-keys/yggdrasil-keyring.gpg] http://neilalexander.s3.dualstack.eu-west-2.amazonaws.com/deb/ debian yggdrasil' | \
+        sudo tee /etc/apt/sources.list.d/yggdrasil.list > /dev/null
+    sudo apt-get update
+    sudo apt-get install -y yggdrasil
+
+    # Generate config if it doesn't exist
+    if [ ! -f /etc/yggdrasil.conf ]; then
+        sudo yggdrasil -genconf | sudo tee /etc/yggdrasil.conf > /dev/null
+        echo "  Generated /etc/yggdrasil.conf"
+    fi
+
+    # Allow reticulumpi user to read Yggdrasil admin socket
+    # by adding the user to the yggdrasil group (if the group exists)
+    if getent group yggdrasil >/dev/null 2>&1; then
+        sudo usermod -aG yggdrasil "$SERVICE_USER"
+        echo "  Added $SERVICE_USER to yggdrasil group"
+    fi
+
+    sudo systemctl enable --now yggdrasil
+    sleep 2
+
+    # Show the node's Yggdrasil address
+    if command -v yggdrasilctl &>/dev/null; then
+        YGG_ADDR=$(yggdrasilctl getself 2>/dev/null | grep -oP 'address: \K[0-9a-f:]+' || echo "pending")
+        echo "  Yggdrasil address: $YGG_ADDR"
+    else
+        echo "  Yggdrasil installed (address will be assigned on start)"
     fi
 fi
 
@@ -433,4 +474,15 @@ else
     echo ""
     echo "Optional — for I2P anonymous networking support:"
     echo "  Re-run with: sudo bash $0 --with-i2p"
+fi
+
+if [ "$WITH_YGGDRASIL" = true ]; then
+    echo ""
+    echo "Yggdrasil installed. Enable the yggdrasil_transport plugin in"
+    echo "config.yaml and set auto_configure_rns: true to auto-add a"
+    echo "Reticulum TCP interface on your Yggdrasil IPv6 address."
+else
+    echo ""
+    echo "Optional — for Yggdrasil encrypted IPv6 overlay:"
+    echo "  Re-run with: sudo bash $0 --with-yggdrasil"
 fi

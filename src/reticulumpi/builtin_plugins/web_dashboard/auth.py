@@ -213,6 +213,23 @@ class AuthManager:
         session["last_seen"] = now
         return True
 
+    def cleanup_expired_sessions(self) -> int:
+        """Remove all expired sessions. Returns count of sessions removed.
+
+        Called periodically by the web dashboard's background GC task so
+        that sessions abandoned without an explicit logout don't accumulate
+        in memory indefinitely.
+        """
+        now = time.time()
+        expired = [
+            token
+            for token, session in self.sessions.items()
+            if now - session["last_seen"] > self.session_timeout
+        ]
+        for token in expired:
+            del self.sessions[token]
+        return len(expired)
+
     def logout(self, token: str) -> None:
         """Invalidate a session token."""
         self.sessions.pop(token, None)

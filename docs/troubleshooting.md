@@ -35,7 +35,7 @@ sudo -u reticulumpi /opt/reticulumpi/.venv/bin/reticulumpi --list-plugins
 
 **Symptom:** `systemctl status reticulumpi` shows exit code 226.
 
-**Cause:** The systemd service uses `ReadWritePaths` for sandboxing. If any listed directory doesn't exist, namespace mounting fails silently.
+**Cause:** The systemd service uses `ProtectSystem=strict` with `ReadWritePaths` for sandboxing. The entire filesystem becomes read-only except for paths explicitly listed in `ReadWritePaths`. If any listed directory **doesn't exist**, the namespace mount fails and the service won't start at all.
 
 **Fix:**
 ```bash
@@ -44,13 +44,35 @@ sudo -u reticulumpi mkdir -p \
   /home/reticulumpi/.config/reticulumpi \
   /home/reticulumpi/.local/share/reticulumpi \
   /home/reticulumpi/.reticulum \
-  /home/reticulumpi/.nomadnet
+  /home/reticulumpi/.nomadnet \
+  /home/reticulumpi/.nomadnet-tui
+
+# If MeshChat is installed, also ensure its storage dir exists:
+sudo -u reticulumpi mkdir -p /opt/reticulumpi/meshchat/storage
 
 # Restart
 sudo systemctl restart reticulumpi
 ```
 
 The bootstrap script creates these automatically. This only happens with manual installs.
+
+**Understanding `ReadWritePaths`:**
+
+The current service file lists these writable paths:
+
+| Path | Purpose |
+|------|---------|
+| `/var/lib/reticulumpi` | General data storage |
+| `/home/reticulumpi/.reticulum` | Reticulum config + path table |
+| `/home/reticulumpi/.config/reticulumpi` | Dashboard secret, identity, web certs |
+| `/home/reticulumpi/.local/share/reticulumpi` | LXMF identities, SQLite databases |
+| `/home/reticulumpi/.nomadnet` | NomadNet daemon data |
+| `/home/reticulumpi/.nomadnet-tui` | NomadNet TUI data |
+| `/opt/reticulumpi/meshchat/storage` | MeshChat database + LXMF router |
+
+If a plugin needs to write to a path not in this list, it will get `sqlite3.OperationalError: attempt to write a readonly database` or `PermissionError: [Errno 13] Permission denied`. The fix is to add the path to `ReadWritePaths` in `/etc/systemd/system/reticulumpi.service` and run `sudo systemctl daemon-reload && sudo systemctl restart reticulumpi`.
+
+> **Important:** Every path in `ReadWritePaths` must exist before the service starts. If you add a new path, create the directory first.
 
 ### "No module named reticulumpi"
 
@@ -148,6 +170,10 @@ dmesg | tail -20    # check for USB disconnect messages
 
 ### Forgot Dashboard Password
 
+There are three ways to reset the dashboard password:
+
+**Option 1: Delete and auto-regenerate (simplest)**
+
 ```bash
 # Delete the auto-generated secret
 sudo -u reticulumpi rm ~/.config/reticulumpi/dashboard_secret
@@ -155,20 +181,43 @@ sudo -u reticulumpi rm ~/.config/reticulumpi/dashboard_secret
 # Restart -- a new password will be generated and printed to logs
 sudo systemctl restart reticulumpi
 
-# Find the new password
+# Find the new password in the journal
 sudo journalctl -u reticulumpi -g "password" --no-pager -n 20
+
+# Or check the temp file (if /tmp is accessible)
+sudo cat /tmp/reticulumpi-initial-password
 ```
 
-Or set a password explicitly:
+**Option 2: Set a specific password via hash**
+
 ```bash
-# Generate a hash
+# Generate a hash interactively (prompts twice for confirmation)
 /opt/reticulumpi/.venv/bin/reticulumpi --hash-password
 
 # Add to config
 sudo nano /etc/reticulumpi/config.yaml
 # Under web_dashboard, add:
 #   password_hash: "scrypt:..."
+
+sudo systemctl restart reticulumpi
 ```
+
+**Option 3: Set via environment variable (one-shot)**
+
+```bash
+# Set password via env var (takes precedence over hash file and config)
+sudo systemctl set-environment RETICULUMPI_DASHBOARD_PASSWORD=mynewpassword
+sudo systemctl restart reticulumpi
+
+# Clear the env var after login and set a permanent hash
+sudo systemctl unset-environment RETICULUMPI_DASHBOARD_PASSWORD
+```
+
+**Password storage details:**
+- Hash file: `~/.config/reticulumpi/dashboard_secret` (mode 0600)
+- Algorithm: scrypt with n=16384, r=8, p=2 (32-byte derived key)
+- Format: `scrypt:<salt_hex>:<n>:<r>:<p>:<hash_hex>`
+- Priority: env `RETICULUMPI_DASHBOARD_PASSWORD_HASH` > env `RETICULUMPI_DASHBOARD_PASSWORD` > config `password_hash` > config `password` > auto-generated hash file
 
 ### "Too Many Login Attempts" (429)
 

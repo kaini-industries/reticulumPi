@@ -1,5 +1,5 @@
 # Community TCP Hubs for Reticulum
-# Last updated: 2026-04-04
+# Last updated: 2026-04-11
 # Source: https://github.com/markqvist/Reticulum/wiki/Community-Node-List
 #         + NomadNet node pages, directory.rns.recipes, community contributions
 #
@@ -8,6 +8,8 @@
 #   name: human-readable label (required)
 #   region: for diversity selection (optional)
 #     Values: na-east, na-west, eu-west, eu-central, eu-north, eu-east, asia, oceania, middle-east
+#   network: transport network (optional, default: internet)
+#     Values: internet, yggdrasil
 
 hubs:
   # ── North America ─────────────────────────────────────────────────
@@ -243,3 +245,33 @@ hubs:
     target_host: sydney.reticulum.au
     target_port: 4242
     region: oceania
+
+  # ── Yggdrasil Overlay ─────────────────────────────────────────────
+
+  - name: "ReticulumPi TRASHMAN (Ygg)"
+    target_host: "201:5117:8075:66e4:97d0:4eee:3844:3840"
+    target_port: 4243
+    region: na-east
+    network: yggdrasil
+
+  - name: "Spaceman (Ygg)"
+    target_host: "201:e73a:61ee:ca68:4bc5:99d5:fd70:ded1"
+    target_port: 4343
+    region: na-east
+    network: yggdrasil
+
+  - name: "rothbard ZA (Ygg)"
+    target_host: "200:73eb:2e4:14be:aac7:90b3:784b:71a3"
+    target_port: 4242
+    region: eu-west
+    network: yggdrasil
+
+  - name: "0rbit (Ygg)"
+    target_host: "200:978c:6347:8b49:f73e:ac69:daa:f71a"
+    target_port: 4242
+    network: yggdrasil
+
+  - name: "Int32 Pi (Ygg)"
+    target_host: "200:b55c:7e7a:80fe:9e32:cded:55d2:91"
+    target_port: 4242
+    network: yggdrasil

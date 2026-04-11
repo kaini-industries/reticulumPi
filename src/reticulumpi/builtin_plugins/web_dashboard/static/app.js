@@ -1519,6 +1519,10 @@
 
   function sortMeshtasticNodes(nodes, key, asc) {
     return nodes.slice().sort(function(a, b) {
+      // Pin "Self" gateway to the top regardless of sort
+      if (a.is_self && !b.is_self) return -1;
+      if (!a.is_self && b.is_self) return 1;
+
       var va, vb;
       if (key === 'snr') {
         va = a.snr != null ? a.snr : -999;
@@ -2462,12 +2466,11 @@
     };
 
     ws.onclose = function() {
-      setConnStatus('disconnected');
       scheduleReconnect();
     };
 
     ws.onerror = function() {
-      setConnStatus('disconnected');
+      // onerror is always followed by onclose — no action needed here
     };
   }
 
@@ -2482,8 +2485,10 @@
   // --- Polling fallback ---
 
   function startPolling() {
-    if (pollTimer) return;
+    // Always update status so it shows "polling" even if timer already exists
+    // (prevents stuck "disconnected" when WS reconnect keeps failing)
     setConnStatus('polling');
+    if (pollTimer) return;
     pollTimer = setInterval(function() {
       fetchAll();
     }, 10000);
