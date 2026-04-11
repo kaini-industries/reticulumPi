@@ -88,21 +88,30 @@ class WebDashboardPlugin(PluginBase):
             )
             password_hash, generated_password = load_or_create_password_hash(secret_dir)
             if generated_password:
-                self.log.warning(
+                banner = (
+                    "\n"
+                    "============================================================\n"
+                    f"  Web dashboard password (first run): {generated_password}\n"
+                    "  Save this password! It will not be shown again.\n"
+                    "  To reset: delete ~/.config/reticulumpi/dashboard_secret\n"
+                    "  Or set RETICULUMPI_DASHBOARD_PASSWORD env var.\n"
                     "============================================================"
                 )
-                self.log.warning(
-                    "  Web dashboard password (first run): %s", generated_password
-                )
-                self.log.warning(
-                    "  Save this password! It will not be shown again."
-                )
-                self.log.warning(
-                    "  To reset: delete ~/.config/reticulumpi/dashboard_secret"
-                )
-                self.log.warning(
-                    "============================================================"
-                )
+                self.log.warning(banner)
+                # Also print to stdout for interactive use / systemd journal
+                print(banner, flush=True)
+                # Write to a temp file so users can retrieve it after start
+                try:
+                    pw_file = "/tmp/reticulumpi-initial-password"
+                    with open(pw_file, "w") as f:
+                        f.write(generated_password + "\n")
+                    os.chmod(pw_file, 0o600)
+                    self.log.info(
+                        "Initial password also written to %s (delete after use)",
+                        pw_file,
+                    )
+                except OSError:
+                    pass  # Best-effort — /tmp may not be writable under PrivateTmp
         elif plaintext_password and not password_hash:
             self.log.warning(
                 "Using plaintext password in config. Generate a hash with "

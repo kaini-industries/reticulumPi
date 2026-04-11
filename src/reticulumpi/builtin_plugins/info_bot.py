@@ -7,6 +7,7 @@ import operator
 import os
 import random
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -404,10 +405,10 @@ class InfoBot(PluginBase):
     def _cmd_peers(self, _args: str = "") -> str:
         """Show Reticulum network peers via rnstatus."""
         try:
+            venv_bin = os.path.dirname(sys.executable)
             result = subprocess.run(
-                ["/opt/reticulumpi/.venv/bin/rnstatus"],
+                [os.path.join(venv_bin, "rnstatus")],
                 capture_output=True, text=True, timeout=10,
-                env={**os.environ, "HOME": "/home/reticulumpi"},
             )
             output = result.stdout.strip()
             if not output:
@@ -426,10 +427,10 @@ class InfoBot(PluginBase):
     def _cmd_nodes(self, _args: str = "") -> str:
         """Show known transport nodes via rnpath."""
         try:
+            venv_bin = os.path.dirname(sys.executable)
             result = subprocess.run(
-                ["/opt/reticulumpi/.venv/bin/rnstatus", "-A"],
+                [os.path.join(venv_bin, "rnstatus"), "-A"],
                 capture_output=True, text=True, timeout=10,
-                env={**os.environ, "HOME": "/home/reticulumpi"},
             )
             output = result.stdout.strip()
             if not output:

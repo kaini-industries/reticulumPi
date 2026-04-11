@@ -216,7 +216,15 @@ sudo systemctl restart rnsd reticulumpi
 
 ### Dashboard Authentication
 
-The dashboard requires password authentication. Set your password hash in `config.yaml`:
+The dashboard requires password authentication. On **first run**, a random password is auto-generated and displayed in three places:
+
+1. The systemd journal (`journalctl -u reticulumpi`)
+2. Standard output (visible if running interactively)
+3. A temporary file at `/tmp/reticulumpi-initial-password` (mode 0600, delete after use)
+
+Save this password — it will not be shown again. To reset, delete `~/.config/reticulumpi/dashboard_secret` and restart.
+
+For permanent configuration, generate a hash and add it to `config.yaml`:
 
 ```bash
 # Generate a password hash interactively
@@ -232,6 +240,8 @@ plugins:
     password_hash: "$argon2id$..."
     session_timeout: 3600
 ```
+
+You can also set a password via the `RETICULUMPI_DASHBOARD_PASSWORD` environment variable, which takes precedence over both the auto-generated and config-file passwords.
 
 ### SSL/TLS
 
@@ -687,7 +697,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 627 tests across 30 files (pytest)
+└── tests/                          # 630 tests across 30 files (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests

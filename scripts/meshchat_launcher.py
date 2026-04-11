@@ -249,6 +249,143 @@ def _apply_patches(meshchat_module):
     except Exception as exc:
         print(f"{_TAG} Warning: could not patch page failure logging ({exc})")
 
+    # --- Patch 5: Enable SQLite WAL mode for concurrent access ---
+    # MeshChat's SQLite DB uses default DELETE journal mode, which allows only
+    # one writer at a time.  With hundreds of concurrent announce callbacks
+    # (each writing to the DB), this causes massive "database is locked"
+    # contention that blocks the web frontend.  WAL mode allows concurrent
+    # readers while a single writer holds the lock.
+    try:
+        RMC = meshchat_module.ReticulumMeshChat
+        _original_init = RMC.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            _original_init(self, *args, **kwargs)
+            try:
+                self.db.execute_sql("PRAGMA journal_mode=WAL")
+                self.db.execute_sql("PRAGMA synchronous=NORMAL")
+                self.db.execute_sql("PRAGMA busy_timeout=10000")
+                print(f"{_TAG} SQLite WAL mode enabled for MeshChat database")
+            except Exception as e:
+                print(f"{_TAG} Warning: could not enable WAL mode ({e})")
+
+        RMC.__init__ = _patched_init
+        print(f"{_TAG} Patched ReticulumMeshChat.__init__() with SQLite WAL mode")
+    except Exception as exc:
+        print(f"{_TAG} Warning: could not patch SQLite WAL mode ({exc})")
+
+    # --- Patch 6: Throttle auto-resend of failed messages ---
+    # MeshChat triggers resend_failed_messages_for_destination on EVERY
+    # lxmf.delivery announce.  With 5,000+ failed messages queued and hundreds
+    # of announces per minute, this creates a write storm that overwhelms
+    # SQLite even with WAL mode.  Replace the resend function with one that
+    # enforces a global cooldown — at most one resend cycle per 120 seconds.
+    try:
+        import threading as _threading
+
+        RMC = meshchat_module.ReticulumMeshChat
+        _original_resend = RMC.resend_failed_messages_for_destination
+        _resend_lock = _threading.Lock()
+        _resend_last = [0.0]  # mutable container for closure
+        _RESEND_COOLDOWN = 120  # seconds
+
+        async def _throttled_resend(self, destination_hash: str):
+            now = time.time()
+            with _resend_lock:
+                if (now - _resend_last[0]) < _RESEND_COOLDOWN:
+                    return  # skip — a resend ran recently
+                _resend_last[0] = now
+            print(f"{_TAG} Running throttled resend for <{destination_hash[:12]}>")
+            await _original_resend(self, destination_hash)
+
+        RMC.resend_failed_messages_for_destination = _throttled_resend
+        print(f"{_TAG} Patched resend_failed_messages() with {_RESEND_COOLDOWN}s global throttle")
+    except Exception as exc:
+        print(f"{_TAG} Warning: could not patch resend throttle ({exc})")
+
+    # --- Patch 7: Default to OPPORTUNISTIC for low-bandwidth interfaces ---
+    # MeshChat defaults to DIRECT delivery (multi-packet link handshake), which
+    # fails over LoRa at 3.12 kbps.  When no explicit method is requested and
+    # the next-hop interface is low-bandwidth (< 100 kbps), use OPPORTUNISTIC
+    # (single packet) instead.
+    try:
+        import RNS
+        import LXMF
+
+        RMC = meshchat_module.ReticulumMeshChat
+        _original_send = RMC.send_message
+
+        _LOW_BW_THRESHOLD = 100_000  # bits per second
+
+        async def _patched_send(self, destination_hash, content, image_field=None,
+                                audio_field=None, file_attachments_field=None,
+                                delivery_method=None):
+            # If no explicit method, check if dest was heard over LoRa (has RF metrics)
+            if delivery_method is None:
+                try:
+                    import database as _db
+                    dest_hex = destination_hash if isinstance(destination_hash, str) else destination_hash.hex()
+                    announce = _db.Announce.get_or_none(
+                        _db.Announce.destination_hash == dest_hex
+                    )
+                    if announce and announce.rssi is not None:
+                        delivery_method = "opportunistic"
+                        print(
+                            f"{_TAG} Auto-selected OPPORTUNISTIC for "
+                            f"<{dest_hex[:12]}> "
+                            f"(LoRa announce: RSSI {announce.rssi} dBm, "
+                            f"SNR {announce.snr} dB)"
+                        )
+                except Exception:
+                    pass  # Fall through to MeshChat's default logic
+
+            return await _original_send(
+                self, destination_hash, content,
+                image_field=image_field,
+                audio_field=audio_field,
+                file_attachments_field=file_attachments_field,
+                delivery_method=delivery_method,
+            )
+
+        RMC.send_message = _patched_send
+        print(f"{_TAG} Patched send_message() with auto-OPPORTUNISTIC for low-bandwidth interfaces")
+    except Exception as exc:
+        print(f"{_TAG} Warning: could not patch send_message ({exc})")
+
+    # --- Patch 8: Auto-clear failed outbound messages ---
+    # OPPORTUNISTIC messages over LoRa often show as "failed" because the
+    # delivery proof doesn't make it back, even though the message was received.
+    # Run a background sweep every 5 minutes to delete failed outbound messages
+    # older than 2 minutes, keeping the conversation view clean.
+    try:
+        import threading as _threading
+        import database as _database
+
+        _SWEEP_INTERVAL = 300   # seconds between sweeps
+        _FAILED_MAX_AGE = 120   # delete failed outbound messages older than this (seconds)
+
+        def _sweep_failed_messages():
+            while True:
+                time.sleep(_SWEEP_INTERVAL)
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    cutoff = datetime.now(timezone.utc) - timedelta(seconds=_FAILED_MAX_AGE)
+                    deleted = (_database.LxmfMessage.delete()
+                               .where(_database.LxmfMessage.state == "failed")
+                               .where(_database.LxmfMessage.is_incoming == False)
+                               .where(_database.LxmfMessage.updated_at < cutoff)
+                               .execute())
+                    if deleted > 0:
+                        print(f"{_TAG} Auto-cleared {deleted} failed outbound message(s)")
+                except Exception as e:
+                    print(f"{_TAG} Failed message sweep error: {e}")
+
+        t = _threading.Thread(target=_sweep_failed_messages, daemon=True)
+        t.start()
+        print(f"{_TAG} Started failed message sweep (every {_SWEEP_INTERVAL}s, max age {_FAILED_MAX_AGE}s)")
+    except Exception as exc:
+        print(f"{_TAG} Warning: could not start failed message sweep ({exc})")
+
     return ok
 
 

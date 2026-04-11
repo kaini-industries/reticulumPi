@@ -311,7 +311,9 @@ class SensorFrameworkPlugin(PluginBase):
                 storage.get("path", "~/.local/share/reticulumpi/sensor_data.db")
             )
             os.makedirs(os.path.dirname(db_path), exist_ok=True)
-            self._db = sqlite3.connect(db_path, check_same_thread=False)
+            self._db = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=NORMAL")
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS sensor_readings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

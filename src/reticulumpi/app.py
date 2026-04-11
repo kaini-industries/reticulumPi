@@ -193,7 +193,7 @@ class ReticulumPiApp:
                 for name, reason in self._failed_plugins
             ],
         }
-        for name, plugin in self.plugins.items():
+        for name, plugin in list(self.plugins.items()):
             try:
                 status["plugins"][name] = plugin.get_status()
             except Exception:
@@ -309,7 +309,7 @@ class ReticulumPiApp:
 
         # Report loaded plugins
         if self.plugins:
-            for name, plugin in self.plugins.items():
+            for name, plugin in list(self.plugins.items()):
                 log.info(
                     "  Plugin: %s v%s — %s",
                     name,
@@ -320,8 +320,12 @@ class ReticulumPiApp:
             log.info("  No plugins loaded")
 
         # Report failed plugins prominently
-        for name, reason in self._failed_plugins:
-            log.warning("  FAILED plugin: %s — %s", name, reason)
+        if self._failed_plugins:
+            log.error(
+                "  %d plugin(s) FAILED to load:", len(self._failed_plugins)
+            )
+            for name, reason in self._failed_plugins:
+                log.error("    - %s: %s", name, reason)
 
     def check(self) -> bool:
         """Dry-run validation: check config, discover plugins, report status.

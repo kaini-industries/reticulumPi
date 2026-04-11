@@ -33,7 +33,7 @@ sensors = [
 meshtastic = [
     "meshtastic>=2.0,<3.0",
     "paho-mqtt>=2.0,<3.0",
-    "cryptography>=3.0,<44.0",
+    "cryptography>=3.0,<5.0",
 ]
 dev = [
     "pytest>=7.4,<9.0",

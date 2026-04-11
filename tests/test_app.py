@@ -287,10 +287,10 @@ def test_startup_report_warns_on_failed_plugins(caplog):
     app.identity = MagicMock()
     app.identity.hash = b"\x00" * 16
     import logging
-    with caplog.at_level(logging.WARNING), patch("RNS.Transport") as mock_transport:
+    with caplog.at_level(logging.ERROR), patch("RNS.Transport") as mock_transport:
         mock_transport.interfaces = []
         app._print_startup_report()
-    assert any("FAILED" in msg and "broken" in msg for msg in caplog.messages)
+    assert any("FAILED" in msg or "broken" in msg for msg in caplog.messages)
 
 
 def test_check_returns_true_valid(tmp_path):

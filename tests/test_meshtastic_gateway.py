@@ -17,9 +17,14 @@ import RNS as _RNS
 _mock_meshtastic = MagicMock()
 _mock_meshtastic_serial = MagicMock()
 _mock_meshtastic.serial_interface = _mock_meshtastic_serial
+_mock_meshtastic_protobuf = MagicMock()
 _mock_meshtastic_mesh_pb2 = MagicMock()
 _mock_meshtastic_mqtt_pb2 = MagicMock()
 _mock_meshtastic_portnums_pb2 = MagicMock()
+_mock_meshtastic.protobuf = _mock_meshtastic_protobuf
+_mock_meshtastic_protobuf.mesh_pb2 = _mock_meshtastic_mesh_pb2
+_mock_meshtastic_protobuf.mqtt_pb2 = _mock_meshtastic_mqtt_pb2
+_mock_meshtastic_protobuf.portnums_pb2 = _mock_meshtastic_portnums_pb2
 _mock_pubsub = MagicMock()
 _mock_pub = MagicMock()
 _mock_pubsub.pub = _mock_pub
@@ -36,6 +41,10 @@ def _patch_meshtastic():
     with patch.dict(sys.modules, {
         "meshtastic": _mock_meshtastic,
         "meshtastic.serial_interface": _mock_meshtastic_serial,
+        "meshtastic.protobuf": _mock_meshtastic_protobuf,
+        "meshtastic.protobuf.mesh_pb2": _mock_meshtastic_mesh_pb2,
+        "meshtastic.protobuf.mqtt_pb2": _mock_meshtastic_mqtt_pb2,
+        "meshtastic.protobuf.portnums_pb2": _mock_meshtastic_portnums_pb2,
         "meshtastic.mesh_pb2": _mock_meshtastic_mesh_pb2,
         "meshtastic.mqtt_pb2": _mock_meshtastic_mqtt_pb2,
         "meshtastic.portnums_pb2": _mock_meshtastic_portnums_pb2,

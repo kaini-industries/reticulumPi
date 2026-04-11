@@ -95,9 +95,8 @@ for svc in reticulumpi.service rnsd.service; do
     src="$INSTALL_DIR/systemd/$svc"
     dest="/etc/systemd/system/$svc"
     if [ -f "$src" ] && [ -f "$dest" ]; then
-        # Template only the venv/binary path — leave other /opt/reticulumpi paths
-        # (e.g., meshchat) untouched since they may be installed separately
-        templated=$(sed "s|/opt/reticulumpi/\.venv|$INSTALL_DIR/.venv|g" "$src")
+        # Template install directory paths to match this installation
+        templated=$(sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$src")
         if ! echo "$templated" | diff -q - "$dest" &>/dev/null; then
             echo "$templated" | sudo tee "$dest" >/dev/null
             SERVICES_CHANGED=true

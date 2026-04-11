@@ -165,7 +165,8 @@ class _MeshtasticMQTTClient:
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
 
-        # Connect (blocking)
+        # Set connect timeout to avoid hanging on unresponsive brokers
+        self.client.connect_timeout = 10.0
         self.client.connect(broker, port, keepalive=60)
         self.client.loop_start()
 
@@ -175,7 +176,7 @@ class _MeshtasticMQTTClient:
             self.client.loop_stop()
             self.client.disconnect()
         except Exception:
-            pass
+            pass  # Best-effort cleanup
 
     # ── paho callbacks ──────────────────────────────────────────────
 
@@ -194,7 +195,7 @@ class _MeshtasticMQTTClient:
             from pubsub import pub
             pub.sendMessage("meshtastic.connection.established", interface=self)
         except Exception:
-            pass
+            pass  # pubsub is optional
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         """Notify on disconnect."""
@@ -202,15 +203,21 @@ class _MeshtasticMQTTClient:
             from pubsub import pub
             pub.sendMessage("meshtastic.connection.lost", interface=self)
         except Exception:
-            pass
+            pass  # pubsub is optional
 
     def _on_message(self, client, userdata, msg):
         """Decode incoming MQTT message and dispatch via pubsub."""
         try:
             self._process_mqtt_message(msg.topic, msg.payload)
-        except Exception:
+        except Exception as exc:
             if self._logger:
-                self._logger.debug("Error processing MQTT message", exc_info=True)
+                from google.protobuf.message import DecodeError
+                if isinstance(exc, DecodeError):
+                    self._logger.debug(
+                        "Could not decode MQTT message (expected for encrypted/incompatible packets)"
+                    )
+                else:
+                    self._logger.warning("Error processing MQTT message", exc_info=True)
 
     # ── Message decoding ────────────────────────────────────────────
 
@@ -307,6 +314,7 @@ class _MeshtasticMQTTClient:
             data.ParseFromString(decrypted)
             return data
         except Exception:
+            # Decryption failures are expected for packets using different keys
             return None
 
     def _handle_nodeinfo(self, from_num: int, payload: bytes) -> None:
@@ -337,7 +345,8 @@ class _MeshtasticMQTTClient:
                 }
                 self.nodes[node_id]["lastHeard"] = int(time.time())
         except Exception:
-            pass
+            if self._logger:
+                self._logger.debug("Error parsing NODEINFO payload", exc_info=True)
 
     # ── Identity management ───────────────────────────────────────────
 
@@ -714,11 +723,11 @@ class MeshtasticGateway(PluginBase):
         try:
             RNS.Transport.deregister_announce_handler(self._propagation_handler)
         except Exception:
-            pass
+            pass  # Best-effort cleanup
         try:
             self.lxmf_router.register_delivery_callback(None)
         except Exception:
-            pass
+            pass  # Best-effort cleanup
         self._close_mesh_interface()
         self._join_threads()
 
@@ -871,7 +880,8 @@ class MeshtasticGateway(PluginBase):
             if my_info:
                 return f"!{my_info.my_node_num:08x}"
         except Exception:
-            pass
+            if self.log:
+                self.log.debug("Error reading own node ID from interface", exc_info=True)
         return "unknown"
 
     def _get_connection_detail(self) -> str:
@@ -895,11 +905,11 @@ class MeshtasticGateway(PluginBase):
                 pub.unsubscribe(self._on_mesh_connect, "meshtastic.connection.established")
                 pub.unsubscribe(self._on_mesh_disconnect, "meshtastic.connection.lost")
             except Exception:
-                self.log.debug("Error unsubscribing from Meshtastic pubsub")
+                self.log.debug("Error unsubscribing from Meshtastic pubsub", exc_info=True)
             try:
                 self._mesh_interface.close()
             except Exception:
-                self.log.debug("Error closing Meshtastic interface")
+                self.log.debug("Error closing Meshtastic interface", exc_info=True)
             self._mesh_interface = None
             self._connected = False
 
@@ -923,6 +933,8 @@ class MeshtasticGateway(PluginBase):
                         return stream.is_open
                     return self._mesh_interface is not None
             except Exception:
+                if self.log:
+                    self.log.debug("Error during mesh health check", exc_info=True)
                 return False
 
     # ── Rate limiting ───────────────────────────────────────────────
@@ -1190,7 +1202,8 @@ class MeshtasticGateway(PluginBase):
                     nodes = getattr(self._mesh_interface, "nodes", None) or {}
                     status["meshtastic_nodes"] = len(nodes)
                 except Exception:
-                    pass
+                    if self.log:
+                        self.log.debug("Error reading node count for status", exc_info=True)
             return status
 
     def get_meshtastic_nodes(self) -> list[dict[str, Any]]:
