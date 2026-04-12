@@ -129,6 +129,7 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/routing", handle_routing)
     app.router.add_get("/api/path_warming", handle_path_warming)
     app.router.add_get("/api/transport_health", handle_transport_health)
+    app.router.add_get("/api/lora", handle_lora_diagnostics)
     app.router.add_get("/api/reachability", handle_reachability)
     app.router.add_get("/api/paths", handle_paths)
     app.router.add_get("/api/nomadnet/auth", handle_nomadnet_auth)
@@ -939,6 +940,15 @@ async def handle_path_warming(request: aiohttp.web.Request) -> aiohttp.web.Respo
     if not warmer or not hasattr(warmer, "get_warming_stats"):
         return _ok({"message": "path_warmer plugin not available"})
     return _ok(warmer.get_warming_stats())
+
+
+async def handle_lora_diagnostics(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/lora — LoRa diagnostics (traffic, monitored peers, beacon status)."""
+    plugin = _get_plugin(request)
+    lora = plugin.app.get_plugin("lora_diagnostics")
+    if not lora or not hasattr(lora, "get_diagnostics"):
+        return _ok({"message": "lora_diagnostics plugin not available"})
+    return _ok(lora.get_diagnostics())
 
 
 async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.Response:

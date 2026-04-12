@@ -82,6 +82,11 @@ YGGDRASIL_OFFLINE = "yggdrasil.offline"
 YGGDRASIL_PEERS_CHANGED = "yggdrasil.peers_changed"
 YGGDRASIL_RNS_CONFIGURED = "yggdrasil.rns_configured"
 
+# LoRa diagnostics
+LORA_PEER_ANNOUNCE_RECEIVED = "lora.peer_announce_received"
+LORA_PEER_PATH_LOST = "lora.peer_path_lost"
+LORA_STATS_UPDATED = "lora.stats_updated"
+
 # Shutdown
 SHUTDOWN_STARTING = "shutdown.starting"
 

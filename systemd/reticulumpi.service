@@ -8,11 +8,14 @@ Type=simple
 User=reticulumpi
 Group=reticulumpi
 Environment=PATH=/opt/reticulumpi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# Wait for rnsd shared instance port (37428) to be ready before starting.
+# Wait for rnsd shared instance to be ready before starting.
+# RNS 1.1.4+ uses Unix socket @rns/default instead of TCP port 37428.
 # rnsd can take 10-20s to initialize the RNode serial connection.
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do ss -tlnp | grep -q :37428 && exit 0; sleep 1; done; echo "rnsd port 37428 not ready after 30s, starting anyway"; exit 0'
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do ss -xlnp | grep -q "rns/default" && exit 0; ss -tlnp | grep -q :37428 && exit 0; sleep 1; done; echo "rnsd not ready after 30s, starting anyway"; exit 0'
 ExecStart=/opt/reticulumpi/.venv/bin/reticulumpi --config /etc/reticulumpi/config.yaml
-Restart=on-failure
+# Restart=always ensures reticulumpi recovers when rnsd restarts
+# (rnsd restart closes the shared instance socket, causing a clean exit)
+Restart=always
 RestartSec=10
 KillMode=mixed
 TimeoutStopSec=30
