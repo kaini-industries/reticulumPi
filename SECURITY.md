@@ -33,7 +33,7 @@ The web dashboard (`web_dashboard` plugin) implements:
 
 | Feature | Implementation |
 |---------|----------------|
-| **Password hashing** | scrypt (N=2^14, r=8, p=1, dklen=32) |
+| **Password hashing** | scrypt (N=2^14, r=8, p=2, dklen=32) |
 | **Session tokens** | 64-character hex (256 bits of entropy via `secrets.token_hex`) |
 | **Rate limiting** | 5 failed logins per IP per 60 seconds |
 | **Session management** | Configurable timeout (default 24h), max 5 sessions, LRU eviction |
