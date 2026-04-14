@@ -1,11 +1,30 @@
 """Tests for the NetworkMap plugin."""
 
 import sqlite3
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from reticulumpi.event_bus import EventBus
+
+
+def _drain_announce_queue(plugin, timeout: float = 2.0) -> None:
+    """Wait until the plugin's announce queue is empty and worker has processed it.
+
+    The queue-based architecture processes announces asynchronously, so tests
+    that call ``record_announce`` and immediately inspect state need to wait
+    for the worker thread to drain the queue.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if plugin._announce_queue.empty() and not plugin._pending_upserts:
+            # Give worker thread a moment to finish its current iteration
+            time.sleep(0.05)
+            if plugin._announce_queue.empty():
+                return
+        time.sleep(0.01)
+    raise TimeoutError("Announce queue did not drain within timeout")
 
 
 @pytest.fixture
@@ -54,6 +73,7 @@ def test_record_announce_new_node(mock_transport, mock_app, plugin_config):
 
     dest_hash = b"\xaa" * 16
     plugin.record_announce(dest_hash, MagicMock(), b"test data", "reticulumpi.node.heartbeat")
+    _drain_announce_queue(plugin)
 
     assert dest_hash in plugin._known_nodes
     assert plugin._known_nodes[dest_hash]["hops"] == 3
@@ -74,6 +94,7 @@ def test_record_announce_existing_node(mock_transport, mock_app, plugin_config):
     dest_hash = b"\xbb" * 16
     plugin.record_announce(dest_hash, MagicMock(), b"data1", "app.test")
     plugin.record_announce(dest_hash, MagicMock(), b"data2", "app.test")
+    _drain_announce_queue(plugin)
 
     assert plugin._known_nodes[dest_hash]["announce_count"] == 2
     plugin.stop()
@@ -89,6 +110,7 @@ def test_get_known_nodes(mock_transport, mock_app, plugin_config):
 
     plugin.record_announce(b"\xcc" * 16, MagicMock(), b"node1", "reticulumpi.node")
     plugin.record_announce(b"\xdd" * 16, MagicMock(), b"node2", "reticulumpi.node")
+    _drain_announce_queue(plugin)
 
     nodes = plugin.get_known_nodes()
     assert len(nodes) == 2
@@ -106,6 +128,7 @@ def test_sqlite_persistence(mock_transport, mock_app, plugin_config):
 
     dest_hash = b"\xee" * 16
     plugin.record_announce(dest_hash, MagicMock(), b"persist", "app.test")
+    _drain_announce_queue(plugin)
     plugin.stop()
 
     # Verify data was written to SQLite
@@ -126,6 +149,7 @@ def test_load_from_db(mock_transport, mock_app, plugin_config):
     p1 = NetworkMapPlugin(mock_app, plugin_config)
     p1.start()
     p1.record_announce(b"\xff" * 16, MagicMock(), b"data", "test.app")
+    _drain_announce_queue(p1)
     p1.stop()
 
     # Second instance: should load from DB

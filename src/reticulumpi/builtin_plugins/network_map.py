@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -75,6 +76,14 @@ class NetworkMapPlugin(PluginBase):
 
         # One-time: reclassify unclassified nodes using app_data heuristics
         self._reclassify_unclassified()
+
+        # Announce processing queue — RNS spawns a new thread for every
+        # announce callback, so we must return from callbacks as fast as
+        # possible (just a queue.put_nowait) to prevent thread exhaustion.
+        # A single worker thread drains the queue and batches DB writes.
+        self._announce_queue: queue.Queue = queue.Queue(maxsize=10000)
+        self._pending_upserts: dict[bytes, dict[str, Any]] = {}
+        self._start_thread(self._announce_worker, "network-map-announces")
 
         # Register per-aspect handlers so RNS provides the aspect string,
         # plus a wildcard handler to catch custom/unknown aspects.
@@ -424,11 +433,27 @@ class NetworkMapPlugin(PluginBase):
     ) -> None:
         """Called by the announce handler when an announce is received.
 
-        Args:
-            from_wildcard: True when called by the wildcard handler. Used
-                to skip processing for nodes already classified by a
-                specific-aspect handler (avoids double-counting).
+        This method is invoked in an RNS-spawned daemon thread.  To prevent
+        thread exhaustion (RNS creates a new thread per callback), we just
+        enqueue the announce data and return immediately.  The single
+        ``_announce_worker`` thread does the actual processing.
         """
+        try:
+            self._announce_queue.put_nowait(
+                (destination_hash, identity, app_data, aspect, from_wildcard)
+            )
+        except queue.Full:
+            pass  # Drop announce rather than block the RNS thread
+
+    def _process_announce(
+        self,
+        destination_hash: bytes,
+        identity: Any,
+        app_data: bytes | None,
+        aspect: str,
+        from_wildcard: bool,
+    ) -> None:
+        """Process a single announce (called from the worker thread)."""
         now = time.time()
         hops = None
         try:
@@ -512,8 +537,8 @@ class NetworkMapPlugin(PluginBase):
                 is_new = True
             node_info = dict(self._known_nodes[destination_hash])
 
-        # Persist to DB (outside lock)
-        self._upsert_node(destination_hash, node_info)
+        # Queue for batched DB write (instead of per-announce SQLite open/write/close)
+        self._pending_upserts[destination_hash] = node_info
 
         if is_new:
             self.log.info(
@@ -529,6 +554,77 @@ class NetworkMapPlugin(PluginBase):
                 "aspects": aspect_parts,
                 "hops": hops,
             })
+
+    def _announce_worker(self) -> None:
+        """Drain the announce queue and batch-write to SQLite.
+
+        Processes announces one at a time from the queue, then flushes
+        all pending DB upserts in a single transaction every 2 seconds
+        or when the queue is empty (whichever comes first).
+        """
+        flush_interval = 2.0
+        last_flush = time.monotonic()
+
+        while self._active:
+            try:
+                item = self._announce_queue.get(timeout=1.0)
+                dest_hash, identity, app_data, aspect, from_wildcard = item
+                try:
+                    self._process_announce(
+                        dest_hash, identity, app_data, aspect, from_wildcard
+                    )
+                except Exception:
+                    self.log.debug("Error processing announce", exc_info=True)
+
+                # Flush pending upserts periodically
+                now = time.monotonic()
+                if now - last_flush >= flush_interval:
+                    self._flush_pending_upserts()
+                    last_flush = now
+
+            except queue.Empty:
+                # Queue drained — flush any pending writes
+                if self._pending_upserts:
+                    self._flush_pending_upserts()
+                    last_flush = time.monotonic()
+
+        # Final flush on shutdown
+        self._flush_pending_upserts()
+
+    def _flush_pending_upserts(self) -> None:
+        """Batch-write all pending node upserts in a single transaction."""
+        if not self._pending_upserts:
+            return
+
+        batch = dict(self._pending_upserts)
+        self._pending_upserts.clear()
+
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                for dest_hash, info in batch.items():
+                    conn.execute("""
+                        INSERT OR REPLACE INTO known_nodes
+                        (destination_hash, app_name, aspects, hops,
+                         last_seen, first_seen, announce_count, app_data_str)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        dest_hash.hex(),
+                        info.get("app_name", ""),
+                        info.get("aspects", ""),
+                        info.get("hops"),
+                        info.get("last_seen"),
+                        info.get("first_seen"),
+                        info.get("announce_count", 1),
+                        info.get("app_data_str", ""),
+                    ))
+        except Exception:
+            self.log.debug(
+                "Error flushing %d node upserts to database",
+                len(batch),
+                exc_info=True,
+            )
 
     # --- SQLite ---
 
@@ -613,6 +709,12 @@ class NetworkMapPlugin(PluginBase):
             self.log.exception("Error reclassifying nodes")
 
     def _upsert_node(self, dest_hash: bytes, info: dict[str, Any]) -> None:
+        """Write a single node to the database.
+
+        NOTE: Announce processing now uses ``_flush_pending_upserts`` for
+        batched writes.  This method is retained for one-off writes from
+        maintenance tasks and tests.
+        """
         try:
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute("""
