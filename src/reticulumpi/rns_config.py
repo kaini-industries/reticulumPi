@@ -88,6 +88,47 @@ def parse_rns_config(path: str) -> tuple[list[str], list[InterfaceEntry]]:
     return lines, interfaces
 
 
+def parse_rns_config_from_lines(
+    lines: list[str],
+) -> tuple[list[str], list[InterfaceEntry]]:
+    """Like :func:`parse_rns_config` but operates on an in-memory line list."""
+    interfaces: list[InterfaceEntry] = []
+    in_interfaces_section = False
+    current: InterfaceEntry | None = None
+
+    for idx, raw in enumerate(lines):
+        line = raw.rstrip("\n\r")
+        m = _SECTION_RE.match(line)
+        if m:
+            _finish(current, interfaces)
+            current = None
+            in_interfaces_section = m.group(1).strip().lower() == "interfaces"
+            continue
+        if not in_interfaces_section:
+            continue
+        m = _SUBSECTION_RE.match(line)
+        if m:
+            _finish(current, interfaces)
+            current = InterfaceEntry(name=m.group(1).strip(), start_line=idx)
+            continue
+        if current is not None:
+            m = _KV_RE.match(line)
+            if m:
+                key = m.group(1).strip().lower()
+                val = m.group(2).strip()
+                current.properties[key] = val
+                if key == "type":
+                    current.iface_type = val
+                elif key == "enabled":
+                    if val.lower() in _ENABLED_TRUE:
+                        current.enabled = True
+                    elif val.lower() in _ENABLED_FALSE:
+                        current.enabled = False
+                    current.enabled_line = idx
+    _finish(current, interfaces)
+    return lines, interfaces
+
+
 def set_interface_enabled(
     lines: list[str], entry: InterfaceEntry, enabled: bool
 ) -> list[str]:
@@ -105,6 +146,60 @@ def set_interface_enabled(
         indent = _detect_indent(lines, entry.start_line)
         lines.insert(entry.start_line + 1, f"{indent}enabled = {val}\n")
     return lines
+
+
+def set_interface_property(
+    lines: list[str], entry: InterfaceEntry, key: str, value: str
+) -> list[str]:
+    """Set or update a property in an interface block, returning a new list.
+
+    If the property already exists, its value is replaced in-place.
+    If it does not exist, it is inserted after the last existing property.
+    """
+    lines = list(lines)
+    key_lower = key.lower()
+
+    # Search for existing key within this interface's line range
+    end_line = _interface_end_line(lines, entry.start_line)
+    for idx in range(entry.start_line + 1, end_line):
+        m = _KV_RE.match(lines[idx])
+        if m and m.group(1).strip().lower() == key_lower:
+            # Replace value in-place, preserving indentation and key name
+            indent = lines[idx][: lines[idx].index(m.group(1))]
+            lines[idx] = f"{indent}{m.group(1).strip()} = {value}\n"
+            return lines
+
+    # Key not found — insert after last property line
+    indent = _detect_indent(lines, entry.start_line)
+    insert_at = entry.start_line + 1
+    for idx in range(entry.start_line + 1, end_line):
+        if _KV_RE.match(lines[idx]):
+            insert_at = idx + 1
+    lines.insert(insert_at, f"{indent}{key} = {value}\n")
+    return lines
+
+
+def remove_interface_property(
+    lines: list[str], entry: InterfaceEntry, key: str
+) -> list[str]:
+    """Remove a property line from an interface block, returning a new list."""
+    lines = list(lines)
+    key_lower = key.lower()
+    end_line = _interface_end_line(lines, entry.start_line)
+    for idx in range(entry.start_line + 1, end_line):
+        m = _KV_RE.match(lines[idx])
+        if m and m.group(1).strip().lower() == key_lower:
+            del lines[idx]
+            return lines
+    return lines
+
+
+def _interface_end_line(lines: list[str], start_line: int) -> int:
+    """Find where an interface block ends (next [[section]] or [section] or EOF)."""
+    for idx in range(start_line + 1, len(lines)):
+        if _SUBSECTION_RE.match(lines[idx]) or _SECTION_RE.match(lines[idx]):
+            return idx
+    return len(lines)
 
 
 def add_interface_section(
