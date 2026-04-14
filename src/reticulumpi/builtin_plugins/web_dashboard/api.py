@@ -130,6 +130,7 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/path_warming", handle_path_warming)
     app.router.add_get("/api/transport_health", handle_transport_health)
     app.router.add_get("/api/lora", handle_lora_diagnostics)
+    app.router.add_post("/api/lora/announce_mode", handle_lora_announce_mode)
     app.router.add_get("/api/reachability", handle_reachability)
     app.router.add_get("/api/paths", handle_paths)
     app.router.add_get("/api/nomadnet/auth", handle_nomadnet_auth)
@@ -949,6 +950,46 @@ async def handle_lora_diagnostics(request: aiohttp.web.Request) -> aiohttp.web.R
     if not lora or not hasattr(lora, "get_diagnostics"):
         return _ok({"message": "lora_diagnostics plugin not available"})
     return _ok(lora.get_diagnostics())
+
+
+async def handle_lora_announce_mode(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/lora/announce_mode — toggle LoRa announce forwarding mode.
+
+    Body: ``{"mode": "all"|"local_priority"|"silent"}``
+
+    Modifies rnsd's Reticulum config and restarts rnsd.
+    """
+    plugin = _get_plugin(request)
+    lora = plugin.app.get_plugin("lora_diagnostics")
+    if not lora or not hasattr(lora, "set_announce_mode"):
+        return _ok({"error": "lora_diagnostics plugin not available"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": "Invalid JSON body"}, status=400
+        )
+
+    mode = body.get("mode", "")
+    if not mode:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": "Missing 'mode' field"}, status=400
+        )
+
+    try:
+        result = lora.set_announce_mode(mode)
+        return _ok(result)
+    except ValueError as exc:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": str(exc)}, status=400
+        )
+    except RuntimeError as exc:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": str(exc)}, status=500
+        )
 
 
 async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.Response:

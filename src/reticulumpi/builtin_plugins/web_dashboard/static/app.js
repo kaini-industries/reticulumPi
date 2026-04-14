@@ -337,6 +337,26 @@
       });
   };
 
+  window._setLoraAnnounceMode = function(mode) {
+    var sel = $('lora-announce-mode');
+    if (sel) sel.disabled = true;
+    api('/api/lora/announce_mode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: mode})
+    }).then(function(r) {
+      if (!r || !r.ok) {
+        alert('Failed to set announce mode: ' + (r ? (r.error || 'unknown error') : 'no response'));
+        // Revert select
+        if (sel) { sel.value = _currentLoraAnnounceMode; sel.disabled = false; }
+        return;
+      }
+      _currentLoraAnnounceMode = mode;
+      if (sel) sel.disabled = false;
+      // rnsd was restarted — data will refresh on next poll cycle
+    });
+  };
+
   function doRestart() {
     if (!confirm('Restart rnsd and reticulumpi? The dashboard will be briefly unavailable.')) return;
     var btn = $('restart-btn');
@@ -1875,12 +1895,16 @@
       updatePlugins(r.data.plugins, r.data.failed_plugins);
     });
 
-    // Interfaces
+    // Interfaces + LoRa diagnostics
     api('/api/interfaces').then(function(r) {
       if (!r || !r.ok) return;
       updateInterfaces(r.data.interfaces);
-      updateLoraRadio(r.data.interfaces);
       updateLoraSignal(r.data.interfaces);
+      // Fetch LoRa diagnostics to get announce mode, then render radio card
+      api('/api/lora').then(function(lr) {
+        var loraDiag = (lr && lr.ok) ? lr.data : null;
+        updateLoraRadio(r.data.interfaces, loraDiag);
+      });
     });
 
     // Metrics
@@ -2022,7 +2046,9 @@
     });
   }
 
-  function updateLoraRadio(interfaces) {
+  var _currentLoraAnnounceMode = 'all';
+
+  function updateLoraRadio(interfaces, loraDiag) {
     var container = $('lora-radio-info');
     if (!container) return;
 
@@ -2211,6 +2237,19 @@
             + '</div>';
         }
 
+        // Held announces (backpressure indicator)
+        if (iface.held_announces != null && iface.held_announces > 0) {
+          html += '<div class="lora-metric">'
+            + '<span class="lora-metric-label">Held Announces</span>'
+            + '<span class="lora-metric-value metric-warn">' + iface.held_announces + '</span>'
+            + '</div>';
+        }
+
+        html += '</div>';  // end lora-radio-metrics (radio stats row)
+
+        // --- Second row: Announce Queue + Announce Mode + Battery ---
+        html += '<div class="lora-radio-metrics">';
+
         // Announce queue
         if (iface.announce_queue != null) {
           var aqClass = iface.announce_queue > 10 ? 'metric-warn' : '';
@@ -2220,11 +2259,25 @@
             + '</div>';
         }
 
-        // Held announces (backpressure indicator)
-        if (iface.held_announces != null && iface.held_announces > 0) {
+        // Announce mode (from /api/lora diagnostics, or cached from last fetch)
+        {
+          var modeLabels = {all: 'All', local_priority: 'Local Priority', silent: 'Silent', unknown: 'Unknown'};
+          var modes = ['all', 'local_priority', 'silent'];
+          var curMode = _currentLoraAnnounceMode;
+          if (loraDiag && loraDiag.announce_mode) {
+            curMode = loraDiag.announce_mode.current || curMode;
+            _currentLoraAnnounceMode = curMode;
+            if (loraDiag.announce_mode.available) modes = loraDiag.announce_mode.available;
+          }
           html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Held Announces</span>'
-            + '<span class="lora-metric-value metric-warn">' + iface.held_announces + '</span>'
+            + '<span class="lora-metric-label">Announce Mode</span>'
+            + '<select id="lora-announce-mode" class="lora-mode-select" onchange="window._setLoraAnnounceMode(this.value)">';
+          for (var mi = 0; mi < modes.length; mi++) {
+            var m = modes[mi];
+            var sel = m === curMode ? ' selected' : '';
+            html += '<option value="' + m + '"' + sel + '>' + (modeLabels[m] || m) + '</option>';
+          }
+          html += '</select>'
             + '</div>';
         }
 
@@ -2253,7 +2306,7 @@
             + '</div>';
         }
 
-        html += '</div>';
+        html += '</div>';  // end lora-radio-metrics (announce + battery row)
       }
 
       html += '</div>';
@@ -2449,7 +2502,7 @@
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
           if (msg.data.interfaces) {
             updateInterfaces(msg.data.interfaces);
-            updateLoraRadio(msg.data.interfaces);
+            updateLoraRadio(msg.data.interfaces, null);
           }
           if (msg.data.mesh) {
             if (msg.data.mesh.peers) cacheMeshPeers(msg.data.mesh.peers);

@@ -1293,6 +1293,21 @@ body {
 .lora-metric-value.metric-warn { color: var(--yellow); }
 .lora-metric-value.metric-crit { color: var(--red); }
 
+/* LoRa announce mode dropdown */
+.lora-mode-select {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  outline: none;
+}
+.lora-mode-select:hover { border-color: var(--green); }
+.lora-mode-select:disabled { opacity: 0.5; cursor: wait; }
+
 /* Mini bar for airtime/channel load */
 .lora-bar-wrap {
   display: flex;
