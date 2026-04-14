@@ -129,6 +129,7 @@ class MeshChatServer(PluginBase):
         env["MESHCHAT_DIR"] = self._install_dir
         env["MESHCHAT_LINK_TIMEOUT"] = str(int(self._link_timeout))
         env["MESHCHAT_PATH_LOOKUP_TIMEOUT"] = str(int(self._path_lookup_timeout))
+        self._env = env
         self._launch_process(cmd, env=env)
         self._cmd = cmd
 
@@ -217,7 +218,7 @@ class MeshChatServer(PluginBase):
                         max_restarts,
                     )
                     try:
-                        self._launch_process(self._cmd)
+                        self._launch_process(self._cmd, env=self._env)
                         self.log.info("MeshChat restarted (PID: %d)", self._pid)
                     except Exception:
                         self.log.exception("Failed to restart MeshChat")
