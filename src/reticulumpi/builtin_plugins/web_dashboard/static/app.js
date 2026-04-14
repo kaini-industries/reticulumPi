@@ -2,6 +2,9 @@
 (function() {
   'use strict';
 
+  /* ── Shared namespace ─────────────────────────────────────────────── */
+  var RPI = window.RPI = {};
+
   var token = sessionStorage.getItem('token') || '';
   var ws = null;
   var reconnectDelay = 1000;
@@ -112,6 +115,33 @@
     el.className = 'value ' + metricClass(value, warnAt, critAt);
   }
 
+  function formatTimeAgo(timestamp) {
+    if (!timestamp) return '--';
+    var seconds = Math.floor(Date.now() / 1000 - timestamp);
+    if (seconds < 0) seconds = 0;
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+  }
+
+  /* ── Expose shared utilities for sub-modules ─────────────────────── */
+  RPI.api = api;
+  RPI.$ = $;
+  RPI.esc = esc;
+  RPI.formatUptime = formatUptime;
+  RPI.formatBytes = formatBytes;
+  RPI.formatRate = formatRate;
+  RPI.metricClass = metricClass;
+  RPI.markUpdated = markUpdated;
+  RPI.setMetric = setMetric;
+  RPI.formatTimeAgo = formatTimeAgo;
+
+  // Shared mutable object used by both mesh.js and lora.js
+  RPI._reachScores = {};
+
+  // --- Metrics ---
+
   function updateMetrics(metrics) {
     if (!metrics) return;
     markUpdated('metrics-grid');
@@ -120,6 +150,8 @@
     setMetric('m-mem', metrics.memory_percent, '%', 70, 90);
     setMetric('m-disk', metrics.disk_percent, '%', 80, 95);
   }
+
+  // --- Plugins ---
 
   function updatePlugins(plugins, failedPlugins) {
     var tbody = $('plugins-table');
@@ -184,6 +216,8 @@
     }
   }
 
+  // --- Interfaces ---
+
   function updateInterfaces(interfaces) {
     var tbody = $('interfaces-table');
     if (!tbody) return;
@@ -234,7 +268,7 @@
       var online = isLive && entry.live.online !== false;
       var rowClass = isEnabled ? '' : ' class="row-disabled"';
 
-      // Toggle switch (no inline handler — CSP blocks inline scripts)
+      // Toggle switch (no inline handler -- CSP blocks inline scripts)
       var toggleHtml = '';
       if (entry.cfg) {
         var checked = isEnabled ? ' checked' : '';
@@ -348,12 +382,12 @@
       if (!r || !r.ok) {
         alert('Failed to set announce mode: ' + (r ? (r.error || 'unknown error') : 'no response'));
         // Revert select
-        if (sel) { sel.value = _currentLoraAnnounceMode; sel.disabled = false; }
+        if (sel) { sel.value = RPI._currentLoraAnnounceMode(); sel.disabled = false; }
         return;
       }
-      _currentLoraAnnounceMode = mode;
+      RPI._setCurrentLoraAnnounceMode(mode);
       if (sel) sel.disabled = false;
-      // rnsd was restarted — data will refresh on next poll cycle
+      // rnsd was restarted -- data will refresh on next poll cycle
     });
   };
 
@@ -394,548 +428,7 @@
     }, 3000);
   }
 
-  // Mesh node state — server-side pagination
-  var _meshNodes = [];       // current page of nodes from server
-  var _meshTotal = 0;        // total nodes on server
-  var _meshPage = 1;
-  var _meshPerPage = 25;
-  var _meshPages = 1;
-  var _meshPeers = {};       // destination_hash -> telemetry data
-  var _reachScores = {};     // destination_hash -> {score, label, factors}
-  var _localServices = [];   // local plugin destinations (0-hop)
-  var _meshSortKey = 'score';
-  var _meshSortAsc = false;
-  var _meshExpandedHash = null;
-  var _meshVersion = 0;      // tracks WS mesh version for change detection
-  var _meshSearch = '';
-  var _meshView = '';        // current view preset (hubs/nearby/recent/lxmf/nomadnet/'')
-  var _meshSummary = null;   // cached summary data from /api/mesh/summary
-  var _meshSearchTimer = null;
-  var _peerPageSize = 12;
-  var _peerVisible = 12;
-
-  // Sorting is now server-side. This map translates UI sort keys to API params.
-  var _meshSortMap = {
-    'score': 'score',
-    'hops': 'hops',
-    'last_seen': 'last_seen',
-    'announce_count': 'announce_count'
-  };
-
-  function _di(label, value, cls) {
-    return '<div class="node-detail-item">'
-      + '<span class="node-detail-label">' + label + '</span>'
-      + '<span class="node-detail-value' + (cls ? ' ' + cls : '') + '">' + value + '</span>'
-      + '</div>';
-  }
-
-  function _reachBadgeHTML(score, label) {
-    var cls = 'reach-' + (label || 'unlikely').toLowerCase();
-    return '<span class="reach-badge ' + cls + '">' + score + '</span>'
-      + ' <span class="reach-label ' + cls + '">' + esc(label) + '</span>';
-  }
-
-  function _reachFactorHTML(factors) {
-    if (!factors) return '';
-    var h = '<div class="reach-factors">';
-    var names = { path: 'Path', freshness: 'Freshness', hops: 'Hops', announce: 'Announce', relay: 'Relay' };
-    var order = ['path', 'freshness', 'hops', 'announce', 'relay'];
-    for (var i = 0; i < order.length; i++) {
-      var key = order[i];
-      var f = factors[key];
-      if (!f) continue;
-      var pct = f.max > 0 ? Math.round(f.points / f.max * 100) : 0;
-      h += '<div class="reach-factor">'
-        + '<span class="reach-factor-name">' + (names[key] || key) + '</span>'
-        + '<span class="reach-factor-bar"><span class="reach-factor-fill" style="width:' + pct + '%"></span></span>'
-        + '<span class="reach-factor-val">' + f.points + '/' + f.max + '</span>'
-        + '<span class="reach-factor-detail">' + esc(f.detail || '') + '</span>'
-        + '</div>';
-    }
-    h += '</div>';
-    return h;
-  }
-
-  function buildNodeDetailHTML(node) {
-    var peer = _meshPeers[node.destination_hash];
-    var reach = _reachScores[node.destination_hash];
-    var firstSeen = node.first_seen ? new Date(node.first_seen * 1000).toLocaleString() : '--';
-    var lastSeen = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
-
-    var h = '';
-
-    // Reachability section (show first if data available)
-    if (reach) {
-      h += '<div class="node-detail-section">Reachability</div>'
-        + '<div class="node-detail-grid">'
-        + _di('Score', _reachBadgeHTML(reach.score, reach.label))
-        + '</div>'
-        + _reachFactorHTML(reach.factors);
-    }
-
-    h += '<div class="node-detail-section">Identity</div>'
-      + '<div class="node-detail-grid">'
-      + _di('Address', esc(node.destination_hash || '--'))
-      + _di('Name', esc(node.app_data || '--'))
-      + _di('App', esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : ''))
-      + '</div>'
-      + '<div class="node-detail-section">Network</div>'
-      + '<div class="node-detail-grid">'
-      + _di('Hops', node.hops != null ? node.hops : '--')
-      + _di('First Seen', firstSeen)
-      + _di('Last Seen', lastSeen)
-      + _di('Announces', node.announce_count || 0)
-      + '</div>';
-
-    if (peer) {
-      h += '<div class="node-detail-section">Telemetry</div>'
-        + '<div class="node-detail-grid">';
-      if (peer.cpu != null) h += _di('CPU', peer.cpu.toFixed(1) + '%', metricClass(peer.cpu, 70, 90));
-      if (peer.temp != null) h += _di('Temperature', peer.temp.toFixed(1) + '\u00B0C', metricClass(peer.temp, 65, 80));
-      if (peer.mem != null) h += _di('Memory', peer.mem.toFixed(1) + '%', metricClass(peer.mem, 70, 90));
-      if (peer.disk != null) h += _di('Disk', peer.disk.toFixed(1) + '%', metricClass(peer.disk, 80, 95));
-      if (peer.uptime != null) h += _di('Uptime', formatUptime(peer.uptime));
-      if (peer.v) h += _di('Version', esc(peer.v));
-      if (peer.plugins != null) h += _di('Plugins', peer.plugins);
-      h += '</div>';
-    }
-
-    return h;
-  }
-
-  function _updateMeshCount() {
-    var el = $('mesh-count');
-    if (!el) return;
-    if (_localServices.length) {
-      el.textContent = _localServices.length + ' local'
-        + (_meshTotal > 0 ? ' + ' + _meshTotal + ' remote' : '');
-    } else {
-      el.textContent = _meshTotal > 0 ? _meshTotal + ' nodes' : '0';
-    }
-  }
-
-  function renderMeshNodes() {
-    var tbody = $('mesh-table');
-    if (!tbody) return;
-    var nodes = _meshNodes;
-    if (!nodes || nodes.length === 0) {
-      tbody.innerHTML = '';
-      // Still render local services even when no remote nodes exist
-      for (var li = 0; li < _localServices.length; li++) {
-        var ls = _localServices[li];
-        var ltr = document.createElement('tr');
-        ltr.className = 'local-service-row';
-        ltr.innerHTML =
-            '<td class="reach-col"><span class="local-badge">LOCAL</span></td>'
-          + '<td class="addr">' + esc(ls.destination_hash || '--') + '</td>'
-          + '<td class="col-truncate">' + esc(ls.plugin_name || '--') + '</td>'
-          + '<td>' + esc(ls.app_name || '--') + (ls.aspects ? '.' + esc(ls.aspects) : '') + '</td>'
-          + '<td>0</td><td>--</td><td>--</td>';
-        tbody.appendChild(ltr);
-      }
-      if (_localServices.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7">' + (_meshTotal > 0 ? 'No nodes match filters' : 'No nodes discovered yet') + '</td></tr>';
-      }
-      _updateMeshCount();
-      var showMore = $('mesh-show-more');
-      if (showMore) showMore.style.display = 'none';
-      if (_localServices.length === 0) return;
-      updateMeshSortIndicators();
-      return;
-    }
-
-    // Build rows using event delegation for clicks (no per-row listeners)
-    tbody.innerHTML = '';
-
-    // Pinned local service rows at the top
-    for (var li = 0; li < _localServices.length; li++) {
-      var ls = _localServices[li];
-      var ltr = document.createElement('tr');
-      ltr.className = 'local-service-row';
-      ltr.innerHTML =
-          '<td class="reach-col"><span class="local-badge">LOCAL</span></td>'
-        + '<td class="addr">' + esc(ls.destination_hash || '--') + '</td>'
-        + '<td class="col-truncate">' + esc(ls.plugin_name || '--') + '</td>'
-        + '<td>' + esc(ls.app_name || '--') + (ls.aspects ? '.' + esc(ls.aspects) : '') + '</td>'
-        + '<td>0</td><td>--</td><td>--</td>';
-      tbody.appendChild(ltr);
-    }
-    for (var i = 0; i < nodes.length; i++) {
-      var node = nodes[i];
-      var hash = node.destination_hash || '';
-      var ago = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
-      var isExpanded = (hash === _meshExpandedHash);
-
-      // Reachability score for this node
-      var reach = _reachScores[hash];
-      var reachCell = '--';
-      if (reach) {
-        var cls = 'reach-' + (reach.label || 'unlikely').toLowerCase();
-        reachCell = '<span class="reach-badge ' + cls + '">' + reach.score + '</span>';
-      }
-
-      var tr = document.createElement('tr');
-      if (isExpanded) tr.className = 'node-row-active';
-      tr.setAttribute('data-hash', hash);
-      tr.innerHTML =
-          '<td class="reach-col">' + reachCell + '</td>'
-        + '<td class="addr">' + esc(hash || '--') + '</td>'
-        + '<td class="col-truncate" title="' + esc(node.app_data || '') + '">' + esc(node.app_data || '--') + '</td>'
-        + '<td>' + esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : '') + '</td>'
-        + '<td>' + (node.hops != null ? node.hops : '--') + '</td>'
-        + '<td>' + ago + '</td>'
-        + '<td>' + (node.announce_count || 0) + '</td>';
-      tr.style.cursor = 'pointer';
-      tbody.appendChild(tr);
-
-      if (isExpanded) {
-        var detailTr = document.createElement('tr');
-        detailTr.className = 'node-detail';
-        detailTr.id = 'node-detail-' + hash;
-        var td = document.createElement('td');
-        td.colSpan = 7;
-        td.innerHTML = buildNodeDetailHTML(node);
-        detailTr.appendChild(td);
-        tbody.appendChild(detailTr);
-      }
-    }
-    _updateMeshCount();
-    updateMeshSortIndicators();
-
-    // Pagination controls (replaces "show more" button)
-    var showMore = $('mesh-show-more');
-    if (showMore) {
-      if (_meshPages > 1) {
-        var pHtml = '';
-        if (_meshPage > 1) pHtml += '<span class="mesh-page-btn" data-mesh-page="' + (_meshPage - 1) + '">&lsaquo; Prev</span> ';
-        pHtml += 'Page ' + _meshPage + ' of ' + _meshPages;
-        if (_meshPage < _meshPages) pHtml += ' <span class="mesh-page-btn" data-mesh-page="' + (_meshPage + 1) + '">Next &rsaquo;</span>';
-        showMore.innerHTML = pHtml;
-        showMore.style.display = '';
-      } else {
-        showMore.style.display = 'none';
-      }
-    }
-  }
-
-  function toggleNodeDetail(node, hash) {
-    if (_meshExpandedHash === hash) {
-      _meshExpandedHash = null;
-    } else {
-      _meshExpandedHash = hash;
-    }
-    renderMeshNodes();
-  }
-
-  function fetchMeshNodes() {
-    var sortField = _meshSortMap[_meshSortKey] || 'last_seen';
-    var order = _meshSortAsc ? 'asc' : 'desc';
-    var params = '?page=' + _meshPage + '&per_page=' + _meshPerPage
-      + '&sort=' + sortField + '&order=' + order;
-    if (_meshSearch) params += '&search=' + encodeURIComponent(_meshSearch);
-    if (_meshView) params += '&view=' + encodeURIComponent(_meshView);
-
-    api('/api/mesh/nodes' + params).then(function(r) {
-      if (!r || !r.ok) return;
-      markUpdated('mesh-section');
-      _meshNodes = r.data.nodes || [];
-      _meshTotal = r.data.total || _meshNodes.length;
-      _meshPage = r.data.page || 1;
-      _meshPages = r.data.pages || 1;
-      _localServices = r.data.local_services || [];
-      // Update count immediately (lightweight, no table rebuild)
-      _updateMeshCount();
-      // Single render after reachability scores arrive
-      fetchReachabilityForVisible();
-    });
-  }
-
-  function fetchReachabilityForVisible() {
-    if (_meshNodes.length === 0) { renderMeshNodes(); return; }
-    var hashes = _meshNodes.map(function(n) { return n.destination_hash; }).join(',');
-    api('/api/reachability?hashes=' + encodeURIComponent(hashes)).then(function(r) {
-      if (!r || !r.ok) { renderMeshNodes(); return; }
-      var nodes = r.data.nodes || [];
-      for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        if (n.destination_hash) {
-          _reachScores[n.destination_hash] = {
-            score: n.score,
-            label: n.label,
-            factors: n.factors
-          };
-        }
-      }
-      // Re-sort the current page by full reachability score so the
-      // displayed reach badges appear in the correct visual order.
-      // The server used a proxy score (3 factors) for pagination
-      // boundaries; the full score (5 factors) is the display truth.
-      if (_meshSortKey === 'score' && _meshNodes.length > 1) {
-        _meshNodes.sort(function(a, b) {
-          var sa = (_reachScores[a.destination_hash] || {}).score || 0;
-          var sb = (_reachScores[b.destination_hash] || {}).score || 0;
-          return _meshSortAsc ? sa - sb : sb - sa;
-        });
-      }
-      renderMeshNodes();
-    }, function() {
-      // Network error fallback — render without scores
-      renderMeshNodes();
-    });
-  }
-
-  function updateMeshFromWS(meshData) {
-    if (!meshData) return;
-    markUpdated('mesh-section');
-
-    // Update total count from WS summary
-    if (meshData.known_nodes != null) {
-      _meshTotal = meshData.known_nodes;
-      _updateMeshCount();
-    }
-
-    // If server reports new version (data changed), re-fetch current page
-    var refetching = false;
-    if (meshData.version != null && meshData.version !== _meshVersion) {
-      _meshVersion = meshData.version;
-      fetchMeshNodes();
-      refetching = true;
-    }
-
-    // Update any visible nodes from recent_announces delta
-    // Skip if we're already refetching (avoids redundant render)
-    if (!refetching && meshData.recent_announces && meshData.recent_announces.length > 0) {
-      var announceMap = {};
-      for (var i = 0; i < meshData.recent_announces.length; i++) {
-        var a = meshData.recent_announces[i];
-        announceMap[a.destination_hash] = a;
-      }
-      // Patch matching nodes in current page
-      var patched = false;
-      for (var j = 0; j < _meshNodes.length; j++) {
-        var update = announceMap[_meshNodes[j].destination_hash];
-        if (update) {
-          for (var key in update) {
-            _meshNodes[j][key] = update[key];
-          }
-          patched = true;
-        }
-      }
-      if (patched) renderMeshNodes();
-    }
-
-    // Live summary update from WS
-    if (meshData.summary) {
-      _meshSummary = meshData.summary;
-      renderMeshSummary();
-    }
-  }
-
-  // ── Mesh Summary ──────────────────────────────────────────────────
-  function fetchMeshSummary() {
-    api('/api/mesh/summary').then(function(r) {
-      if (!r || !r.ok) return;
-      _meshSummary = r.data;
-      renderMeshSummary();
-    });
-  }
-
-  function _setMeshStat(id, value, cls) {
-    var el = $(id);
-    if (!el) return;
-    var valEl = el.querySelector('.mesh-stat-value');
-    if (valEl) {
-      valEl.textContent = value;
-      valEl.className = 'mesh-stat-value' + (cls ? ' ' + cls : '');
-    }
-  }
-
-  function renderMeshSummary() {
-    if (!_meshSummary) return;
-    var s = _meshSummary;
-
-    // Total nodes
-    _setMeshStat('ms-total', fmtK(s.total_nodes || 0), s.total_nodes > 0 ? 'ms-ok' : '');
-
-    // Active in last hour
-    var active = s.activity_stats ? (s.activity_stats.last_1h || 0) : 0;
-    _setMeshStat('ms-active', fmtK(active), active > 10 ? 'ms-ok' : active > 0 ? 'ms-warn' : '');
-
-    // Nearby (<=4 hops)
-    var nearby = s.nearby || 0;
-    _setMeshStat('ms-nearby', fmtK(nearby), nearby > 10 ? 'ms-ok' : nearby > 0 ? 'ms-info' : '');
-
-    // New in 24h
-    var newN = s.growth ? (s.growth.last_24h || 0) : 0;
-    _setMeshStat('ms-new', newN > 0 ? '+' + fmtK(newN) : '0', newN > 0 ? 'ms-info' : '');
-
-    // Charts
-    renderMeshAppChart(s.app_breakdown || {});
-    renderMeshHopChart(s.hop_distribution || {});
-  }
-
-  function fmtK(n) {
-    if (n >= 10000) return (n / 1000).toFixed(1) + 'k';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
-    return '' + n;
-  }
-
-  function renderMeshAppChart(breakdown) {
-    var el = $('mesh-app-chart');
-    if (!el) return;
-    var keys = Object.keys(breakdown);
-    if (keys.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No data</div>';
-      return;
-    }
-    // Sort by count descending
-    keys.sort(function(a, b) { return breakdown[b] - breakdown[a]; });
-    var maxVal = breakdown[keys[0]] || 1;
-    var total = 0;
-    for (var i = 0; i < keys.length; i++) total += breakdown[keys[i]];
-
-    var labelMap = {
-      'lxmf': 'LXMF', 'nomadnetwork': 'NomadNet', 'reticulumpi': 'ReticulumPi',
-      'sideband': 'Sideband', 'styrene': 'Styrene', '': 'Unclassified'
-    };
-    var clsMap = {
-      'lxmf': 'ac-lxmf', 'nomadnetwork': 'ac-nomadnet', 'reticulumpi': 'ac-rpi',
-      'sideband': 'ac-sideband', 'styrene': 'ac-styrene'
-    };
-    var html = '';
-    for (var i = 0; i < keys.length; i++) {
-      var key = keys[i];
-      var count = breakdown[key];
-      var pct = maxVal > 0 ? (count / maxVal * 100) : 0;
-      var pctOfTotal = total > 0 ? Math.round(count / total * 100) : 0;
-      var label = labelMap[key] || esc(key || 'Other');
-      var colorCls = clsMap[key] || 'ac-other';
-      html += '<div class="bar-row">'
-        + '<div class="bar-label bar-label-app">' + label + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + colorCls + '" style="width:' + pct + '%"></div></div>'
-        + '<div class="bar-count">' + fmtK(count) + '</div>'
-        + '<div class="bar-pct">' + pctOfTotal + '%</div>'
-        + '</div>';
-    }
-    el.innerHTML = html;
-  }
-
-  function renderMeshHopChart(dist) {
-    var el = $('mesh-hop-chart');
-    if (!el) return;
-    var buckets = [
-      {label: 'Local', key: '0', cls: 'hc-near'},
-      {label: '1-3', key: '1-3', cls: 'hc-near'},
-      {label: '4-10', key: '4-10', cls: 'hc-mid'},
-      {label: '11-50', key: '11-50', cls: 'hc-far'},
-      {label: '51+', key: '51+', cls: 'hc-extreme'},
-    ];
-    var maxVal = 0, total = 0;
-    for (var i = 0; i < buckets.length; i++) {
-      var c = dist[buckets[i].key] || 0;
-      buckets[i].count = c;
-      if (c > maxVal) maxVal = c;
-      total += c;
-    }
-    // Filter empty buckets
-    buckets = buckets.filter(function(b) { return b.count > 0; });
-    if (buckets.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No data</div>';
-      return;
-    }
-    var html = '';
-    for (var i = 0; i < buckets.length; i++) {
-      var b = buckets[i];
-      var pct = maxVal > 0 ? (b.count / maxVal * 100) : 0;
-      var pctOfTotal = total > 0 ? Math.round(b.count / total * 100) : 0;
-      html += '<div class="bar-row">'
-        + '<div class="bar-label bar-label-hop">' + b.label + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + b.cls + '" style="width:' + pct + '%"></div></div>'
-        + '<div class="bar-count">' + fmtK(b.count) + '</div>'
-        + '<div class="bar-pct">' + pctOfTotal + '%</div>'
-        + '</div>';
-    }
-    el.innerHTML = html;
-  }
-
-  function cacheMeshPeers(peers) {
-    _meshPeers = {};
-    if (!peers) return;
-    for (var i = 0; i < peers.length; i++) {
-      var p = peers[i];
-      if (p.destination_hash) _meshPeers[p.destination_hash] = p;
-    }
-  }
-
-  function onMeshSort(key) {
-    if (_meshSortKey === key) {
-      _meshSortAsc = !_meshSortAsc;
-    } else {
-      _meshSortKey = key;
-      _meshSortAsc = (key === 'hops');  // hops default asc, others desc
-    }
-    _meshPage = 1;  // reset to first page on sort change
-    fetchMeshNodes();
-  }
-
-  function updateMeshSortIndicators() {
-    var headers = document.querySelectorAll('#mesh-section th[data-sort]');
-    for (var i = 0; i < headers.length; i++) {
-      var th = headers[i];
-      var arrow = th.querySelector('.sort-arrow');
-      if (th.getAttribute('data-sort') === _meshSortKey) {
-        arrow.textContent = _meshSortAsc ? ' \u25B2' : ' \u25BC';
-      } else {
-        arrow.textContent = '';
-      }
-    }
-  }
-
-  function updatePeerTelemetry(peers) {
-    var grid = $('peer-metrics-grid');
-    if (!grid) return;
-    if (!peers || peers.length === 0) {
-      grid.innerHTML = '<div class="config-content">No peer telemetry received yet</div>';
-      $('telemetry-count').textContent = '0';
-      var showMore = $('peer-show-more');
-      if (showMore) showMore.style.display = 'none';
-      return;
-    }
-    var total = peers.length;
-    var limit = Math.min(_peerVisible, total);
-    var html = '';
-    for (var i = 0; i < limit; i++) {
-      var p = peers[i];
-      var name = p.name || p.destination_hash || 'Unknown';
-      var hops = p.hops != null ? p.hops + ' hops' : '';
-      html += '<div class="metric-card">'
-        + '<div class="label">' + esc(name) + (hops ? ' <small>(' + hops + ')</small>' : '') + '</div>'
-        + '<div class="peer-stats">';
-      if (p.cpu != null) html += '<span class="' + metricClass(p.cpu, 70, 90) + '">CPU: ' + p.cpu.toFixed(1) + '%</span> ';
-      if (p.temp != null) html += '<span class="' + metricClass(p.temp, 65, 80) + '">Temp: ' + p.temp.toFixed(1) + '\u00B0C</span> ';
-      if (p.mem != null) html += '<span class="' + metricClass(p.mem, 70, 90) + '">Mem: ' + p.mem.toFixed(1) + '%</span> ';
-      if (p.disk != null) html += '<span class="' + metricClass(p.disk, 80, 95) + '">Disk: ' + p.disk.toFixed(1) + '%</span>';
-      if (p.uptime != null) html += ' <small>' + formatUptime(p.uptime) + '</small>';
-      html += '</div></div>';
-    }
-    grid.innerHTML = html;
-    $('telemetry-count').textContent = total + ' peers';
-
-    // Show/hide "show more" control
-    var showMore = $('peer-show-more');
-    if (showMore) {
-      var remaining = total - limit;
-      if (remaining > 0) {
-        showMore.style.display = '';
-        showMore.textContent = 'Show more (' + remaining + ' remaining)';
-      } else if (limit > _peerPageSize) {
-        showMore.style.display = '';
-        showMore.textContent = 'Show less';
-      } else {
-        showMore.style.display = 'none';
-      }
-    }
-  }
+  // --- Alerts ---
 
   function updateAlerts(alertData) {
     var el = $('alerts-info');
@@ -954,6 +447,8 @@
     el.innerHTML = html;
     $('alerts-count').textContent = (alertData.alerts_sent || 0) + ' sent';
   }
+
+  // --- Shared Files ---
 
   function updateSharedFiles(files) {
     var tbody = $('files-table');
@@ -976,7 +471,7 @@
     $('files-count').textContent = files.length + ' files';
   }
 
-  // ── Sensor rendering ────────────────────────────────────
+  // -- Sensor rendering ---------------------------------------------------
 
   var _sensorHistory = {};   // { "sensorName:field": [value, value, ...] }
   var _sensorHistoryMax = 60;
@@ -1161,6 +656,8 @@
     $('sensors-count').textContent = names.length + (names.length === 1 ? ' sensor' : ' sensors');
   }
 
+  // --- Emergency Broadcasts ---
+
   var PRIORITY_NAMES = {0: 'INFO', 1: 'WARNING', 2: 'CRITICAL', 3: 'EMERGENCY'};
   var PRIORITY_CLASSES = {0: '', 1: 'warn', 2: 'crit', 3: 'crit'};
 
@@ -1190,6 +687,8 @@
     tbody.innerHTML = html;
     $('emergency-count').textContent = messages.length + ' messages';
   }
+
+  // --- Connectivity Health ---
 
   function updateConnectivity(data) {
     if (!data || !$('connectivity-indicators')) return;
@@ -1302,7 +801,7 @@
     api('/api/messages/transports').then(function(r) {
       var section = $('messaging-section');
       if (!r || !r.ok) {
-        // API unavailable — show disabled state
+        // API unavailable -- show disabled state
         if (section) {
           $('msg-count').textContent = 'unavailable';
           $('msg-count').style.color = 'var(--text-muted)';
@@ -1410,8 +909,8 @@
       var senderLabel = '';
       if (isSent) {
         senderLabel = 'You';
-        if (m.to_name) senderLabel += ' → ' + esc(m.to_name);
-        else if (m.to_id && m.to_id !== 'self') senderLabel += ' → ' + esc(m.to_id);
+        if (m.to_name) senderLabel += ' \u2192 ' + esc(m.to_name);
+        else if (m.to_id && m.to_id !== 'self') senderLabel += ' \u2192 ' + esc(m.to_id);
       } else {
         senderLabel = m.from_name ? esc(m.from_name) : (m.from_id ? esc(m.from_id) : '?');
       }
@@ -1536,6 +1035,13 @@
   var _mshPageSize = 25;
   var _mshVisible = 25;
   var _mshConnected = false;
+
+  function _di(label, value, cls) {
+    return '<div class="node-detail-item">'
+      + '<span class="node-detail-label">' + label + '</span>'
+      + '<span class="node-detail-value' + (cls ? ' ' + cls : '') + '">' + value + '</span>'
+      + '</div>';
+  }
 
   function sortMeshtasticNodes(nodes, key, asc) {
     return nodes.slice().sort(function(a, b) {
@@ -1758,6 +1264,8 @@
     renderMeshtasticNodes();
   }
 
+  // --- Transport Hubs ---
+
   // Track previous traffic values for rate calculation (keyed by hub address)
   // Each entry stores {rxb, txb, time} so rates are always computed from
   // the *same* update source's last sample, avoiding WS/polling race conditions.
@@ -1833,7 +1341,7 @@
     var online = primaries.filter(function(p) { return p.online; }).length;
     var countText = online + '/' + primaries.length + ' primary';
     if (poolHubs.length > 0) countText += ' + ' + poolHubs.length + ' pool';
-    if (tcpDisabled) countText += ' (not connected — no TCP interfaces enabled)';
+    if (tcpDisabled) countText += ' (not connected \u2014 no TCP interfaces enabled)';
     $('transport-count').textContent = countText;
     _updatePoolStatus(ad);
   }
@@ -1853,25 +1361,37 @@
     el.style.display = 'block';
   }
 
-  // (formatBytes and formatRate defined above — single definition)
-
-  function formatTimeAgo(timestamp) {
-    if (!timestamp) return '--';
-    var seconds = Math.floor(Date.now() / 1000 - timestamp);
-    if (seconds < 0) seconds = 0;
-    if (seconds < 60) return seconds + 's ago';
-    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
-    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
-    return Math.floor(seconds / 86400) + 'd ago';
-  }
+  // --- Connection status ---
 
   function setConnStatus(state) {
     var el = $('conn-status');
     if (!el) return;
     el.className = 'conn-status';
-    if (state === 'live') { el.classList.add('conn-live'); el.textContent = 'live'; el.title = 'WebSocket connected — updates every 5s'; }
-    else if (state === 'polling') { el.classList.add('conn-poll'); el.textContent = 'polling (10s)'; el.title = 'WebSocket down — polling every 10s'; }
+    if (state === 'live') { el.classList.add('conn-live'); el.textContent = 'live'; el.title = 'WebSocket connected \u2014 updates every 5s'; }
+    else if (state === 'polling') { el.classList.add('conn-poll'); el.textContent = 'polling (10s)'; el.title = 'WebSocket down \u2014 polling every 10s'; }
     else { el.classList.add('conn-off'); el.textContent = 'disconnected'; el.title = 'No connection to dashboard server'; }
+  }
+
+  // --- Config ---
+
+  function fetchConfig() {
+    api('/api/config').then(function(r) {
+      if (!r || !r.ok) return;
+      $('config-content').textContent = JSON.stringify(r.data, null, 2);
+    });
+  }
+
+  // --- Uptime counter ---
+
+  function startUptimeCounter() {
+    if (uptimeTimer) clearInterval(uptimeTimer);
+    uptimeTimer = setInterval(function() {
+      var elapsed = Date.now() / 1000 - uptimeStart;
+      $('uptime').textContent = 'uptime: ' + formatUptime(elapsed);
+    }, 1000);
+    // Immediate update
+    var elapsed = Date.now() / 1000 - uptimeStart;
+    $('uptime').textContent = 'uptime: ' + formatUptime(elapsed);
   }
 
   // --- Data fetching ---
@@ -1899,11 +1419,11 @@
     api('/api/interfaces').then(function(r) {
       if (!r || !r.ok) return;
       updateInterfaces(r.data.interfaces);
-      updateLoraSignal(r.data.interfaces);
+      RPI.updateLoraSignal(r.data.interfaces);
       // Fetch LoRa diagnostics to get announce mode, then render radio card
       api('/api/lora').then(function(lr) {
         var loraDiag = (lr && lr.ok) ? lr.data : null;
-        updateLoraRadio(r.data.interfaces, loraDiag);
+        RPI.updateLoraRadio(r.data.interfaces, loraDiag);
       });
     });
 
@@ -1914,14 +1434,14 @@
     });
 
     // Mesh nodes (server-side paginated) + summary
-    fetchMeshNodes();
-    fetchMeshSummary();
+    RPI.fetchMeshNodes();
+    RPI.fetchMeshSummary();
 
     // Peer telemetry
     api('/api/mesh/telemetry').then(function(r) {
       if (!r || !r.ok) return;
-      cacheMeshPeers(r.data.peers);
-      updatePeerTelemetry(r.data.peers);
+      RPI.cacheMeshPeers(r.data.peers);
+      RPI.updatePeerTelemetry(r.data.peers);
     });
 
     // Alerts
@@ -1977,502 +1497,14 @@
       updateConnectivity(r.data);
     });
 
-    // Routing summary (no full path table — that's fetched on demand)
+    // Routing summary (no full path table -- that's fetched on demand)
     api('/api/routing?per_page=0').then(function(r) {
       if (!r || !r.ok) return;
-      updateRoutingSummary(r.data.summary);
+      RPI.updateRoutingSummary(r.data.summary);
     });
 
-    // LoRa nodes panel (uses reachability with interface filter — smaller than full score)
-    fetchLoraReachability();
-  }
-
-  function fetchLoraReachability() {
-    // Use /api/paths which runs rnpath -t -j to get REAL interface names
-    // (not LocalInterface). Filter for RNodeInterface to show LoRa peers.
-    // Falls back to 0-hop filter from /api/reachability if /api/paths fails.
-    api('/api/paths?interface=RNode').then(function(r) {
-      if (!r || !r.ok) {
-        _fetchLoraFallback();
-        return;
-      }
-      markUpdated('lora-section');
-      var paths = r.data.paths || [];
-      var loraNodes = [];
-      for (var i = 0; i < paths.length; i++) {
-        var p = paths[i];
-        loraNodes.push({
-          destination_hash: '<' + (p.hash || '') + '>',
-          app_name: p.app_name || '',
-          aspects: p.aspects || '',
-          app_data: p.app_data || '',
-          hops: p.hops,
-          last_seen: p.timestamp,
-          first_seen: p.first_seen || null,
-          announce_count: p.announce_count || 0,
-          score: p.score != null ? p.score : null,
-          label: p.label || '',
-          factors: p.factors || null,
-          interface: p['interface'] || ''
-        });
-      }
-      updateLoraNodes(loraNodes);
-
-      // Update count from interface summary
-      var summary = r.data.by_interface || {};
-      var rnodeCount = 0;
-      for (var iface in summary) {
-        if (iface.indexOf('RNode') !== -1) rnodeCount += summary[iface];
-      }
-      $('lora-count').textContent = rnodeCount;
-    });
-  }
-
-  function _fetchLoraFallback() {
-    api('/api/reachability?per_page=50').then(function(r) {
-      if (!r || !r.ok) return;
-      var nodes = r.data.nodes || [];
-      var loraNodes = [];
-      for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        if (n.destination_hash) {
-          _reachScores[n.destination_hash] = {
-            score: n.score, label: n.label, factors: n.factors
-          };
-          if (n.hops === 0) loraNodes.push(n);
-        }
-      }
-      updateLoraNodes(loraNodes);
-    });
-  }
-
-  var _currentLoraAnnounceMode = 'all';
-
-  function updateLoraRadio(interfaces, loraDiag) {
-    var container = $('lora-radio-info');
-    if (!container) return;
-
-    // Find RNode interfaces
-    var rnodes = [];
-    for (var i = 0; i < interfaces.length; i++) {
-      if (interfaces[i].type === 'RNodeInterface') {
-        rnodes.push(interfaces[i]);
-      }
-    }
-
-    if (rnodes.length === 0) {
-      container.innerHTML = '';
-      return;
-    }
-
-    var html = '';
-    for (var r = 0; r < rnodes.length; r++) {
-      var iface = rnodes[r];
-      var radio = iface.radio || {};
-      var online = iface.online !== false;
-      var statusCls = online ? 'status-active' : 'status-failed';
-      var statusText = online ? 'Online' : 'Offline';
-
-      // Extract label from name like "RNodeInterface[RNode LoRa Interface/dev/ttyACM1]"
-      var ifName = iface.name || 'RNode';
-      var nameMatch = ifName.match(/\[([^\]\/]+)/);
-      var label = nameMatch ? nameMatch[1] : ifName;
-
-      html += '<div class="lora-radio-card">';
-
-      // Header row: name + status
-      html += '<div class="lora-radio-header">'
-        + '<span class="lora-radio-name">' + esc(label) + '</span>'
-        + '<span class="lora-radio-status">'
-        + '<span class="status-dot ' + statusCls + '"></span> ' + statusText
-        + '</span>'
-        + '</div>';
-
-      // Radio parameters row
-      var hasRadio = radio.frequency || radio.bandwidth || radio.spreadingfactor;
-      if (hasRadio) {
-        html += '<div class="lora-radio-params">';
-        if (radio.frequency) {
-          var mhz = (radio.frequency / 1000000).toFixed(1);
-          html += '<div class="lora-param">'
-            + '<span class="lora-param-label">Freq</span>'
-            + '<span class="lora-param-value">' + mhz + '</span>'
-            + '<span class="lora-param-unit">MHz</span>'
-            + '</div>';
-        }
-        if (radio.bandwidth) {
-          var bwKhz = (radio.bandwidth / 1000).toFixed(0);
-          html += '<div class="lora-param">'
-            + '<span class="lora-param-label">BW</span>'
-            + '<span class="lora-param-value">' + bwKhz + '</span>'
-            + '<span class="lora-param-unit">kHz</span>'
-            + '</div>';
-        }
-        if (radio.spreadingfactor) {
-          html += '<div class="lora-param">'
-            + '<span class="lora-param-label">SF</span>'
-            + '<span class="lora-param-value">' + radio.spreadingfactor + '</span>'
-            + '</div>';
-        }
-        if (radio.codingrate) {
-          html += '<div class="lora-param">'
-            + '<span class="lora-param-label">CR</span>'
-            + '<span class="lora-param-value">4/' + radio.codingrate + '</span>'
-            + '</div>';
-        }
-        if (radio.txpower != null) {
-          html += '<div class="lora-param">'
-            + '<span class="lora-param-label">TX</span>'
-            + '<span class="lora-param-value">' + radio.txpower + '</span>'
-            + '<span class="lora-param-unit">dBm</span>'
-            + '</div>';
-        }
-        if (iface.bitrate) {
-          var br = iface.bitrate >= 1000 ? (iface.bitrate / 1000).toFixed(1) + ' kbps'
-                 : iface.bitrate + ' bps';
-          html += '<div class="lora-param">'
-            + '<span class="lora-param-label">Rate</span>'
-            + '<span class="lora-param-value">' + br + '</span>'
-            + '</div>';
-        }
-        html += '</div>';
-      }
-
-      // Runtime metrics row
-      var hasMetrics = iface.airtime_short != null || iface.channel_load_short != null
-                    || iface.noise_floor != null || iface.rxb > 0 || iface.txb > 0;
-      if (hasMetrics) {
-        html += '<div class="lora-radio-metrics">';
-
-        // Link budget & SNR margin (computed from txpower + noise floor)
-        if (radio.txpower != null && iface.noise_floor != null) {
-          var linkBudget = radio.txpower - iface.noise_floor;
-          var lbClass = linkBudget > 130 ? 'metric-ok' : linkBudget > 110 ? 'metric-warn' : 'metric-crit';
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Link Budget</span>'
-            + '<span class="lora-metric-value ' + lbClass + '">' + linkBudget + ' dB</span>'
-            + '</div>';
-        }
-
-        // Airtime (values from RNS are already percentages, e.g. 1.54 = 1.54%)
-        if (iface.airtime_short != null) {
-          var atS = iface.airtime_short.toFixed(1);
-          var atL = iface.airtime_long != null ? iface.airtime_long.toFixed(1) : '--';
-          var atClass = iface.airtime_short > 25 ? 'metric-crit'
-                      : iface.airtime_short > 10 ? 'metric-warn' : 'metric-ok';
-          // Trend indicator: short vs long
-          var atTrend = '';
-          if (iface.airtime_long != null && iface.airtime_long > 0) {
-            var atRatio = iface.airtime_short / iface.airtime_long;
-            if (atRatio > 1.3) atTrend = ' <span class="trend-up" title="Rising">\u2197</span>';
-            else if (atRatio < 0.7) atTrend = ' <span class="trend-down" title="Falling">\u2198</span>';
-          }
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Airtime' + atTrend + '</span>'
-            + '<div class="lora-bar-wrap">'
-            + '<span class="lora-metric-value ' + atClass + '">' + atS + '%</span>'
-            + _loraBar(iface.airtime_short, 50)
-            + '</div>'
-            + '<span class="lora-metric-sub">long: ' + atL + '%</span>'
-            + '</div>';
-        }
-
-        // Channel load (values from RNS are already percentages)
-        if (iface.channel_load_short != null) {
-          var clS = iface.channel_load_short.toFixed(1);
-          var clL = iface.channel_load_long != null ? iface.channel_load_long.toFixed(1) : '--';
-          var clClass = iface.channel_load_short > 50 ? 'metric-crit'
-                      : iface.channel_load_short > 20 ? 'metric-warn' : 'metric-ok';
-          var clTrend = '';
-          if (iface.channel_load_long != null && iface.channel_load_long > 0) {
-            var clRatio = iface.channel_load_short / iface.channel_load_long;
-            if (clRatio > 1.3) clTrend = ' <span class="trend-up" title="Rising">\u2197</span>';
-            else if (clRatio < 0.7) clTrend = ' <span class="trend-down" title="Falling">\u2198</span>';
-          }
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Channel Load' + clTrend + '</span>'
-            + '<div class="lora-bar-wrap">'
-            + '<span class="lora-metric-value ' + clClass + '">' + clS + '%</span>'
-            + _loraBar(iface.channel_load_short, 100)
-            + '</div>'
-            + '<span class="lora-metric-sub">long: ' + clL + '%</span>'
-            + '</div>';
-        }
-
-        // Noise floor
-        if (iface.noise_floor != null) {
-          var nf = iface.noise_floor;
-          var nfClass = nf > -90 ? 'metric-crit' : nf > -100 ? 'metric-warn' : 'metric-ok';
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Noise Floor</span>'
-            + '<span class="lora-metric-value ' + nfClass + '">' + nf + ' dBm</span>'
-            + '</div>';
-        }
-
-        // Interference (always show when available, not just non-zero)
-        if (iface.interference != null) {
-          var intVal = iface.interference;
-          var intClass = intVal > -80 ? 'metric-crit' : intVal > -95 ? 'metric-warn' : 'metric-ok';
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Interference</span>'
-            + '<span class="lora-metric-value ' + intClass + '">' + intVal + ' dBm</span>'
-            + '</div>';
-        }
-
-        // SNR margin (noise floor vs interference — how much room above noise)
-        if (iface.noise_floor != null && iface.interference != null) {
-          var snrMargin = iface.interference - iface.noise_floor;
-          var snrClass = snrMargin > 20 ? 'metric-crit' : snrMargin > 10 ? 'metric-warn' : 'metric-ok';
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">SNR Margin</span>'
-            + '<span class="lora-metric-value ' + snrClass + '">' + snrMargin + ' dB</span>'
-            + '</div>';
-        }
-
-        // Traffic
-        if (iface.txb > 0 || iface.rxb > 0) {
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">TX / RX</span>'
-            + '<span class="lora-metric-value">' + formatBytes(iface.txb || 0) + ' / ' + formatBytes(iface.rxb || 0) + '</span>'
-            + '</div>';
-        }
-
-        // Held announces (backpressure indicator)
-        if (iface.held_announces != null && iface.held_announces > 0) {
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Held Announces</span>'
-            + '<span class="lora-metric-value metric-warn">' + iface.held_announces + '</span>'
-            + '</div>';
-        }
-
-        html += '</div>';  // end lora-radio-metrics (radio stats row)
-
-        // --- Second row: Announce Queue + Announce Mode + Battery ---
-        html += '<div class="lora-radio-metrics">';
-
-        // Announce queue
-        if (iface.announce_queue != null) {
-          var aqClass = iface.announce_queue > 10 ? 'metric-warn' : '';
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Announce Queue</span>'
-            + '<span class="lora-metric-value ' + aqClass + '">' + iface.announce_queue + '</span>'
-            + '</div>';
-        }
-
-        // Announce mode (from /api/lora diagnostics, or cached from last fetch)
-        {
-          var modeLabels = {all: 'All', local_priority: 'Local Priority', silent: 'Silent', unknown: 'Unknown'};
-          var modes = ['all', 'local_priority', 'silent'];
-          var curMode = _currentLoraAnnounceMode;
-          if (loraDiag && loraDiag.announce_mode) {
-            curMode = loraDiag.announce_mode.current || curMode;
-            _currentLoraAnnounceMode = curMode;
-            if (loraDiag.announce_mode.available) modes = loraDiag.announce_mode.available;
-          }
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Announce Mode</span>'
-            + '<select id="lora-announce-mode" class="lora-mode-select" onchange="window._setLoraAnnounceMode(this.value)">';
-          for (var mi = 0; mi < modes.length; mi++) {
-            var m = modes[mi];
-            var sel = m === curMode ? ' selected' : '';
-            html += '<option value="' + m + '"' + sel + '>' + (modeLabels[m] || m) + '</option>';
-          }
-          html += '</select>'
-            + '</div>';
-        }
-
-        // Battery (show whenever available)
-        if (iface.battery_state != null || iface.battery_percent != null) {
-          var batPct = iface.battery_percent;
-          var batState = iface.battery_state;
-          // 0% with no draining state typically means external/USB power (no battery)
-          var onExtPower = (batPct === 0 && batState !== 3);
-          var batParts = [];
-          var batClass = '';
-          if (onExtPower) {
-            batParts.push('External Power');
-          } else {
-            if (batState != null) {
-              var batStates = {0: 'Unknown', 1: 'Charging', 2: 'Charged', 3: 'Draining'};
-              batParts.push(batStates[batState] || 'State ' + batState);
-            }
-            if (batPct != null) batParts.push(batPct + '%');
-            batClass = batPct != null && batPct < 20 ? 'metric-crit'
-                     : batPct != null && batPct < 50 ? 'metric-warn' : '';
-          }
-          html += '<div class="lora-metric">'
-            + '<span class="lora-metric-label">Battery</span>'
-            + '<span class="lora-metric-value ' + batClass + '">' + esc(batParts.join(' \u2022 ')) + '</span>'
-            + '</div>';
-        }
-
-        html += '</div>';  // end lora-radio-metrics (announce + battery row)
-      }
-
-      html += '</div>';
-    }
-
-    container.innerHTML = html;
-    markUpdated('lora-section');
-  }
-
-  function _loraBar(pct, maxPct) {
-    var w = Math.min(100, (pct / maxPct) * 100).toFixed(0);
-    var cls = pct > (maxPct * 0.5) ? 'bar-crit' : pct > (maxPct * 0.2) ? 'bar-warn' : 'bar-ok';
-    return '<span class="lora-bar"><span class="lora-bar-fill ' + cls + '" style="width:' + w + '%"></span></span>';
-  }
-
-  var _loraNodes = [];
-  var _loraExpandedHash = null;
-  var _loraSignal = { rssi: null, snr: null }; // from interface stats
-
-  function updateLoraSignal(interfaces) {
-    // Extract last RSSI/SNR from the RNode interface for the Signal column
-    if (!interfaces) return;
-    for (var i = 0; i < interfaces.length; i++) {
-      var iface = interfaces[i];
-      if (iface.name && iface.name.indexOf('RNode') !== -1) {
-        if (iface.noise_floor != null) _loraSignal.noise = iface.noise_floor;
-        if (iface.interference_last_dbm != null) _loraSignal.rssi = iface.interference_last_dbm;
-        if (iface.rxb != null) _loraSignal.rxb = iface.rxb;
-        break;
-      }
-    }
-  }
-
-  function updateLoraNodes(nodes) {
-    var section = $('lora-section');
-    var tbody = $('lora-table');
-    var countEl = $('lora-count');
-    if (!section || !tbody) return;
-
-    _loraNodes = nodes;
-    countEl.textContent = nodes.length;
-
-    if (nodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8">No LoRa peers discovered yet</td></tr>';
-      return;
-    }
-
-    tbody.innerHTML = '';
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      var hash = n.destination_hash || '';
-      var shortHash = hash.length > 14 ? hash.slice(1, 13) + '\u2026' : hash;
-      var name = n.app_data || '';
-      if (!name && n.app_name) {
-        name = n.app_name + (n.aspects ? '.' + n.aspects : '');
-      }
-      name = name || '--';
-      var appFull = n.app_name ? n.app_name + (n.aspects ? '.' + n.aspects : '') : '--';
-      var hops = n.hops != null ? n.hops : '--';
-      var ago = n.last_seen ? formatTimeAgo(n.last_seen) : '--';
-      var annCount = n.announce_count || 0;
-      var score = n.score != null ? n.score : 0;
-      var cls = score >= 80 ? 'reach-high' : score >= 60 ? 'reach-good'
-              : score >= 40 ? 'reach-fair' : score >= 20 ? 'reach-low' : 'reach-unlikely';
-      var isExpanded = (hash === _loraExpandedHash);
-
-      // Signal column — show interface RSSI if we have RX data
-      var sigHtml = '--';
-      if (_loraSignal.rssi != null && _loraSignal.rxb > 0) {
-        var rssiCls = _loraSignal.rssi > -80 ? 'metric-ok' : _loraSignal.rssi > -100 ? 'metric-warn' : 'metric-crit';
-        sigHtml = '<span class="' + rssiCls + '">' + _loraSignal.rssi + ' dBm</span>';
-      }
-
-      var tr = document.createElement('tr');
-      if (isExpanded) tr.className = 'node-row-active';
-      tr.setAttribute('data-lora-hash', hash);
-      tr.style.cursor = 'pointer';
-      tr.innerHTML =
-          '<td class="reach-col"><span class="reach-badge ' + cls + '">' + score + '</span></td>'
-        + '<td class="addr" title="' + esc(hash) + '">' + esc(shortHash) + '</td>'
-        + '<td class="col-truncate" title="' + esc(n.app_data || '') + '">' + esc(name) + '</td>'
-        + '<td>' + esc(appFull) + '</td>'
-        + '<td>' + hops + '</td>'
-        + '<td>' + sigHtml + '</td>'
-        + '<td>' + ago + '</td>'
-        + '<td>' + annCount + '</td>';
-      tbody.appendChild(tr);
-
-      // Expanded detail row
-      if (isExpanded) {
-        var detailTr = document.createElement('tr');
-        detailTr.className = 'node-detail';
-        var td = document.createElement('td');
-        td.colSpan = 8;
-        td.innerHTML = _buildLoraDetailHTML(n);
-        detailTr.appendChild(td);
-        tbody.appendChild(detailTr);
-      }
-    }
-  }
-
-  function _buildLoraDetailHTML(node) {
-    var h = '';
-
-    // Reachability
-    if (node.score != null && node.factors) {
-      h += '<div class="node-detail-section">Reachability</div>'
-        + '<div class="node-detail-grid">'
-        + _di('Score', _reachBadgeHTML(node.score, node.label))
-        + '</div>'
-        + _reachFactorHTML(node.factors);
-    }
-
-    // Identity
-    h += '<div class="node-detail-section">Identity</div>'
-      + '<div class="node-detail-grid">'
-      + _di('Address', esc(node.destination_hash || '--'))
-      + _di('Name', esc(node.app_data || '--'))
-      + _di('App', esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : ''))
-      + '</div>';
-
-    // Network
-    var firstSeen = node.first_seen ? new Date(node.first_seen * 1000).toLocaleString() : '--';
-    var lastSeen = node.last_seen ? formatTimeAgo(node.last_seen) : '--';
-    h += '<div class="node-detail-section">Network</div>'
-      + '<div class="node-detail-grid">'
-      + _di('Hops', node.hops != null ? node.hops : '--')
-      + _di('First Seen', firstSeen)
-      + _di('Last Seen', lastSeen)
-      + _di('Announces', node.announce_count || 0)
-      + _di('Interface', esc(node.interface || '--'))
-      + '</div>';
-
-    // Signal
-    if (_loraSignal.rssi != null || _loraSignal.noise != null) {
-      h += '<div class="node-detail-section">Signal</div>'
-        + '<div class="node-detail-grid">';
-      if (_loraSignal.rssi != null) h += _di('Last RSSI', _loraSignal.rssi + ' dBm');
-      if (_loraSignal.noise != null) h += _di('Noise Floor', _loraSignal.noise + ' dBm');
-      if (_loraSignal.rssi != null && _loraSignal.noise != null) {
-        h += _di('SNR Margin', (_loraSignal.rssi - _loraSignal.noise) + ' dB');
-      }
-      h += '</div>';
-    }
-
-    return h;
-  }
-
-  function fetchConfig() {
-    api('/api/config').then(function(r) {
-      if (!r || !r.ok) return;
-      $('config-content').textContent = JSON.stringify(r.data, null, 2);
-    });
-  }
-
-  // --- Uptime counter ---
-
-  function startUptimeCounter() {
-    if (uptimeTimer) clearInterval(uptimeTimer);
-    uptimeTimer = setInterval(function() {
-      var elapsed = Date.now() / 1000 - uptimeStart;
-      $('uptime').textContent = 'uptime: ' + formatUptime(elapsed);
-    }, 1000);
-    // Immediate update
-    var elapsed = Date.now() / 1000 - uptimeStart;
-    $('uptime').textContent = 'uptime: ' + formatUptime(elapsed);
+    // LoRa nodes panel (uses reachability with interface filter -- smaller than full score)
+    RPI.fetchLoraReachability();
   }
 
   // --- WebSocket ---
@@ -2502,17 +1534,17 @@
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
           if (msg.data.interfaces) {
             updateInterfaces(msg.data.interfaces);
-            updateLoraRadio(msg.data.interfaces, null);
+            RPI.updateLoraRadio(msg.data.interfaces, null);
           }
           if (msg.data.mesh) {
-            if (msg.data.mesh.peers) cacheMeshPeers(msg.data.mesh.peers);
-            updateMeshFromWS(msg.data.mesh);
+            if (msg.data.mesh.peers) RPI.cacheMeshPeers(msg.data.mesh.peers);
+            RPI.updateMeshFromWS(msg.data.mesh);
           }
           if (msg.data.sensors) updateSensors(msg.data.sensors);
           if (msg.data.emergency) updateEmergency(msg.data.emergency);
           if (msg.data.transport) updateTransport(msg.data.transport);
           if (msg.data.connectivity) updateConnectivity(msg.data.connectivity);
-          if (msg.data.routing) updateRoutingSummary(msg.data.routing);
+          if (msg.data.routing) RPI.updateRoutingSummary(msg.data.routing);
           if (msg.data.messaging) updateMessaging(msg.data.messaging);
         }
       } catch(e) { /* ignore parse errors */ }
@@ -2523,7 +1555,7 @@
     };
 
     ws.onerror = function() {
-      // onerror is always followed by onclose — no action needed here
+      // onerror is always followed by onclose -- no action needed here
     };
   }
 
@@ -2549,331 +1581,6 @@
 
   function stopPolling() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  }
-
-  // --- Routing ---
-
-  var _rtPage = 1, _rtPerPage = 100, _rtSort = 'hops', _rtOrder = 'asc';
-  var _rtSearch = '', _rtIfaceFilter = '', _rtHopsFilter = '';
-  var _rtTableOpen = false;
-  var _rtDebounceTimer = null;
-  var _rtKnownInterfaces = [];
-  var _rtAutoRefresh = null;
-
-  function formatDuration(seconds) {
-    if (seconds == null || seconds <= 0) return '--';
-    if (seconds < 60) return Math.floor(seconds) + 's';
-    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
-    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';
-    return Math.floor(seconds / 86400) + 'd ' + Math.floor((seconds % 86400) / 3600) + 'h';
-  }
-
-  function hopColorClass(hops) {
-    if (hops <= 1) return 'hop-color-1';
-    if (hops <= 3) return 'hop-color-2';
-    if (hops <= 6) return 'hop-color-3';
-    return 'hop-color-4';
-  }
-
-  function truncHash(h) {
-    if (!h) return '--';
-    if (h.length <= 16) return h;
-    return h.substring(0, 8) + '\u2026' + h.substring(h.length - 6);
-  }
-
-  // Bucket raw hop distribution into meaningful ranges
-  function bucketHops(dist) {
-    var buckets = [
-      {label: 'Local', min: 0, max: 0, count: 0, cls: 'hc-near'},
-      {label: '1-2', min: 1, max: 2, count: 0, cls: 'hc-near'},
-      {label: '3-4', min: 3, max: 4, count: 0, cls: 'hc-mid'},
-      {label: '5-6', min: 5, max: 6, count: 0, cls: 'hc-far'},
-      {label: '7-10', min: 7, max: 10, count: 0, cls: 'hc-vfar'},
-      {label: '11+', min: 11, max: 9999, count: 0, cls: 'hc-extreme'}
-    ];
-    var keys = Object.keys(dist);
-    for (var i = 0; i < keys.length; i++) {
-      var hop = Number(keys[i]);
-      var cnt = dist[keys[i]];
-      for (var b = 0; b < buckets.length; b++) {
-        if (hop >= buckets[b].min && hop <= buckets[b].max) {
-          buckets[b].count += cnt;
-          break;
-        }
-      }
-    }
-    // Filter out empty buckets
-    return buckets.filter(function(b) { return b.count > 0; });
-  }
-
-  function _setStatCard(id, value, cls) {
-    var el = $(id);
-    if (!el) return;
-    var valEl = el.querySelector('.routing-stat-value');
-    if (valEl) {
-      valEl.textContent = value;
-      valEl.className = 'routing-stat-value' + (cls ? ' ' + cls : '');
-    }
-  }
-
-  function updateRoutingSummary(data) {
-    if (!data || !$('routing-section')) return;
-    markUpdated('routing-section');
-
-    // Transport identity bar
-    var idEl = $('routing-identity');
-    if (idEl) {
-      var html = '';
-      if (data.transport_id) {
-        html += '<span><span class="ri-label">Transport </span><span class="ri-value">' + esc(truncHash(data.transport_id)) + '</span></span>';
-      }
-      if (data.transport_uptime) {
-        html += '<span><span class="ri-label">Uptime </span><span class="ri-value">' + formatDuration(data.transport_uptime) + '</span></span>';
-      }
-      if (data.probe_responder) {
-        html += '<span><span class="ri-label">Probe </span><span class="ri-value">' + esc(truncHash(data.probe_responder)) + '</span></span>';
-      }
-      idEl.innerHTML = html || '<span class="ri-label">Transport info not available</span>';
-    }
-
-    // Stat cards
-    var pc = data.path_count || 0;
-    _setStatCard('ri-paths', pc, pc > 100 ? 'rs-ok' : (pc > 0 ? 'rs-info' : 'rs-warn'));
-    var lc = data.link_count || 0;
-    _setStatCard('ri-links', lc, lc > 0 ? 'rs-info' : '');
-    var rc = data.rate_limited_count || 0;
-    _setStatCard('ri-rate', rc, rc > 0 ? 'rs-warn' : 'rs-ok');
-    var bc = data.blackholed_count || 0;
-    _setStatCard('ri-blackhole', bc, bc > 0 ? 'rs-warn' : 'rs-ok');
-
-    // Charts
-    renderHopChart(data.hop_distribution || {}, pc);
-    renderIfaceChart(data.interface_distribution || {}, pc);
-
-    // Update interface filter dropdown
-    var ifaces = Object.keys(data.interface_distribution || {});
-    if (ifaces.length !== _rtKnownInterfaces.length || ifaces.join() !== _rtKnownInterfaces.join()) {
-      _rtKnownInterfaces = ifaces;
-      var sel = $('rt-iface-filter');
-      if (sel) {
-        var curVal = sel.value;
-        sel.innerHTML = '<option value="">All interfaces</option>';
-        for (var i = 0; i < ifaces.length; i++) {
-          var opt = document.createElement('option');
-          opt.value = ifaces[i];
-          opt.textContent = ifaces[i];
-          sel.appendChild(opt);
-        }
-        sel.value = curVal;
-      }
-    }
-
-    // Path freshness
-    var freshEl = $('routing-freshness');
-    if (freshEl && data.freshness) {
-      var f = data.freshness;
-      var fhtml = '';
-      if (f.newest_age_s != null) fhtml += '<span class="rf-item"><span class="ri-label">Newest </span><span class="rf-val">' + formatDuration(f.newest_age_s) + '</span></span>';
-      if (f.oldest_age_s != null) fhtml += '<span class="rf-item"><span class="ri-label">Oldest </span><span class="rf-val">' + formatDuration(f.oldest_age_s) + '</span></span>';
-      if (f.avg_age_s != null) fhtml += '<span class="rf-item"><span class="ri-label">Avg </span><span class="rf-val">' + formatDuration(f.avg_age_s) + '</span></span>';
-      if (f.expiring_soon > 0) fhtml += '<span class="rf-item" style="color:var(--yellow)"><span class="ri-label">Expiring soon </span><span class="rf-val">' + f.expiring_soon + '</span></span>';
-      freshEl.innerHTML = fhtml;
-    }
-
-    // Routing diagnostics
-    var diagEl = $('routing-diagnostics');
-    if (diagEl) {
-      var diags = data.diagnostics || [];
-      if (diags.length === 0) {
-        diagEl.innerHTML = '';
-      } else {
-        var dhtml = '';
-        for (var i = 0; i < diags.length; i++) {
-          var isCrit = diags[i].toLowerCase().indexOf('empty') >= 0
-            || diags[i].toLowerCase().indexOf('single point') >= 0;
-          dhtml += '<div class="issue' + (isCrit ? ' critical' : '') + '">\u26A0 ' + esc(diags[i]) + '</div>';
-        }
-        diagEl.innerHTML = dhtml;
-      }
-    }
-
-    // Status badge in header
-    var statusEl = $('routing-status');
-    if (statusEl) {
-      var diags = data.diagnostics || [];
-      if (diags.length === 0 && pc > 0) {
-        statusEl.textContent = pc + ' paths';
-        statusEl.style.color = 'var(--green)';
-      } else if (diags.length > 0) {
-        statusEl.textContent = diags.length + ' issue(s)';
-        statusEl.style.color = 'var(--yellow)';
-      } else {
-        statusEl.textContent = 'no data';
-        statusEl.style.color = 'var(--text-muted)';
-      }
-    }
-
-    // Path table info
-    var infoEl = $('routing-table-info');
-    if (infoEl) {
-      infoEl.textContent = pc + ' paths in routing table';
-    }
-  }
-
-  function renderHopChart(dist, total) {
-    var el = $('hop-chart');
-    if (!el) return;
-
-    var buckets = bucketHops(dist);
-    if (buckets.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No path data</div>';
-      return;
-    }
-
-    var maxVal = 0;
-    for (var i = 0; i < buckets.length; i++) {
-      if (buckets[i].count > maxVal) maxVal = buckets[i].count;
-    }
-    total = total || maxVal;
-
-    var html = '';
-    for (var i = 0; i < buckets.length; i++) {
-      var b = buckets[i];
-      var pct = maxVal > 0 ? (b.count / maxVal * 100) : 0;
-      var pctOfTotal = total > 0 ? Math.round(b.count / total * 100) : 0;
-      html += '<div class="bar-row">'
-        + '<div class="bar-label bar-label-hop">' + b.label + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + b.cls + '" style="width:' + pct + '%"></div></div>'
-        + '<div class="bar-count">' + b.count + '</div>'
-        + '<div class="bar-pct">' + pctOfTotal + '%</div>'
-        + '</div>';
-    }
-    el.innerHTML = html;
-  }
-
-  function renderIfaceChart(dist, total) {
-    var el = $('iface-chart');
-    if (!el) return;
-
-    var keys = Object.keys(dist);
-    if (keys.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No path data</div>';
-      return;
-    }
-
-    // Sort by count descending
-    keys.sort(function(a, b) { return dist[b] - dist[a]; });
-
-    var maxVal = dist[keys[0]] || 1;
-    total = total || maxVal;
-
-    var html = '';
-    for (var i = 0; i < keys.length; i++) {
-      var iface = keys[i];
-      var count = dist[iface];
-      var pct = maxVal > 0 ? (count / maxVal * 100) : 0;
-      var pctOfTotal = total > 0 ? Math.round(count / total * 100) : 0;
-      // Shorten interface name for display
-      var shortName = iface
-        .replace(/TCPInterface\[TCP Client\s*/g, '')
-        .replace(/TCPInterface\[TCP Server\s*/g, 'Server ')
-        .replace(/LocalInterface\[.*?\]/g, 'Local')
-        .replace(/I2PInterface\[.*?\]/g, 'I2P')
-        .replace(/\/.*/g, '')
-        .replace(/\]$/g, '');
-      // Pick color class based on type
-      var colorCls = 'ic-default';
-      if (iface.indexOf('I2P') >= 0) colorCls = 'ic-i2p';
-      else if (iface.indexOf('Local') >= 0) colorCls = 'ic-local';
-
-      html += '<div class="bar-row">'
-        + '<div class="bar-label bar-label-iface" title="' + esc(iface) + '">' + esc(shortName) + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + colorCls + '" style="width:' + pct + '%"></div></div>'
-        + '<div class="bar-count">' + count + '</div>'
-        + '<div class="bar-pct">' + pctOfTotal + '%</div>'
-        + '</div>';
-    }
-    el.innerHTML = html;
-  }
-
-  function fetchRoutingTable() {
-    if (!_rtTableOpen) return;
-
-    var params = '?page=' + _rtPage + '&per_page=' + _rtPerPage
-      + '&sort=' + _rtSort + '&order=' + _rtOrder;
-    if (_rtSearch) params += '&search=' + encodeURIComponent(_rtSearch);
-    if (_rtIfaceFilter) params += '&interface=' + encodeURIComponent(_rtIfaceFilter);
-    if (_rtHopsFilter) {
-      if (_rtHopsFilter === '4') {
-        params += '&min_hops=4';
-      } else {
-        params += '&min_hops=' + _rtHopsFilter + '&max_hops=' + _rtHopsFilter;
-      }
-    }
-
-    api('/api/routing' + params).then(function(r) {
-      if (!r || !r.ok) return;
-      renderRoutingTable(r.data);
-    });
-  }
-
-  function renderRoutingTable(data) {
-    var tbody = $('routing-table-body');
-    if (!tbody) return;
-
-    var paths = data.paths || [];
-    if (paths.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No paths match filters</td></tr>';
-      renderRoutingPagination(0, 0);
-      return;
-    }
-
-    var html = '';
-    for (var i = 0; i < paths.length; i++) {
-      var p = paths[i];
-      var hopCls = hopColorClass(p.hops || 0);
-      var expCls = '';
-      if (p.expires_in_s != null && p.expires_in_s < 600) expCls = ' style="color:var(--red)"';
-      else if (p.expires_in_s != null && p.expires_in_s < 1800) expCls = ' style="color:var(--yellow)"';
-
-      html += '<tr>'
-        + '<td class="hash-cell" title="' + esc(p.hash || '') + '">' + esc(truncHash(p.hash)) + '</td>'
-        + '<td class="' + hopCls + '">' + (p.hops != null ? p.hops : '--') + '</td>'
-        + '<td class="hash-cell" title="' + esc(p.via || '') + '">' + esc(truncHash(p.via)) + '</td>'
-        + '<td>' + esc(p.interface || '--') + '</td>'
-        + '<td>' + formatDuration(p.age_s) + '</td>'
-        + '<td' + expCls + '>' + formatDuration(p.expires_in_s) + '</td>'
-        + '</tr>';
-    }
-    tbody.innerHTML = html;
-    // Hash-cell click-to-copy is handled by event delegation (see _initRoutingDelegation)
-
-    renderRoutingPagination(data.pages || 1, data.page || 1);
-  }
-
-  function renderRoutingPagination(totalPages, currentPage) {
-    var el = $('routing-pagination');
-    if (!el) return;
-    if (totalPages <= 1) { el.innerHTML = ''; return; }
-
-    var html = '';
-    // First / Prev
-    html += '<button' + (currentPage <= 1 ? ' disabled' : '') + ' data-rt-page="1">&laquo;</button>';
-    html += '<button' + (currentPage <= 1 ? ' disabled' : '') + ' data-rt-page="' + (currentPage - 1) + '">&lsaquo;</button>';
-
-    // Page numbers (show current context)
-    var start = Math.max(1, currentPage - 2);
-    var end = Math.min(totalPages, currentPage + 2);
-    for (var i = start; i <= end; i++) {
-      html += '<button' + (i === currentPage ? ' class="active"' : '') + ' data-rt-page="' + i + '">' + i + '</button>';
-    }
-
-    // Next / Last
-    html += '<button' + (currentPage >= totalPages ? ' disabled' : '') + ' data-rt-page="' + (currentPage + 1) + '">&rsaquo;</button>';
-    html += '<button' + (currentPage >= totalPages ? ' disabled' : '') + ' data-rt-page="' + totalPages + '">&raquo;</button>';
-
-    el.innerHTML = html;
-    // Page button clicks handled by event delegation (see _initRoutingDelegation)
   }
 
   // --- Events ---
@@ -2918,12 +1625,12 @@
   for (var i = 0; i < sortHeaders.length; i++) {
     (function(th) {
       th.addEventListener('click', function() {
-        onMeshSort(th.getAttribute('data-sort'));
+        RPI.onMeshSort(th.getAttribute('data-sort'));
       });
     })(sortHeaders[i]);
   }
 
-  // Routing table — event delegation (replaces per-render listener binding)
+  // Routing table -- event delegation (replaces per-render listener binding)
   // Hash cell click-to-copy
   $('routing-table-body').addEventListener('click', function(ev) {
     var cell = ev.target.closest('.hash-cell');
@@ -2940,9 +1647,9 @@
     var btn = ev.target.closest('button[data-rt-page]');
     if (!btn || btn.disabled) return;
     var pg = parseInt(btn.getAttribute('data-rt-page'));
-    if (pg && pg !== _rtPage) {
-      _rtPage = pg;
-      fetchRoutingTable();
+    if (pg && pg !== RPI._rtPage()) {
+      RPI._setRtPage(pg);
+      RPI.fetchRoutingTable();
     }
   });
 
@@ -2950,18 +1657,19 @@
   $('routing-table-toggle').addEventListener('click', function() {
     var wrapper = $('routing-table-wrapper');
     var btn = $('routing-table-toggle');
-    if (_rtTableOpen) {
+    if (RPI._rtTableOpen()) {
       wrapper.classList.add('hidden');
       btn.textContent = 'Show Path Table';
-      _rtTableOpen = false;
-      if (_rtAutoRefresh) { clearInterval(_rtAutoRefresh); _rtAutoRefresh = null; }
+      RPI._setRtTableOpen(false);
+      var autoRef = RPI._rtAutoRefresh();
+      if (autoRef) { clearInterval(autoRef); RPI._setRtAutoRefresh(null); }
     } else {
       wrapper.classList.remove('hidden');
       btn.textContent = 'Hide Path Table';
-      _rtTableOpen = true;
-      _rtPage = 1;
-      fetchRoutingTable();
-      _rtAutoRefresh = setInterval(fetchRoutingTable, 15000);
+      RPI._setRtTableOpen(true);
+      RPI._setRtPage(1);
+      RPI.fetchRoutingTable();
+      RPI._setRtAutoRefresh(setInterval(function() { RPI.fetchRoutingTable(); }, 15000));
     }
   });
 
@@ -2971,42 +1679,43 @@
     (function(th) {
       th.addEventListener('click', function() {
         var key = th.getAttribute('data-rt-sort');
-        if (_rtSort === key) {
-          _rtOrder = _rtOrder === 'asc' ? 'desc' : 'asc';
+        if (RPI._rtSort() === key) {
+          RPI._setRtOrder(RPI._rtOrder() === 'asc' ? 'desc' : 'asc');
         } else {
-          _rtSort = key;
-          _rtOrder = (key === 'hops') ? 'asc' : 'desc';
+          RPI._setRtSort(key);
+          RPI._setRtOrder((key === 'hops') ? 'asc' : 'desc');
         }
-        _rtPage = 1;
-        fetchRoutingTable();
+        RPI._setRtPage(1);
+        RPI.fetchRoutingTable();
       });
     })(rtSortHeaders[si]);
   }
 
   // Routing table filters (debounced)
   $('rt-search').addEventListener('input', function() {
-    clearTimeout(_rtDebounceTimer);
+    var timer = RPI._rtDebounceTimer();
+    if (timer) clearTimeout(timer);
     var val = this.value;
-    _rtDebounceTimer = setTimeout(function() {
-      _rtSearch = val;
-      _rtPage = 1;
-      fetchRoutingTable();
-    }, 300);
+    RPI._setRtDebounceTimer(setTimeout(function() {
+      RPI._setRtSearch(val);
+      RPI._setRtPage(1);
+      RPI.fetchRoutingTable();
+    }, 300));
   });
 
   $('rt-iface-filter').addEventListener('change', function() {
-    _rtIfaceFilter = this.value;
-    _rtPage = 1;
-    fetchRoutingTable();
+    RPI._setRtIfaceFilter(this.value);
+    RPI._setRtPage(1);
+    RPI.fetchRoutingTable();
   });
 
   $('rt-hops-filter').addEventListener('change', function() {
-    _rtHopsFilter = this.value;
-    _rtPage = 1;
-    fetchRoutingTable();
+    RPI._setRtHopsFilter(this.value);
+    RPI._setRtPage(1);
+    RPI.fetchRoutingTable();
   });
 
-  // Mesh filter tabs — event delegation
+  // Mesh filter tabs -- event delegation
   $('mesh-filter-bar').addEventListener('click', function(ev) {
     var tab = ev.target.closest('[data-mesh-view]');
     if (!tab) return;
@@ -3016,63 +1725,67 @@
     for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
     tab.classList.add('active');
     // Cancel pending search if switching views
-    if (_meshSearchTimer) { clearTimeout(_meshSearchTimer); _meshSearchTimer = null; }
-    _meshView = view;
-    _meshPage = 1;
-    fetchMeshNodes();
+    var timer = RPI._meshSearchTimer();
+    if (timer) { clearTimeout(timer); RPI._setMeshSearchTimer(null); }
+    RPI._setMeshView(view);
+    RPI._setMeshPage(1);
+    RPI.fetchMeshNodes();
   });
 
-  // Mesh search — debounced input
+  // Mesh search -- debounced input
   $('mesh-search').addEventListener('input', function() {
     var input = this;
-    if (_meshSearchTimer) clearTimeout(_meshSearchTimer);
-    _meshSearchTimer = setTimeout(function() {
-      _meshSearch = input.value.trim();
-      _meshPage = 1;
-      fetchMeshNodes();
-    }, 300);
+    var timer = RPI._meshSearchTimer();
+    if (timer) clearTimeout(timer);
+    RPI._setMeshSearchTimer(setTimeout(function() {
+      RPI._setMeshSearch(input.value.trim());
+      RPI._setMeshPage(1);
+      RPI.fetchMeshNodes();
+    }, 300));
   });
 
-  // Mesh pagination — event delegation for page buttons
+  // Mesh pagination -- event delegation for page buttons
   $('mesh-show-more').addEventListener('click', function(ev) {
     var btn = ev.target.closest('[data-mesh-page]');
     if (!btn) return;
     var pg = parseInt(btn.getAttribute('data-mesh-page'));
-    if (pg && pg !== _meshPage) {
-      _meshPage = pg;
-      fetchMeshNodes();
+    if (pg && pg !== RPI._meshPage()) {
+      RPI._setMeshPage(pg);
+      RPI.fetchMeshNodes();
     }
   });
-  // Mesh table row clicks — event delegation
+  // Mesh table row clicks -- event delegation
   $('mesh-table').addEventListener('click', function(ev) {
     var row = ev.target.closest('tr[data-hash]');
     if (!row) return;
     var hash = row.getAttribute('data-hash');
     if (!hash) return;
     // Find the node in current data
+    var nodes = RPI._meshNodes();
     var node = null;
-    for (var i = 0; i < _meshNodes.length; i++) {
-      if (_meshNodes[i].destination_hash === hash) { node = _meshNodes[i]; break; }
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].destination_hash === hash) { node = nodes[i]; break; }
     }
-    if (node) toggleNodeDetail(node, hash);
+    if (node) RPI.toggleNodeDetail(node, hash);
   });
-  // LoRa table row clicks — event delegation
+  // LoRa table row clicks -- event delegation
   $('lora-table').addEventListener('click', function(ev) {
     var row = ev.target.closest('tr[data-lora-hash]');
     if (!row) return;
     var hash = row.getAttribute('data-lora-hash');
     if (!hash) return;
-    _loraExpandedHash = (_loraExpandedHash === hash) ? null : hash;
-    updateLoraNodes(_loraNodes);
+    var curHash = RPI._loraExpandedHash();
+    RPI._setLoraExpandedHash(curHash === hash ? null : hash);
+    RPI.updateLoraNodes(RPI._loraNodes());
   });
   $('peer-show-more').addEventListener('click', function() {
-    var peers = Object.values(_meshPeers);
-    if (_peerVisible >= peers.length) {
-      _peerVisible = _peerPageSize;  // collapse back
+    var peers = Object.values(RPI._meshPeers());
+    if (RPI._peerVisible() >= peers.length) {
+      RPI._setPeerVisible(RPI._peerPageSize());  // collapse back
     } else {
-      _peerVisible += _peerPageSize;  // show next page
+      RPI._setPeerVisible(RPI._peerVisible() + RPI._peerPageSize());  // show next page
     }
-    updatePeerTelemetry(peers);
+    RPI.updatePeerTelemetry(peers);
   });
 
   // Wire up messaging hub controls
@@ -3107,7 +1820,7 @@
     renderMeshtasticNodes();
   });
 
-  // Interface management — event delegation (CSP blocks inline handlers)
+  // Interface management -- event delegation (CSP blocks inline handlers)
   $('restart-btn').addEventListener('click', doRestart);
   $('interfaces-table').addEventListener('change', function(ev) {
     var cb = ev.target;
@@ -3126,6 +1839,6 @@
   setInterval(fetchAll, 30000);
 
   // Refresh LoRa reachability scores every 60s
-  setInterval(fetchLoraReachability, 60000);
+  setInterval(function() { RPI.fetchLoraReachability(); }, 60000);
 
 })();
