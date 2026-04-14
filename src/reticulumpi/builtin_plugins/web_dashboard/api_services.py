@@ -1,0 +1,350 @@
+"""API route handlers for plugin-provided services.
+
+Covers: LoRa diagnostics, messaging hub, NomadNet auth, Meshtastic gateway,
+sensors, alerts, emergency broadcasts, and file transfers.
+"""
+
+from __future__ import annotations
+
+import aiohttp.web
+
+from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok
+
+
+# ── LoRa diagnostics ────────────────────────────────────────────────
+
+
+async def handle_lora_diagnostics(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/lora — LoRa diagnostics (traffic, monitored peers, beacon status)."""
+    plugin = _get_plugin(request)
+    lora = plugin.app.get_plugin("lora_diagnostics")
+    if not lora or not hasattr(lora, "get_diagnostics"):
+        return _ok({"message": "lora_diagnostics plugin not available"})
+    return _ok(lora.get_diagnostics())
+
+
+async def handle_lora_announce_mode(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/lora/announce_mode — toggle LoRa announce forwarding mode.
+
+    Body: ``{"mode": "all"|"local_priority"|"silent"}``
+
+    Modifies rnsd's Reticulum config and restarts rnsd.
+    """
+    plugin = _get_plugin(request)
+    lora = plugin.app.get_plugin("lora_diagnostics")
+    if not lora or not hasattr(lora, "set_announce_mode"):
+        return _ok({"error": "lora_diagnostics plugin not available"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": "Invalid JSON body"}, status=400
+        )
+
+    mode = body.get("mode", "")
+    if not mode:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": "Missing 'mode' field"}, status=400
+        )
+
+    try:
+        result = lora.set_announce_mode(mode)
+        return _ok(result)
+    except ValueError as exc:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": str(exc)}, status=400
+        )
+    except RuntimeError as exc:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": str(exc)}, status=500
+        )
+
+
+# ── Sensors, alerts, emergency, files ────────────────────────────────
+
+
+async def handle_alerts(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/alerts — alert system status."""
+    plugin = _get_plugin(request)
+    alert_sys = plugin.app.get_plugin("alert_system")
+    if not alert_sys:
+        return _ok({"status": None, "message": "alert_system plugin not available"})
+    try:
+        status = alert_sys.get_status()
+    except Exception:
+        status = {"error": "status collection failed"}
+    return _ok(status)
+
+
+async def handle_files(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/files — shared files from file_transfer plugin."""
+    plugin = _get_plugin(request)
+    ft = plugin.app.get_plugin("file_transfer")
+    if not ft or not hasattr(ft, "get_shared_files"):
+        return _ok({"files": [], "message": "file_transfer plugin not available"})
+    return _ok({"files": ft.get_shared_files()})
+
+
+async def handle_sensors(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/sensors — latest sensor readings from sensor_framework plugin."""
+    plugin = _get_plugin(request)
+    sf = plugin.app.get_plugin("sensor_framework")
+    if not sf or not hasattr(sf, "get_latest_readings"):
+        return _ok({"sensors": {}, "message": "sensor_framework plugin not available"})
+    return _ok({"sensors": sf.get_latest_readings()})
+
+
+async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/sensors/history — recent readings for a sensor.
+
+    Query params: sensor (required), limit (default 60).
+    """
+    plugin = _get_plugin(request)
+    sf = plugin.app.get_plugin("sensor_framework")
+    if not sf or not hasattr(sf, "get_sensor_history"):
+        return _ok({"history": [], "message": "sensor_framework plugin not available"})
+
+    sensor_name = request.query.get("sensor", "")
+    if not sensor_name:
+        return _error("sensor query param is required", 400)
+
+    try:
+        limit = min(int(request.query.get("limit", "60")), 500)
+    except (ValueError, TypeError):
+        limit = 60
+
+    history = sf.get_sensor_history(sensor_name, limit=limit)
+    return _ok({"sensor": sensor_name, "history": history})
+
+
+async def handle_emergency(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/emergency — recent emergency broadcast messages."""
+    plugin = _get_plugin(request)
+    eb = plugin.app.get_plugin("emergency_broadcast")
+    if not eb or not hasattr(eb, "get_messages"):
+        return _ok({"messages": [], "message": "emergency_broadcast plugin not available"})
+    return _ok({"messages": eb.get_messages(), "status": eb.get_status()})
+
+
+# ── NomadNet auth ────────────────────────────────────────────────────
+
+
+async def handle_nomadnet_auth(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/nomadnet/auth — NomadNet page access control status."""
+    plugin = _get_plugin(request)
+    nn = plugin.app.get_plugin("nomadnet_server")
+    if not nn or not hasattr(nn, "get_allowed_identities"):
+        return _ok({"message": "nomadnet_server plugin not available"})
+    protected = nn._get_protected_pages() if hasattr(nn, "_get_protected_pages") else []
+    return _ok({
+        "allowed_identities": nn.get_allowed_identities(),
+        "protected_pages": protected,
+    })
+
+
+async def handle_nomadnet_auth_add(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/nomadnet/auth/add — add an identity to the allow list."""
+    plugin = _get_plugin(request)
+    nn = plugin.app.get_plugin("nomadnet_server")
+    if not nn or not hasattr(nn, "add_allowed_identity"):
+        return _error("nomadnet_server plugin not available", 503)
+    try:
+        body = await request.json()
+        identity = body.get("identity", "")
+    except Exception:
+        return _error("Invalid request body", 400)
+    if not identity:
+        return _error("identity field is required", 400)
+    if len(identity) > 128:
+        return _error("identity too long", 400)
+    try:
+        added = nn.add_allowed_identity(identity)
+        return _ok({"added": added, "identity": identity.strip().lower()})
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+
+async def handle_nomadnet_auth_remove(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/nomadnet/auth/remove — remove an identity from the allow list."""
+    plugin = _get_plugin(request)
+    nn = plugin.app.get_plugin("nomadnet_server")
+    if not nn or not hasattr(nn, "remove_allowed_identity"):
+        return _error("nomadnet_server plugin not available", 503)
+    try:
+        body = await request.json()
+        identity = body.get("identity", "")
+    except Exception:
+        return _error("Invalid request body", 400)
+    if not identity:
+        return _error("identity field is required", 400)
+    if len(identity) > 128:
+        return _error("identity too long", 400)
+    removed = nn.remove_allowed_identity(identity)
+    return _ok({"removed": removed, "identity": identity.strip().lower()})
+
+
+# ── Meshtastic gateway ──────────────────────────────────────────────
+
+
+async def handle_meshtastic_status(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshtastic/status — Meshtastic gateway status and message stats."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "get_status"):
+        return _ok({"available": False, "message": "meshtastic_gateway plugin not enabled"})
+    return _ok(gw.get_status())
+
+
+async def handle_meshtastic_nodes(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshtastic/nodes — Known Meshtastic mesh nodes."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "get_meshtastic_nodes"):
+        return _ok({"nodes": [], "message": "meshtastic_gateway plugin not enabled"})
+    return _ok({"nodes": gw.get_meshtastic_nodes()})
+
+
+# ── Messaging Hub ────────────────────────────────────────────────────
+
+
+async def handle_messages(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages — Paginated message history.
+
+    Query params: limit, offset, transport, direction, since.
+    """
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_messages"):
+        return _ok({"messages": [], "message": "messaging_hub not enabled"})
+
+    try:
+        limit = min(int(request.query.get("limit", "50")), 200)
+        offset = max(int(request.query.get("offset", "0")), 0)
+    except (ValueError, TypeError):
+        return _error("limit and offset must be integers", 400)
+
+    transport = request.query.get("transport") or None
+    direction = request.query.get("direction") or None
+    since_str = request.query.get("since")
+    try:
+        since = float(since_str) if since_str else None
+    except (ValueError, TypeError):
+        return _error("since must be a numeric timestamp", 400)
+
+    messages = hub.get_messages(
+        limit=limit, offset=offset, transport=transport,
+        direction=direction, since=since,
+    )
+    return _ok({"messages": messages})
+
+
+async def handle_send_message(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/messages/send — Send a message via a transport.
+
+    Body: ``{"transport": "lxmf"|"meshtastic", "text": "...", "destination": "..."}``
+    """
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "send_message"):
+        return _error("messaging_hub not enabled", 503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+
+    transport = body.get("transport", "")
+    text = body.get("text", "").strip()
+    destination = body.get("destination", "").strip()
+
+    if not transport:
+        return _error("transport field is required", 400)
+    if not text:
+        return _error("text field is required", 400)
+    if len(text) > 5000:
+        return _error("text exceeds maximum length (5000 chars)", 400)
+    if not destination:
+        return _error("destination field is required", 400)
+
+    result = hub.send_message(transport, text, destination)
+    if result.get("sent"):
+        return _ok(result)
+    return _error(result.get("reason", "Send failed"), 400)
+
+
+async def handle_transports(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/transports — Available transports."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_transports"):
+        return _ok({"transports": []})
+    return _ok({"transports": hub.get_transports()})
+
+
+async def handle_contacts(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/contacts — Contacts across transports.
+
+    Query param: transport (optional filter).
+    """
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_contacts"):
+        return _ok({"contacts": []})
+    transport = request.query.get("transport") or None
+    return _ok({"contacts": hub.get_contacts(transport)})
+
+
+async def handle_message_stats(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/stats — Message counts by transport and direction."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_stats"):
+        return _ok({"stats": {}})
+    return _ok({"stats": hub.get_stats()})
+
+
+def setup_service_routes(app: aiohttp.web.Application) -> None:
+    """Register plugin service API routes."""
+    # LoRa
+    app.router.add_get("/api/lora", handle_lora_diagnostics)
+    app.router.add_post("/api/lora/announce_mode", handle_lora_announce_mode)
+    # Data plugins
+    app.router.add_get("/api/alerts", handle_alerts)
+    app.router.add_get("/api/files", handle_files)
+    app.router.add_get("/api/sensors", handle_sensors)
+    app.router.add_get("/api/sensors/history", handle_sensor_history)
+    app.router.add_get("/api/emergency", handle_emergency)
+    # NomadNet
+    app.router.add_get("/api/nomadnet/auth", handle_nomadnet_auth)
+    app.router.add_post("/api/nomadnet/auth/add", handle_nomadnet_auth_add)
+    app.router.add_post("/api/nomadnet/auth/remove", handle_nomadnet_auth_remove)
+    # Meshtastic
+    app.router.add_get("/api/meshtastic/status", handle_meshtastic_status)
+    app.router.add_get("/api/meshtastic/nodes", handle_meshtastic_nodes)
+    # Messaging
+    app.router.add_get("/api/messages", handle_messages)
+    app.router.add_post("/api/messages/send", handle_send_message)
+    app.router.add_get("/api/messages/transports", handle_transports)
+    app.router.add_get("/api/messages/contacts", handle_contacts)
+    app.router.add_get("/api/messages/stats", handle_message_stats)

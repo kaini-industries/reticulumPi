@@ -6,7 +6,7 @@ import asyncio
 import json
 from unittest.mock import MagicMock
 
-from reticulumpi.builtin_plugins.web_dashboard.api import handle_routing
+from reticulumpi.builtin_plugins.web_dashboard.api_mesh import handle_routing
 
 
 def _make_request(query_string="", conn_mon=None):
