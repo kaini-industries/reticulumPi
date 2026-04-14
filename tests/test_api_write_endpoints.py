@@ -590,7 +590,7 @@ class TestHandleLoraAnnounceMode:
         assert "rnsd" in data["error"].lower() or "restart" in data["error"].lower()
 
     def test_plugin_not_available(self):
-        """When lora_diagnostics plugin is not loaded, returns graceful message."""
+        """When lora_diagnostics plugin is not loaded, returns 503."""
         plugin = MagicMock()
         plugin.app.get_plugin.return_value = None
         request = _make_request(body={"mode": "all"}, plugin_mock=plugin)
@@ -598,9 +598,9 @@ class TestHandleLoraAnnounceMode:
         resp = asyncio.run(handle_lora_announce_mode(request))
         data = _parse_response(resp)
 
-        # The handler returns _ok with error field (not a 4xx/5xx)
-        assert data["ok"] is True
-        assert "not available" in data["data"]["error"]
+        assert resp.status == 503
+        assert data["ok"] is False
+        assert "not available" in data["error"]
 
     def test_plugin_missing_method(self):
         """Plugin exists but lacks set_announce_mode attribute."""
@@ -612,8 +612,9 @@ class TestHandleLoraAnnounceMode:
         resp = asyncio.run(handle_lora_announce_mode(request))
         data = _parse_response(resp)
 
-        assert data["ok"] is True
-        assert "not available" in data["data"]["error"]
+        assert resp.status == 503
+        assert data["ok"] is False
+        assert "not available" in data["error"]
 
     def test_invalid_json_body(self):
         """When request body is not valid JSON."""

@@ -35,7 +35,7 @@ async def handle_lora_announce_mode(
     plugin = _get_plugin(request)
     lora = plugin.app.get_plugin("lora_diagnostics")
     if not lora or not hasattr(lora, "set_announce_mode"):
-        return _ok({"error": "lora_diagnostics plugin not available"})
+        return _error("lora_diagnostics plugin not available", 503)
 
     try:
         body = await request.json()
