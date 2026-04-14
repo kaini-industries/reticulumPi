@@ -35,6 +35,25 @@ _DEFAULT_BEACON_INTERVAL = 120
 _MIN_MONITOR_INTERVAL = 10
 _MIN_BEACON_INTERVAL = 30
 
+# Announce mode presets
+ANNOUNCE_MODES = {
+    "all": {
+        "announce_cap": "5",
+        "interface_mode": None,  # remove interface_mode line (defaults to full)
+        "description": "Full announce forwarding, ~10 announces/min on LoRa",
+    },
+    "local_priority": {
+        "announce_cap": "1",
+        "interface_mode": None,
+        "description": "Local announces get priority, TCP announces barely trickle",
+    },
+    "silent": {
+        "announce_cap": None,  # don't change
+        "interface_mode": "access_point",
+        "description": "Zero announces on LoRa, path requests still work",
+    },
+}
+
 
 class LoRaDiagnosticsPlugin(PluginBase):
     """LoRa-specific diagnostics and announce beaconing for microReticulum interop."""
@@ -162,6 +181,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
                         "last_path_check": info["last_path_check"],
                     }
                 )
+            current_mode = self._detect_announce_mode()
             return {
                 "lora_interface": dict(self._lora_stats),
                 "monitored_destinations": monitored,
@@ -172,7 +192,127 @@ class LoRaDiagnosticsPlugin(PluginBase):
                         "beacon_interval", _DEFAULT_BEACON_INTERVAL
                     ),
                 },
+                "announce_mode": {
+                    "current": current_mode,
+                    "available": list(ANNOUNCE_MODES.keys()),
+                    "description": ANNOUNCE_MODES.get(
+                        current_mode, {}
+                    ).get("description", "unknown"),
+                },
             }
+
+    def set_announce_mode(self, mode: str) -> dict[str, Any]:
+        """Change the LoRa announce mode by modifying rnsd config and restarting.
+
+        Returns a dict with the result or raises ValueError for invalid modes.
+        """
+        import subprocess
+
+        from reticulumpi.rns_config import (
+            parse_rns_config,
+            parse_rns_config_from_lines,
+            remove_interface_property,
+            set_interface_property,
+            write_rns_config,
+        )
+
+        if mode not in ANNOUNCE_MODES:
+            raise ValueError(
+                f"Invalid mode '{mode}'. Must be one of: {', '.join(ANNOUNCE_MODES)}"
+            )
+
+        preset = ANNOUNCE_MODES[mode]
+        rns_config_path = self._get_rns_config_path()
+        iface_name = self.config.get("lora_interface_name", "RNode LoRa Interface")
+
+        lines, interfaces = parse_rns_config(rns_config_path)
+        rnode = None
+        for iface in interfaces:
+            if iface_name in iface.name:
+                rnode = iface
+                break
+
+        if not rnode:
+            raise RuntimeError(
+                f"RNode interface '{iface_name}' not found in {rns_config_path}"
+            )
+
+        # Apply announce_cap
+        if preset["announce_cap"] is not None:
+            lines = set_interface_property(
+                lines, rnode, "announce_cap", preset["announce_cap"]
+            )
+            # Re-parse to get updated line positions after insertion
+            lines, interfaces = parse_rns_config_from_lines(lines)
+            rnode = next(
+                (i for i in interfaces if iface_name in i.name), rnode
+            )
+
+        # Apply interface_mode
+        if preset["interface_mode"] is not None:
+            lines = set_interface_property(
+                lines, rnode, "interface_mode", preset["interface_mode"]
+            )
+        else:
+            # Remove interface_mode line if present (defaults to full)
+            lines = remove_interface_property(lines, rnode, "interface_mode")
+
+        write_rns_config(rns_config_path, lines)
+        self.log.info(
+            "LoRa announce mode set to '%s' — restarting rnsd", mode
+        )
+
+        # Restart rnsd — reticulumpi will auto-recover via Restart=always
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "rnsd"],
+                timeout=15,
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.TimeoutExpired:
+            self.log.warning("rnsd restart timed out")
+        except subprocess.CalledProcessError as exc:
+            self.log.error("rnsd restart failed: %s", exc.stderr.decode())
+            raise RuntimeError(f"rnsd restart failed: {exc.stderr.decode()}")
+
+        return {
+            "mode": mode,
+            "description": preset["description"],
+            "rnsd_restarted": True,
+        }
+
+    def _detect_announce_mode(self) -> str:
+        """Read current rnsd config to determine active announce mode."""
+        try:
+            from reticulumpi.rns_config import parse_rns_config
+
+            rns_config_path = self._get_rns_config_path()
+            _, interfaces = parse_rns_config(rns_config_path)
+            iface_name = self.config.get(
+                "lora_interface_name", "RNode LoRa Interface"
+            )
+            for iface in interfaces:
+                if iface_name in iface.name:
+                    imode = iface.properties.get("interface_mode", "").lower()
+                    cap = iface.properties.get("announce_cap", "2")
+                    if imode in ("access_point", "accesspoint", "ap"):
+                        return "silent"
+                    try:
+                        cap_val = float(cap)
+                    except (ValueError, TypeError):
+                        cap_val = 2.0
+                    if cap_val <= 1.0:
+                        return "local_priority"
+                    return "all"
+        except Exception:
+            pass
+        return "unknown"
+
+    def _get_rns_config_path(self) -> str:
+        """Resolve the rnsd Reticulum config path."""
+        # rnsd runs as the reticulumpi user with its own config dir
+        return "/home/reticulumpi/.reticulum/config"
 
     # ------------------------------------------------------------------
     # Monitor thread — poll interface stats + check paths

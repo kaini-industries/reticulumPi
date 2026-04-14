@@ -495,6 +495,112 @@ class TestInterfaceStats:
         plugin.stop()
 
     @patch("RNS.Transport")
+    def test_diagnostics_includes_announce_mode(self, mock_transport, mock_app, base_config):
+        """Diagnostics response includes current announce mode info."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        # Mock _detect_announce_mode to avoid filesystem access
+        plugin._detect_announce_mode = lambda: "all"
+
+        diag = plugin.get_diagnostics()
+        assert "announce_mode" in diag
+        assert diag["announce_mode"]["current"] == "all"
+        assert "all" in diag["announce_mode"]["available"]
+        assert "local_priority" in diag["announce_mode"]["available"]
+        assert "silent" in diag["announce_mode"]["available"]
+        plugin.stop()
+
+
+class TestAnnounceMode:
+    @patch("RNS.Transport")
+    def test_set_invalid_mode_raises(self, mock_transport, mock_app, base_config):
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        with pytest.raises(ValueError, match="Invalid mode"):
+            plugin.set_announce_mode("invalid_mode")
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    def test_detect_mode_all(self, mock_transport, mock_app, base_config):
+        """Detect 'all' mode from config with announce_cap > 1."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        from reticulumpi.rns_config import InterfaceEntry
+        iface = InterfaceEntry(
+            name="RNode LoRa Interface",
+            properties={"announce_cap": "5"},
+        )
+        with patch(
+            "reticulumpi.rns_config.parse_rns_config",
+            return_value=([], [iface]),
+        ):
+            mode = plugin._detect_announce_mode()
+            assert mode == "all"
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    def test_detect_mode_local_priority(self, mock_transport, mock_app, base_config):
+        """Detect 'local_priority' mode from config with announce_cap <= 1."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        from reticulumpi.rns_config import InterfaceEntry
+        iface = InterfaceEntry(
+            name="RNode LoRa Interface",
+            properties={"announce_cap": "1"},
+        )
+        with patch(
+            "reticulumpi.rns_config.parse_rns_config",
+            return_value=([], [iface]),
+        ):
+            mode = plugin._detect_announce_mode()
+            assert mode == "local_priority"
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    def test_detect_mode_silent(self, mock_transport, mock_app, base_config):
+        """Detect 'silent' mode from config with interface_mode=access_point."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        from reticulumpi.rns_config import InterfaceEntry
+        iface = InterfaceEntry(
+            name="RNode LoRa Interface",
+            properties={"interface_mode": "access_point", "announce_cap": "5"},
+        )
+        with patch(
+            "reticulumpi.rns_config.parse_rns_config",
+            return_value=([], [iface]),
+        ):
+            mode = plugin._detect_announce_mode()
+            assert mode == "silent"
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    def test_detect_mode_handles_parse_error(self, mock_transport, mock_app, base_config):
+        """Detection gracefully handles config parse errors."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        with patch(
+            "reticulumpi.rns_config.parse_rns_config",
+            side_effect=FileNotFoundError("no config"),
+        ):
+            mode = plugin._detect_announce_mode()
+            assert mode == "unknown"
+        plugin.stop()
+
+
+# ---------------------------------------------------------------------------
+# Interface stats polling
+# ---------------------------------------------------------------------------
+
+
+class TestInterfaceStats:
+    @patch("RNS.Transport")
     def test_delta_tracking(self, mock_transport, mock_app, base_config):
         mock_app.reticulum.get_interface_stats.return_value = {
             "interfaces": [
