@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import logging
 import os
 import secrets
+import sqlite3
 import time
 from typing import Any
 
@@ -151,6 +153,87 @@ class RateLimiter:
                 del self._attempts[ip]
 
 
+class SqliteSessionStore:
+    """Dict-like session store backed by SQLite for persistence across restarts.
+
+    Implements the subset of dict interface used by AuthManager: get, set,
+    delete, pop, len, contains, items, and iteration over keys.
+    """
+
+    def __init__(self, db_path: str):
+        self._db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "  token TEXT PRIMARY KEY,"
+            "  data TEXT NOT NULL"
+            ")"
+        )
+        self._conn.commit()
+
+    def __getitem__(self, token: str) -> dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT data FROM sessions WHERE token = ?", (token,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(token)
+        return json.loads(row[0])
+
+    def __setitem__(self, token: str, value: dict[str, Any]) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO sessions (token, data) VALUES (?, ?)",
+            (token, json.dumps(value)),
+        )
+        self._conn.commit()
+
+    def __delitem__(self, token: str) -> None:
+        cursor = self._conn.execute(
+            "DELETE FROM sessions WHERE token = ?", (token,)
+        )
+        self._conn.commit()
+        if cursor.rowcount == 0:
+            raise KeyError(token)
+
+    def __contains__(self, token: object) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sessions WHERE token = ?", (token,)
+        ).fetchone()
+        return row is not None
+
+    def __len__(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+        return row[0] if row else 0
+
+    def __iter__(self):
+        rows = self._conn.execute("SELECT token FROM sessions").fetchall()
+        return iter(r[0] for r in rows)
+
+    def get(self, token: str, default: Any = None) -> Any:
+        try:
+            return self[token]
+        except KeyError:
+            return default
+
+    def pop(self, token: str, *args: Any) -> Any:
+        try:
+            value = self[token]
+            del self[token]
+            return value
+        except KeyError:
+            if args:
+                return args[0]
+            raise
+
+    def items(self):
+        rows = self._conn.execute("SELECT token, data FROM sessions").fetchall()
+        return [(r[0], json.loads(r[1])) for r in rows]
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 class AuthManager:
     """Manages password verification, session tokens, and rate limiting."""
 
@@ -160,6 +243,7 @@ class AuthManager:
         plaintext_password: str | None = None,
         session_timeout: float = 86400,
         max_sessions: int = 5,
+        session_db_path: str | None = None,
     ):
         if password_hash:
             self._password_hash = password_hash
@@ -170,7 +254,13 @@ class AuthManager:
 
         self.session_timeout = session_timeout
         self.max_sessions = max_sessions
-        self.sessions: dict[str, dict[str, Any]] = {}
+        if session_db_path:
+            self.sessions: dict[str, dict[str, Any]] | SqliteSessionStore = (
+                SqliteSessionStore(session_db_path)
+            )
+            log.info("Using persistent session store: %s", session_db_path)
+        else:
+            self.sessions = {}
         self.rate_limiter = RateLimiter()
 
     def login(self, password: str, remote_ip: str) -> str | None:

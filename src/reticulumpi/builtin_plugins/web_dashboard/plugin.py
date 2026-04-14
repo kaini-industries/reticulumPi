@@ -125,11 +125,18 @@ class WebDashboardPlugin(PluginBase):
                 "'reticulumpi --hash-password' and set password_hash instead."
             )
 
+        # Session persistence — store sessions in SQLite so they survive restarts
+        secret_dir_resolved = os.path.expanduser(
+            self.config.get("secret_dir", "~/.config/reticulumpi")
+        )
+        session_db = os.path.join(secret_dir_resolved, "sessions.db")
+
         self._auth = AuthManager(
             password_hash=password_hash,
             plaintext_password=plaintext_password,
             session_timeout=self.config.get("session_timeout", 86400),
             max_sessions=self.config.get("max_sessions", 5),
+            session_db_path=session_db,
         )
 
         ssl_ctx = self._setup_ssl()

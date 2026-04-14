@@ -231,6 +231,170 @@ class TestAuthManager:
         assert mgr.cleanup_expired_sessions() == 0
 
 
+# --- SQLite session persistence tests ---
+
+
+class TestSqliteSessionStore:
+    def test_basic_operations(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store = SqliteSessionStore(db)
+
+        # set and get
+        store["tok1"] = {"created_at": 1.0, "last_seen": 1.0, "remote_ip": "1.2.3.4"}
+        assert store["tok1"]["remote_ip"] == "1.2.3.4"
+        assert "tok1" in store
+        assert len(store) == 1
+
+        # delete
+        del store["tok1"]
+        assert "tok1" not in store
+        assert len(store) == 0
+        store.close()
+
+    def test_persistence_across_instances(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store1 = SqliteSessionStore(db)
+        store1["tok1"] = {"created_at": 1.0, "last_seen": 1.0, "remote_ip": "1.2.3.4"}
+        store1.close()
+
+        # Open a new instance — data should persist
+        store2 = SqliteSessionStore(db)
+        assert "tok1" in store2
+        assert store2["tok1"]["remote_ip"] == "1.2.3.4"
+        store2.close()
+
+    def test_pop(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store = SqliteSessionStore(db)
+        store["tok1"] = {"created_at": 1.0, "last_seen": 1.0, "remote_ip": "x"}
+
+        val = store.pop("tok1", None)
+        assert val["remote_ip"] == "x"
+        assert "tok1" not in store
+
+        # pop missing key with default
+        assert store.pop("missing", None) is None
+        store.close()
+
+    def test_get_default(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store = SqliteSessionStore(db)
+        assert store.get("missing") is None
+        assert store.get("missing", "fallback") == "fallback"
+        store.close()
+
+    def test_items(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store = SqliteSessionStore(db)
+        store["a"] = {"v": 1}
+        store["b"] = {"v": 2}
+        items = dict(store.items())
+        assert items["a"]["v"] == 1
+        assert items["b"]["v"] == 2
+        store.close()
+
+    def test_iter(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store = SqliteSessionStore(db)
+        store["a"] = {"v": 1}
+        store["b"] = {"v": 2}
+        keys = list(store)
+        assert set(keys) == {"a", "b"}
+        store.close()
+
+    def test_keyerror_on_missing(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store = SqliteSessionStore(db)
+        with pytest.raises(KeyError):
+            _ = store["missing"]
+        with pytest.raises(KeyError):
+            del store["missing"]
+        store.close()
+
+
+class TestAuthManagerPersistent:
+    def test_sessions_survive_restart(self, tmp_path):
+        """Sessions persist across AuthManager instances via SQLite."""
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        db = str(tmp_path / "sessions.db")
+        mgr1 = AuthManager(
+            plaintext_password="test",
+            session_db_path=db,
+        )
+        token = mgr1.login("test", "127.0.0.1")
+        assert token is not None
+        assert mgr1.validate_token(token)
+
+        # Create a new manager pointing to the same DB — simulates restart
+        mgr2 = AuthManager(
+            plaintext_password="test",
+            session_db_path=db,
+        )
+        assert mgr2.validate_token(token)
+
+    def test_eviction_works_with_sqlite(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        db = str(tmp_path / "sessions.db")
+        mgr = AuthManager(
+            plaintext_password="test",
+            max_sessions=2,
+            session_db_path=db,
+        )
+        t1 = mgr.login("test", "10.0.0.1")
+        time.sleep(0.01)
+        t2 = mgr.login("test", "10.0.0.2")
+        time.sleep(0.01)
+        t3 = mgr.login("test", "10.0.0.3")
+
+        # Oldest (t1) should be evicted
+        assert not mgr.validate_token(t1)
+        assert mgr.validate_token(t3)
+
+    def test_cleanup_with_sqlite(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        db = str(tmp_path / "sessions.db")
+        mgr = AuthManager(
+            plaintext_password="test",
+            session_timeout=0.01,
+            session_db_path=db,
+        )
+        mgr.login("test", "10.0.0.1")
+        mgr.login("test", "10.0.0.2")
+        time.sleep(0.05)
+        removed = mgr.cleanup_expired_sessions()
+        assert removed == 2
+        assert len(mgr.sessions) == 0
+
+    def test_logout_with_sqlite(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        db = str(tmp_path / "sessions.db")
+        mgr = AuthManager(
+            plaintext_password="test",
+            session_db_path=db,
+        )
+        token = mgr.login("test", "127.0.0.1")
+        mgr.logout(token)
+        assert not mgr.validate_token(token)
+
+
 # --- Plugin config validation tests ---
 
 
