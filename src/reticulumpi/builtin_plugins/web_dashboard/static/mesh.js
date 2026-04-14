@@ -27,19 +27,14 @@
   var _peerVisible = 12;
 
   // Sorting is now server-side. This map translates UI sort keys to API params.
+  var _di = R._di;
+
   var _meshSortMap = {
     'score': 'score',
     'hops': 'hops',
     'last_seen': 'last_seen',
     'announce_count': 'announce_count'
   };
-
-  function _di(label, value, cls) {
-    return '<div class="node-detail-item">'
-      + '<span class="node-detail-label">' + label + '</span>'
-      + '<span class="node-detail-value' + (cls ? ' ' + cls : '') + '">' + value + '</span>'
-      + '</div>';
-  }
 
   function _reachBadgeHTML(score, label) {
     var cls = 'reach-' + (label || 'unlikely').toLowerCase();

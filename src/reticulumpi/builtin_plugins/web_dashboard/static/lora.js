@@ -6,17 +6,12 @@
   var formatTimeAgo = R.formatTimeAgo, formatBytes = R.formatBytes;
   var markUpdated = R.markUpdated;
 
+  var _di = R._di;
+
   var _currentLoraAnnounceMode = 'all';
   var _loraNodes = [];
   var _loraExpandedHash = null;
   var _loraSignal = { rssi: null, snr: null }; // from interface stats
-
-  function _di(label, value, cls) {
-    return '<div class="node-detail-item">'
-      + '<span class="node-detail-label">' + label + '</span>'
-      + '<span class="node-detail-value' + (cls ? ' ' + cls : '') + '">' + value + '</span>'
-      + '</div>';
-  }
 
   function _reachBadgeHTML(score, label) {
     var cls = 'reach-' + (label || 'unlikely').toLowerCase();
