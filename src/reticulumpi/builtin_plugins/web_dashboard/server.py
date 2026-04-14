@@ -15,6 +15,7 @@ PUBLIC_PATHS = frozenset({
     "/login.html",
     "/api/auth/login",
     "/auth/login",
+    "/api/version",
 })
 
 # Static file prefixes that are public
@@ -57,7 +58,9 @@ async def security_headers_middleware(
     request: aiohttp.web.Request,
     handler,
 ) -> aiohttp.web.StreamResponse:
-    """Add security headers to all responses."""
+    """Add security headers and API version to all responses."""
+    from reticulumpi.builtin_plugins.web_dashboard.api import API_VERSION
+
     response = await handler(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -66,6 +69,8 @@ async def security_headers_middleware(
         "style-src 'self' 'unsafe-inline'"
     )
     response.headers["Referrer-Policy"] = "no-referrer"
+    if request.path.startswith("/api/"):
+        response.headers["Api-Version"] = API_VERSION
     return response
 
 

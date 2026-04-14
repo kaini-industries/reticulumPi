@@ -18,6 +18,11 @@ if TYPE_CHECKING:
 
 SENSITIVE_KEYS = frozenset({"password", "password_hash"})
 
+# API version — bump when making breaking changes to response schemas.
+# Included in all API responses via the Api-Version header so clients
+# can detect incompatibilities before they parse the response body.
+API_VERSION = "1.0"
+
 
 # ── Shared utilities (imported by sub-modules) ───────────────────────
 
@@ -144,6 +149,8 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
         setup_service_routes,
     )
 
+    # Version
+    app.router.add_get("/api/version", handle_version)
     # Auth
     app.router.add_post("/api/auth/login", handle_login)
     app.router.add_post("/auth/login", handle_form_login)
@@ -160,6 +167,18 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     setup_interface_routes(app)
     setup_mesh_routes(app)
     setup_service_routes(app)
+
+
+# ── Version endpoint ─────────────────────────────────────────────────
+
+
+async def handle_version(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/version — API version and compatibility info."""
+    plugin = _get_plugin(request)
+    return _ok({
+        "api_version": API_VERSION,
+        "app_version": plugin.app._get_version(),
+    })
 
 
 # ── Auth endpoints ───────────────────────────────────────────────────
