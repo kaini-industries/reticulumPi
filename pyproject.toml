@@ -35,6 +35,9 @@ meshtastic = [
     "paho-mqtt>=2.0,<3.0",
     "cryptography>=3.0,<5.0",
 ]
+meshcore = [
+    "meshcore>=2.3,<3.0",
+]
 dev = [
     "pytest>=7.4,<9.0",
     "pytest-cov",

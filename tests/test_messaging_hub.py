@@ -1,13 +1,14 @@
 """Tests for the messaging_hub plugin."""
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 import RNS as _RNS
 
 from reticulumpi.builtin_plugins.messaging_hub import (
     LXMFAdapter,
+    MeshCoreAdapter,
     MeshtasticAdapter,
     MessageStore,
     MessagingHubPlugin,
@@ -37,6 +38,7 @@ def hub_plugin(mock_app, tmp_path):
         "message_history_limit": 100,
         "lxmf": {"enabled": False},
         "meshtastic": {"enabled": False},
+        "meshcore": {"enabled": False},
     }
     plugin = MessagingHubPlugin(mock_app, config)
     plugin.start()
@@ -56,6 +58,7 @@ def hub_with_lxmf(mock_app, tmp_path):
             "display_name": "Test Messages",
         },
         "meshtastic": {"enabled": False},
+        "meshcore": {"enabled": False},
     }
     mock_identity = MagicMock()
     mock_identity.hash = b"\x01" * 16
@@ -711,7 +714,9 @@ class TestMeshtasticAdapter:
         adapter = MeshtasticAdapter(hub)
         result = adapter.send("Hello mesh!", "!abcd1234")
 
-        gw.send_message.assert_called_once_with("Hello mesh!", destination_id="!abcd1234", via="lora")
+        gw.send_message.assert_called_once_with(
+            "Hello mesh!", destination_id="!abcd1234", via="lora", on_ack=ANY,
+        )
         assert result["sent"] is True
 
     def test_send_broadcast(self, mock_app):
@@ -726,7 +731,9 @@ class TestMeshtasticAdapter:
         adapter = MeshtasticAdapter(hub)
         result = adapter.send("Hello all!", "broadcast")
 
-        gw.send_message.assert_called_once_with("Hello all!", destination_id=None, via="")
+        gw.send_message.assert_called_once_with(
+            "Hello all!", destination_id=None, via="", on_ack=ANY,
+        )
         assert result["sent"] is True
 
     def test_send_via_lora(self, mock_app):
@@ -741,7 +748,9 @@ class TestMeshtasticAdapter:
         adapter = MeshtasticAdapter(hub)
         result = adapter.send("Local msg!", "broadcast", sub_transport="lora")
 
-        gw.send_message.assert_called_once_with("Local msg!", destination_id=None, via="lora")
+        gw.send_message.assert_called_once_with(
+            "Local msg!", destination_id=None, via="lora", on_ack=ANY,
+        )
         assert result["sent"] is True
 
     def test_send_gateway_unavailable(self, mock_app):
@@ -894,3 +903,246 @@ class TestHubWithLXMF:
         lxmf = next(t for t in transports if t["name"] == "lxmf")
         assert "address" in lxmf
         assert lxmf["address"] == (b"\x01" * 16).hex()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Delivery Tracking
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestLXMFDeliveryTracking:
+    def test_lxmf_delivery_callback_updates_status(self, mock_app, tmp_path):
+        """LXMF delivery callback updates the message status in the store."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.config = {"lxmf": {"storage_path": str(tmp_path / "lxmf")}}
+        hub.log = MagicMock()
+
+        adapter = LXMFAdapter(hub)
+        # Track a pending message
+        adapter.track_pending(42, "aabbccdd")
+        assert "aabbccdd" in adapter.get_pending_delivery()
+
+        # Simulate delivery
+        import LXMF
+
+        fake_msg = MagicMock()
+        fake_msg.hash = bytes.fromhex("aabbccdd")
+        fake_msg.state = LXMF.LXMessage.DELIVERED
+
+        adapter._on_lxmf_delivery(fake_msg)
+
+        hub._on_delivery_status_update.assert_called_once_with(
+            42, "lxmf", "delivered",
+        )
+        assert "aabbccdd" not in adapter.get_pending_delivery()
+
+    def test_lxmf_propagated_callback(self, mock_app, tmp_path):
+        """LXMF propagated state sets status to 'propagated'."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.config = {"lxmf": {"storage_path": str(tmp_path / "lxmf")}}
+        hub.log = MagicMock()
+
+        adapter = LXMFAdapter(hub)
+        adapter.track_pending(43, "11223344")
+
+        import LXMF
+
+        fake_msg = MagicMock()
+        fake_msg.hash = bytes.fromhex("11223344")
+        fake_msg.state = LXMF.LXMessage.SENT  # propagated, not delivered
+
+        adapter._on_lxmf_delivery(fake_msg)
+        hub._on_delivery_status_update.assert_called_once_with(
+            43, "lxmf", "propagated",
+        )
+
+    def test_lxmf_failed_callback(self, mock_app, tmp_path):
+        """LXMF failed callback updates status to delivery_failed."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.config = {"lxmf": {"storage_path": str(tmp_path / "lxmf")}}
+        hub.log = MagicMock()
+
+        adapter = LXMFAdapter(hub)
+        adapter.track_pending(44, "deadbeef")
+
+        fake_msg = MagicMock()
+        fake_msg.hash = bytes.fromhex("deadbeef")
+
+        adapter._on_lxmf_failed(fake_msg)
+        hub._on_delivery_status_update.assert_called_once_with(
+            44, "lxmf", "delivery_failed",
+        )
+
+    def test_lxmf_callback_ignores_unknown_hash(self, mock_app, tmp_path):
+        """Callbacks for messages we aren't tracking are silently ignored."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.config = {"lxmf": {"storage_path": str(tmp_path / "lxmf")}}
+        hub.log = MagicMock()
+
+        import LXMF
+
+        adapter = LXMFAdapter(hub)
+        fake_msg = MagicMock()
+        fake_msg.hash = bytes.fromhex("00000000")
+        fake_msg.state = LXMF.LXMessage.DELIVERED
+
+        adapter._on_lxmf_delivery(fake_msg)
+        hub._on_delivery_status_update.assert_not_called()
+
+
+class TestMeshtasticDeliveryTracking:
+    def test_ack_callback_updates_status(self, mock_app):
+        """Meshtastic ack callback triggers a delivery status update."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        adapter = MeshtasticAdapter(hub)
+        adapter.track_pending(50, "serial")
+        assert "50" in adapter.get_pending_delivery()
+
+        # Simulate the on_ack closure being called with acked=True
+        # We need to go through the actual send flow to get the closure
+        gw = MagicMock()
+        gw.send_message.return_value = {"sent": True, "ack_tracking": "serial"}
+        mock_app.get_plugin.return_value = gw
+
+        result = adapter.send("Test!", "!abcd1234")
+
+        # Extract the on_ack callback from the gateway call
+        call_kwargs = gw.send_message.call_args[1]
+        on_ack = call_kwargs["on_ack"]
+
+        # Bind msg_id via the _ack_holder mechanism
+        ack_holder = result.get("_ack_holder")
+        assert ack_holder is not None
+        ack_holder["msg_id"] = 55
+
+        # Simulate ack
+        on_ack(True)
+        hub._on_delivery_status_update.assert_called_once_with(
+            55, "meshtastic", "delivered",
+        )
+
+    def test_nak_callback_sets_delivery_failed(self, mock_app):
+        """Meshtastic nak sets delivery_failed."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        gw = MagicMock()
+        gw.send_message.return_value = {"sent": True, "ack_tracking": "serial"}
+        mock_app.get_plugin.return_value = gw
+
+        adapter = MeshtasticAdapter(hub)
+        result = adapter.send("Test!", "!abcd1234")
+
+        call_kwargs = gw.send_message.call_args[1]
+        on_ack = call_kwargs["on_ack"]
+
+        ack_holder = result.get("_ack_holder")
+        ack_holder["msg_id"] = 56
+
+        on_ack(False)
+        hub._on_delivery_status_update.assert_called_once_with(
+            56, "meshtastic", "delivery_failed",
+        )
+
+
+class TestMeshCoreDeliveryTracking:
+    def test_ack_event_updates_status(self, mock_app):
+        """MeshCore ACK event triggers delivery status update."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        adapter = MeshCoreAdapter(hub)
+        adapter.track_pending(60, "abcd1234")
+        assert "abcd1234" in adapter.get_pending_delivery()
+
+        # Simulate ACK event
+        adapter._on_meshcore_ack(
+            events.MESHCORE_MESSAGE_ACKED,
+            {"ack_code": "abcd1234"},
+        )
+
+        hub._on_delivery_status_update.assert_called_once_with(
+            60, "meshcore", "delivered",
+        )
+        assert "abcd1234" not in adapter.get_pending_delivery()
+
+    def test_ack_event_ignores_unknown_code(self, mock_app):
+        """ACK for unknown ack_code is silently ignored."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        adapter = MeshCoreAdapter(hub)
+        adapter._on_meshcore_ack(
+            events.MESHCORE_MESSAGE_ACKED,
+            {"ack_code": "unknown"},
+        )
+        hub._on_delivery_status_update.assert_not_called()
+
+
+class TestHubDeliveryStatus:
+    def test_on_delivery_status_update(self, hub_plugin):
+        """_on_delivery_status_update persists status and publishes event."""
+        msg_id = hub_plugin._store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
+
+        msg = hub_plugin._store.get_message(msg_id)
+        assert msg["status"] == "delivered"
+        hub_plugin.event_bus.publish.assert_any_call(
+            events.MESSAGE_DELIVERED,
+            pytest.approx({
+                "id": msg_id,
+                "transport": "lxmf",
+                "status": "delivered",
+                "timestamp": pytest.approx(time.time(), abs=2),
+            }),
+        )
+
+    def test_status_updates_since(self, hub_plugin):
+        """get_status_updates_since returns recent delivery updates."""
+        msg_id = hub_plugin._store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        before = time.time() - 1
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
+
+        updates = hub_plugin.get_status_updates_since(before)
+        assert len(updates) == 1
+        assert updates[0]["id"] == msg_id
+        assert updates[0]["status"] == "delivered"
+
+    def test_expire_stale_pending(self, hub_plugin):
+        """expire_stale_pending marks old entries as timeout."""
+        # Register a mock adapter with a stale pending entry
+        adapter = MagicMock(spec=LXMFAdapter)
+        adapter.transport_name = "test_lxmf"
+        adapter.display_name = "Test LXMF"
+        adapter._pending_lock = __import__("threading").Lock()
+        adapter._pending_delivery = {
+            "stale_hash": {"msg_id": 99, "timestamp": time.time() - 600},
+        }
+        adapter.get_pending_delivery.return_value = dict(adapter._pending_delivery)
+        adapter.track_pending = MagicMock()
+        hub_plugin.register_adapter(adapter)
+
+        # Store a message to update
+        hub_plugin._store.store(
+            transport="test_lxmf", direction="sent", msg_type="direct",
+            text="Stale", status="sent",
+        )
+
+        expired = hub_plugin.expire_stale_pending(max_age=300)
+        assert expired == 1

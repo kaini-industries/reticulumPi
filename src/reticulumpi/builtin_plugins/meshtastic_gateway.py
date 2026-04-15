@@ -1979,6 +1979,7 @@ class MeshtasticGateway(PluginBase):
         destination_id: str | None = None,
         channel: int | None = None,
         via: str = "",
+        on_ack: Any = None,
     ) -> dict[str, Any]:
         """Send a text message to the Meshtastic mesh.
 
@@ -1991,10 +1992,15 @@ class MeshtasticGateway(PluginBase):
             via: Send route — ``"lora"`` to send via the local serial radio
                 instead of the MQTT client.  Falls back to MQTT if the
                 serial listener is unavailable.
+            on_ack: Optional callback ``(acked: bool) -> None`` invoked when
+                a delivery ack or nak is received.  Only works for direct
+                messages sent via the serial (LoRa) interface.
 
         Returns:
-            ``{"sent": True, "truncated": bool}`` on success, or
-            ``{"sent": False, "reason": str}`` on failure.
+            ``{"sent": True, "truncated": bool, "ack_tracking": str|None}``
+            on success, or ``{"sent": False, "reason": str}`` on failure.
+            ``ack_tracking`` is ``"serial"`` when ack callbacks are active,
+            ``None`` when acks are not available (MQTT or broadcast).
         """
         if not self._check_send_rate_limit():
             return {"sent": False, "reason": "rate_limited"}
@@ -2010,14 +2016,28 @@ class MeshtasticGateway(PluginBase):
 
         ch = channel if channel is not None else self.config.get("meshtastic_channel", 0)
         truncated = len(text.encode("utf-8")) > MESHTASTIC_MTU
-        via_label = "LoRa" if iface is self._serial_listener else "MQTT"
+        is_serial = iface is self._serial_listener
+        via_label = "LoRa" if is_serial else "MQTT"
+
+        # Ack tracking is only possible for direct messages via serial
+        can_ack = bool(is_serial and destination_id and on_ack)
 
         try:
             if destination_id:
-                iface.sendText(
-                    text[:MESHTASTIC_MTU], channelIndex=ch,
-                    destinationId=destination_id,
-                )
+                if can_ack:
+                    # Serial interface supports wantAck + onResponse
+                    iface.sendText(
+                        text[:MESHTASTIC_MTU], channelIndex=ch,
+                        destinationId=destination_id,
+                        wantAck=True,
+                        onResponse=self._make_ack_handler(on_ack),
+                        onResponseAckPermitted=True,
+                    )
+                else:
+                    iface.sendText(
+                        text[:MESHTASTIC_MTU], channelIndex=ch,
+                        destinationId=destination_id,
+                    )
             else:
                 iface.sendText(text[:MESHTASTIC_MTU], channelIndex=ch)
         except Exception as exc:
@@ -2040,7 +2060,29 @@ class MeshtasticGateway(PluginBase):
             "source": "hub",
         })
 
-        return {"sent": True, "truncated": truncated}
+        return {
+            "sent": True,
+            "truncated": truncated,
+            "ack_tracking": "serial" if can_ack else None,
+        }
+
+    @staticmethod
+    def _make_ack_handler(on_ack: Any) -> Any:
+        """Create a Meshtastic onResponse callback that calls *on_ack(bool)*.
+
+        The meshtastic library invokes ``onResponse(packet_dict)`` when an
+        ack or nak arrives.  We inspect the routing field to determine
+        whether it's an ack (no error) or a nak.
+        """
+        def _handler(packet: dict) -> None:
+            try:
+                routing = (packet or {}).get("decoded", {}).get("routing", {})
+                error = routing.get("errorReason", "NONE")
+                acked = (error == "NONE")
+                on_ack(acked)
+            except Exception:
+                pass
+        return _handler
 
 
 # ---------------------------------------------------------------------------

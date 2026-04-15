@@ -88,17 +88,15 @@ if [ -d "$MESHCHAT_DIR/.git" ]; then
     fi
 fi
 
-# 3. Update systemd service files if they changed (template paths)
+# 3. Update systemd service files if they changed
 echo "[3/5] Updating systemd services..."
 SERVICES_CHANGED=false
 for svc in reticulumpi.service rnsd.service; do
     src="$INSTALL_DIR/systemd/$svc"
     dest="/etc/systemd/system/$svc"
     if [ -f "$src" ] && [ -f "$dest" ]; then
-        # Template install directory paths to match this installation
-        templated=$(sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$src")
-        if ! echo "$templated" | diff -q - "$dest" &>/dev/null; then
-            echo "$templated" | sudo tee "$dest" >/dev/null
+        if ! diff -q "$src" "$dest" &>/dev/null; then
+            sudo cp "$src" "$dest"
             SERVICES_CHANGED=true
             echo "  Updated $svc"
         fi
@@ -107,6 +105,25 @@ done
 if [ "$SERVICES_CHANGED" = true ]; then
     sudo systemctl daemon-reload
 fi
+
+# Validate: warn if any service file paths are unreachable
+for svc in reticulumpi.service; do
+    dest="/etc/systemd/system/$svc"
+    [ -f "$dest" ] || continue
+    execbin=$(grep -oP '^ExecStart=\K\S+' "$dest" || true)
+    if [ -n "$execbin" ] && [ ! -x "$execbin" ]; then
+        echo "  WARNING: ExecStart binary not found: $execbin"
+        echo "           Service may fail to start. Check $dest"
+    fi
+    rwpaths=$(grep -oP '^ReadWritePaths=\K.*' "$dest" || true)
+    for dir in $rwpaths; do
+        parent=$(dirname "$dir")
+        if [ ! -d "$parent" ] && [ ! -d "$dir" ]; then
+            echo "  WARNING: ReadWritePaths target unreachable: $dir"
+            echo "           Parent directory $parent does not exist."
+        fi
+    done
+done
 
 # 4. Ensure all ReadWritePaths directories exist (systemd namespace mount fails otherwise)
 echo "[4/5] Pre-creating ReadWritePaths directories..."

@@ -76,6 +76,13 @@ MESHTASTIC_MESSAGE_RECEIVED = "meshtastic.message_received"
 MESHTASTIC_MESSAGE_SENT = "meshtastic.message_sent"
 MESHTASTIC_NODEINFO_SENT = "meshtastic.nodeinfo_sent"
 
+# MeshCore gateway
+MESHCORE_CONNECTED = "meshcore.connected"
+MESHCORE_DISCONNECTED = "meshcore.disconnected"
+MESHCORE_CONNECT_FAILED = "meshcore.connect_failed"
+MESHCORE_MESSAGE_RECEIVED = "meshcore.message_received"
+MESHCORE_MESSAGE_SENT = "meshcore.message_sent"
+
 # Yggdrasil transport
 YGGDRASIL_ONLINE = "yggdrasil.online"
 YGGDRASIL_OFFLINE = "yggdrasil.offline"
@@ -94,3 +101,10 @@ SHUTDOWN_STARTING = "shutdown.starting"
 MESSAGE_RECEIVED = "messaging.message_received"
 MESSAGE_SENT = "messaging.message_sent"
 MESSAGE_FAILED = "messaging.message_failed"
+MESSAGE_DELIVERED = "messaging.message_delivered"
+
+# Meshtastic message ack/nak
+MESHTASTIC_MESSAGE_ACKED = "meshtastic.message_acked"
+
+# MeshCore message ack
+MESHCORE_MESSAGE_ACKED = "meshcore.message_acked"

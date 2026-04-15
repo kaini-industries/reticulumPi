@@ -166,6 +166,9 @@
     if (!transport || transport === 'meshtastic') {
       builtins.push({ id: 'broadcast', name: 'Broadcast (all)', transport: 'meshtastic', group: 'meshtastic' });
     }
+    if (!transport || transport === 'meshcore') {
+      builtins.push({ id: 'broadcast', name: 'Public Channel', transport: 'meshcore', group: 'meshcore' });
+    }
     if (!transport || transport === 'lxmf') {
       builtins.push({ id: '__lxmf_raw__', name: 'Enter address\u2026', transport: 'lxmf', group: 'lxmf' });
     }
@@ -329,7 +332,7 @@
       // Transport dot
       html += '<span class="msg-conv-transport">'
             + '<span class="msg-transport-badge ' + esc(c.transport) + '">'
-            + esc(c.transport === 'meshtastic' ? 'MSH' : 'LXMF')
+            + esc(transportLabel(c.transport))
             + '</span></span>';
 
       html += '<div class="msg-conv-body">'
@@ -353,6 +356,7 @@
     // Broadcast conversations — check sub-transport variants first
     if (conv.contact_id === '__broadcast_meshtastic_lora__') return 'Meshtastic LoRa';
     if (conv.contact_id === '__broadcast_meshtastic_mqtt__') return 'Meshtastic MQTT';
+    if (conv.contact_id === '__broadcast_meshcore__') return 'MeshCore Public';
     if (conv.contact_id && conv.contact_id.indexOf('__broadcast_') === 0) {
       var transport = conv.transport || '';
       return transport.charAt(0).toUpperCase() + transport.slice(1) + ' Broadcast';
@@ -455,7 +459,7 @@
     }
     if (badgeEl) {
       badgeEl.className = 'msg-transport-badge ' + (transport || '');
-      badgeEl.textContent = transport === 'meshtastic' ? 'MSH' : transport === 'lxmf' ? 'LXMF' : (transport || '');
+      badgeEl.textContent = transportLabel(transport);
     }
 
     // Show compose, hide new-compose
@@ -613,6 +617,13 @@
 
   // ── Helpers ────────────────────────────────────────────────────────
 
+  function transportLabel(name) {
+    if (name === 'meshtastic') return 'MSH';
+    if (name === 'meshcore') return 'MC';
+    if (name === 'lxmf') return 'LXMF';
+    return name || '';
+  }
+
   function showMsgFeedback(elId, text, cls) {
     var el = $(elId);
     if (!el) return;
@@ -727,7 +738,7 @@
             + ' data-msgtype="' + esc(m.msg_type || 'direct') + '">';
       html += '<span class="msg-conv-transport">'
             + '<span class="msg-transport-badge ' + esc(m.transport) + '">'
-            + esc(m.transport === 'meshtastic' ? 'MSH' : 'LXMF')
+            + esc(transportLabel(m.transport))
             + '</span></span>';
       html += '<div class="msg-conv-body">'
             + '<div class="msg-conv-top">'

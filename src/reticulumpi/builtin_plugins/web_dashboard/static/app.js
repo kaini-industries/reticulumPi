@@ -933,32 +933,13 @@
   }
 
   function fetchAll() {
-    // Plugins
-    api('/api/plugins').then(function(r) {
-      if (!r || !r.ok) return;
-      updatePlugins(r.data.plugins, r.data.failed_plugins);
-    });
+    // ── Priority 1: Core panels (metrics, mesh, interfaces) ──────────
 
-    // Interfaces + LoRa diagnostics
-    api('/api/interfaces').then(function(r) {
-      if (!r || !r.ok) return;
-      updateInterfaces(r.data.interfaces);
-      if (RPI.updateLoraSignal) RPI.updateLoraSignal(r.data.interfaces);
-      // Fetch LoRa diagnostics to get announce mode, then render radio card
-      api('/api/lora').then(function(lr) {
-        var loraDiag = (lr && lr.ok) ? lr.data : null;
-        if (RPI.updateLoraRadio) RPI.updateLoraRadio(r.data.interfaces, loraDiag);
-      });
-    });
-
-    // Metrics
     api('/api/metrics').then(function(r) {
-      if (!r || !r.ok) return;
-      updateMetrics(r.data);
+      if (r && r.ok) updateMetrics(r.data);
     });
 
     // Mesh nodes (server-side paginated) + summary
-    // Guard: mesh.js may not have loaded yet on first call (scripts load in order)
     if (RPI.fetchMeshNodes) RPI.fetchMeshNodes();
     if (RPI.fetchMeshSummary) RPI.fetchMeshSummary();
 
@@ -969,46 +950,44 @@
       if (RPI.updatePeerTelemetry) RPI.updatePeerTelemetry(r.data.peers);
     });
 
-    // Alerts
-    api('/api/alerts').then(function(r) {
+    // Interfaces + LoRa diagnostics — fetch in parallel, merge when both arrive
+    var _ifaceResult = null, _loraResult = null;
+    function mergeIfaceLora() {
+      if (_ifaceResult === null || _loraResult === null) return;
+      if (RPI.updateLoraRadio) RPI.updateLoraRadio(_ifaceResult, _loraResult);
+    }
+    api('/api/interfaces').then(function(r) {
       if (!r || !r.ok) return;
-      updateAlerts(r.data);
+      updateInterfaces(r.data.interfaces);
+      if (RPI.updateLoraSignal) RPI.updateLoraSignal(r.data.interfaces);
+      _ifaceResult = r.data.interfaces;
+      mergeIfaceLora();
+    });
+    api('/api/lora').then(function(r) {
+      _loraResult = (r && r.ok) ? r.data : {};
+      mergeIfaceLora();
     });
 
-    // Shared files
-    api('/api/files').then(function(r) {
-      if (!r || !r.ok) return;
-      updateSharedFiles(r.data.files);
+    api('/api/plugins').then(function(r) {
+      if (r && r.ok) updatePlugins(r.data.plugins, r.data.failed_plugins);
     });
 
-    // Sensors
-    api('/api/sensors').then(function(r) {
-      if (!r || !r.ok) return;
-      updateSensors(r.data.sensors);
-      // Fetch history for sparklines
-      var sensorNames = Object.keys(r.data.sensors || {});
-      if (sensorNames.length > 0) fetchSensorHistory(sensorNames);
+    // ── Priority 2: Radios (Meshtastic, MeshCore) ────────────────────
+
+    // Meshtastic — fetch status + nodes in parallel, merge when both arrive
+    var _mshStatus = null, _mshNodes = null;
+    function mergeMeshtastic() {
+      if (_mshStatus === null || _mshNodes === null) return;
+      if (RPI.updateMeshtastic) RPI.updateMeshtastic(_mshStatus, _mshNodes);
+      if (RPI.updateMap) RPI.updateMap(_mshNodes);
+    }
+    api('/api/meshtastic/status').then(function(r) {
+      _mshStatus = (r && r.ok) ? r.data : {};
+      mergeMeshtastic();
     });
-
-    // Emergency broadcasts
-    api('/api/emergency').then(function(r) {
-      if (!r || !r.ok) return;
-      updateEmergency(r.data);
-    });
-
-    // Messaging hub (messages.js module)
-    if (RPI.fetchTransports) RPI.fetchTransports();
-    if (RPI.fetchMessages) RPI.fetchMessages();
-    if (RPI.fetchContacts) RPI.fetchContacts();
-
-    // Meshtastic gateway
-    api('/api/meshtastic/status').then(function(statusRes) {
-      var status = (statusRes && statusRes.ok) ? statusRes.data : null;
-      api('/api/meshtastic/nodes').then(function(nodesRes) {
-        var nodes = (nodesRes && nodesRes.ok) ? nodesRes.data.nodes : [];
-        if (RPI.updateMeshtastic) RPI.updateMeshtastic(status, nodes);
-        if (RPI.updateMap) RPI.updateMap(nodes);
-      });
+    api('/api/meshtastic/nodes').then(function(r) {
+      _mshNodes = (r && r.ok) ? r.data.nodes : [];
+      mergeMeshtastic();
     });
     api('/api/meshtastic/device').then(function(r) {
       if (r && r.ok && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(r.data);
@@ -1020,25 +999,62 @@
       }
     });
 
-    // Transport hub health
+    // MeshCore — fetch status + contacts in parallel, merge when both arrive
+    var _mcStatus = null, _mcContacts = null;
+    function mergeMeshCore() {
+      if (_mcStatus === null || _mcContacts === null) return;
+      if (RPI.updateMeshCore) RPI.updateMeshCore(_mcStatus, _mcContacts);
+    }
+    api('/api/meshcore/status').then(function(r) {
+      _mcStatus = (r && r.ok) ? r.data : {};
+      mergeMeshCore();
+    });
+    api('/api/meshcore/contacts').then(function(r) {
+      _mcContacts = (r && r.ok) ? r.data.contacts : [];
+      mergeMeshCore();
+    });
+    api('/api/meshcore/device').then(function(r) {
+      if (r && r.ok && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(r.data);
+    });
+
+    // ── Priority 3: Secondary panels ─────────────────────────────────
+
+    api('/api/alerts').then(function(r) {
+      if (r && r.ok) updateAlerts(r.data);
+    });
+
+    api('/api/sensors').then(function(r) {
+      if (!r || !r.ok) return;
+      updateSensors(r.data.sensors);
+      var sensorNames = Object.keys(r.data.sensors || {});
+      if (sensorNames.length > 0) fetchSensorHistory(sensorNames);
+    });
+
+    api('/api/emergency').then(function(r) {
+      if (r && r.ok) updateEmergency(r.data);
+    });
+
+    api('/api/files').then(function(r) {
+      if (r && r.ok) updateSharedFiles(r.data.files);
+    });
+
+    // Messaging hub
+    if (RPI.fetchTransports) RPI.fetchTransports();
+    if (RPI.fetchMessages) RPI.fetchMessages();
+    if (RPI.fetchContacts) RPI.fetchContacts();
+
+    // Transport + connectivity + routing
     api('/api/transport').then(function(r) {
-      if (!r || !r.ok) return;
-      updateTransport(r.data);
+      if (r && r.ok) updateTransport(r.data);
     });
-
-    // Connectivity health
     api('/api/connectivity').then(function(r) {
-      if (!r || !r.ok) return;
-      updateConnectivity(r.data);
+      if (r && r.ok) updateConnectivity(r.data);
     });
-
-    // Routing summary (no full path table -- that's fetched on demand)
     api('/api/routing?per_page=0').then(function(r) {
-      if (!r || !r.ok) return;
-      if (RPI.updateRoutingSummary) RPI.updateRoutingSummary(r.data.summary);
+      if (r && r.ok && RPI.updateRoutingSummary) RPI.updateRoutingSummary(r.data.summary);
     });
 
-    // LoRa nodes panel (uses reachability with interface filter -- smaller than full score)
+    // LoRa nodes panel
     if (RPI.fetchLoraReachability) RPI.fetchLoraReachability();
   }
 
@@ -1085,6 +1101,8 @@
             if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(msg.data.meshtastic_lora_neighbors);
             if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(msg.data.meshtastic_lora_neighbors);
           }
+          if (msg.data.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(msg.data.meshcore_status, msg.data.meshcore_contacts);
+          if (msg.data.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(msg.data.meshcore_device);
           if (msg.data.messaging && RPI.updateMessaging) RPI.updateMessaging(msg.data.messaging);
         }
       } catch(e) { /* ignore parse errors */ }
@@ -1355,6 +1373,19 @@
   }
   $('lora-neighbors-show-more').addEventListener('click', function() {
     if (RPI.loraNeighborsShowMore) RPI.loraNeighborsShowMore();
+  });
+
+  // Wire up sortable MeshCore contacts table headers
+  var mcSortHeaders = document.querySelectorAll('#meshcore-section th[data-sort]');
+  for (var mci = 0; mci < mcSortHeaders.length; mci++) {
+    (function(th) {
+      th.addEventListener('click', function() {
+        RPI.onMeshCoreSort(th.getAttribute('data-sort'));
+      });
+    })(mcSortHeaders[mci]);
+  }
+  $('meshcore-show-more').addEventListener('click', function() {
+    if (RPI.meshcoreShowMore) RPI.meshcoreShowMore();
   });
 
   // Interface management -- event delegation (CSP blocks inline handlers)

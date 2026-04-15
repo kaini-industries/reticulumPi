@@ -457,6 +457,31 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
+            # Collect MeshCore device info (if gateway plugin available)
+            meshcore_device_data: dict = {}
+            meshcore_gw = plugin.app.get_plugin("meshcore_gateway")
+            if meshcore_gw and hasattr(meshcore_gw, "get_device_info"):
+                try:
+                    meshcore_device_data = meshcore_gw.get_device_info()
+                except Exception:
+                    pass
+
+            # Collect MeshCore contacts (if gateway plugin available)
+            meshcore_contacts: list = []
+            if meshcore_gw and hasattr(meshcore_gw, "get_contacts"):
+                try:
+                    meshcore_contacts = meshcore_gw.get_contacts()
+                except Exception:
+                    pass
+
+            # Collect MeshCore status (if gateway plugin available)
+            meshcore_status: dict = {}
+            if meshcore_gw and hasattr(meshcore_gw, "get_status"):
+                try:
+                    meshcore_status = meshcore_gw.get_status()
+                except Exception:
+                    pass
+
             # Collect recent messages from messaging hub (if available)
             messaging_data: dict = {}
             msg_hub = plugin.app.get_plugin("messaging_hub")
@@ -473,6 +498,15 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                         unread = msg_hub.get_unread_counts()
                         if unread:
                             messaging_data["unread"] = unread
+                    if hasattr(msg_hub, "get_status_updates_since"):
+                        status_updates = msg_hub.get_status_updates_since(
+                            _last_msg_ts.get("status_ts", 0)
+                        )
+                        if status_updates:
+                            messaging_data["status_updates"] = status_updates
+                            _last_msg_ts["status_ts"] = max(
+                                u["timestamp"] for u in status_updates
+                            )
                 except Exception:
                     pass
 
@@ -492,6 +526,12 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 data["meshtastic_device"] = meshtastic_device_data
             if meshtastic_lora_neighbors:
                 data["meshtastic_lora_neighbors"] = meshtastic_lora_neighbors
+            if meshcore_status:
+                data["meshcore_status"] = meshcore_status
+            if meshcore_device_data:
+                data["meshcore_device"] = meshcore_device_data
+            if meshcore_contacts:
+                data["meshcore_contacts"] = meshcore_contacts
             if messaging_data:
                 data["messaging"] = messaging_data
             if mesh_data:

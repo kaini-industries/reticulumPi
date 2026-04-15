@@ -334,8 +334,23 @@ reticulumpi:
     #  reconnect_delay: 10             # Seconds between reconnect attempts
     #  max_reconnect_attempts: 10      # 0 = unlimited
 
+    # MeshCore Gateway — bridges MeshCore LoRa mesh with ReticulumPi.
+    # Connects to a MeshCore companion radio over USB serial.
+    # Requires: pip install reticulumpi[meshcore]
+    # Flash the RAK4631 with MeshCore Companion Radio USB firmware.
+    #meshcore_gateway:
+    #  enabled: false
+    #  serial_port: /dev/meshcore     # Device path (use udev symlink)
+    #  baudrate: 115200
+    #  storage_path: ~/.local/share/reticulumpi/meshcore_gw
+    #  max_messages_per_minute: 0     # Rate limit outbound sends (0=unlimited)
+    #  health_check_interval: 30      # Seconds between health checks
+    #  reconnect_delay: 10            # Seconds between reconnect attempts
+    #  max_reconnect_attempts: 10     # 0 = unlimited
+    #  advert_interval: 900           # Seconds between advertisements (min 60)
+
     # Messaging Hub — unified message store and chat UI.
-    # Stores all messages in SQLite, bridges LXMF and Meshtastic.
+    # Stores all messages in SQLite, bridges LXMF, Meshtastic, and MeshCore.
     # Provides transport-agnostic send/receive from the web dashboard.
     # Requires: web_dashboard enabled for the chat UI.
     #messaging_hub:
@@ -348,6 +363,8 @@ reticulumpi:
     #    display_name: "MyNode Messages"  # Defaults to "<node_name> Messages"
     #  meshtastic:
     #    enabled: true               # Bridges to meshtastic_gateway plugin
+    #  meshcore:
+    #    enabled: true               # Bridges to meshcore_gateway plugin
 
     # Meshtastic Responder — auto-replies to Meshtastic DMs with commands.
     # Requires: meshtastic_gateway enabled.

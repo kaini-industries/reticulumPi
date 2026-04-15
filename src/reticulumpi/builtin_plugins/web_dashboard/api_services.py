@@ -1,7 +1,7 @@
 """API route handlers for plugin-provided services.
 
 Covers: LoRa diagnostics, messaging hub, NomadNet auth, Meshtastic gateway,
-sensors, alerts, emergency broadcasts, and file transfers.
+MeshCore gateway, sensors, alerts, emergency broadcasts, and file transfers.
 """
 
 from __future__ import annotations
@@ -237,6 +237,42 @@ async def handle_meshtastic_lora_neighbors(
     return _ok({"neighbors": gw.get_lora_neighbors()})
 
 
+# ── MeshCore gateway ───────────────────────────────────────────────
+
+
+async def handle_meshcore_status(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshcore/status — MeshCore gateway status and message stats."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshcore_gateway")
+    if not gw or not hasattr(gw, "get_status"):
+        return _ok({"available": False, "message": "meshcore_gateway plugin not enabled"})
+    return _ok(gw.get_status())
+
+
+async def handle_meshcore_contacts(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshcore/contacts — Known MeshCore contacts."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshcore_gateway")
+    if not gw or not hasattr(gw, "get_contacts"):
+        return _ok({"contacts": [], "message": "meshcore_gateway plugin not enabled"})
+    return _ok({"contacts": gw.get_contacts()})
+
+
+async def handle_meshcore_device(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshcore/device — MeshCore device hardware and firmware info."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshcore_gateway")
+    if not gw or not hasattr(gw, "get_device_info"):
+        return _ok({"available": False, "message": "meshcore_gateway plugin not enabled"})
+    return _ok(gw.get_device_info())
+
+
 # ── Messaging Hub ────────────────────────────────────────────────────
 
 
@@ -455,6 +491,10 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/meshtastic/nodes", handle_meshtastic_nodes)
     app.router.add_get("/api/meshtastic/device", handle_meshtastic_device)
     app.router.add_get("/api/meshtastic/lora_neighbors", handle_meshtastic_lora_neighbors)
+    # MeshCore
+    app.router.add_get("/api/meshcore/status", handle_meshcore_status)
+    app.router.add_get("/api/meshcore/contacts", handle_meshcore_contacts)
+    app.router.add_get("/api/meshcore/device", handle_meshcore_device)
     # Messaging
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_post("/api/messages/send", handle_send_message)

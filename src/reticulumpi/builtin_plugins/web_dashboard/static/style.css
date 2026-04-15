@@ -177,16 +177,16 @@ body {
 /* Metric cards grid */
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 1rem;
 }
 
 .metric-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 1.25rem;
+  padding: 0.7rem 0.85rem;
 }
 
 #sensors-section .metrics-grid {
@@ -313,7 +313,7 @@ body {
 }
 
 .metric-card .label {
-  font-size: 0.8rem;
+  font-size: 0.7rem;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -321,14 +321,14 @@ body {
 }
 
 .metric-card .value {
-  font-size: 1.75rem;
+  font-size: 1.35rem;
   font-weight: 600;
   font-family: var(--mono);
   color: var(--text-bright);
 }
 
 .metric-card .unit {
-  font-size: 0.9rem;
+  font-size: 0.75rem;
   color: var(--text-muted);
   font-weight: 400;
 }
@@ -394,6 +394,68 @@ body {
 .section-header.open .chevron {
   transform: rotate(90deg);
 }
+
+/* ── Service group dividers ───────────────────────────────────────── */
+.service-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 2rem 0 1rem;
+  padding: 0 0.25rem;
+}
+.service-group::before,
+.service-group::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+}
+.service-group-name {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.service-group-rns::before, .service-group-rns::after { background: rgba(88, 166, 255, 0.3); }
+.service-group-rns .service-group-name { color: var(--accent); }
+
+.service-group-msh::before, .service-group-msh::after { background: rgba(63, 185, 80, 0.3); }
+.service-group-msh .service-group-name { color: var(--green); }
+
+.service-group-mc::before, .service-group-mc::after { background: rgba(210, 153, 34, 0.3); }
+.service-group-mc .service-group-name { color: var(--yellow); }
+
+/* ── Service section accents ──────────────────────────────────────── */
+.section.svc-reticulum  { border-left: 3px solid var(--accent); }
+.section.svc-meshtastic { border-left: 3px solid var(--green); }
+.section.svc-meshcore   { border-left: 3px solid var(--yellow); }
+
+.section.svc-reticulum > .section-header {
+  background: linear-gradient(90deg, rgba(88, 166, 255, 0.06) 0%, transparent 50%);
+}
+.section.svc-meshtastic > .section-header {
+  background: linear-gradient(90deg, rgba(63, 185, 80, 0.06) 0%, transparent 50%);
+}
+.section.svc-meshcore > .section-header {
+  background: linear-gradient(90deg, rgba(210, 153, 34, 0.06) 0%, transparent 50%);
+}
+
+/* ── Service tag pills ────────────────────────────────────────────── */
+.svc-tag {
+  display: inline-block;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+  text-transform: uppercase;
+}
+.svc-tag-rns { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
+.svc-tag-msh { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+.svc-tag-mc  { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
 
 /* Tables */
 .data-table {
@@ -775,6 +837,45 @@ body {
 .lora-hops-badge.hops-2 { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
 .lora-hops-badge.hops-3 { background: rgba(239, 68, 68, 0.12); color: var(--red); }
 
+/* MeshCore gateway overview */
+.meshcore-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+.meshcore-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 90px;
+}
+.meshcore-stat .mc-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.meshcore-stat .mc-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.mc-hops-badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  min-width: 1.4em;
+  text-align: center;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+}
+.mc-hops-badge.hops-0 { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+.mc-hops-badge.hops-1 { background: rgba(74, 108, 247, 0.15); color: var(--accent, #4a6cf7); }
+.mc-hops-badge.hops-2 { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
+.mc-hops-badge.hops-3 { background: rgba(239, 68, 68, 0.12); color: var(--red); }
+
 /* ── Messaging Hub ────────────────────────────────────── */
 
 /* Two-pane layout */
@@ -993,6 +1094,7 @@ body {
 }
 .msg-transport-badge.lxmf { background: #1a3352; color: var(--accent); }
 .msg-transport-badge.meshtastic { background: #2a3a1a; color: var(--green); }
+.msg-transport-badge.meshcore { background: #3a2a1a; color: var(--yellow); }
 
 /* Unread total in section header */
 .msg-unread-total {
@@ -1781,7 +1883,7 @@ body {
 /* ========== Responsive — Tablet ========== */
 @media (max-width: 768px) {
   .dashboard { padding: 1rem 0.75rem; }
-  .metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
+  .metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
 
   /* Tables: horizontal scroll on every table */
   .section > .data-table,
@@ -1836,15 +1938,18 @@ body {
   #logout-btn { font-size: 0.7rem; padding: 0.25rem 0.5rem; }
 
   /* Metrics */
-  .metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 0.5rem; margin-bottom: 1rem; }
-  .metric-card { padding: 0.75rem; }
-  .metric-card .value { font-size: 1.3rem; }
-  .metric-card .label { font-size: 0.7rem; }
+  .metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 0.4rem; margin-bottom: 0.75rem; }
+  .metric-card { padding: 0.5rem 0.65rem; }
+  .metric-card .value { font-size: 1.1rem; }
+  .metric-card .label { font-size: 0.6rem; }
 
   /* Sections */
   .section { margin-bottom: 1rem; border-radius: 6px; }
   .section-header { padding: 0.6rem 0.75rem; font-size: 0.8rem; }
   .section-header .count { font-size: 0.7rem; }
+  .service-group { margin: 1.25rem 0 0.75rem; }
+  .service-group-name { font-size: 0.6rem; }
+  .svc-tag { font-size: 0.5rem; padding: 0.08rem 0.25rem; margin-left: 0.35rem; }
 
   /* Tables: force minimum width so columns don't collapse */
   .data-table { font-size: 0.75rem; min-width: 520px; }

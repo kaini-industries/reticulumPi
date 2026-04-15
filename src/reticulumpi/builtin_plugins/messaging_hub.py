@@ -500,6 +500,10 @@ class LXMFAdapter(TransportAdapter):
         self._identity: Any = None
         self._propagation_handler: _LXMFPropagationHandler | None = None
         self._best_propagation_hops: int = 0
+        # Track outbound messages awaiting delivery confirmation:
+        # {lxm_hash_hex: {"msg_id": int, "timestamp": float}}
+        self._pending_delivery: dict[str, dict[str, Any]] = {}
+        self._pending_lock = threading.Lock()
 
     def start(self) -> None:
         import LXMF
@@ -599,10 +603,81 @@ class LXMFAdapter(TransportAdapter):
                 text,
                 desired_method=LXMF.LXMessage.OPPORTUNISTIC,
             )
+            msg.register_delivery_callback(self._on_lxmf_delivery)
+            msg.register_failed_callback(self._on_lxmf_failed)
             self._router.handle_outbound(msg)
-            return {"sent": True, "destination": RNS.prettyhexrep(dest_hash)}
+            return {
+                "sent": True,
+                "destination": RNS.prettyhexrep(dest_hash),
+                "lxm_hash": msg.hash.hex() if msg.hash else None,
+            }
         except Exception as exc:
             return {"sent": False, "reason": str(exc)}
+
+    def track_pending(self, msg_id: int, lxm_hash: str | None) -> None:
+        """Register an outbound message for delivery tracking."""
+        if not lxm_hash:
+            return
+        with self._pending_lock:
+            self._pending_delivery[lxm_hash] = {
+                "msg_id": msg_id,
+                "timestamp": time.time(),
+            }
+
+    def get_pending_delivery(self) -> dict[str, dict[str, Any]]:
+        """Return a copy of the pending delivery tracker."""
+        with self._pending_lock:
+            return dict(self._pending_delivery)
+
+    def _on_lxmf_delivery(self, message: Any) -> None:
+        """LXMF delivery callback — message was delivered or propagated."""
+        try:
+            import LXMF
+
+            lxm_hash = message.hash.hex() if message.hash else None
+            if not lxm_hash:
+                return
+            with self._pending_lock:
+                entry = self._pending_delivery.pop(lxm_hash, None)
+            if not entry:
+                return
+
+            # DELIVERED = confirmed at recipient; SENT = accepted by propagation node
+            if message.state == LXMF.LXMessage.DELIVERED:
+                status = "delivered"
+            else:
+                status = "propagated"
+
+            self._hub.log.info(
+                "LXMF message %s: %s (msg_id=%d)",
+                lxm_hash[:12], status, entry["msg_id"],
+            )
+            self._hub._on_delivery_status_update(
+                entry["msg_id"], "lxmf", status,
+            )
+        except Exception:
+            self._hub.log.exception("Error in LXMF delivery callback")
+
+    def _on_lxmf_failed(self, message: Any) -> None:
+        """LXMF failed callback — message delivery failed."""
+        try:
+            lxm_hash = message.hash.hex() if message.hash else None
+            if not lxm_hash:
+                return
+            with self._pending_lock:
+                entry = self._pending_delivery.pop(lxm_hash, None)
+            if not entry:
+                return
+
+            self._hub.log.warning(
+                "LXMF message %s: delivery_failed (msg_id=%d)",
+                lxm_hash[:12], entry["msg_id"],
+            )
+            self._hub._on_delivery_status_update(
+                entry["msg_id"], "lxmf", "delivery_failed",
+            )
+        except Exception:
+            self._hub.log.exception("Error in LXMF failed callback")
 
     def get_contacts(self) -> list[dict[str, Any]]:
         # LXMF doesn't maintain a contact list natively.
@@ -691,6 +766,24 @@ class MeshtasticAdapter(TransportAdapter):
     def __init__(self, hub: "MessagingHubPlugin") -> None:
         super().__init__()
         self._hub = hub
+        # Track outbound messages awaiting ack:
+        # {msg_id: {"timestamp": float}}
+        self._pending_delivery: dict[int, dict[str, Any]] = {}
+        self._pending_lock = threading.Lock()
+
+    def track_pending(self, msg_id: int, ack_tracking: str | None) -> None:
+        """Register an outbound message for ack tracking."""
+        if not ack_tracking:
+            return
+        with self._pending_lock:
+            self._pending_delivery[msg_id] = {
+                "timestamp": time.time(),
+            }
+
+    def get_pending_delivery(self) -> dict[str, dict[str, Any]]:
+        """Return pending entries keyed by str(msg_id) for timeout scanning."""
+        with self._pending_lock:
+            return {str(k): v for k, v in self._pending_delivery.items()}
 
     def start(self) -> None:
         self._hub.event_bus.subscribe(
@@ -767,7 +860,31 @@ class MeshtasticAdapter(TransportAdapter):
         # gateway falls back to MQTT if serial listener is unavailable.
         if dest_id and not via:
             via = "lora"
-        return gw.send_message(text, destination_id=dest_id, via=via)
+
+        # Create an ack callback that will be passed to the gateway.
+        # The actual msg_id gets bound after the hub stores the message,
+        # via the track_pending() method.
+        ack_holder: dict[str, Any] = {}
+
+        def _on_ack(acked: bool) -> None:
+            msg_id = ack_holder.get("msg_id")
+            if msg_id is None:
+                return
+            with self._pending_lock:
+                self._pending_delivery.pop(msg_id, None)
+            status = "delivered" if acked else "delivery_failed"
+            self._hub.log.info(
+                "Meshtastic message ack: %s (msg_id=%d)", status, msg_id,
+            )
+            self._hub._on_delivery_status_update(msg_id, "meshtastic", status)
+
+        result = gw.send_message(
+            text, destination_id=dest_id, via=via, on_ack=_on_ack,
+        )
+        # Stash the holder ref so the hub's send_message can bind msg_id
+        if result.get("sent"):
+            result["_ack_holder"] = ack_holder
+        return result
 
     def get_contacts(self) -> list[dict[str, Any]]:
         gw = self._hub.app.get_plugin("meshtastic_gateway")
@@ -795,6 +912,151 @@ class MeshtasticAdapter(TransportAdapter):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# MeshCore Transport Adapter
+# ═══════════════════════════════════════════════════════════════════
+
+
+class MeshCoreAdapter(TransportAdapter):
+    """MeshCore adapter — bridges to the meshcore_gateway plugin.
+
+    Does NOT own the MeshCore connection.  Delegates sending to the
+    gateway's ``send_message()`` method and subscribes to its events
+    for inbound messages.
+    """
+
+    transport_name = "meshcore"
+    display_name = "MeshCore"
+
+    def __init__(self, hub: "MessagingHubPlugin") -> None:
+        super().__init__()
+        self._hub = hub
+        # Track outbound direct messages awaiting ACK:
+        # {ack_code: {"msg_id": int, "timestamp": float}}
+        self._pending_delivery: dict[str, dict[str, Any]] = {}
+        self._pending_lock = threading.Lock()
+
+    def track_pending(self, msg_id: int, expected_ack: str | None) -> None:
+        """Register an outbound message for ACK tracking."""
+        if not expected_ack:
+            return
+        with self._pending_lock:
+            self._pending_delivery[expected_ack] = {
+                "msg_id": msg_id,
+                "timestamp": time.time(),
+            }
+
+    def get_pending_delivery(self) -> dict[str, dict[str, Any]]:
+        """Return a copy of the pending delivery tracker."""
+        with self._pending_lock:
+            return dict(self._pending_delivery)
+
+    def start(self) -> None:
+        self._hub.event_bus.subscribe(
+            events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event
+        )
+        self._hub.event_bus.subscribe(
+            events.MESHCORE_MESSAGE_ACKED, self._on_meshcore_ack
+        )
+
+    def stop(self) -> None:
+        self._hub.event_bus.unsubscribe(
+            events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event
+        )
+        self._hub.event_bus.unsubscribe(
+            events.MESHCORE_MESSAGE_ACKED, self._on_meshcore_ack
+        )
+
+    def _on_meshcore_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Event bus callback for incoming MeshCore messages."""
+        if not self._hub_callback:
+            return
+        from_key = data.get("from_key", "")
+        from_name = (
+            data.get("from_name")
+            or self._resolve_contact_name(from_key)
+            or from_key[:12]
+        )
+        msg_type = data.get("msg_type", "direct")
+
+        self._hub_callback({
+            "transport": "meshcore",
+            "sub_transport": "",
+            "from_id": from_key,
+            "from_name": from_name,
+            "to_id": None,
+            "to_name": None,
+            "text": data.get("text", ""),
+            "msg_type": msg_type,
+            "metadata": {k: v for k, v in data.items() if k not in ("text",)},
+        })
+
+    def _on_meshcore_ack(self, event_type: str, data: dict[str, Any]) -> None:
+        """Event bus callback for MeshCore ACK events."""
+        ack_code = data.get("ack_code", "")
+        if not ack_code:
+            return
+        with self._pending_lock:
+            entry = self._pending_delivery.pop(ack_code, None)
+        if not entry:
+            return
+        self._hub.log.info(
+            "MeshCore message ACK received: %s (msg_id=%d)",
+            ack_code, entry["msg_id"],
+        )
+        self._hub._on_delivery_status_update(
+            entry["msg_id"], "meshcore", "delivered",
+        )
+
+    def _resolve_contact_name(self, public_key: str) -> str | None:
+        """Look up a MeshCore contact name from the gateway."""
+        try:
+            gw = self._hub.app.get_plugin("meshcore_gateway")
+            if not gw or not hasattr(gw, "get_meshcore_nodes"):
+                return None
+            for n in gw.get_meshcore_nodes():
+                if n.get("id") == public_key:
+                    return n.get("name") or None
+        except Exception:
+            pass
+        return None
+
+    def send(self, text: str, destination: str, **kwargs: Any) -> dict[str, Any]:
+        gw = self._hub.app.get_plugin("meshcore_gateway")
+        if not gw or not hasattr(gw, "send_message"):
+            return {"sent": False, "reason": "meshcore_gateway plugin not available"}
+        dest = destination if destination and destination != "broadcast" else None
+        channel = kwargs.get("channel")
+        result = gw.send_message(text, destination=dest, channel=channel)
+        # Pass expected_ack through so the hub can register tracking
+        if result.get("sent") and result.get("expected_ack"):
+            result["expected_ack"] = result["expected_ack"]
+        return result
+
+    def get_contacts(self) -> list[dict[str, Any]]:
+        gw = self._hub.app.get_plugin("meshcore_gateway")
+        if not gw or not hasattr(gw, "get_meshcore_nodes"):
+            return []
+        return [
+            {
+                "id": n["id"],
+                "name": n.get("name") or n["id"][:12],
+                "transport": "meshcore",
+                "last_heard": n.get("last_heard"),
+            }
+            for n in gw.get_meshcore_nodes()
+        ]
+
+    def is_available(self) -> bool:
+        gw = self._hub.app.get_plugin("meshcore_gateway")
+        if not gw:
+            return False
+        try:
+            return gw.get_status().get("connected", False)
+        except Exception:
+            return False
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Messaging Hub Plugin
 # ═══════════════════════════════════════════════════════════════════
 
@@ -803,8 +1065,8 @@ class MessagingHubPlugin(PluginBase):
     """Unified messaging hub with transport-agnostic message store."""
 
     plugin_name = "messaging_hub"
-    plugin_version = "1.0.0"
-    plugin_description = "Unified message store and chat hub for LXMF and Meshtastic"
+    plugin_version = "1.1.0"
+    plugin_description = "Unified message store and chat hub for LXMF, Meshtastic, and MeshCore"
 
     def validate_config(self) -> None:
         limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)
@@ -814,6 +1076,7 @@ class MessagingHubPlugin(PluginBase):
     def start(self) -> None:
         self._lock = threading.Lock()
         self._adapters: dict[str, TransportAdapter] = {}
+        self._recent_status_updates: list[dict[str, Any]] = []
 
         # Initialize SQLite store
         db_path = os.path.expanduser(
@@ -836,7 +1099,17 @@ class MessagingHubPlugin(PluginBase):
             mesh_adapter = MeshtasticAdapter(self)
             self.register_adapter(mesh_adapter)
 
+        # Register MeshCore adapter (bridges to meshcore_gateway plugin)
+        mc_cfg = self.config.get("meshcore", {})
+        if mc_cfg.get("enabled", True):
+            mc_adapter = MeshCoreAdapter(self)
+            self.register_adapter(mc_adapter)
+
         self._active = True
+        self._delivery_timeout = float(
+            self.config.get("delivery_timeout", 300)
+        )
+        self._start_thread(self._delivery_timeout_loop, name="msg-delivery-timeout")
         self.log.info(
             "Messaging hub started with %d transport(s): %s",
             len(self._adapters),
@@ -962,8 +1235,114 @@ class MessagingHubPlugin(PluginBase):
                 "text": text[:100],
                 "timestamp": time.time(),
             })
+            # Register for delivery tracking if the adapter supports it
+            self._register_delivery_tracking(adapter, msg_id, result)
 
         return {**result, "msg_id": msg_id}
+
+    # ── Delivery tracking ─────────────────────────────────────────
+
+    def _register_delivery_tracking(
+        self, adapter: TransportAdapter, msg_id: int, result: dict[str, Any],
+    ) -> None:
+        """Register an outbound message for delivery tracking with its adapter."""
+        if not hasattr(adapter, "track_pending"):
+            return
+
+        if isinstance(adapter, LXMFAdapter):
+            adapter.track_pending(msg_id, result.get("lxm_hash"))
+        elif isinstance(adapter, MeshtasticAdapter):
+            # Bind the msg_id into the ack callback's closure
+            ack_holder = result.pop("_ack_holder", None)
+            if ack_holder is not None:
+                ack_holder["msg_id"] = msg_id
+            adapter.track_pending(msg_id, result.get("ack_tracking"))
+        elif isinstance(adapter, MeshCoreAdapter):
+            adapter.track_pending(msg_id, result.get("expected_ack"))
+
+    def _on_delivery_status_update(
+        self, msg_id: int, transport: str, status: str,
+    ) -> None:
+        """Called by adapter callbacks when a delivery status changes."""
+        try:
+            self._store.update_status(msg_id, status)
+            ts = time.time()
+            self.event_bus.publish(events.MESSAGE_DELIVERED, {
+                "id": msg_id,
+                "transport": transport,
+                "status": status,
+                "timestamp": ts,
+            })
+            # Buffer for WebSocket push — keep last 50 updates
+            with self._lock:
+                self._recent_status_updates.append({
+                    "id": msg_id,
+                    "status": status,
+                    "transport": transport,
+                    "timestamp": ts,
+                })
+                if len(self._recent_status_updates) > 50:
+                    self._recent_status_updates = self._recent_status_updates[-50:]
+        except Exception:
+            self.log.exception("Error updating delivery status for msg %d", msg_id)
+
+    def get_status_updates_since(self, since: float) -> list[dict[str, Any]]:
+        """Return delivery status updates newer than *since*."""
+        with self._lock:
+            return [
+                u for u in self._recent_status_updates
+                if u["timestamp"] > since
+            ]
+
+    def expire_stale_pending(self, max_age: float = 300.0) -> int:
+        """Mark pending messages older than *max_age* seconds as timed out.
+
+        Returns the number of messages expired.
+        """
+        now = time.time()
+        expired = 0
+        with self._lock:
+            adapters = list(self._adapters.values())
+        for adapter in adapters:
+            if not hasattr(adapter, "get_pending_delivery"):
+                continue
+            pending = adapter.get_pending_delivery()
+            for key, entry in pending.items():
+                age = now - entry.get("timestamp", now)
+                if age <= max_age:
+                    continue
+                msg_id = entry.get("msg_id")
+                if msg_id is None:
+                    # Meshtastic uses msg_id as the key itself
+                    try:
+                        msg_id = int(key)
+                    except (ValueError, TypeError):
+                        continue
+                # Remove from adapter's pending tracker
+                if hasattr(adapter, "_pending_lock"):
+                    with adapter._pending_lock:
+                        if isinstance(adapter, MeshtasticAdapter):
+                            adapter._pending_delivery.pop(msg_id, None)
+                        else:
+                            adapter._pending_delivery.pop(key, None)
+                self._store.update_status(msg_id, "timeout")
+                expired += 1
+        if expired:
+            self.log.debug("Expired %d stale pending delivery entries", expired)
+        return expired
+
+    def _delivery_timeout_loop(self) -> None:
+        """Periodically expire stale pending delivery entries."""
+        while self._active:
+            try:
+                self.expire_stale_pending(self._delivery_timeout)
+            except Exception:
+                self.log.exception("Error in delivery timeout loop")
+            # Check every 60 seconds
+            for _ in range(60):
+                if not self._active:
+                    return
+                time.sleep(1)
 
     # ── Queries (used by dashboard API) ────────────────────────────
 

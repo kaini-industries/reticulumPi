@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=23">
+  <link rel="stylesheet" href="/static/style.css?v=25">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -48,28 +48,79 @@
       </div>
     </div>
 
-    <!-- Plugins (collapsed by default) -->
-    <div class="section" id="plugins-section">
-      <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> Plugins</span>
-        <span class="count" id="plugin-count"></span>
+    <!-- Messaging Hub -->
+    <div class="section" id="messaging-section">
+      <div class="section-header">
+        <span>Messages</span>
+        <span class="count" id="msg-count"></span>
+        <span class="msg-unread-total" id="msg-unread-total"></span>
       </div>
-      <div class="section-body hidden" id="plugins-body">
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr><th>Name</th><th>Version</th><th>Status</th><th>Address</th><th>Details</th></tr>
-            </thead>
-            <tbody id="plugins-table"></tbody>
-          </table>
+      <div class="msg-layout">
+        <!-- Sidebar: conversations list -->
+        <div class="msg-sidebar" id="msg-sidebar">
+          <div class="msg-sidebar-toolbar">
+            <input type="text" id="msg-search-input" class="rt-input"
+                   placeholder="Search messages..." autocomplete="off">
+            <select id="msg-transport-filter" class="rt-select">
+              <option value="">All</option>
+            </select>
+            <button class="msg-new-btn" id="msg-new-btn" title="New message">+</button>
+          </div>
+          <div class="msg-conversations" id="msg-conversations"></div>
+        </div>
+        <!-- Thread: messages for selected conversation -->
+        <div class="msg-thread" id="msg-thread">
+          <div class="msg-thread-header" id="msg-thread-header">
+            <button class="msg-back-btn" id="msg-back-btn">&larr;</button>
+            <span class="msg-thread-name" id="msg-thread-name">Select a conversation</span>
+            <span class="msg-transport-badge" id="msg-thread-transport"></span>
+          </div>
+          <div class="msg-chat" id="msg-chat"></div>
+          <div class="msg-compose" id="msg-compose" style="display:none">
+            <div class="msg-compose-row">
+              <textarea id="msg-send-text" class="rt-input" rows="1"
+                        placeholder="Type a message..." autocomplete="off"></textarea>
+              <button id="msg-send-btn" class="msg-send-btn" disabled>Send</button>
+            </div>
+            <div class="msg-compose-meta">
+              <span class="msg-byte-count" id="msg-byte-count"></span>
+              <span class="msg-feedback" id="msg-feedback"></span>
+            </div>
+          </div>
+          <!-- New message compose (hidden until + clicked) -->
+          <div class="msg-new-compose" id="msg-new-compose" style="display:none">
+            <div class="msg-compose-row">
+              <select id="msg-send-transport" class="rt-select"></select>
+              <div class="msg-dest-combo" id="msg-dest-combo">
+                <input type="text" id="msg-dest-input" class="rt-input"
+                       placeholder="Search recipients..." autocomplete="off" />
+                <input type="hidden" id="msg-send-dest" value="" />
+                <div class="msg-dest-list" id="msg-dest-list"></div>
+              </div>
+            </div>
+            <div class="msg-compose-row">
+              <textarea id="msg-new-text" class="rt-input" rows="1"
+                        placeholder="Type a message..." autocomplete="off"></textarea>
+              <button id="msg-new-send-btn" class="msg-send-btn" disabled>Send</button>
+            </div>
+            <div class="msg-compose-meta">
+              <span class="msg-byte-count" id="msg-new-byte-count"></span>
+              <span class="msg-feedback" id="msg-new-feedback"></span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
+    <!-- ═══════════ Reticulum Network ═══════════ -->
+    <div class="service-group service-group-rns">
+      <span class="service-group-name">Reticulum Network</span>
+    </div>
+
     <!-- Network Interfaces -->
-    <div class="section" id="interfaces-section">
+    <div class="section svc-reticulum" id="interfaces-section">
       <div class="section-header">
-        <span>Network Interfaces</span>
+        <span>Network Interfaces <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="iface-count"></span><span class="freshness"></span>
       </div>
       <div id="restart-banner" class="restart-banner hidden">
@@ -87,9 +138,9 @@
     </div>
 
     <!-- Connectivity Health -->
-    <div class="section" id="connectivity-section">
+    <div class="section svc-reticulum" id="connectivity-section">
       <div class="section-header">
-        <span>Connectivity Health</span>
+        <span>Connectivity Health <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="connectivity-status"></span><span class="freshness"></span>
       </div>
       <div id="connectivity-content" class="connectivity-grid">
@@ -105,9 +156,9 @@
     </div>
 
     <!-- Routing -->
-    <div class="section" id="routing-section">
+    <div class="section svc-reticulum" id="routing-section">
       <div class="section-header">
-        <span>Routing</span>
+        <span>Routing <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="routing-status"></span><span class="freshness"></span>
       </div>
       <div class="routing-content">
@@ -190,9 +241,9 @@
     </div>
 
     <!-- Transport Health -->
-    <div class="section" id="transport-section">
+    <div class="section svc-reticulum" id="transport-section">
       <div class="section-header">
-        <span>Transport Hubs</span>
+        <span>Transport Hubs <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="transport-count"></span><span class="freshness"></span>
       </div>
       <div id="pool-status" style="display:none;"></div>
@@ -207,9 +258,9 @@
     </div>
 
     <!-- LoRa Nodes -->
-    <div class="section" id="lora-section">
+    <div class="section svc-reticulum" id="lora-section">
       <div class="section-header">
-        <span>LoRa Nodes</span>
+        <span>LoRa Nodes <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="lora-count"></span><span class="freshness"></span>
       </div>
       <div id="lora-radio-info"></div>
@@ -233,9 +284,9 @@
     </div>
 
     <!-- Mesh Network -->
-    <div class="section" id="mesh-section">
+    <div class="section svc-reticulum" id="mesh-section">
       <div class="section-header">
-        <span>Mesh Network</span>
+        <span>Mesh Network <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="mesh-count"></span><span class="freshness"></span>
       </div>
 
@@ -302,29 +353,20 @@
       <div id="mesh-show-more" class="show-more-btn" style="display:none"></div>
     </div>
 
-    <!-- Mesh Telemetry (peer metrics) -->
-    <div class="section" id="telemetry-section">
+    <!-- Peer Telemetry -->
+    <div class="section svc-reticulum" id="telemetry-section">
       <div class="section-header">
-        <span>Peer Telemetry</span>
+        <span>Peer Telemetry <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="telemetry-count"></span>
       </div>
       <div class="metrics-grid" id="peer-metrics-grid"></div>
       <button id="peer-show-more" class="show-more-btn" style="display:none">Show all</button>
     </div>
 
-    <!-- Alerts -->
-    <div class="section" id="alerts-section">
-      <div class="section-header">
-        <span>Alerts</span>
-        <span class="count" id="alerts-count"></span>
-      </div>
-      <div id="alerts-info" class="config-content">No alerts configured</div>
-    </div>
-
     <!-- Shared Files -->
-    <div class="section" id="files-section">
+    <div class="section svc-reticulum" id="files-section">
       <div class="section-header">
-        <span>Shared Files</span>
+        <span>Shared Files <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="files-count"></span>
       </div>
       <div class="table-wrap">
@@ -337,83 +379,49 @@
       </div>
     </div>
 
-    <!-- Sensors -->
-    <div class="section" id="sensors-section">
+    <!-- Alerts -->
+    <div class="section svc-reticulum" id="alerts-section">
       <div class="section-header">
-        <span>Sensors</span>
+        <span>Alerts <span class="svc-tag svc-tag-rns">RNS</span></span>
+        <span class="count" id="alerts-count"></span>
+      </div>
+      <div id="alerts-info" class="config-content">No alerts configured</div>
+    </div>
+
+    <!-- Sensors -->
+    <div class="section svc-reticulum" id="sensors-section">
+      <div class="section-header">
+        <span>Sensors <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="sensors-count"></span><span class="freshness"></span>
       </div>
       <div class="metrics-grid" id="sensors-grid"></div>
     </div>
 
-    <!-- Messaging Hub -->
-    <div class="section" id="messaging-section">
+    <!-- Emergency Broadcasts -->
+    <div class="section svc-reticulum" id="emergency-section">
       <div class="section-header">
-        <span>Messages</span>
-        <span class="count" id="msg-count"></span>
-        <span class="msg-unread-total" id="msg-unread-total"></span>
+        <span>Emergency Broadcasts <span class="svc-tag svc-tag-rns">RNS</span></span>
+        <span class="count" id="emergency-count"></span>
       </div>
-      <div class="msg-layout">
-        <!-- Sidebar: conversations list -->
-        <div class="msg-sidebar" id="msg-sidebar">
-          <div class="msg-sidebar-toolbar">
-            <input type="text" id="msg-search-input" class="rt-input"
-                   placeholder="Search messages..." autocomplete="off">
-            <select id="msg-transport-filter" class="rt-select">
-              <option value="">All</option>
-            </select>
-            <button class="msg-new-btn" id="msg-new-btn" title="New message">+</button>
-          </div>
-          <div class="msg-conversations" id="msg-conversations"></div>
-        </div>
-        <!-- Thread: messages for selected conversation -->
-        <div class="msg-thread" id="msg-thread">
-          <div class="msg-thread-header" id="msg-thread-header">
-            <button class="msg-back-btn" id="msg-back-btn">&larr;</button>
-            <span class="msg-thread-name" id="msg-thread-name">Select a conversation</span>
-            <span class="msg-transport-badge" id="msg-thread-transport"></span>
-          </div>
-          <div class="msg-chat" id="msg-chat"></div>
-          <div class="msg-compose" id="msg-compose" style="display:none">
-            <div class="msg-compose-row">
-              <textarea id="msg-send-text" class="rt-input" rows="1"
-                        placeholder="Type a message..." autocomplete="off"></textarea>
-              <button id="msg-send-btn" class="msg-send-btn" disabled>Send</button>
-            </div>
-            <div class="msg-compose-meta">
-              <span class="msg-byte-count" id="msg-byte-count"></span>
-              <span class="msg-feedback" id="msg-feedback"></span>
-            </div>
-          </div>
-          <!-- New message compose (hidden until + clicked) -->
-          <div class="msg-new-compose" id="msg-new-compose" style="display:none">
-            <div class="msg-compose-row">
-              <select id="msg-send-transport" class="rt-select"></select>
-              <div class="msg-dest-combo" id="msg-dest-combo">
-                <input type="text" id="msg-dest-input" class="rt-input"
-                       placeholder="Search recipients..." autocomplete="off" />
-                <input type="hidden" id="msg-send-dest" value="" />
-                <div class="msg-dest-list" id="msg-dest-list"></div>
-              </div>
-            </div>
-            <div class="msg-compose-row">
-              <textarea id="msg-new-text" class="rt-input" rows="1"
-                        placeholder="Type a message..." autocomplete="off"></textarea>
-              <button id="msg-new-send-btn" class="msg-send-btn" disabled>Send</button>
-            </div>
-            <div class="msg-compose-meta">
-              <span class="msg-byte-count" id="msg-new-byte-count"></span>
-              <span class="msg-feedback" id="msg-new-feedback"></span>
-            </div>
-          </div>
-        </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
+          </thead>
+          <tbody id="emergency-table"></tbody>
+        </table>
       </div>
     </div>
 
+    <!-- ═══════════ Meshtastic ═══════════ -->
+    <div class="service-group service-group-msh">
+      <span class="service-group-name">Meshtastic</span>
+    </div>
+
     <!-- Meshtastic Gateway -->
-    <div class="section" id="meshtastic-section">
+    <div class="section svc-meshtastic" id="meshtastic-section">
       <div class="section-header">
-        <span>Meshtastic Gateway</span>
+        <span>Meshtastic Gateway <span class="svc-tag svc-tag-msh">MSH</span></span>
         <span class="count" id="meshtastic-status"></span>
       </div>
       <div class="meshtastic-overview" id="meshtastic-overview"></div>
@@ -455,6 +463,36 @@
       <button id="meshtastic-show-more" class="show-more-btn" style="display:none">Show all</button>
     </div>
 
+    <!-- ═══════════ MeshCore ═══════════ -->
+    <div class="service-group service-group-mc">
+      <span class="service-group-name">MeshCore</span>
+    </div>
+
+    <!-- MeshCore Gateway -->
+    <div class="section svc-meshcore" id="meshcore-section">
+      <div class="section-header">
+        <span>MeshCore Gateway <span class="svc-tag svc-tag-mc">MC</span></span>
+        <span class="count" id="meshcore-status"></span>
+      </div>
+      <div class="meshcore-overview" id="meshcore-overview"></div>
+      <div id="meshcore-device-info"></div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="name">Name<span class="sort-arrow"></span></th>
+              <th>Public Key</th>
+              <th>Type</th>
+              <th class="sortable" data-sort="out_path_len">Hops<span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="last_advert">Last Advert<span class="sort-arrow"></span></th>
+            </tr>
+          </thead>
+          <tbody id="meshcore-contacts-table"></tbody>
+        </table>
+      </div>
+      <button id="meshcore-show-more" class="show-more-btn" style="display:none">Show all</button>
+    </div>
+
     <!-- Node Map -->
     <div class="section" id="map-section">
       <div class="section-header">
@@ -469,19 +507,21 @@
       <div id="map-container" style="height: 450px; width: 100%;"></div>
     </div>
 
-    <!-- Emergency Broadcasts -->
-    <div class="section" id="emergency-section">
-      <div class="section-header">
-        <span>Emergency Broadcasts</span>
-        <span class="count" id="emergency-count"></span>
+    <!-- Plugins (collapsed by default) -->
+    <div class="section" id="plugins-section">
+      <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Plugins</span>
+        <span class="count" id="plugin-count"></span>
       </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
-          </thead>
-          <tbody id="emergency-table"></tbody>
-        </table>
+      <div class="section-body hidden" id="plugins-body">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Name</th><th>Version</th><th>Status</th><th>Address</th><th>Details</th></tr>
+            </thead>
+            <tbody id="plugins-table"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -495,12 +535,13 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=24"></script>
-  <script src="/static/messages.js?v=32"></script>
+  <script src="/static/app.js?v=25"></script>
+  <script src="/static/messages.js?v=33"></script>
   <script src="/static/mesh.js?v=23"></script>
   <script src="/static/lora.js?v=23"></script>
   <script src="/static/routing.js?v=23"></script>
   <script src="/static/meshtastic.js?v=23"></script>
+  <script src="/static/meshcore.js?v=2"></script>
   <script src="/static/vendor/leaflet.js"></script>
   <script src="/static/map.js?v=1"></script>
 </body>
