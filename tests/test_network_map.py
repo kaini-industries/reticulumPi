@@ -9,22 +9,25 @@ import pytest
 from reticulumpi.event_bus import EventBus
 
 
-def _drain_announce_queue(plugin, timeout: float = 2.0) -> None:
-    """Wait until the plugin's announce queue is empty and worker has processed it.
+def _drain_announce_queue(plugin, timeout: float = 5.0) -> None:
+    """Wait until the plugin's announce queue is fully processed.
 
-    The queue-based architecture processes announces asynchronously, so tests
-    that call ``record_announce`` and immediately inspect state need to wait
-    for the worker thread to drain the queue.
+    Uses ``Queue.join()`` which blocks until every item that was ``get()``-ed
+    has had ``task_done()`` called — eliminating the race between dequeue and
+    processing that the old polling approach was susceptible to.
     """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if plugin._announce_queue.empty() and not plugin._pending_upserts:
-            # Give worker thread a moment to finish its current iteration
-            time.sleep(0.05)
-            if plugin._announce_queue.empty():
-                return
-        time.sleep(0.01)
-    raise TimeoutError("Announce queue did not drain within timeout")
+    import threading
+
+    done = threading.Event()
+
+    def _wait() -> None:
+        plugin._announce_queue.join()
+        done.set()
+
+    waiter = threading.Thread(target=_wait, daemon=True)
+    waiter.start()
+    if not done.wait(timeout):
+        raise TimeoutError("Announce queue did not drain within timeout")
 
 
 @pytest.fixture

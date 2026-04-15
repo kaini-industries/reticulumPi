@@ -215,6 +215,28 @@ async def handle_meshtastic_nodes(
     return _ok({"nodes": gw.get_meshtastic_nodes()})
 
 
+async def handle_meshtastic_device(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshtastic/device — Meshtastic device hardware and radio info."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "get_device_info"):
+        return _ok({"available": False, "message": "meshtastic_gateway plugin not enabled"})
+    return _ok(gw.get_device_info())
+
+
+async def handle_meshtastic_lora_neighbors(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshtastic/lora_neighbors — LoRa-only neighbors from the physical radio."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "get_lora_neighbors"):
+        return _ok({"neighbors": [], "message": "meshtastic_gateway plugin not enabled"})
+    return _ok({"neighbors": gw.get_lora_neighbors()})
+
+
 # ── Messaging Hub ────────────────────────────────────────────────────
 
 
@@ -281,7 +303,12 @@ async def handle_send_message(
     if not destination:
         return _error("destination field is required", 400)
 
-    result = hub.send_message(transport, text, destination)
+    kwargs: dict = {}
+    if body.get("msg_type"):
+        kwargs["msg_type"] = body["msg_type"]
+    if body.get("sub_transport"):
+        kwargs["sub_transport"] = body["sub_transport"]
+    result = hub.send_message(transport, text, destination, **kwargs)
     if result.get("sent"):
         return _ok(result)
     return _error(result.get("reason", "Send failed"), 400)
@@ -303,14 +330,17 @@ async def handle_contacts(
 ) -> aiohttp.web.Response:
     """GET /api/messages/contacts — Contacts across transports.
 
-    Query param: transport (optional filter).
+    Query params:
+        transport — optional transport filter (e.g. ``meshtastic``).
+        q — optional search string (name or id substring match).
     """
     plugin = _get_plugin(request)
     hub = plugin.app.get_plugin("messaging_hub")
     if not hub or not hasattr(hub, "get_contacts"):
         return _ok({"contacts": []})
     transport = request.query.get("transport") or None
-    return _ok({"contacts": hub.get_contacts(transport)})
+    query = request.query.get("q") or None
+    return _ok({"contacts": hub.get_contacts(transport, query=query)})
 
 
 async def handle_message_stats(
@@ -322,6 +352,87 @@ async def handle_message_stats(
     if not hub or not hasattr(hub, "get_stats"):
         return _ok({"stats": {}})
     return _ok({"stats": hub.get_stats()})
+
+
+async def handle_conversations(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/conversations — Conversation summaries."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_conversations"):
+        return _ok({"conversations": []})
+    transport = request.query.get("transport") or None
+    return _ok({"conversations": hub.get_conversations(transport=transport)})
+
+
+async def handle_conversation_messages(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/conversation/{contact_id} — Messages for one conversation."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_conversation_messages"):
+        return _ok({"messages": []})
+    contact_id = request.match_info["contact_id"]
+    limit = min(int(request.query.get("limit", "50")), 200)
+    before_str = request.query.get("before")
+    before = float(before_str) if before_str else None
+    return _ok({
+        "messages": hub.get_conversation_messages(
+            contact_id, limit=limit, before=before,
+        ),
+    })
+
+
+async def handle_message_search(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/search — Text search across messages."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "search_messages"):
+        return _ok({"messages": []})
+    query = request.query.get("q", "").strip()
+    if not query:
+        return _ok({"messages": []})
+    limit = min(int(request.query.get("limit", "50")), 200)
+    transport = request.query.get("transport") or None
+    return _ok({"messages": hub.search_messages(query, limit=limit, transport=transport)})
+
+
+async def handle_mark_read(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/messages/read — Mark conversation as read."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "mark_read"):
+        return _ok({"updated": 0})
+    try:
+        body = await request.json()
+    except Exception:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": "Invalid JSON"}, status=400,
+        )
+    contact_id = body.get("contact_id", "")
+    if not contact_id:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": "contact_id required"}, status=400,
+        )
+    updated = hub.mark_read(contact_id)
+    return _ok({"updated": updated})
+
+
+async def handle_unread_counts(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/messages/unread — Unread counts per contact."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "get_unread_counts"):
+        return _ok({"unread": {}})
+    return _ok({"unread": hub.get_unread_counts()})
 
 
 def setup_service_routes(app: aiohttp.web.Application) -> None:
@@ -342,9 +453,18 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     # Meshtastic
     app.router.add_get("/api/meshtastic/status", handle_meshtastic_status)
     app.router.add_get("/api/meshtastic/nodes", handle_meshtastic_nodes)
+    app.router.add_get("/api/meshtastic/device", handle_meshtastic_device)
+    app.router.add_get("/api/meshtastic/lora_neighbors", handle_meshtastic_lora_neighbors)
     # Messaging
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_post("/api/messages/send", handle_send_message)
     app.router.add_get("/api/messages/transports", handle_transports)
     app.router.add_get("/api/messages/contacts", handle_contacts)
     app.router.add_get("/api/messages/stats", handle_message_stats)
+    app.router.add_get("/api/messages/conversations", handle_conversations)
+    app.router.add_get(
+        "/api/messages/conversation/{contact_id}", handle_conversation_messages,
+    )
+    app.router.add_get("/api/messages/search", handle_message_search)
+    app.router.add_post("/api/messages/read", handle_mark_read)
+    app.router.add_get("/api/messages/unread", handle_unread_counts)

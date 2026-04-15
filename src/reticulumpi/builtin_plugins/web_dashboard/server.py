@@ -66,9 +66,10 @@ async def security_headers_middleware(
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; connect-src 'self' ws: wss:; "
-        "style-src 'self' 'unsafe-inline'"
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https://*.tile.openstreetmap.org"
     )
-    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     if request.path.startswith("/api/"):
         response.headers["Api-Version"] = API_VERSION
     return response

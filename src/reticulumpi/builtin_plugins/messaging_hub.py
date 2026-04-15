@@ -118,6 +118,75 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_transport
                     ON messages(transport);
             """)
+            self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Add conversation-related columns if missing (v2 migration)."""
+        cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "contact_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN contact_id TEXT"
+            )
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN read INTEGER DEFAULT 0"
+            )
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN search_text TEXT"
+            )
+            # Backfill contact_id from existing data
+            self._conn.execute("""
+                UPDATE messages SET contact_id = CASE
+                    WHEN msg_type = 'broadcast'
+                        THEN '__broadcast_' || transport || '__'
+                    WHEN direction = 'sent'
+                        THEN COALESCE(to_id, '__unknown__')
+                    ELSE COALESCE(from_id, '__unknown__')
+                END
+                WHERE contact_id IS NULL
+            """)
+            # Backfill search_text
+            self._conn.execute(
+                "UPDATE messages SET search_text = lower(text) "
+                "WHERE search_text IS NULL"
+            )
+            # Mark all existing received messages as read
+            self._conn.execute(
+                "UPDATE messages SET read = 1 "
+                "WHERE direction = 'received' AND read = 0"
+            )
+            self._conn.commit()
+        # Ensure indexes exist (idempotent)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_contact "
+            "ON messages(contact_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_read "
+            "ON messages(read) WHERE read = 0"
+        )
+        self._conn.commit()
+
+    @staticmethod
+    def _compute_contact_id(
+        direction: str, msg_type: str, transport: str,
+        from_id: str | None, to_id: str | None,
+        sub_transport: str = "",
+    ) -> str:
+        """Compute the contact_id for a message.
+
+        For broadcasts, ``sub_transport`` (e.g. "mqtt" or "lora") creates
+        separate conversations per source channel.
+        """
+        if msg_type == "broadcast":
+            if sub_transport:
+                return f"__broadcast_{transport}_{sub_transport}__"
+            return f"__broadcast_{transport}__"
+        if direction == "sent":
+            return to_id or "__unknown__"
+        return from_id or "__unknown__"
 
     # ── Write ──────────────────────────────────────────────────────
 
@@ -134,21 +203,31 @@ class MessageStore:
         to_name: str | None = None,
         status: str = "sent",
         metadata: dict | None = None,
+        sub_transport: str = "",
     ) -> int:
         """Insert a message and return its row ID."""
         ts = time.time()
         meta_json = json.dumps(metadata) if metadata else None
+        contact_id = self._compute_contact_id(
+            direction, msg_type, transport, from_id, to_id,
+            sub_transport=sub_transport,
+        )
+        search_text = text.lower() if text else None
+        # New received messages default to unread
+        read_flag = 0 if direction == "received" else 1
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO messages
                    (timestamp, transport, direction, msg_type,
                     from_id, from_name, to_id, to_name,
-                    text, status, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    text, status, metadata,
+                    contact_id, read, search_text)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ts, transport, direction, msg_type,
                     from_id, from_name, to_id, to_name,
                     text, status, meta_json,
+                    contact_id, read_flag, search_text,
                 ),
             )
             self._conn.commit()
@@ -238,6 +317,128 @@ class MessageStore:
             "by_transport": by_transport,
             "by_direction": by_direction,
         }
+
+    # ── Conversation queries ─────────────────────────────────────────
+
+    def get_conversations(
+        self, transport: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return conversation summaries, one per contact_id.
+
+        Each entry: ``{contact_id, contact_name, transport, msg_type,
+        last_text, last_ts, unread_count}``.  Ordered by most recent first.
+        """
+        where = ""
+        params: list[Any] = []
+        if transport:
+            where = " WHERE transport = ?"
+            params.append(transport)
+        sql = f"""
+            SELECT contact_id,
+                   transport,
+                   msg_type,
+                   MAX(timestamp) AS last_ts,
+                   MAX(CASE
+                       WHEN direction = 'received' THEN from_name
+                       ELSE to_name
+                   END) AS contact_name,
+                   SUM(CASE
+                       WHEN direction = 'received' AND read = 0 THEN 1
+                       ELSE 0
+                   END) AS unread_count
+            FROM messages{where}
+            GROUP BY contact_id
+            ORDER BY last_ts DESC
+        """
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            # Fetch last message text per conversation in a second pass
+            result = []
+            for r in rows:
+                cid = r["contact_id"]
+                last_row = self._conn.execute(
+                    "SELECT text FROM messages WHERE contact_id = ? "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (cid,),
+                ).fetchone()
+                result.append({
+                    "contact_id": cid,
+                    "contact_name": r["contact_name"],
+                    "transport": r["transport"],
+                    "msg_type": r["msg_type"],
+                    "last_ts": r["last_ts"],
+                    "last_text": last_row["text"] if last_row else None,
+                    "unread_count": r["unread_count"],
+                })
+        return result
+
+    def get_conversation_messages(
+        self,
+        contact_id: str,
+        limit: int = 50,
+        before: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch messages for a single conversation, newest first."""
+        params: list[Any] = [contact_id]
+        time_clause = ""
+        if before is not None:
+            time_clause = " AND timestamp < ?"
+            params.append(before)
+        params.append(limit)
+        sql = (
+            "SELECT * FROM messages "
+            f"WHERE contact_id = ?{time_clause} "
+            "ORDER BY timestamp DESC LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def search_messages(
+        self,
+        query: str,
+        limit: int = 50,
+        transport: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search messages by text content (case-insensitive)."""
+        clauses = ["search_text LIKE ?"]
+        params: list[Any] = [f"%{query.lower()}%"]
+        if transport:
+            clauses.append("transport = ?")
+            params.append(transport)
+        where = " AND ".join(clauses)
+        params.append(limit)
+        sql = (
+            f"SELECT * FROM messages WHERE {where} "
+            "ORDER BY timestamp DESC LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def mark_read(self, contact_id: str) -> int:
+        """Mark all unread received messages from a contact as read.
+
+        Returns the number of messages updated.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE messages SET read = 1 "
+                "WHERE contact_id = ? AND direction = 'received' AND read = 0",
+                (contact_id,),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def get_unread_counts(self) -> dict[str, int]:
+        """Return ``{contact_id: unread_count}`` for contacts with unread > 0."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT contact_id, COUNT(*) AS cnt FROM messages "
+                "WHERE direction = 'received' AND read = 0 "
+                "GROUP BY contact_id"
+            ).fetchall()
+        return {r["contact_id"]: r["cnt"] for r in rows}
 
     def close(self) -> None:
         """Close the database connection."""
@@ -506,17 +707,42 @@ class MeshtasticAdapter(TransportAdapter):
         if not self._hub_callback:
             return
         from_id = data.get("from_id", "")
-        from_name = self._resolve_node_name(from_id) or from_id
-        self._hub_callback({
-            "transport": "meshtastic",
-            "from_id": from_id,
-            "from_name": from_name,
-            "to_id": None,
-            "to_name": None,
-            "text": data.get("text", ""),
-            "msg_type": "broadcast",
-            "metadata": {k: v for k, v in data.items() if k not in ("text",)},
-        })
+        # Prefer the name resolved by the gateway (checks MQTT, serial,
+        # and persistent cache).  Fall back to our own lookup.
+        from_name = (
+            data.get("from_name")
+            or self._resolve_node_name(from_id)
+            or from_id
+        )
+        source = data.get("source", "")
+        is_broadcast = data.get("is_broadcast", True)
+
+        if is_broadcast:
+            # Broadcast — split by source (LoRa vs MQTT) via sub_transport
+            self._hub_callback({
+                "transport": "meshtastic",
+                "sub_transport": source.lower() if source else "",
+                "from_id": from_id,
+                "from_name": from_name,
+                "to_id": None,
+                "to_name": None,
+                "text": data.get("text", ""),
+                "msg_type": "broadcast",
+                "metadata": {k: v for k, v in data.items() if k not in ("text",)},
+            })
+        else:
+            # Direct message — group by peer (no sub_transport split)
+            self._hub_callback({
+                "transport": "meshtastic",
+                "sub_transport": "",
+                "from_id": from_id,
+                "from_name": from_name,
+                "to_id": data.get("to_id", ""),
+                "to_name": None,
+                "text": data.get("text", ""),
+                "msg_type": "direct",
+                "metadata": {k: v for k, v in data.items() if k not in ("text",)},
+            })
 
     def _resolve_node_name(self, node_id: str) -> str | None:
         """Look up a Meshtastic node's human-readable name from the gateway."""
@@ -536,7 +762,12 @@ class MeshtasticAdapter(TransportAdapter):
         if not gw or not hasattr(gw, "send_message"):
             return {"sent": False, "reason": "meshtastic_gateway plugin not available"}
         dest_id = destination if destination and destination != "broadcast" else None
-        return gw.send_message(text, destination_id=dest_id)
+        via = kwargs.get("sub_transport", "")
+        # DMs prefer LoRa for direct delivery to local neighbors;
+        # gateway falls back to MQTT if serial listener is unavailable.
+        if dest_id and not via:
+            via = "lora"
+        return gw.send_message(text, destination_id=dest_id, via=via)
 
     def get_contacts(self) -> list[dict[str, Any]]:
         gw = self._hub.app.get_plugin("meshtastic_gateway")
@@ -547,6 +778,7 @@ class MeshtasticAdapter(TransportAdapter):
                 "id": n["id"],
                 "name": n.get("long_name") or n.get("short_name") or n["id"],
                 "transport": "meshtastic",
+                "last_heard": n.get("last_heard"),
             }
             for n in gw.get_meshtastic_nodes()
             if not n.get("is_self")
@@ -661,6 +893,7 @@ class MessagingHubPlugin(PluginBase):
                 to_name=msg.get("to_name"),
                 status="received",
                 metadata=msg.get("metadata"),
+                sub_transport=msg.get("sub_transport", ""),
             )
             self._maybe_prune()
             self.event_bus.publish(events.MESSAGE_RECEIVED, {
@@ -717,6 +950,7 @@ class MessagingHubPlugin(PluginBase):
             to_name=to_name,
             status="sent" if result.get("sent") else "failed",
             metadata=kwargs.get("metadata"),
+            sub_transport=kwargs.get("sub_transport", ""),
         )
         self._maybe_prune()
 
@@ -754,8 +988,21 @@ class MessagingHubPlugin(PluginBase):
             result.append(info)
         return result
 
-    def get_contacts(self, transport: str | None = None) -> list[dict[str, Any]]:
-        """Aggregate contacts from all or a specific transport."""
+    def get_contacts(
+        self,
+        transport: str | None = None,
+        query: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregate contacts from all or a specific transport.
+
+        Args:
+            transport: Optional filter by transport name.
+            query: Optional search string — filters by name or id
+                   (case-insensitive substring match).
+
+        Returns contacts sorted by ``last_heard`` descending (most recent
+        first).  Contacts without a ``last_heard`` value sort last.
+        """
         with self._lock:
             adapters = list(self._adapters.values())
         contacts: list[dict[str, Any]] = []
@@ -769,11 +1016,48 @@ class MessagingHubPlugin(PluginBase):
                     "Error getting contacts from %s", a.transport_name,
                     exc_info=True,
                 )
+
+        # Optional text search
+        if query:
+            q = query.lower()
+            contacts = [
+                c for c in contacts
+                if q in (c.get("name") or "").lower()
+                or q in (c.get("id") or "").lower()
+            ]
+
+        # Sort by last_heard descending (None sorts last)
+        contacts.sort(
+            key=lambda c: (c.get("last_heard") or 0),
+            reverse=True,
+        )
         return contacts
 
     def get_stats(self) -> dict[str, Any]:
         """Return message statistics."""
         return self._store.get_stats()
+
+    def get_conversations(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Return conversation summaries from the store."""
+        return self._store.get_conversations(**kwargs)
+
+    def get_conversation_messages(
+        self, contact_id: str, **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Fetch messages for a single conversation."""
+        return self._store.get_conversation_messages(contact_id, **kwargs)
+
+    def search_messages(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+        """Search messages by text content."""
+        return self._store.search_messages(query, **kwargs)
+
+    def mark_read(self, contact_id: str) -> int:
+        """Mark all unread messages from a contact as read."""
+        return self._store.mark_read(contact_id)
+
+    def get_unread_counts(self) -> dict[str, int]:
+        """Return unread counts per contact."""
+        return self._store.get_unread_counts()
 
     def get_status(self) -> dict[str, Any]:
         stats = self._store.get_stats()

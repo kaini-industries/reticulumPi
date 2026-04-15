@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=16">
+  <link rel="stylesheet" href="/static/style.css?v=23">
+  <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
   <div class="dashboard">
@@ -350,32 +351,62 @@
       <div class="section-header">
         <span>Messages</span>
         <span class="count" id="msg-count"></span>
+        <span class="msg-unread-total" id="msg-unread-total"></span>
       </div>
-      <div class="msg-toolbar">
-        <select id="msg-transport-filter" class="rt-select">
-          <option value="">All Transports</option>
-        </select>
-        <select id="msg-direction-filter" class="rt-select">
-          <option value="">All</option>
-          <option value="sent">Sent</option>
-          <option value="received">Received</option>
-        </select>
-      </div>
-      <div class="msg-chat" id="msg-chat"></div>
-      <div class="msg-compose">
-        <div class="msg-compose-row">
-          <select id="msg-send-transport" class="rt-select"></select>
-          <select id="msg-send-dest" class="rt-select">
-            <option value="">Select recipient...</option>
-          </select>
-          <span class="msg-byte-count" id="msg-byte-count"></span>
+      <div class="msg-layout">
+        <!-- Sidebar: conversations list -->
+        <div class="msg-sidebar" id="msg-sidebar">
+          <div class="msg-sidebar-toolbar">
+            <input type="text" id="msg-search-input" class="rt-input"
+                   placeholder="Search messages..." autocomplete="off">
+            <select id="msg-transport-filter" class="rt-select">
+              <option value="">All</option>
+            </select>
+            <button class="msg-new-btn" id="msg-new-btn" title="New message">+</button>
+          </div>
+          <div class="msg-conversations" id="msg-conversations"></div>
         </div>
-        <div class="msg-compose-row">
-          <input type="text" id="msg-send-text" class="rt-input"
-                 placeholder="Type a message..." autocomplete="off">
-          <button id="msg-send-btn" class="msg-send-btn" disabled>Send</button>
+        <!-- Thread: messages for selected conversation -->
+        <div class="msg-thread" id="msg-thread">
+          <div class="msg-thread-header" id="msg-thread-header">
+            <button class="msg-back-btn" id="msg-back-btn">&larr;</button>
+            <span class="msg-thread-name" id="msg-thread-name">Select a conversation</span>
+            <span class="msg-transport-badge" id="msg-thread-transport"></span>
+          </div>
+          <div class="msg-chat" id="msg-chat"></div>
+          <div class="msg-compose" id="msg-compose" style="display:none">
+            <div class="msg-compose-row">
+              <textarea id="msg-send-text" class="rt-input" rows="1"
+                        placeholder="Type a message..." autocomplete="off"></textarea>
+              <button id="msg-send-btn" class="msg-send-btn" disabled>Send</button>
+            </div>
+            <div class="msg-compose-meta">
+              <span class="msg-byte-count" id="msg-byte-count"></span>
+              <span class="msg-feedback" id="msg-feedback"></span>
+            </div>
+          </div>
+          <!-- New message compose (hidden until + clicked) -->
+          <div class="msg-new-compose" id="msg-new-compose" style="display:none">
+            <div class="msg-compose-row">
+              <select id="msg-send-transport" class="rt-select"></select>
+              <div class="msg-dest-combo" id="msg-dest-combo">
+                <input type="text" id="msg-dest-input" class="rt-input"
+                       placeholder="Search recipients..." autocomplete="off" />
+                <input type="hidden" id="msg-send-dest" value="" />
+                <div class="msg-dest-list" id="msg-dest-list"></div>
+              </div>
+            </div>
+            <div class="msg-compose-row">
+              <textarea id="msg-new-text" class="rt-input" rows="1"
+                        placeholder="Type a message..." autocomplete="off"></textarea>
+              <button id="msg-new-send-btn" class="msg-send-btn" disabled>Send</button>
+            </div>
+            <div class="msg-compose-meta">
+              <span class="msg-byte-count" id="msg-new-byte-count"></span>
+              <span class="msg-feedback" id="msg-new-feedback"></span>
+            </div>
+          </div>
         </div>
-        <div class="msg-feedback" id="msg-feedback"></div>
       </div>
     </div>
 
@@ -386,6 +417,27 @@
         <span class="count" id="meshtastic-status"></span>
       </div>
       <div class="meshtastic-overview" id="meshtastic-overview"></div>
+      <div id="meshtastic-device-info"></div>
+      <div id="meshtastic-lora-neighbors" style="display:none">
+        <div class="msh-subsection-header">LoRa Neighbors</div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Hardware</th>
+                <th class="sortable" data-sort="lora-hops_away">Hops<span class="sort-arrow"></span></th>
+                <th class="sortable" data-sort="lora-snr">SNR<span class="sort-arrow"></span></th>
+                <th class="sortable" data-sort="lora-last_heard">Last Heard<span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="lora-neighbors-table"></tbody>
+          </table>
+        </div>
+        <button id="lora-neighbors-show-more" class="show-more-btn" style="display:none">Show all</button>
+      </div>
+      <div id="meshtastic-mqtt-nodes-header" class="msh-subsection-header" style="display:none">MQTT Nodes</div>
       <div class="table-scroll">
         <table class="data-table">
           <thead>
@@ -401,6 +453,20 @@
         </table>
       </div>
       <button id="meshtastic-show-more" class="show-more-btn" style="display:none">Show all</button>
+    </div>
+
+    <!-- Node Map -->
+    <div class="section" id="map-section">
+      <div class="section-header">
+        <span>Node Map</span>
+        <span class="count" id="map-count"></span>
+      </div>
+      <div class="map-controls">
+        <button class="mesh-tab active" id="map-show-all" title="Show all nodes with position">All Nodes</button>
+        <button class="mesh-tab" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
+        <span class="map-stats" id="map-stats"></span>
+      </div>
+      <div id="map-container" style="height: 450px; width: 100%;"></div>
     </div>
 
     <!-- Emergency Broadcasts -->
@@ -429,10 +495,13 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=18"></script>
-  <script src="/static/mesh.js?v=18"></script>
-  <script src="/static/lora.js?v=18"></script>
-  <script src="/static/routing.js?v=18"></script>
-  <script src="/static/meshtastic.js?v=18"></script>
+  <script src="/static/app.js?v=24"></script>
+  <script src="/static/messages.js?v=32"></script>
+  <script src="/static/mesh.js?v=23"></script>
+  <script src="/static/lora.js?v=23"></script>
+  <script src="/static/routing.js?v=23"></script>
+  <script src="/static/meshtastic.js?v=23"></script>
+  <script src="/static/vendor/leaflet.js"></script>
+  <script src="/static/map.js?v=1"></script>
 </body>
 </html>

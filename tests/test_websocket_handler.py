@@ -960,6 +960,7 @@ class TestBroadcastDataCollection:
             {"text": "hello", "timestamp": time.time()},
         ]
         msg_hub.get_transports.return_value = ["lxmf"]
+        msg_hub.get_unread_counts.return_value = {}
 
         plugin = self._make_plugin({"messaging_hub": msg_hub})
         _ws_clients.clear()

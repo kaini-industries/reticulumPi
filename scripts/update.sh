@@ -128,8 +128,16 @@ done
 echo "[5/5] Restarting services..."
 if systemctl is-active --quiet rnsd; then
     sudo systemctl restart rnsd
-    echo "  Waiting for rnsd to initialize..."
-    sleep 3
+    echo "  Waiting for rnsd shared instance socket..."
+    for i in $(seq 1 60); do
+        ss -xa 2>/dev/null | grep -q "@rns/default" && break
+        sleep 1
+    done
+    if ss -xa 2>/dev/null | grep -q "@rns/default"; then
+        echo "  rnsd ready (${i}s)"
+    else
+        echo "  Warning: rnsd socket not detected after 60s, continuing anyway"
+    fi
 fi
 sudo systemctl restart reticulumpi
 

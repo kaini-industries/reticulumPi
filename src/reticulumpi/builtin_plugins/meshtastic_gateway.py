@@ -13,6 +13,7 @@ Modes:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -599,6 +600,15 @@ class MeshtasticGateway(PluginBase):
         if not isinstance(mpm, (int, float)) or mpm < 0:
             raise ValueError("max_messages_per_minute must be >= 0 (0 = unlimited)")
 
+        # Validate device_probe_port (optional, for MQTT mode device telemetry)
+        dpp = self.config.get("device_probe_port", "")
+        if dpp and not isinstance(dpp, str):
+            raise ValueError("device_probe_port must be a string (device path)")
+
+        dpi = self.config.get("device_probe_interval", 300)
+        if not isinstance(dpi, (int, float)) or dpi < 60:
+            raise ValueError("device_probe_interval must be >= 60 seconds")
+
         # Validate short_name (optional, max 4 chars)
         short_name = self.config.get("short_name", "")
         if short_name and (not isinstance(short_name, str) or len(short_name) > 4):
@@ -652,10 +662,31 @@ class MeshtasticGateway(PluginBase):
         self._connected = False
         self._last_disconnect_time: float = 0.0
 
+        # Device info probe (for dashboard device card & LoRa neighbors)
+        self._cached_device_info: dict[str, Any] | None = None
+        self._cached_lora_neighbors: list[dict[str, Any]] = []
+        self._node_name_cache: dict[str, dict[str, str]] = {}  # {id: {longName, shortName, hwModel}}
+        self._name_cache_path: str = ""  # set after storage_path is known
+        self._device_info_cache_time: float = 0
+        self._device_probe_port: str = self.config.get("device_probe_port", "")
+        self._device_probe_interval: float = self.config.get(
+            "device_probe_interval", 300
+        )
+
+        # Persistent serial listener for LoRa message reception (MQTT mode)
+        self._serial_listener: Any = None
+
+        # Packet dedup — same message can arrive via both MQTT and serial
+        self._seen_packet_ids: dict[int, float] = {}  # packet_id → timestamp
+
         # ── LXMF setup (same pattern as message_echo.py) ───────────
         default_storage = "~/.local/share/reticulumpi/meshtastic_gw_lxmf"
         storage_path = os.path.expanduser(self.config.get("storage_path", default_storage))
         os.makedirs(storage_path, exist_ok=True)
+
+        # Load persisted node name cache (survives restarts)
+        self._name_cache_path = os.path.join(storage_path, "node_name_cache.json")
+        self._load_name_cache()
 
         identity_path = os.path.join(storage_path, "identity")
         if os.path.isfile(identity_path):
@@ -713,6 +744,11 @@ class MeshtasticGateway(PluginBase):
         self._active = True
         self._start_thread(self._connection_loop, "meshtastic-connect")
 
+        # Start device probe thread (MQTT mode only — reads HW info from
+        # the physical Meshtastic device via a brief serial connection).
+        if self._mode == MODE_MQTT and self._device_probe_port:
+            self._start_thread(self._device_probe_loop, "meshtastic-device-probe")
+
         self.log.info(
             "Meshtastic Gateway started (mode=%s, LXMF address: %s)",
             self._mode,
@@ -721,6 +757,14 @@ class MeshtasticGateway(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        # Close persistent serial listener (if any) before joining threads
+        try:
+            listener = self._serial_listener
+            self._serial_listener = None
+            if listener is not None:
+                listener.close()
+        except Exception:
+            pass
         try:
             RNS.Transport.deregister_announce_handler(self._propagation_handler)
         except Exception:
@@ -963,6 +1007,451 @@ class MeshtasticGateway(PluginBase):
                 self.log.debug("Error closing Meshtastic interface", exc_info=True)
             self._mesh_interface = None
             self._connected = False
+            # Invalidate serial-mode caches on disconnect
+            if self._mode == MODE_SERIAL:
+                self._cached_device_info = None
+                self._cached_lora_neighbors = []
+
+    # ── Device info probe (for dashboard device card) ────────────
+
+    def _device_probe_loop(self) -> None:
+        """Background thread: probe the physical device and listen for LoRa messages.
+
+        Only runs in MQTT mode when ``device_probe_port`` is configured.
+        Opens a SerialInterface, reads hardware/radio/telemetry data, then
+        **keeps the connection open** between probes so the meshtastic library
+        can receive local LoRa text messages via pubsub.  The existing
+        ``_on_mesh_text`` callback fires for both MQTT and serial sources;
+        packet-level dedup prevents double-processing.
+        """
+        import meshtastic.serial_interface
+
+        # Small initial delay so the gateway MQTT connection settles first
+        self._sleep_while_active(10)
+
+        while self._active:
+            iface = None
+            try:
+                iface = meshtastic.serial_interface.SerialInterface(
+                    devPath=self._device_probe_port
+                )
+
+                # ── Read device info (same as before) ────────────────
+                info = self._read_device_info_from_interface(iface)
+                neighbors = self._extract_lora_neighbors(iface)
+                self._request_missing_nodeinfo(iface, neighbors)
+
+                if info:
+                    with self._lock:
+                        self._cached_device_info = info
+                        self._device_info_cache_time = time.monotonic()
+                        self._cached_lora_neighbors = neighbors
+                    self._save_name_cache()
+                    self.log.debug(
+                        "Device probe OK: %s %s (%s), %d LoRa neighbors",
+                        info.get("hw_model"),
+                        info.get("firmware_version"),
+                        info.get("node_id"),
+                        len(neighbors),
+                    )
+
+                # ── Keep serial open to receive local LoRa messages ──
+                with self._lock:
+                    self._serial_listener = iface
+                self.log.info(
+                    "Serial listener active on %s — receiving LoRa messages",
+                    self._device_probe_port,
+                )
+
+                # Sleep until next probe.  The meshtastic library's
+                # internal reader thread delivers packets via pubsub
+                # while we wait — _on_mesh_text handles them.
+                self._sleep_while_active(self._device_probe_interval)
+
+            except Exception:
+                self.log.debug("Device probe / serial listener failed", exc_info=True)
+                # Wait before retrying on failure
+                self._sleep_while_active(self._device_probe_interval)
+            finally:
+                # Close serial so next iteration can reopen cleanly
+                with self._lock:
+                    self._serial_listener = None
+                if iface is not None:
+                    try:
+                        iface.close()
+                    except Exception:
+                        pass
+
+    def _request_missing_nodeinfo(
+        self, iface: Any, neighbors: list[dict[str, Any]],
+    ) -> None:
+        """Send NodeInfo requests for LoRa neighbors with generic names.
+
+        Fire-and-forget: the device receives the response over LoRa and
+        stores it in its NodeDB.  The next probe will pick up the name.
+
+        Rate-limited to at most 3 requests per probe to conserve airtime.
+        Only targets nodes heard within the last 2 hours with generic names.
+        """
+        from meshtastic.protobuf.portnums_pb2 import PortNum
+
+        now = time.time()
+        cutoff = now - 7200  # 2 hours
+        requests_sent = 0
+        max_requests = 3
+
+        for n in neighbors:
+            if requests_sent >= max_requests:
+                break
+            # Only request for generic-named, recently-heard nodes
+            name = n.get("long_name") or ""
+            last_heard = n.get("last_heard") or 0
+            if not (name.startswith("Meshtastic ") and len(name) <= 20):
+                continue
+            if last_heard < cutoff:
+                continue
+            node_id = n.get("id", "")
+            if not node_id:
+                continue
+            try:
+                iface.sendData(
+                    bytes(),
+                    destinationId=node_id,
+                    portNum=PortNum.NODEINFO_APP,
+                    wantAck=False,
+                    wantResponse=True,
+                )
+                requests_sent += 1
+                self.log.debug(
+                    "Requested NodeInfo from %s (generic name)", node_id,
+                )
+            except Exception:
+                self.log.debug(
+                    "Failed to request NodeInfo from %s", node_id,
+                    exc_info=True,
+                )
+
+    @staticmethod
+    def _read_device_info_from_interface(iface: Any) -> dict[str, Any]:
+        """Extract hardware, radio, and telemetry info from a Meshtastic interface.
+
+        Works with both ``SerialInterface`` (full data) and the custom
+        ``_MeshtasticMQTTClient`` (limited data).
+        """
+        from meshtastic import mesh_pb2, config_pb2
+
+        info: dict[str, Any] = {"available": True}
+
+        # ── Node identity ────────────────────────────────────────
+        my_info = getattr(iface, "myInfo", None)
+        if my_info:
+            try:
+                node_num = my_info.my_node_num
+                info["node_id"] = f"!{node_num:08x}"
+            except Exception:
+                info["node_id"] = None
+        else:
+            info["node_id"] = None
+
+        # ── Metadata (firmware, role, hw_model) ──────────────────
+        metadata = getattr(iface, "metadata", None)
+        if metadata:
+            info["firmware_version"] = getattr(metadata, "firmware_version", None)
+            # Hardware model enum
+            hw_val = getattr(metadata, "hwModel", None) or getattr(
+                metadata, "hw_model", None
+            )
+            if hw_val is not None:
+                try:
+                    info["hw_model"] = mesh_pb2.HardwareModel.Name(hw_val)
+                except (ValueError, AttributeError):
+                    info["hw_model"] = str(hw_val)
+            else:
+                info["hw_model"] = None
+            # Role from metadata
+            role_val = getattr(metadata, "role", None)
+            if role_val is not None:
+                try:
+                    info["role"] = config_pb2.Config.DeviceConfig.Role.Name(role_val)
+                except (ValueError, AttributeError):
+                    info["role"] = str(role_val)
+            else:
+                info["role"] = None
+        else:
+            info["firmware_version"] = None
+            info["hw_model"] = None
+            info["role"] = None
+
+        # ── Local config (LoRa settings) ─────────────────────────
+        local_node = getattr(iface, "localNode", None)
+        local_config = getattr(local_node, "localConfig", None) if local_node else None
+
+        if local_config:
+            lora = getattr(local_config, "lora", None)
+            if lora:
+                # Region
+                region_val = getattr(lora, "region", None)
+                if region_val is not None:
+                    try:
+                        info["region"] = config_pb2.Config.LoRaConfig.RegionCode.Name(
+                            region_val
+                        )
+                    except (ValueError, AttributeError):
+                        info["region"] = str(region_val)
+                else:
+                    info["region"] = None
+                # Modem preset
+                preset_val = getattr(lora, "modem_preset", None)
+                if preset_val is not None:
+                    try:
+                        info["modem_preset"] = (
+                            config_pb2.Config.LoRaConfig.ModemPreset.Name(preset_val)
+                        )
+                    except (ValueError, AttributeError):
+                        info["modem_preset"] = str(preset_val)
+                else:
+                    info["modem_preset"] = None
+                info["hop_limit"] = getattr(lora, "hop_limit", None)
+                info["tx_power"] = getattr(lora, "tx_power", None)
+                info["tx_enabled"] = getattr(lora, "tx_enabled", None)
+            else:
+                for k in ("region", "modem_preset", "hop_limit", "tx_power", "tx_enabled"):
+                    info[k] = None
+
+            device_cfg = getattr(local_config, "device", None)
+            if device_cfg:
+                info["node_info_broadcast_secs"] = getattr(
+                    device_cfg, "node_info_broadcast_secs", None
+                )
+                # Fallback role from device config
+                if info.get("role") is None:
+                    role_val = getattr(device_cfg, "role", None)
+                    if role_val is not None:
+                        try:
+                            info["role"] = config_pb2.Config.DeviceConfig.Role.Name(
+                                role_val
+                            )
+                        except (ValueError, AttributeError):
+                            info["role"] = str(role_val)
+            else:
+                info.setdefault("node_info_broadcast_secs", None)
+        else:
+            for k in (
+                "region", "modem_preset", "hop_limit", "tx_power",
+                "tx_enabled", "node_info_broadcast_secs",
+            ):
+                info[k] = None
+
+        # ── Self-node user info (long/short name) ────────────────
+        info["long_name"] = None
+        info["short_name"] = None
+        node_num = None
+        if my_info:
+            try:
+                node_num = my_info.my_node_num
+            except Exception:
+                pass
+        nodes_by_num = getattr(iface, "nodesByNum", None) or {}
+        self_node = nodes_by_num.get(node_num, {}) if node_num else {}
+
+        user = self_node.get("user", {})
+        if user:
+            info["long_name"] = user.get("longName")
+            info["short_name"] = user.get("shortName")
+
+        # ── Device telemetry (battery, utilization) ──────────────
+        device_metrics = self_node.get("deviceMetrics", {})
+        info["battery_level"] = device_metrics.get("batteryLevel")
+        info["voltage"] = device_metrics.get("voltage")
+        info["channel_utilization"] = device_metrics.get("channelUtilization")
+        info["air_util_tx"] = device_metrics.get("airUtilTx")
+
+        return info
+
+    def _load_name_cache(self) -> None:
+        """Load the persisted node name cache from disk."""
+        if not self._name_cache_path:
+            return
+        try:
+            with open(self._name_cache_path) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._node_name_cache = data
+                self.log.debug(
+                    "Loaded %d entries from node name cache", len(data),
+                )
+        except FileNotFoundError:
+            pass
+        except Exception:
+            self.log.debug("Error loading node name cache", exc_info=True)
+
+    def _save_name_cache(self) -> None:
+        """Persist the node name cache to disk."""
+        if not self._name_cache_path:
+            return
+        try:
+            with open(self._name_cache_path, "w") as f:
+                json.dump(self._node_name_cache, f)
+        except Exception:
+            self.log.debug("Error saving node name cache", exc_info=True)
+
+    def _extract_lora_neighbors(
+        self, iface: Any,
+    ) -> list[dict[str, Any]]:
+        """Extract LoRa-only neighbors from a Meshtastic interface's NodeDB.
+
+        Filters to nodes where ``via_mqtt`` is False/absent, excluding the
+        self node.  Returns a list of dicts suitable for the dashboard API.
+
+        Names are enriched from ``_node_name_cache`` which accumulates across
+        probes, since NodeInfo packets arrive infrequently (default 3 h).
+        """
+        raw_nodes = getattr(iface, "nodes", None) or {}
+        # Determine own node number to filter self even if isSelf is absent
+        my_node_num: int | None = None
+        my_info = getattr(iface, "myInfo", None)
+        if my_info:
+            try:
+                my_node_num = my_info.my_node_num
+            except Exception:
+                pass
+
+        # First pass: update the name cache from ALL nodes in the NodeDB
+        # (including MQTT nodes — their names help enrich LoRa neighbors)
+        for node_id, node_data in raw_nodes.items():
+            user = node_data.get("user", {})
+            long_name = user.get("longName") or ""
+            short_name = user.get("shortName") or ""
+            hw_model = user.get("hwModel") or ""
+            # Cache if we have any useful user data (skip bare IDs)
+            if long_name and long_name != node_id:
+                self._node_name_cache[node_id] = {
+                    "longName": long_name,
+                    "shortName": short_name,
+                    "hwModel": hw_model,
+                }
+            elif short_name and node_id not in self._node_name_cache:
+                self._node_name_cache[node_id] = {
+                    "longName": long_name,
+                    "shortName": short_name,
+                    "hwModel": hw_model,
+                }
+
+        # Second pass: build the filtered LoRa-only neighbor list
+        neighbors: list[dict[str, Any]] = []
+        for node_id, node_data in raw_nodes.items():
+            # Skip self node (check isSelf flag and own node number)
+            if node_data.get("isSelf"):
+                continue
+            if my_node_num is not None and node_data.get("num") == my_node_num:
+                continue
+            # Skip MQTT-relayed nodes — we only want LoRa-heard
+            # Check both snake_case (protobuf) and camelCase (library) variants
+            if node_data.get("via_mqtt") or node_data.get("viaMqtt"):
+                continue
+            user = node_data.get("user", {})
+            cached = self._node_name_cache.get(node_id, {})
+            position = node_data.get("position", {})
+
+            # Prefer cached names over generic auto-names.
+            # The serial NodeDB auto-generates "Meshtastic XXXX" as a
+            # placeholder until a NodeInfo packet arrives (every 3 h).
+            # The name cache may already have a real name from MQTT.
+            local_long = user.get("longName") or ""
+            cached_long = cached.get("longName") or ""
+            local_short = user.get("shortName") or ""
+            cached_short = cached.get("shortName") or ""
+            local_hw = user.get("hwModel") or ""
+            cached_hw = cached.get("hwModel") or ""
+
+            is_generic = (
+                local_long.startswith("Meshtastic ")
+                and len(local_long) <= 20
+            )
+            long_name = (
+                (cached_long if is_generic and cached_long
+                 and not cached_long.startswith("Meshtastic ")
+                 else local_long) or None
+            )
+            short_name = (
+                (cached_short if is_generic and cached_short
+                 else local_short) or None
+            )
+            hw_model = (
+                (cached_hw if (not local_hw or local_hw == "UNSET")
+                 and cached_hw and cached_hw != "UNSET"
+                 else local_hw) or None
+            )
+
+            entry: dict[str, Any] = {
+                "id": node_id,
+                "long_name": long_name,
+                "short_name": short_name,
+                "hw_model": hw_model,
+                "hops_away": node_data.get("hops_away", node_data.get("hopsAway")),
+                "snr": node_data.get("snr"),
+                "last_heard": node_data.get("lastHeard"),
+                "latitude": position.get("latitude"),
+                "longitude": position.get("longitude"),
+            }
+            neighbors.append(entry)
+        return neighbors
+
+    def get_device_info(self) -> dict[str, Any]:
+        """Return Meshtastic device hardware and radio info for the dashboard.
+
+        In SERIAL mode, reads directly from the live interface.
+        In MQTT mode, returns cached data from the background device probe.
+        """
+        with self._lock:
+            mode = self._mode
+            connected = self._connected
+            iface = self._mesh_interface
+
+        result: dict[str, Any] = {"mode": mode, "connected": connected}
+
+        if mode == MODE_SERIAL and connected and iface is not None:
+            # Serial mode — read live from the connected interface
+            try:
+                info = self._read_device_info_from_interface(iface)
+                info["mode"] = mode
+                info["connected"] = connected
+                return info
+            except Exception:
+                if self.log:
+                    self.log.debug("Error reading device info from serial interface",
+                                  exc_info=True)
+                result["available"] = False
+                result["message"] = "Error reading device info"
+                return result
+
+        # MQTT mode — return cached probe data
+        with self._lock:
+            cached = self._cached_device_info
+
+        if cached:
+            cached_copy = dict(cached)
+            cached_copy["mode"] = mode
+            cached_copy["connected"] = connected
+            return cached_copy
+
+        # No cache yet
+        if self._device_probe_port:
+            result["available"] = False
+            result["message"] = "Device probe pending — first reading in a few seconds"
+        else:
+            result["available"] = False
+            result["message"] = (
+                "No device_probe_port configured — "
+                "set device_probe_port in meshtastic_gateway config "
+                "to enable hardware telemetry"
+            )
+            # Return what we know from MQTT identity
+            if self._mqtt_node_num:
+                result["node_id"] = f"!{self._mqtt_node_num:08x}"
+                result["long_name"] = self._mqtt_long_name
+                result["short_name"] = self._mqtt_short_name
+        return result
 
     def _check_mesh_health(self) -> bool:
         """Return True if the Meshtastic connection appears healthy."""
@@ -1010,13 +1499,36 @@ class MeshtasticGateway(PluginBase):
     # ── Meshtastic pubsub callbacks ─────────────────────────────────
 
     def _on_mesh_text(self, packet: dict, interface: Any = None) -> None:
-        """Handle incoming Meshtastic text message (pubsub callback)."""
+        """Handle incoming Meshtastic text message (pubsub callback).
+
+        Fires for messages from both the MQTT client and the persistent
+        serial listener.  Packet-level dedup ensures a message arriving
+        via both sources is only processed once.
+        """
         with self._lock:
             if not self._active:
                 return
             try:
+                # ── Packet dedup ─────────────────────────────────────
+                packet_id = packet.get("id", 0)
+                now = time.time()
+                if packet_id:
+                    if packet_id in self._seen_packet_ids:
+                        return  # Already processed via the other source
+                    self._seen_packet_ids[packet_id] = now
+                    # Prune old entries every 64 packets
+                    if len(self._seen_packet_ids) > 512:
+                        cutoff = now - 120
+                        self._seen_packet_ids = {
+                            k: v for k, v in self._seen_packet_ids.items()
+                            if v > cutoff
+                        }
+
                 from_id = packet.get("fromId", "?")
                 from_num = packet.get("from", 0)
+                to_num = packet.get("to", 0)
+                to_id = packet.get("toId", "")
+                is_broadcast = (to_num == _MESH_BROADCAST)
 
                 decoded = packet.get("decoded", {})
                 payload = decoded.get("payload", b"")
@@ -1034,15 +1546,23 @@ class MeshtasticGateway(PluginBase):
                     self.log.debug("Ignoring Meshtastic msg from %s (not in allow list)", from_id)
                     return
 
-                # Resolve node name
+                # Resolve node name (checks MQTT nodes, serial nodes, name cache)
                 node_name = self._resolve_mesh_node_name(from_num)
                 sender_label = f"{node_name} ({from_id})" if node_name else from_id
+
+                # Identify source for logging
+                is_serial = (interface is not None
+                             and interface is self._serial_listener)
+                source_tag = "LoRa" if is_serial else "MQTT"
 
                 # Build formatted message
                 prefix = self.config.get("meshtastic_prefix", DEFAULT_MESH_PREFIX)
                 formatted = f"{prefix} {sender_label}:\n{text}"
 
-                self.log.info("Meshtastic msg from %s: %s", sender_label, text[:80])
+                self.log.info(
+                    "Meshtastic msg [%s] from %s: %s",
+                    source_tag, sender_label, text[:80],
+                )
 
                 self._msgs_mesh_to_lxmf += 1
                 self._last_mesh_msg_time = time.time()
@@ -1059,8 +1579,12 @@ class MeshtasticGateway(PluginBase):
 
         self.event_bus.publish(events.MESHTASTIC_MESSAGE_RECEIVED, {
             "from_id": from_id,
+            "from_name": node_name,
+            "to_id": to_id,
+            "is_broadcast": is_broadcast,
             "text": text[:100],
             "forwarded_to": len(self._recipient_hashes),
+            "source": source_tag,  # "LoRa" or "MQTT"
         })
 
     def _on_mesh_connect(self, interface: Any = None, topic: Any = None) -> None:
@@ -1069,7 +1593,16 @@ class MeshtasticGateway(PluginBase):
         Paho-mqtt auto-reconnects with exponential backoff.  When it succeeds,
         this callback fires — set ``_connected = True`` so the connection loop
         knows the link is healthy again and does NOT tear everything down.
+
+        Ignores connect events from the serial listener — those track the
+        LoRa message receiver, not the primary MQTT connection.
         """
+        # Ignore serial listener connection events — they must not affect
+        # the MQTT connection state that the dashboard reports.
+        if interface is not None and interface is self._serial_listener:
+            self.log.debug("Serial listener connected (ignored for MQTT state)")
+            return
+
         was_disconnected = False
         with self._lock:
             if not self._connected:
@@ -1085,7 +1618,15 @@ class MeshtasticGateway(PluginBase):
             self.log.debug("Meshtastic connection.established event")
 
     def _on_mesh_disconnect(self, interface: Any = None, topic: Any = None) -> None:
-        """Pubsub callback when Meshtastic connection is lost."""
+        """Pubsub callback when Meshtastic connection is lost.
+
+        Ignores disconnect events from the serial listener.
+        """
+        # Ignore serial listener disconnects
+        if interface is not None and interface is self._serial_listener:
+            self.log.debug("Serial listener disconnected (ignored for MQTT state)")
+            return
+
         self.log.warning("Meshtastic connection lost")
         with self._lock:
             self._connected = False
@@ -1148,15 +1689,48 @@ class MeshtasticGateway(PluginBase):
     # ── Helpers ──────────────────────────────────────────────────────
 
     def _resolve_mesh_node_name(self, node_num: int) -> str | None:
-        """Look up the long name for a Meshtastic node by its node number."""
-        if not self._mesh_interface or not hasattr(self._mesh_interface, "nodes"):
-            return None
+        """Look up the long name for a Meshtastic node by its node number.
+
+        Checks three sources in order:
+        1. MQTT interface node list
+        2. Serial listener node list (LoRa-heard nodes)
+        3. Persistent name cache
+        Prefers a real name over generic "Meshtastic XXXX" auto-names.
+        """
         node_id = f"!{node_num:08x}"
-        node_info = (getattr(self._mesh_interface, "nodes", None) or {}).get(node_id)
-        if node_info:
-            user = node_info.get("user", {})
-            return user.get("longName") or user.get("shortName")
-        return None
+        best_name: str | None = None
+
+        # 1. MQTT interface nodes
+        if self._mesh_interface and hasattr(self._mesh_interface, "nodes"):
+            node_info = (getattr(self._mesh_interface, "nodes", None) or {}).get(node_id)
+            if node_info:
+                user = node_info.get("user", {})
+                name = user.get("longName") or user.get("shortName")
+                if name:
+                    best_name = name
+
+        # 2. Serial listener nodes (may have names MQTT doesn't)
+        listener = self._serial_listener
+        if listener is not None and hasattr(listener, "nodes"):
+            node_info = (getattr(listener, "nodes", None) or {}).get(node_id)
+            if node_info:
+                user = node_info.get("user", {})
+                name = user.get("longName") or user.get("shortName")
+                if name:
+                    # Prefer non-generic name from either source
+                    if best_name and best_name.startswith("Meshtastic ") and not name.startswith("Meshtastic "):
+                        best_name = name
+                    elif not best_name:
+                        best_name = name
+
+        # 3. Persistent name cache (accumulated over time)
+        if (not best_name or (best_name.startswith("Meshtastic ") and len(best_name) <= 20)):
+            cached = self._node_name_cache.get(node_id, {})
+            cached_name = cached.get("longName") or cached.get("shortName")
+            if cached_name and not cached_name.startswith("Meshtastic "):
+                best_name = cached_name
+
+        return best_name
 
     def _forward_to_lxmf(self, text: str) -> None:
         """Send formatted text to each configured LXMF recipient."""
@@ -1233,10 +1807,24 @@ class MeshtasticGateway(PluginBase):
     def get_status(self) -> dict[str, Any]:
         """Return current gateway status for monitoring and API."""
         with self._lock:
+            # During auto-reconnect grace period, report as connected so
+            # the dashboard doesn't flash "(off)" on brief MQTT drops.
+            connected = self._connected
+            if (
+                not connected
+                and self._active
+                and self._mesh_interface is not None
+                and self._last_disconnect_time > 0
+            ):
+                grace = self.config.get("reconnect_grace_period", 90)
+                elapsed = time.monotonic() - self._last_disconnect_time
+                if elapsed < grace:
+                    connected = True
+
             status: dict[str, Any] = {
                 "active": self._active,
                 "mode": self._mode,
-                "connected": self._connected,
+                "connected": connected,
                 "meshtastic_channel": self.config.get("meshtastic_channel", 0),
                 "msgs_mesh_to_lxmf": self._msgs_mesh_to_lxmf,
                 "msgs_lxmf_to_mesh": self._msgs_lxmf_to_mesh,
@@ -1276,29 +1864,112 @@ class MeshtasticGateway(PluginBase):
             return status
 
     def get_meshtastic_nodes(self) -> list[dict[str, Any]]:
-        """Return list of known Meshtastic mesh nodes."""
+        """Return list of known Meshtastic mesh nodes.
+
+        Merges nodes from the MQTT interface and the serial listener so
+        contacts from both sources appear in the Messages panel.
+        """
         with self._lock:
-            if not self._connected or not self._mesh_interface:
+            seen: dict[str, dict[str, Any]] = {}
+
+            # 1. MQTT interface nodes
+            if self._connected and self._mesh_interface:
+                raw_nodes = getattr(self._mesh_interface, "nodes", None) or {}
+                for node_id, node_data in raw_nodes.items():
+                    user = node_data.get("user", {})
+                    position = node_data.get("position", {})
+                    long_name = user.get("longName") or ""
+                    short_name = user.get("shortName") or ""
+                    hw_model = user.get("hwModel") or ""
+                    if long_name and long_name != node_id:
+                        self._node_name_cache[node_id] = {
+                            "longName": long_name,
+                            "shortName": short_name,
+                            "hwModel": hw_model,
+                        }
+                    entry: dict[str, Any] = {
+                        "id": node_id,
+                        "long_name": long_name or None,
+                        "short_name": short_name or None,
+                        "hw_model": hw_model or None,
+                        "snr": node_data.get("snr"),
+                        "last_heard": node_data.get("lastHeard"),
+                        "latitude": position.get("latitude"),
+                        "longitude": position.get("longitude"),
+                    }
+                    if node_data.get("isSelf"):
+                        entry["is_self"] = True
+                    seen[node_id] = entry
+
+            # 2. Serial listener nodes (LoRa-heard, may not be on MQTT)
+            listener = self._serial_listener
+            if listener is not None:
+                serial_nodes = getattr(listener, "nodes", None) or {}
+                for node_id, node_data in serial_nodes.items():
+                    user = node_data.get("user", {})
+                    position = node_data.get("position", {})
+                    long_name = user.get("longName") or ""
+                    short_name = user.get("shortName") or ""
+                    hw_model = user.get("hwModel") or ""
+                    if long_name and long_name != node_id:
+                        self._node_name_cache[node_id] = {
+                            "longName": long_name,
+                            "shortName": short_name,
+                            "hwModel": hw_model,
+                        }
+                    if node_id in seen:
+                        # Prefer non-generic name from serial over MQTT
+                        existing = seen[node_id]
+                        ex_name = existing.get("long_name") or ""
+                        if (ex_name.startswith("Meshtastic ")
+                                and long_name
+                                and not long_name.startswith("Meshtastic ")):
+                            existing["long_name"] = long_name
+                            existing["short_name"] = short_name or existing["short_name"]
+                            existing["hw_model"] = hw_model or existing["hw_model"]
+                    else:
+                        entry = {
+                            "id": node_id,
+                            "long_name": long_name or None,
+                            "short_name": short_name or None,
+                            "hw_model": hw_model or None,
+                            "snr": node_data.get("snr"),
+                            "last_heard": node_data.get("lastHeard"),
+                            "latitude": position.get("latitude"),
+                            "longitude": position.get("longitude"),
+                        }
+                        if node_data.get("isSelf"):
+                            entry["is_self"] = True
+                        seen[node_id] = entry
+
+            return list(seen.values())
+
+    def get_lora_neighbors(self) -> list[dict[str, Any]]:
+        """Return LoRa-only neighbors from the physical radio's NodeDB.
+
+        In SERIAL mode: filters the live interface's nodes (always fresh).
+        In MQTT mode: returns cached data from the background device probe.
+        Returns an empty list if no data is available.
+        """
+        with self._lock:
+            mode = self._mode
+            connected = self._connected
+            iface = self._mesh_interface
+
+        if mode == MODE_SERIAL and connected and iface is not None:
+            try:
+                return self._extract_lora_neighbors(iface)
+            except Exception:
+                if self.log:
+                    self.log.debug(
+                        "Error extracting LoRa neighbors from serial",
+                        exc_info=True,
+                    )
                 return []
-            nodes: list[dict[str, Any]] = []
-            raw_nodes = getattr(self._mesh_interface, "nodes", None) or {}
-            for node_id, node_data in raw_nodes.items():
-                user = node_data.get("user", {})
-                position = node_data.get("position", {})
-                entry: dict[str, Any] = {
-                    "id": node_id,
-                    "long_name": user.get("longName"),
-                    "short_name": user.get("shortName"),
-                    "hw_model": user.get("hwModel"),
-                    "snr": node_data.get("snr"),
-                    "last_heard": node_data.get("lastHeard"),
-                    "latitude": position.get("latitude"),
-                    "longitude": position.get("longitude"),
-                }
-                if node_data.get("isSelf"):
-                    entry["is_self"] = True
-                nodes.append(entry)
-            return nodes
+
+        # MQTT mode — return cached probe data
+        with self._lock:
+            return list(self._cached_lora_neighbors)
 
     # ── Public send API (for messaging hub / dashboard) ────────────
 
@@ -1307,6 +1978,7 @@ class MeshtasticGateway(PluginBase):
         text: str,
         destination_id: str | None = None,
         channel: int | None = None,
+        via: str = "",
     ) -> dict[str, Any]:
         """Send a text message to the Meshtastic mesh.
 
@@ -1316,6 +1988,9 @@ class MeshtasticGateway(PluginBase):
                 for broadcast.
             channel: Channel index override.  Uses the configured default
                 if ``None``.
+            via: Send route — ``"lora"`` to send via the local serial radio
+                instead of the MQTT client.  Falls back to MQTT if the
+                serial listener is unavailable.
 
         Returns:
             ``{"sent": True, "truncated": bool}`` on success, or
@@ -1325,12 +2000,17 @@ class MeshtasticGateway(PluginBase):
             return {"sent": False, "reason": "rate_limited"}
 
         with self._lock:
-            if not self._active or not self._connected or self._mesh_interface is None:
+            # Prefer serial listener when via="lora" and it's available
+            if via == "lora" and self._serial_listener is not None:
+                iface = self._serial_listener
+            elif self._active and self._connected and self._mesh_interface is not None:
+                iface = self._mesh_interface
+            else:
                 return {"sent": False, "reason": "not_connected"}
-            iface = self._mesh_interface
 
         ch = channel if channel is not None else self.config.get("meshtastic_channel", 0)
         truncated = len(text.encode("utf-8")) > MESHTASTIC_MTU
+        via_label = "LoRa" if iface is self._serial_listener else "MQTT"
 
         try:
             if destination_id:
@@ -1341,11 +2021,14 @@ class MeshtasticGateway(PluginBase):
             else:
                 iface.sendText(text[:MESHTASTIC_MTU], channelIndex=ch)
         except Exception as exc:
-            self.log.exception("Error sending Meshtastic message")
+            self.log.exception("Error sending Meshtastic message via %s", via_label)
             return {"sent": False, "reason": str(exc)}
 
         dest_label = destination_id or "broadcast"
-        self.log.info("Sent Meshtastic message to %s on ch%d", dest_label, ch)
+        self.log.info(
+            "Sent Meshtastic message to %s on ch%d via %s",
+            dest_label, ch, via_label,
+        )
 
         with self._lock:
             self._msgs_hub_to_mesh += 1

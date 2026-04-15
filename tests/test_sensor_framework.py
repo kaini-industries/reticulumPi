@@ -242,11 +242,22 @@ def test_get_status(mock_dest, mock_app, plugin_config):
 def test_event_published_on_read(mock_dest, mock_app, plugin_config):
     from reticulumpi.builtin_plugins.sensor_framework import SensorFrameworkPlugin
 
-    events_received = []
-    mock_app.event_bus.subscribe("sensor.reading", lambda e, d: events_received.append(d))
+    # Use a long read_interval so the background _read_loop only fires once
+    # (the initial iteration, which always runs immediately before sleeping).
+    plugin_config["read_interval"] = 3600
 
     plugin = SensorFrameworkPlugin(mock_app, plugin_config)
     plugin.start()
+
+    # Wait for the background loop's initial read to complete so it doesn't
+    # race with our subscription.  _last_readings is populated once the first
+    # iteration finishes.
+    deadline = time.monotonic() + 2.0
+    while not plugin._last_readings and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    events_received = []
+    mock_app.event_bus.subscribe("sensor.reading", lambda e, d: events_received.append(d))
 
     # Manually trigger a read cycle for the command driver
     for sensor_cfg, driver in plugin._drivers:

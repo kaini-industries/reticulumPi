@@ -226,6 +226,41 @@ class TestMessageStore:
         msg = store.get_message(msg_id)
         assert msg["metadata"] == meta
 
+    def test_dm_contact_id_groups_by_peer(self, store):
+        """DMs from the same Meshtastic peer land in one conversation."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="Hello via LoRa", from_id="!aabb1122", to_id="!ccdd3344",
+            sub_transport="",
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="Hello via MQTT", from_id="!aabb1122", to_id="!ccdd3344",
+            sub_transport="",
+        )
+        convos = store.get_conversations()
+        # Both messages in one conversation keyed by from_id
+        mesh_dm_convos = [c for c in convos if c["contact_id"] == "!aabb1122"]
+        assert len(mesh_dm_convos) == 1
+
+    def test_broadcast_and_dm_are_separate_conversations(self, store):
+        """Broadcast and DM from the same peer create separate conversations."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="Broadcast msg", from_id="!aabb1122",
+            sub_transport="lora",
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="Direct msg", from_id="!aabb1122", to_id="!ccdd3344",
+            sub_transport="",
+        )
+        convos = store.get_conversations()
+        contact_ids = [c["contact_id"] for c in convos]
+        assert "__broadcast_meshtastic_lora__" in contact_ids
+        assert "!aabb1122" in contact_ids
+        assert len(convos) == 2
+
 
 # ═══════════════════════════════════════════════════════════════════
 # MessagingHubPlugin
@@ -379,6 +414,67 @@ class TestMessagingHubPlugin:
         contacts = hub_plugin.get_contacts(transport="t1")
         assert len(contacts) == 1
         assert contacts[0]["id"] == "1"
+
+    def test_get_contacts_search_by_name(self, hub_plugin):
+        a = MagicMock(spec=TransportAdapter)
+        a.transport_name = "meshtastic"
+        a.display_name = "Meshtastic"
+        a.get_contacts.return_value = [
+            {"id": "!aabb1122", "name": "Trashman", "transport": "meshtastic"},
+            {"id": "!ccdd3344", "name": "Hilltop Relay", "transport": "meshtastic"},
+            {"id": "!eeff5566", "name": "Base Camp", "transport": "meshtastic"},
+        ]
+        hub_plugin.register_adapter(a)
+
+        # Search by partial name (case-insensitive)
+        contacts = hub_plugin.get_contacts(query="trash")
+        assert len(contacts) == 1
+        assert contacts[0]["id"] == "!aabb1122"
+
+    def test_get_contacts_search_by_id(self, hub_plugin):
+        a = MagicMock(spec=TransportAdapter)
+        a.transport_name = "meshtastic"
+        a.display_name = "Meshtastic"
+        a.get_contacts.return_value = [
+            {"id": "!aabb1122", "name": "Node A", "transport": "meshtastic"},
+            {"id": "!ccdd3344", "name": "Node B", "transport": "meshtastic"},
+        ]
+        hub_plugin.register_adapter(a)
+
+        contacts = hub_plugin.get_contacts(query="ccdd")
+        assert len(contacts) == 1
+        assert contacts[0]["id"] == "!ccdd3344"
+
+    def test_get_contacts_search_no_match(self, hub_plugin):
+        a = MagicMock(spec=TransportAdapter)
+        a.transport_name = "meshtastic"
+        a.display_name = "Meshtastic"
+        a.get_contacts.return_value = [
+            {"id": "!aabb1122", "name": "Node A", "transport": "meshtastic"},
+        ]
+        hub_plugin.register_adapter(a)
+
+        contacts = hub_plugin.get_contacts(query="zzz_no_match")
+        assert len(contacts) == 0
+
+    def test_get_contacts_sorted_by_last_heard(self, hub_plugin):
+        a = MagicMock(spec=TransportAdapter)
+        a.transport_name = "meshtastic"
+        a.display_name = "Meshtastic"
+        a.get_contacts.return_value = [
+            {"id": "!old", "name": "Old", "transport": "meshtastic", "last_heard": 1000},
+            {"id": "!new", "name": "New", "transport": "meshtastic", "last_heard": 3000},
+            {"id": "!mid", "name": "Mid", "transport": "meshtastic", "last_heard": 2000},
+            {"id": "!none", "name": "Never", "transport": "meshtastic"},
+        ]
+        hub_plugin.register_adapter(a)
+
+        contacts = hub_plugin.get_contacts()
+        assert contacts[0]["id"] == "!new"
+        assert contacts[1]["id"] == "!mid"
+        assert contacts[2]["id"] == "!old"
+        # Node without last_heard sorts last
+        assert contacts[3]["id"] == "!none"
 
     def test_get_status(self, hub_plugin):
         status = hub_plugin.get_status()
@@ -615,7 +711,7 @@ class TestMeshtasticAdapter:
         adapter = MeshtasticAdapter(hub)
         result = adapter.send("Hello mesh!", "!abcd1234")
 
-        gw.send_message.assert_called_once_with("Hello mesh!", destination_id="!abcd1234")
+        gw.send_message.assert_called_once_with("Hello mesh!", destination_id="!abcd1234", via="lora")
         assert result["sent"] is True
 
     def test_send_broadcast(self, mock_app):
@@ -630,7 +726,22 @@ class TestMeshtasticAdapter:
         adapter = MeshtasticAdapter(hub)
         result = adapter.send("Hello all!", "broadcast")
 
-        gw.send_message.assert_called_once_with("Hello all!", destination_id=None)
+        gw.send_message.assert_called_once_with("Hello all!", destination_id=None, via="")
+        assert result["sent"] is True
+
+    def test_send_via_lora(self, mock_app):
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        gw = MagicMock()
+        gw.send_message.return_value = {"sent": True}
+        mock_app.get_plugin.return_value = gw
+
+        adapter = MeshtasticAdapter(hub)
+        result = adapter.send("Local msg!", "broadcast", sub_transport="lora")
+
+        gw.send_message.assert_called_once_with("Local msg!", destination_id=None, via="lora")
         assert result["sent"] is True
 
     def test_send_gateway_unavailable(self, mock_app):
@@ -651,9 +762,9 @@ class TestMeshtasticAdapter:
 
         gw = MagicMock()
         gw.get_meshtastic_nodes.return_value = [
-            {"id": "!aabb1122", "long_name": "Node A", "is_self": False},
+            {"id": "!aabb1122", "long_name": "Node A", "is_self": False, "last_heard": 1000},
             {"id": "!ccdd3344", "long_name": "Gateway", "is_self": True},
-            {"id": "!eeff5566", "short_name": "NB", "is_self": False},
+            {"id": "!eeff5566", "short_name": "NB", "is_self": False, "last_heard": 2000},
         ]
         mock_app.get_plugin.return_value = gw
 
@@ -664,8 +775,10 @@ class TestMeshtasticAdapter:
         assert len(contacts) == 2
         assert contacts[0]["id"] == "!aabb1122"
         assert contacts[0]["name"] == "Node A"
+        assert contacts[0]["last_heard"] == 1000
         assert contacts[1]["id"] == "!eeff5566"
         assert contacts[1]["name"] == "NB"
+        assert contacts[1]["last_heard"] == 2000
 
     def test_is_available_checks_gateway(self, mock_app):
         hub = MagicMock()
@@ -700,11 +813,13 @@ class TestMeshtasticAdapter:
         callback = MagicMock()
         adapter.on_message_received(callback)
 
-        # Simulate event from gateway
+        # Simulate broadcast event from gateway
         adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
             "from_id": "!aabb1122",
             "text": "Hello from mesh",
             "forwarded_to": 1,
+            "is_broadcast": True,
+            "source": "LoRa",
         })
 
         callback.assert_called_once()
@@ -712,6 +827,55 @@ class TestMeshtasticAdapter:
         assert call_args["transport"] == "meshtastic"
         assert call_args["text"] == "Hello from mesh"
         assert call_args["from_id"] == "!aabb1122"
+        assert call_args["msg_type"] == "broadcast"
+        assert call_args["sub_transport"] == "lora"
+
+    def test_dm_event_routes_as_direct(self, mock_app):
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        adapter = MeshtasticAdapter(hub)
+        callback = MagicMock()
+        adapter.on_message_received(callback)
+
+        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
+            "from_id": "!aabb1122",
+            "from_name": "Solar Node",
+            "to_id": "!ccdd3344",
+            "is_broadcast": False,
+            "text": "Hello direct",
+            "source": "LoRa",
+        })
+
+        callback.assert_called_once()
+        call_args = callback.call_args[0][0]
+        assert call_args["transport"] == "meshtastic"
+        assert call_args["msg_type"] == "direct"
+        assert call_args["from_id"] == "!aabb1122"
+        assert call_args["from_name"] == "Solar Node"
+        assert call_args["to_id"] == "!ccdd3344"
+        assert call_args["sub_transport"] == ""  # DMs don't split by source
+
+    def test_missing_is_broadcast_defaults_to_broadcast(self, mock_app):
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        adapter = MeshtasticAdapter(hub)
+        callback = MagicMock()
+        adapter.on_message_received(callback)
+
+        # Old-format event without is_broadcast field
+        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
+            "from_id": "!aabb1122",
+            "text": "Legacy format",
+            "source": "LoRa",
+        })
+
+        callback.assert_called_once()
+        call_args = callback.call_args[0][0]
+        assert call_args["msg_type"] == "broadcast"
 
 
 # ═══════════════════════════════════════════════════════════════════

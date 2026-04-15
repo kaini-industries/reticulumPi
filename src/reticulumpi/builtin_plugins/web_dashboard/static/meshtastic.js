@@ -244,9 +244,360 @@
     renderMeshtasticNodes();
   }
 
+  /* ── Device info card ──────────────────────────────────────────── */
+
+  function formatBroadcastInterval(secs) {
+    if (secs == null) return '--';
+    if (secs >= 3600) {
+      var h = secs / 3600;
+      return (h === Math.floor(h) ? h : h.toFixed(1)) + 'h';
+    }
+    if (secs >= 60) {
+      var m = secs / 60;
+      return (m === Math.floor(m) ? m : m.toFixed(1)) + 'm';
+    }
+    return secs + 's';
+  }
+
+  function batteryDisplay(level) {
+    if (level == null) return { text: '--', cls: '' };
+    if (level > 100) return { text: 'Ext Power', cls: 'metric-ok' };
+    if (level > 50) return { text: level + '%', cls: 'metric-ok' };
+    if (level > 20) return { text: level + '%', cls: 'metric-warn' };
+    return { text: level + '%', cls: 'metric-crit' };
+  }
+
+  function utilClass(val) {
+    if (val == null) return '';
+    if (val > 50) return 'metric-crit';
+    if (val > 25) return 'metric-warn';
+    return 'metric-ok';
+  }
+
+  function updateMeshtasticDevice(device) {
+    var container = $('meshtastic-device-info');
+    if (!container) return;
+
+    // Not available — show notice or nothing
+    if (!device || device.available === false) {
+      if (device && device.message) {
+        container.innerHTML = '<div class="msh-mode-notice">' + esc(device.message) + '</div>';
+      } else {
+        container.innerHTML = '';
+      }
+      return;
+    }
+
+    var html = '<div class="lora-radio-card">';
+
+    // Header: name + status
+    var name = device.long_name || 'Meshtastic Device';
+    var nodeId = device.node_id || '';
+    var statusCls = device.connected ? 'status-active' : 'status-failed';
+    var statusText = device.connected ? 'Connected' : 'Disconnected';
+
+    html += '<div class="lora-radio-header">'
+      + '<span class="lora-radio-name">' + esc(name)
+      + (nodeId ? ' <span style="color:var(--text-muted);font-weight:400">(' + esc(nodeId) + ')</span>' : '')
+      + '</span>'
+      + '<span class="lora-radio-status">'
+      + '<span class="status-dot ' + statusCls + '"></span> ' + statusText
+      + '</span>'
+      + '</div>';
+
+    // Identity params row: Firmware, Role, Hardware, Region, Preset
+    var hasIdentity = device.firmware_version || device.role || device.hw_model
+                   || device.region || device.modem_preset;
+    if (hasIdentity) {
+      html += '<div class="lora-radio-params">';
+      if (device.firmware_version) {
+        // Strip build hash if present (e.g. "2.7.15.567b8ea" -> "2.7.15")
+        var fw = device.firmware_version;
+        var fwParts = fw.split('.');
+        if (fwParts.length > 3) fw = fwParts.slice(0, 3).join('.');
+        html += '<div class="lora-param">'
+          + '<span class="lora-param-label">Firmware</span>'
+          + '<span class="lora-param-value">' + esc(fw) + '</span>'
+          + '</div>';
+      }
+      if (device.role) {
+        html += '<div class="lora-param">'
+          + '<span class="lora-param-label">Role</span>'
+          + '<span class="lora-param-value">' + esc(device.role) + '</span>'
+          + '</div>';
+      }
+      if (device.hw_model) {
+        html += '<div class="lora-param">'
+          + '<span class="lora-param-label">Hardware</span>'
+          + '<span class="lora-param-value">' + esc(device.hw_model) + '</span>'
+          + '</div>';
+      }
+      if (device.region) {
+        html += '<div class="lora-param">'
+          + '<span class="lora-param-label">Region</span>'
+          + '<span class="lora-param-value">' + esc(device.region) + '</span>'
+          + '</div>';
+      }
+      if (device.modem_preset) {
+        // Make preset more readable: LONG_FAST -> Long Fast
+        var preset = device.modem_preset.replace(/_/g, ' ').replace(/\b\w/g, function(c) {
+          return c.toUpperCase();
+        }).replace(/\b\w+/g, function(w) {
+          return w.charAt(0) + w.slice(1).toLowerCase();
+        });
+        html += '<div class="lora-param">'
+          + '<span class="lora-param-label">Preset</span>'
+          + '<span class="lora-param-value">' + esc(preset) + '</span>'
+          + '</div>';
+      }
+      html += '</div>';
+    }
+
+    // Runtime metrics grid
+    var hasMetrics = device.hop_limit != null || device.tx_power != null
+                  || device.battery_level != null || device.channel_utilization != null
+                  || device.node_info_broadcast_secs != null;
+    if (hasMetrics) {
+      html += '<div class="lora-radio-metrics">';
+
+      if (device.hop_limit != null) {
+        html += '<div class="lora-metric">'
+          + '<span class="lora-metric-label">Hop Limit</span>'
+          + '<span class="lora-metric-value">' + device.hop_limit + '</span>'
+          + '</div>';
+      }
+      if (device.tx_power != null) {
+        html += '<div class="lora-metric">'
+          + '<span class="lora-metric-label">TX Power</span>'
+          + '<span class="lora-metric-value">' + device.tx_power + ' dBm</span>'
+          + '</div>';
+      }
+      if (device.node_info_broadcast_secs != null) {
+        html += '<div class="lora-metric">'
+          + '<span class="lora-metric-label">Broadcast</span>'
+          + '<span class="lora-metric-value">' + formatBroadcastInterval(device.node_info_broadcast_secs) + '</span>'
+          + '</div>';
+      }
+
+      var batt = batteryDisplay(device.battery_level);
+      html += '<div class="lora-metric">'
+        + '<span class="lora-metric-label">Battery</span>'
+        + '<span class="lora-metric-value ' + batt.cls + '">' + batt.text + '</span>'
+        + '</div>';
+
+      if (device.voltage != null) {
+        html += '<div class="lora-metric">'
+          + '<span class="lora-metric-label">Voltage</span>'
+          + '<span class="lora-metric-value">' + device.voltage.toFixed(2) + ' V</span>'
+          + '</div>';
+      }
+
+      var chUtil = device.channel_utilization;
+      html += '<div class="lora-metric">'
+        + '<span class="lora-metric-label">Ch Util</span>'
+        + '<span class="lora-metric-value ' + utilClass(chUtil) + '">'
+        + (chUtil != null ? chUtil.toFixed(1) + '%' : '--') + '</span>'
+        + '</div>';
+
+      var airUtil = device.air_util_tx;
+      html += '<div class="lora-metric">'
+        + '<span class="lora-metric-label">Air Util TX</span>'
+        + '<span class="lora-metric-value ' + utilClass(airUtil) + '">'
+        + (airUtil != null ? airUtil.toFixed(1) + '%' : '--') + '</span>'
+        + '</div>';
+
+      html += '</div>';
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  /* ── LoRa Neighbors ────────────────────────────────────────────── */
+
+  var _loraNbrs = [];
+  var _loraSortKey = 'last_heard';
+  var _loraSortAsc = false;
+  var _loraExpandedId = null;
+  var _loraPageSize = 25;
+  var _loraVisible = 25;
+
+  function sortLoraNeighbors(nodes, key, asc) {
+    return nodes.slice().sort(function(a, b) {
+      var va, vb;
+      if (key === 'snr') {
+        va = a.snr != null ? a.snr : -999;
+        vb = b.snr != null ? b.snr : -999;
+      } else if (key === 'last_heard') {
+        va = a.last_heard || 0;
+        vb = b.last_heard || 0;
+      } else if (key === 'hops_away') {
+        va = a.hops_away != null ? a.hops_away : 999;
+        vb = b.hops_away != null ? b.hops_away : 999;
+      } else {
+        return 0;
+      }
+      return asc ? va - vb : vb - va;
+    });
+  }
+
+  function buildLoraNeighborDetailHTML(node) {
+    var h = '<div class="node-detail-section">Identity</div>'
+      + '<div class="node-detail-grid">';
+    h += _di('Node ID', esc(node.id || '--'));
+    if (node.long_name) h += _di('Long Name', esc(node.long_name));
+    if (node.short_name) h += _di('Short Name', esc(node.short_name));
+    h += '</div>';
+
+    h += '<div class="node-detail-section">Radio</div>'
+      + '<div class="node-detail-grid">';
+    h += _di('Hardware', esc(node.hw_model || '--'));
+    h += _di('Hops Away', node.hops_away != null ? '' + node.hops_away : '--');
+    h += _di('SNR', node.snr != null ? node.snr.toFixed(1) + ' dB' : '--');
+    if (node.last_heard) {
+      h += _di('Last Heard', formatTimeAgo(node.last_heard));
+      h += _di('Timestamp', new Date(node.last_heard * 1000).toLocaleString());
+    }
+    h += '</div>';
+
+    if (node.latitude != null && node.longitude != null) {
+      h += '<div class="node-detail-section">Position</div>'
+        + '<div class="node-detail-grid">'
+        + _di('Latitude', node.latitude.toFixed(5))
+        + _di('Longitude', node.longitude.toFixed(5))
+        + '</div>';
+    }
+    return h;
+  }
+
+  function renderLoraNeighbors() {
+    var tbody = $('lora-neighbors-table');
+    var container = $('meshtastic-lora-neighbors');
+    if (!tbody || !container) return;
+
+    if (_loraNbrs.length === 0) {
+      container.style.display = 'none';
+      var mqttH = $('meshtastic-mqtt-nodes-header');
+      if (mqttH) mqttH.style.display = 'none';
+      return;
+    }
+    container.style.display = '';
+    var mqttHeader = $('meshtastic-mqtt-nodes-header');
+    if (mqttHeader) mqttHeader.style.display = '';
+
+    var sorted = sortLoraNeighbors(_loraNbrs, _loraSortKey, _loraSortAsc);
+    var total = sorted.length;
+    var limit = Math.min(_loraVisible, total);
+    tbody.innerHTML = '';
+
+    for (var i = 0; i < limit; i++) {
+      var n = sorted[i];
+      var nodeId = n.id || '';
+      var name = n.long_name || n.short_name || '--';
+      var hw = n.hw_model || '--';
+      var hops = n.hops_away;
+      var hopsHtml = hops != null
+        ? '<span class="lora-hops-badge hops-' + Math.min(hops, 3) + '">' + hops + '</span>'
+        : '--';
+      var snr = n.snr != null ? n.snr.toFixed(1) + ' dB' : '--';
+      var heard = formatTimeAgo(n.last_heard);
+      var isExpanded = (nodeId === _loraExpandedId);
+
+      var tr = document.createElement('tr');
+      if (isExpanded) tr.className = 'node-row-active';
+      tr.setAttribute('data-lora-nbr-id', nodeId);
+      tr.innerHTML =
+          '<td>' + esc(name) + '</td>'
+        + '<td class="addr">' + esc(String(nodeId)) + '</td>'
+        + '<td>' + esc(hw) + '</td>'
+        + '<td>' + hopsHtml + '</td>'
+        + '<td>' + esc(snr) + '</td>'
+        + '<td>' + heard + '</td>';
+      tr.style.cursor = 'pointer';
+      (function(node, id) {
+        tr.addEventListener('click', function() { toggleLoraNeighborDetail(node, id); });
+      })(n, nodeId);
+      tbody.appendChild(tr);
+
+      if (isExpanded) {
+        var detailTr = document.createElement('tr');
+        detailTr.className = 'node-detail';
+        detailTr.id = 'lora-nbr-detail-' + nodeId;
+        var td = document.createElement('td');
+        td.colSpan = 6;
+        td.innerHTML = buildLoraNeighborDetailHTML(n);
+        detailTr.appendChild(td);
+        tbody.appendChild(detailTr);
+      }
+    }
+
+    updateLoraSortIndicators();
+
+    var showMore = $('lora-neighbors-show-more');
+    if (showMore) {
+      var remaining = total - limit;
+      if (remaining > 0) {
+        showMore.style.display = '';
+        showMore.textContent = 'Show more (' + remaining + ' remaining)';
+      } else if (limit > _loraPageSize) {
+        showMore.style.display = '';
+        showMore.textContent = 'Show less';
+      } else {
+        showMore.style.display = 'none';
+      }
+    }
+  }
+
+  function toggleLoraNeighborDetail(node, id) {
+    _loraExpandedId = (_loraExpandedId === id) ? null : id;
+    renderLoraNeighbors();
+  }
+
+  function onLoraSort(key) {
+    if (_loraSortKey === key) {
+      _loraSortAsc = !_loraSortAsc;
+    } else {
+      _loraSortKey = key;
+      _loraSortAsc = (key === 'hops_away');
+    }
+    renderLoraNeighbors();
+  }
+
+  function updateLoraSortIndicators() {
+    var headers = document.querySelectorAll('#meshtastic-lora-neighbors th[data-sort]');
+    for (var i = 0; i < headers.length; i++) {
+      var th = headers[i];
+      var arrow = th.querySelector('.sort-arrow');
+      var sortKey = th.getAttribute('data-sort').replace('lora-', '');
+      if (sortKey === _loraSortKey) {
+        arrow.textContent = _loraSortAsc ? ' \u25B2' : ' \u25BC';
+      } else {
+        arrow.textContent = '';
+      }
+    }
+  }
+
+  function loraNeighborsShowMore() {
+    if (_loraVisible >= _loraNbrs.length) {
+      _loraVisible = _loraPageSize;
+    } else {
+      _loraVisible += _loraPageSize;
+    }
+    renderLoraNeighbors();
+  }
+
+  function updateLoraNeighbors(neighbors) {
+    _loraNbrs = neighbors || [];
+    renderLoraNeighbors();
+  }
+
   /* ── Expose to RPI namespace ─────────────────────────────────────── */
   R.updateMeshtastic = updateMeshtastic;
+  R.updateMeshtasticDevice = updateMeshtasticDevice;
   R.onMeshtasticSort = onMeshtasticSort;
   R.meshtasticShowMore = meshtasticShowMore;
+  R.updateLoraNeighbors = updateLoraNeighbors;
+  R.onLoraSort = onLoraSort;
+  R.loraNeighborsShowMore = loraNeighborsShowMore;
 
 })();

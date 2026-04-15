@@ -349,6 +349,20 @@ reticulumpi:
     #  meshtastic:
     #    enabled: true               # Bridges to meshtastic_gateway plugin
 
+    # Meshtastic Responder — auto-replies to Meshtastic DMs with commands.
+    # Requires: meshtastic_gateway enabled.
+    # Built-in commands: help, ping, time, uptime, nodes, weather, fortune,
+    #                    dice, flip, calc.
+    #meshtastic_responder:
+    #  enabled: false
+    #  prefix: "!"                    # Command prefix
+    #  respond_to_broadcast: false    # Only reply to direct messages
+    #  cooldown_seconds: 30           # Per-node reply cooldown
+    #  commands: []                   # Enabled commands (empty = all)
+    #  custom_responses:              # Keyword -> response mappings
+    #    hello: "Hi! I'm a ReticulumPi mesh node."
+    #  # reply_via: ""               # "lora" to force LoRa, "" for gateway default
+
     # Example scaffold plugin (disabled by default).
     # Copy plugins/example_plugin.py to start your own.
     #example_plugin:

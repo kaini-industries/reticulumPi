@@ -786,254 +786,7 @@
     }
   }
 
-  // --- Messaging Hub ---
-
-  var _messages = [];
-  var _msgTransports = [];
-  var _msgContacts = [];
-  var _msgSectionVisible = false;
-
-  function fetchMessages() {
-    var f = $('msg-transport-filter');
-    var d = $('msg-direction-filter');
-    var params = '?limit=100';
-    if (f && f.value) params += '&transport=' + encodeURIComponent(f.value);
-    if (d && d.value) params += '&direction=' + encodeURIComponent(d.value);
-    api('/api/messages' + params).then(function(r) {
-      if (!r || !r.ok) return;
-      _messages = r.data.messages || [];
-      renderMessages();
-    });
-  }
-
-  function fetchTransports() {
-    api('/api/messages/transports').then(function(r) {
-      var section = $('messaging-section');
-      if (!r || !r.ok) {
-        // API unavailable -- show disabled state
-        if (section) {
-          $('msg-count').textContent = 'unavailable';
-          $('msg-count').style.color = 'var(--text-muted)';
-        }
-        return;
-      }
-      _msgTransports = r.data.transports || [];
-      updateTransportDropdowns();
-      if (section && _msgTransports.length > 0) {
-        _msgSectionVisible = true;
-        $('msg-count').textContent = '';
-        $('msg-count').style.color = '';
-      } else if (section) {
-        $('msg-count').textContent = 'no transports';
-        $('msg-count').style.color = 'var(--text-muted)';
-      }
-    });
-  }
-
-  function fetchContacts(transport) {
-    var params = transport ? '?transport=' + encodeURIComponent(transport) : '';
-    api('/api/messages/contacts' + params).then(function(r) {
-      if (!r || !r.ok) return;
-      _msgContacts = r.data.contacts || [];
-      updateRecipientDropdown();
-    });
-  }
-
-  function updateTransportDropdowns() {
-    // Filter dropdown
-    var filter = $('msg-transport-filter');
-    if (filter) {
-      var curFilter = filter.value;
-      // Keep the "All" option, rebuild the rest
-      var opts = '<option value="">All Transports</option>';
-      for (var i = 0; i < _msgTransports.length; i++) {
-        var t = _msgTransports[i];
-        opts += '<option value="' + esc(t.name) + '">' + esc(t.display);
-        if (!t.available) opts += ' (offline)';
-        opts += '</option>';
-      }
-      filter.innerHTML = opts;
-      filter.value = curFilter;
-    }
-    // Send transport dropdown
-    var send = $('msg-send-transport');
-    if (send) {
-      var curSend = send.value;
-      var sendOpts = '';
-      for (var j = 0; j < _msgTransports.length; j++) {
-        var s = _msgTransports[j];
-        sendOpts += '<option value="' + esc(s.name) + '"';
-        if (!s.available) sendOpts += ' disabled';
-        sendOpts += '>' + esc(s.display);
-        if (s.address) sendOpts += ' (' + esc(s.address.substring(0, 12)) + '...)';
-        sendOpts += '</option>';
-      }
-      send.innerHTML = sendOpts;
-      if (curSend) send.value = curSend;
-    }
-  }
-
-  function updateRecipientDropdown() {
-    var sel = $('msg-send-dest');
-    if (!sel) return;
-    var curVal = sel.value;
-    var transport = $('msg-send-transport') ? $('msg-send-transport').value : '';
-    var html = '<option value="">Select recipient...</option>';
-    if (transport === 'meshtastic') {
-      html += '<option value="broadcast">Broadcast (all)</option>';
-    }
-    for (var i = 0; i < _msgContacts.length; i++) {
-      var c = _msgContacts[i];
-      if (transport && c.transport !== transport) continue;
-      html += '<option value="' + esc(c.id) + '">[' + esc(c.transport) + '] '
-              + esc(c.name) + '</option>';
-    }
-    sel.innerHTML = html;
-    sel.value = curVal;
-  }
-
-  function renderMessages() {
-    var chat = $('msg-chat');
-    if (!chat) return;
-
-    // Count badge
-    var count = $('msg-count');
-    if (count) count.textContent = _messages.length > 0 ? _messages.length : '';
-
-    if (_messages.length === 0) {
-      chat.innerHTML = '';
-      return;
-    }
-
-    // Messages come newest-first from API; reverse to show chronological
-    var sorted = _messages.slice().reverse();
-    var html = '';
-    for (var i = 0; i < sorted.length; i++) {
-      var m = sorted[i];
-      var isSent = m.direction === 'sent';
-      var cls = 'msg-bubble ' + (isSent ? 'sent' : 'received');
-      var badge = '<span class="msg-transport-badge ' + esc(m.transport) + '">'
-                  + esc(m.transport) + '</span>';
-
-      var senderLabel = '';
-      if (isSent) {
-        senderLabel = 'You';
-        if (m.to_name) senderLabel += ' \u2192 ' + esc(m.to_name);
-        else if (m.to_id && m.to_id !== 'self') senderLabel += ' \u2192 ' + esc(m.to_id);
-      } else {
-        senderLabel = m.from_name ? esc(m.from_name) : (m.from_id ? esc(m.from_id) : '?');
-      }
-
-      var timeStr = m.timestamp ? formatTimeAgo(m.timestamp) : '';
-
-      html += '<div class="' + cls + '">'
-            + '<div class="msg-meta">' + badge + ' <span>' + senderLabel + '</span>'
-            + '<span>' + timeStr + '</span></div>'
-            + '<div class="msg-text">' + esc(m.text) + '</div>'
-            + '</div>';
-    }
-    // Sticky scroll: only auto-scroll if user is already near the bottom
-    var wasAtBottom = (chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 40);
-    chat.innerHTML = html;
-    if (wasAtBottom) chat.scrollTop = chat.scrollHeight;
-  }
-
-  function sendMessage() {
-    var transportEl = $('msg-send-transport');
-    var destEl = $('msg-send-dest');
-    var textEl = $('msg-send-text');
-    var btn = $('msg-send-btn');
-    if (!transportEl || !destEl || !textEl) return;
-
-    var transport = transportEl.value;
-    var dest = destEl.value;
-    var text = textEl.value.trim();
-
-    if (!transport || !text || !dest) return;
-
-    btn.disabled = true;
-    showMsgFeedback('Sending...', '');
-
-    api('/api/messages/send', {
-      method: 'POST',
-      body: { transport: transport, text: text, destination: dest }
-    }).then(function(r) {
-      if (!r) { showMsgFeedback('Network error', 'error'); return; }
-      if (!r.ok) { showMsgFeedback(r.error || 'Send failed', 'error'); return; }
-      var d = r.data;
-      if (!d.sent) {
-        showMsgFeedback('Not sent: ' + (d.reason || 'unknown'), 'error');
-        return;
-      }
-      textEl.value = '';
-      updateMsgByteCount();
-      var note = d.truncated ? 'Sent (truncated)' : 'Sent';
-      showMsgFeedback(note, 'ok');
-      fetchMessages();
-    }).finally(function() {
-      btn.disabled = false;
-    });
-  }
-
-  function showMsgFeedback(text, cls) {
-    var el = $('msg-feedback');
-    if (!el) return;
-    el.textContent = text;
-    el.className = 'msg-feedback' + (cls ? ' ' + cls : '');
-    if (cls === 'ok') {
-      setTimeout(function() {
-        if (el.textContent === text) el.textContent = '';
-      }, 3000);
-    }
-  }
-
-  function updateMsgByteCount() {
-    var textEl = $('msg-send-text');
-    var byteEl = $('msg-byte-count');
-    var btn = $('msg-send-btn');
-    if (!textEl || !byteEl) return;
-    var text = textEl.value;
-    var bytes = new TextEncoder().encode(text).length;
-    var transport = $('msg-send-transport') ? $('msg-send-transport').value : '';
-
-    // Only show byte count for Meshtastic (237 byte MTU)
-    if (transport === 'meshtastic') {
-      byteEl.textContent = bytes + '/237';
-      byteEl.className = 'msg-byte-count' + (bytes > 237 ? ' over' : bytes > 200 ? ' near' : '');
-    } else {
-      byteEl.textContent = '';
-      byteEl.className = 'msg-byte-count';
-    }
-
-    // Enable send when there's text and a destination
-    var dest = $('msg-send-dest') ? $('msg-send-dest').value : '';
-    if (btn) btn.disabled = !text.trim() || !dest;
-  }
-
-  function updateMessaging(data) {
-    if (!data || !data.messages || data.messages.length === 0) return;
-    // Merge new messages, avoiding duplicates by id
-    var existing = {};
-    for (var i = 0; i < _messages.length; i++) {
-      existing[_messages[i].id] = true;
-    }
-    var added = false;
-    for (var j = 0; j < data.messages.length; j++) {
-      var m = data.messages[j];
-      if (!existing[m.id]) {
-        _messages.unshift(m); // Add to front (newest first)
-        added = true;
-      }
-    }
-    // Keep max 200 in memory
-    if (_messages.length > 200) _messages = _messages.slice(0, 200);
-    if (added) renderMessages();
-    // Update transport availability
-    if (data.transports) {
-      _msgTransports = data.transports;
-      updateTransportDropdowns();
-    }
-  }
+  // --- Messaging Hub --- (code in messages.js module)
 
   // --- Transport Hubs ---
 
@@ -1190,11 +943,11 @@
     api('/api/interfaces').then(function(r) {
       if (!r || !r.ok) return;
       updateInterfaces(r.data.interfaces);
-      RPI.updateLoraSignal(r.data.interfaces);
+      if (RPI.updateLoraSignal) RPI.updateLoraSignal(r.data.interfaces);
       // Fetch LoRa diagnostics to get announce mode, then render radio card
       api('/api/lora').then(function(lr) {
         var loraDiag = (lr && lr.ok) ? lr.data : null;
-        RPI.updateLoraRadio(r.data.interfaces, loraDiag);
+        if (RPI.updateLoraRadio) RPI.updateLoraRadio(r.data.interfaces, loraDiag);
       });
     });
 
@@ -1205,14 +958,15 @@
     });
 
     // Mesh nodes (server-side paginated) + summary
-    RPI.fetchMeshNodes();
-    RPI.fetchMeshSummary();
+    // Guard: mesh.js may not have loaded yet on first call (scripts load in order)
+    if (RPI.fetchMeshNodes) RPI.fetchMeshNodes();
+    if (RPI.fetchMeshSummary) RPI.fetchMeshSummary();
 
     // Peer telemetry
     api('/api/mesh/telemetry').then(function(r) {
       if (!r || !r.ok) return;
-      RPI.cacheMeshPeers(r.data.peers);
-      RPI.updatePeerTelemetry(r.data.peers);
+      if (RPI.cacheMeshPeers) RPI.cacheMeshPeers(r.data.peers);
+      if (RPI.updatePeerTelemetry) RPI.updatePeerTelemetry(r.data.peers);
     });
 
     // Alerts
@@ -1242,18 +996,28 @@
       updateEmergency(r.data);
     });
 
-    // Messaging hub
-    fetchTransports();
-    fetchMessages();
-    fetchContacts();
+    // Messaging hub (messages.js module)
+    if (RPI.fetchTransports) RPI.fetchTransports();
+    if (RPI.fetchMessages) RPI.fetchMessages();
+    if (RPI.fetchContacts) RPI.fetchContacts();
 
     // Meshtastic gateway
     api('/api/meshtastic/status').then(function(statusRes) {
       var status = (statusRes && statusRes.ok) ? statusRes.data : null;
       api('/api/meshtastic/nodes').then(function(nodesRes) {
         var nodes = (nodesRes && nodesRes.ok) ? nodesRes.data.nodes : [];
-        RPI.updateMeshtastic(status, nodes);
+        if (RPI.updateMeshtastic) RPI.updateMeshtastic(status, nodes);
+        if (RPI.updateMap) RPI.updateMap(nodes);
       });
+    });
+    api('/api/meshtastic/device').then(function(r) {
+      if (r && r.ok && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(r.data);
+    });
+    api('/api/meshtastic/lora_neighbors').then(function(r) {
+      if (r && r.ok) {
+        if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(r.data.neighbors);
+        if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(r.data.neighbors);
+      }
     });
 
     // Transport hub health
@@ -1271,11 +1035,11 @@
     // Routing summary (no full path table -- that's fetched on demand)
     api('/api/routing?per_page=0').then(function(r) {
       if (!r || !r.ok) return;
-      RPI.updateRoutingSummary(r.data.summary);
+      if (RPI.updateRoutingSummary) RPI.updateRoutingSummary(r.data.summary);
     });
 
     // LoRa nodes panel (uses reachability with interface filter -- smaller than full score)
-    RPI.fetchLoraReachability();
+    if (RPI.fetchLoraReachability) RPI.fetchLoraReachability();
   }
 
   // --- WebSocket ---
@@ -1305,18 +1069,23 @@
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
           if (msg.data.interfaces) {
             updateInterfaces(msg.data.interfaces);
-            RPI.updateLoraRadio(msg.data.interfaces, null);
+            if (RPI.updateLoraRadio) RPI.updateLoraRadio(msg.data.interfaces, null);
           }
           if (msg.data.mesh) {
-            if (msg.data.mesh.peers) RPI.cacheMeshPeers(msg.data.mesh.peers);
-            RPI.updateMeshFromWS(msg.data.mesh);
+            if (msg.data.mesh.peers && RPI.cacheMeshPeers) RPI.cacheMeshPeers(msg.data.mesh.peers);
+            if (RPI.updateMeshFromWS) RPI.updateMeshFromWS(msg.data.mesh);
           }
           if (msg.data.sensors) updateSensors(msg.data.sensors);
           if (msg.data.emergency) updateEmergency(msg.data.emergency);
           if (msg.data.transport) updateTransport(msg.data.transport);
           if (msg.data.connectivity) updateConnectivity(msg.data.connectivity);
-          if (msg.data.routing) RPI.updateRoutingSummary(msg.data.routing);
-          if (msg.data.messaging) updateMessaging(msg.data.messaging);
+          if (msg.data.routing && RPI.updateRoutingSummary) RPI.updateRoutingSummary(msg.data.routing);
+          if (msg.data.meshtastic_device && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(msg.data.meshtastic_device);
+          if (msg.data.meshtastic_lora_neighbors) {
+            if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(msg.data.meshtastic_lora_neighbors);
+            if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(msg.data.meshtastic_lora_neighbors);
+          }
+          if (msg.data.messaging && RPI.updateMessaging) RPI.updateMessaging(msg.data.messaging);
         }
       } catch(e) { /* ignore parse errors */ }
     };
@@ -1559,22 +1328,10 @@
     RPI.updatePeerTelemetry(peers);
   });
 
-  // Wire up messaging hub controls
-  $('msg-send-btn').addEventListener('click', sendMessage);
-  $('msg-send-text').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') sendMessage();
-  });
-  $('msg-send-text').addEventListener('input', updateMsgByteCount);
-  $('msg-transport-filter').addEventListener('change', fetchMessages);
-  $('msg-direction-filter').addEventListener('change', fetchMessages);
-  $('msg-send-transport').addEventListener('change', function() {
-    fetchContacts($('msg-send-transport').value);
-    updateMsgByteCount();
-  });
-  $('msg-send-dest').addEventListener('change', updateMsgByteCount);
+  // Messaging hub controls wired in messages.js module
 
-  // Wire up sortable Meshtastic table headers
-  var mshSortHeaders = document.querySelectorAll('#meshtastic-section th[data-sort]');
+  // Wire up sortable Meshtastic MQTT table headers (exclude lora- prefixed)
+  var mshSortHeaders = document.querySelectorAll('#meshtastic-section th[data-sort]:not([data-sort^="lora-"])');
   for (var mi = 0; mi < mshSortHeaders.length; mi++) {
     (function(th) {
       th.addEventListener('click', function() {
@@ -1583,7 +1340,21 @@
     })(mshSortHeaders[mi]);
   }
   $('meshtastic-show-more').addEventListener('click', function() {
-    RPI.meshtasticShowMore();
+    if (RPI.meshtasticShowMore) RPI.meshtasticShowMore();
+  });
+
+  // Wire up sortable LoRa neighbors table headers
+  var loraSortHeaders = document.querySelectorAll('#meshtastic-lora-neighbors th[data-sort]');
+  for (var li = 0; li < loraSortHeaders.length; li++) {
+    (function(th) {
+      th.addEventListener('click', function() {
+        var key = th.getAttribute('data-sort').replace('lora-', '');
+        RPI.onLoraSort(key);
+      });
+    })(loraSortHeaders[li]);
+  }
+  $('lora-neighbors-show-more').addEventListener('click', function() {
+    if (RPI.loraNeighborsShowMore) RPI.loraNeighborsShowMore();
   });
 
   // Interface management -- event delegation (CSP blocks inline handlers)
@@ -1592,6 +1363,13 @@
     var cb = ev.target;
     if (cb.tagName === 'INPUT' && cb.dataset.iface) {
       window._toggleIface(cb.dataset.iface);
+    }
+  });
+
+  // LoRa announce mode -- event delegation (select is dynamically rendered)
+  $('lora-section').addEventListener('change', function(ev) {
+    if (ev.target.id === 'lora-announce-mode') {
+      window._setLoraAnnounceMode(ev.target.value);
     }
   });
   fetchInterfacesConfig();
@@ -1605,6 +1383,6 @@
   setInterval(fetchAll, 30000);
 
   // Refresh LoRa reachability scores every 60s
-  setInterval(function() { RPI.fetchLoraReachability(); }, 60000);
+  setInterval(function() { if (RPI.fetchLoraReachability) RPI.fetchLoraReachability(); }, 60000);
 
 })();

@@ -322,7 +322,7 @@
           }
           html += '<div class="lora-metric">'
             + '<span class="lora-metric-label">Announce Mode</span>'
-            + '<select id="lora-announce-mode" class="lora-mode-select" onchange="window._setLoraAnnounceMode(this.value)">';
+            + '<select id="lora-announce-mode" class="lora-mode-select">';
           for (var mi = 0; mi < modes.length; mi++) {
             var m = modes[mi];
             var sel = m === curMode ? ' selected' : '';

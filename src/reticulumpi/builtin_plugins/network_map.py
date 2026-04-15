@@ -575,6 +575,8 @@ class NetworkMapPlugin(PluginBase):
                     )
                 except Exception:
                     self.log.debug("Error processing announce", exc_info=True)
+                finally:
+                    self._announce_queue.task_done()
 
                 # Flush pending upserts periodically
                 now = time.monotonic()

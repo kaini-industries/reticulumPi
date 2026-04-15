@@ -440,6 +440,23 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
+            # Collect Meshtastic device info (if gateway plugin available)
+            meshtastic_device_data: dict = {}
+            meshtastic_gw = plugin.app.get_plugin("meshtastic_gateway")
+            if meshtastic_gw and hasattr(meshtastic_gw, "get_device_info"):
+                try:
+                    meshtastic_device_data = meshtastic_gw.get_device_info()
+                except Exception:
+                    pass
+
+            # Collect LoRa neighbors (if gateway plugin available)
+            meshtastic_lora_neighbors: list = []
+            if meshtastic_gw and hasattr(meshtastic_gw, "get_lora_neighbors"):
+                try:
+                    meshtastic_lora_neighbors = meshtastic_gw.get_lora_neighbors()
+                except Exception:
+                    pass
+
             # Collect recent messages from messaging hub (if available)
             messaging_data: dict = {}
             msg_hub = plugin.app.get_plugin("messaging_hub")
@@ -452,6 +469,10 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                     transports = msg_hub.get_transports()
                     if transports:
                         messaging_data["transports"] = transports
+                    if hasattr(msg_hub, "get_unread_counts"):
+                        unread = msg_hub.get_unread_counts()
+                        if unread:
+                            messaging_data["unread"] = unread
                 except Exception:
                     pass
 
@@ -467,6 +488,10 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 "path_warming": path_warming_data,
                 "transport_health": transport_health_data,
             }
+            if meshtastic_device_data:
+                data["meshtastic_device"] = meshtastic_device_data
+            if meshtastic_lora_neighbors:
+                data["meshtastic_lora_neighbors"] = meshtastic_lora_neighbors
             if messaging_data:
                 data["messaging"] = messaging_data
             if mesh_data:
