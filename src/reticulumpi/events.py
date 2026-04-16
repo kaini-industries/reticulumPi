@@ -101,7 +101,7 @@ SHUTDOWN_STARTING = "shutdown.starting"
 MESSAGE_RECEIVED = "messaging.message_received"
 MESSAGE_SENT = "messaging.message_sent"
 MESSAGE_FAILED = "messaging.message_failed"
-MESSAGE_DELIVERED = "messaging.message_delivered"
+MESSAGE_STATUS_CHANGED = "messaging.message_status_changed"
 
 # Meshtastic message ack/nak
 MESHTASTIC_MESSAGE_ACKED = "meshtastic.message_acked"

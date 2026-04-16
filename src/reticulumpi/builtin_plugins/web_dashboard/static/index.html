@@ -353,63 +353,73 @@
       <div id="mesh-show-more" class="show-more-btn" style="display:none"></div>
     </div>
 
-    <!-- Peer Telemetry -->
+    <!-- Peer Telemetry (collapsed by default) -->
     <div class="section svc-reticulum" id="telemetry-section">
-      <div class="section-header">
-        <span>Peer Telemetry <span class="svc-tag svc-tag-rns">RNS</span></span>
+      <div class="section-header collapsible" id="telemetry-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Peer Telemetry <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="telemetry-count"></span>
       </div>
-      <div class="metrics-grid" id="peer-metrics-grid"></div>
-      <button id="peer-show-more" class="show-more-btn" style="display:none">Show all</button>
+      <div class="section-body hidden" id="telemetry-body">
+        <div class="metrics-grid" id="peer-metrics-grid"></div>
+        <button id="peer-show-more" class="show-more-btn" style="display:none">Show all</button>
+      </div>
     </div>
 
-    <!-- Shared Files -->
+    <!-- Shared Files (collapsed by default) -->
     <div class="section svc-reticulum" id="files-section">
-      <div class="section-header">
-        <span>Shared Files <span class="svc-tag svc-tag-rns">RNS</span></span>
+      <div class="section-header collapsible" id="files-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Shared Files <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="files-count"></span>
       </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
-          </thead>
-          <tbody id="files-table"></tbody>
-        </table>
+      <div class="section-body hidden" id="files-body">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+            </thead>
+            <tbody id="files-table"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
-    <!-- Alerts -->
+    <!-- Alerts (collapsed by default) -->
     <div class="section svc-reticulum" id="alerts-section">
-      <div class="section-header">
-        <span>Alerts <span class="svc-tag svc-tag-rns">RNS</span></span>
+      <div class="section-header collapsible" id="alerts-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Alerts <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="alerts-count"></span>
       </div>
-      <div id="alerts-info" class="config-content">No alerts configured</div>
+      <div class="section-body hidden" id="alerts-body">
+        <div id="alerts-info" class="config-content">No alerts configured</div>
+      </div>
     </div>
 
-    <!-- Sensors -->
+    <!-- Sensors (collapsed by default) -->
     <div class="section svc-reticulum" id="sensors-section">
-      <div class="section-header">
-        <span>Sensors <span class="svc-tag svc-tag-rns">RNS</span></span>
+      <div class="section-header collapsible" id="sensors-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Sensors <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="sensors-count"></span><span class="freshness"></span>
       </div>
-      <div class="metrics-grid" id="sensors-grid"></div>
+      <div class="section-body hidden" id="sensors-body">
+        <div class="metrics-grid" id="sensors-grid"></div>
+      </div>
     </div>
 
-    <!-- Emergency Broadcasts -->
+    <!-- Emergency Broadcasts (collapsed by default) -->
     <div class="section svc-reticulum" id="emergency-section">
-      <div class="section-header">
-        <span>Emergency Broadcasts <span class="svc-tag svc-tag-rns">RNS</span></span>
+      <div class="section-header collapsible" id="emergency-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Emergency Broadcasts <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="emergency-count"></span>
       </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
-          </thead>
-          <tbody id="emergency-table"></tbody>
-        </table>
+      <div class="section-body hidden" id="emergency-body">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
+            </thead>
+            <tbody id="emergency-table"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 

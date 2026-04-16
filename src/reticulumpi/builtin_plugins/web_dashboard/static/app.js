@@ -1150,16 +1150,20 @@
     });
   });
 
-  // Plugins section collapsible toggle
-  $('plugins-toggle').addEventListener('click', function() {
-    var header = $('plugins-toggle');
-    var body = $('plugins-body');
-    if (body.classList.contains('hidden')) {
-      body.classList.remove('hidden');
-      header.classList.add('open');
-    } else {
-      body.classList.add('hidden');
-      header.classList.remove('open');
+  // Collapsible section toggles
+  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency'].forEach(function(name) {
+    var toggle = $(name + '-toggle');
+    var body = $(name + '-body');
+    if (toggle && body) {
+      toggle.addEventListener('click', function() {
+        if (body.classList.contains('hidden')) {
+          body.classList.remove('hidden');
+          toggle.classList.add('open');
+        } else {
+          body.classList.add('hidden');
+          toggle.classList.remove('open');
+        }
+      });
     }
   });
 

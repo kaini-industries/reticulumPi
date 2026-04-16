@@ -867,9 +867,17 @@ class MeshtasticAdapter(TransportAdapter):
         ack_holder: dict[str, Any] = {}
 
         def _on_ack(acked: bool) -> None:
+            # msg_id may not be bound yet if the radio acks very quickly;
+            # wait briefly for _register_delivery_tracking to set it.
             msg_id = ack_holder.get("msg_id")
             if msg_id is None:
-                return
+                for _ in range(50):  # up to 500ms
+                    time.sleep(0.01)
+                    msg_id = ack_holder.get("msg_id")
+                    if msg_id is not None:
+                        break
+                else:
+                    return
             with self._pending_lock:
                 self._pending_delivery.pop(msg_id, None)
             status = "delivered" if acked else "delivery_failed"
@@ -1267,7 +1275,7 @@ class MessagingHubPlugin(PluginBase):
         try:
             self._store.update_status(msg_id, status)
             ts = time.time()
-            self.event_bus.publish(events.MESSAGE_DELIVERED, {
+            self.event_bus.publish(events.MESSAGE_STATUS_CHANGED, {
                 "id": msg_id,
                 "transport": transport,
                 "status": status,
@@ -1325,7 +1333,9 @@ class MessagingHubPlugin(PluginBase):
                             adapter._pending_delivery.pop(msg_id, None)
                         else:
                             adapter._pending_delivery.pop(key, None)
-                self._store.update_status(msg_id, "timeout")
+                self._on_delivery_status_update(
+                    msg_id, adapter.transport_name, "timeout",
+                )
                 expired += 1
         if expired:
             self.log.debug("Expired %d stale pending delivery entries", expired)

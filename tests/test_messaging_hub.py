@@ -1101,7 +1101,7 @@ class TestHubDeliveryStatus:
         msg = hub_plugin._store.get_message(msg_id)
         assert msg["status"] == "delivered"
         hub_plugin.event_bus.publish.assert_any_call(
-            events.MESSAGE_DELIVERED,
+            events.MESSAGE_STATUS_CHANGED,
             pytest.approx({
                 "id": msg_id,
                 "transport": "lxmf",
@@ -1126,23 +1126,27 @@ class TestHubDeliveryStatus:
 
     def test_expire_stale_pending(self, hub_plugin):
         """expire_stale_pending marks old entries as timeout."""
-        # Register a mock adapter with a stale pending entry
+        # Store a message first so we have a valid msg_id
+        msg_id = hub_plugin._store.store(
+            transport="test_lxmf", direction="sent", msg_type="direct",
+            text="Stale", status="sent",
+        )
+
+        # Register a mock adapter with a stale pending entry using the real msg_id
         adapter = MagicMock(spec=LXMFAdapter)
         adapter.transport_name = "test_lxmf"
         adapter.display_name = "Test LXMF"
         adapter._pending_lock = __import__("threading").Lock()
         adapter._pending_delivery = {
-            "stale_hash": {"msg_id": 99, "timestamp": time.time() - 600},
+            "stale_hash": {"msg_id": msg_id, "timestamp": time.time() - 600},
         }
         adapter.get_pending_delivery.return_value = dict(adapter._pending_delivery)
         adapter.track_pending = MagicMock()
         hub_plugin.register_adapter(adapter)
 
-        # Store a message to update
-        hub_plugin._store.store(
-            transport="test_lxmf", direction="sent", msg_type="direct",
-            text="Stale", status="sent",
-        )
-
         expired = hub_plugin.expire_stale_pending(max_age=300)
         assert expired == 1
+
+        # Verify the DB row was actually updated
+        msg = hub_plugin._store.get_message(msg_id)
+        assert msg["status"] == "timeout"

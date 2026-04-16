@@ -456,11 +456,16 @@ class MeshCoreGateway(PluginBase):
     def _handle_ack_event(self, event: Any) -> None:
         """Process an incoming MeshCore ACK event and publish on the event bus."""
         try:
-            ack_code = ""
+            ack_code: Any = ""
             if hasattr(event, "attributes") and isinstance(event.attributes, dict):
                 ack_code = event.attributes.get("code", "")
             if not ack_code and isinstance(event.payload, dict):
                 ack_code = event.payload.get("code", "")
+            # Normalize to hex string to match send_message()'s expected_ack
+            if isinstance(ack_code, bytes):
+                ack_code = ack_code.hex()
+            elif ack_code:
+                ack_code = str(ack_code)
             if ack_code:
                 self.log.debug("MeshCore ACK received: %s", ack_code)
                 self.event_bus.publish(events.MESHCORE_MESSAGE_ACKED, {

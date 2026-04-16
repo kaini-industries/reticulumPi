@@ -961,6 +961,7 @@ class TestBroadcastDataCollection:
         ]
         msg_hub.get_transports.return_value = ["lxmf"]
         msg_hub.get_unread_counts.return_value = {}
+        msg_hub.get_status_updates_since.return_value = []
 
         plugin = self._make_plugin({"messaging_hub": msg_hub})
         _ws_clients.clear()

@@ -2031,7 +2031,6 @@ class MeshtasticGateway(PluginBase):
                         destinationId=destination_id,
                         wantAck=True,
                         onResponse=self._make_ack_handler(on_ack),
-                        onResponseAckPermitted=True,
                     )
                 else:
                     iface.sendText(

@@ -503,10 +503,11 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                             _last_msg_ts.get("status_ts", 0)
                         )
                         if status_updates:
-                            messaging_data["status_updates"] = status_updates
-                            _last_msg_ts["status_ts"] = max(
+                            latest_ts = max(
                                 u["timestamp"] for u in status_updates
                             )
+                            messaging_data["status_updates"] = status_updates
+                            _last_msg_ts["status_ts"] = latest_ts
                 except Exception:
                     pass
 
