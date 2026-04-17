@@ -1038,11 +1038,6 @@
       if (r && r.ok) updateSharedFiles(r.data.files);
     });
 
-    // Messaging hub
-    if (RPI.fetchTransports) RPI.fetchTransports();
-    if (RPI.fetchMessages) RPI.fetchMessages();
-    if (RPI.fetchContacts) RPI.fetchContacts();
-
     // Transport + connectivity + routing
     api('/api/transport').then(function(r) {
       if (r && r.ok) updateTransport(r.data);
@@ -1103,7 +1098,13 @@
           }
           if (msg.data.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(msg.data.meshcore_status, msg.data.meshcore_contacts);
           if (msg.data.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(msg.data.meshcore_device);
-          if (msg.data.messaging && RPI.updateMessaging) RPI.updateMessaging(msg.data.messaging);
+          if (msg.data.messaging) {
+            if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(msg.data.messaging);
+            if (RPI.updateMessagingMqtt) RPI.updateMessagingMqtt(msg.data.messaging);
+            if (RPI.updateMessagingLora) RPI.updateMessagingLora(msg.data.messaging);
+            if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(msg.data.messaging);
+          }
+          if (msg.data.space && RPI.space && RPI.space.update) RPI.space.update(msg.data.space);
         }
       } catch(e) { /* ignore parse errors */ }
     };

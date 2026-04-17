@@ -388,3 +388,54 @@ reticulumpi:
     #  aspect: example
     #  announce_interval: 300
     #  display_name: "MyNode Example"  # Defaults to "<node_name> Example"
+
+    # Space Tracker — satellites (Celestrak TLEs), upcoming launches
+    # (Launch Library 2), and space weather (NOAA SWPC Kp index).
+    # All data is fetched from public HTTPS APIs with strict rate limiting
+    # — minimum intervals are enforced and cannot be lowered below the
+    # floors shown (etiquette requirements of the upstream services).
+    # Optional deps for orbital propagation / pass prediction:
+    #   pip install sgp4       # sub-satellite points
+    #   pip install skyfield   # observer az/el + pass prediction
+    #space_tracker:
+    #  enabled: false
+    #  # Observer location used for az/el + pass prediction.
+    #  # Leave latitude/longitude null to pick them up from the
+    #  # gps_telemetry plugin automatically (when that is enabled).
+    #  observer:
+    #    latitude: null               # degrees, -90 to 90
+    #    longitude: null              # degrees, -180 to 180
+    #    elevation_m: 0
+    #  # Which Celestrak satellite groups to track.  See
+    #  # https://celestrak.org/NORAD/elements/ for the full list.
+    #  celestrak_groups:
+    #    - stations                   # ISS, CSS, HST
+    #    - amateur                    # Amateur radio satellites
+    #    - weather                    # Weather satellites
+    #    - noaa                       # NOAA APT-capable sats
+    #  tle_refresh_hours: 24          # Floor: 6h (Celestrak etiquette)
+    #  launches:
+    #    enabled: true
+    #    poll_interval_minutes: 30    # Floor: 15 (LL2 free-tier quota)
+    #    lookahead_count: 5
+    #  space_weather:
+    #    enabled: true
+    #    poll_interval_minutes: 15    # Floor: 10
+    #  propagation:
+    #    enabled: true                # No-op if sgp4 not installed
+    #    interval_seconds: 10
+    #    max_objects: 200
+    #  passes:
+    #    enabled: true                # No-op if skyfield not installed
+    #    lookahead_hours: 24
+    #    min_elevation_deg: 10
+    #    watchlist:
+    #      - "ISS (ZARYA)"
+    #      - "NOAA 15"
+    #      - "NOAA 18"
+    #      - "NOAA 19"
+    #  cache_dir: ~/.local/share/reticulumpi/space_tracker
+    #  # Please set contact info in the user-agent so upstream operators can
+    #  # reach you if something goes wrong with your node.
+    #  user_agent: "reticulumpi/0.2 (+https://example.invalid/contact)"
+    #  request_timeout_seconds: 15

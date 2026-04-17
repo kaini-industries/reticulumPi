@@ -38,10 +38,15 @@ meshtastic = [
 meshcore = [
     "meshcore>=2.3,<3.0",
 ]
+space = [
+    "sgp4>=2.20,<3.0",
+]
 dev = [
     "pytest>=7.4,<9.0",
     "pytest-cov",
     "pytest-mock",
+    "pytest-xdist",
+    "pytest-timeout",
     "ruff",
 ]
 
@@ -60,6 +65,9 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# -n 2 leaves a core free for the OS/thermals on a 4-core Pi; override with -n0 for debugging.
+# timeout guards against hangs on a slow/throttled Pi without masking real slow tests.
+addopts = "-n 2 --timeout=60 --timeout-method=thread"
 markers = [
     "integration: tests that require a real Reticulum instance",
 ]

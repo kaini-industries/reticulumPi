@@ -34,6 +34,16 @@ async def _empty_async_iter():
     yield  # noqa: unreachable — makes this an async generator
 
 
+@pytest.fixture(autouse=True)
+def _reset_ws_clients():
+    # _ws_clients is a module-level set; without reset, a failing test leaves
+    # entries behind and poisons later tests. Required for safe re-ordering
+    # and parallel runs.
+    _ws_clients.clear()
+    yield
+    _ws_clients.clear()
+
+
 # ── _extract_radio tests ───────────────────────────────────────────
 
 

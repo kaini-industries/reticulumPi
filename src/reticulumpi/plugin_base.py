@@ -30,9 +30,21 @@ class PluginBase(ABC):
         self.identity = app.identity
         self.event_bus = app.event_bus
         self.log = logging.getLogger(f"reticulumpi.plugin.{self.plugin_name}")
-        self._active = False
+        self._stop_event = threading.Event()
+        self._stop_event.set()  # starts "stopped"
         self._threads: list[threading.Thread] = []
         self.validate_config()
+
+    @property
+    def _active(self) -> bool:
+        return not self._stop_event.is_set()
+
+    @_active.setter
+    def _active(self, value: bool) -> None:
+        if value:
+            self._stop_event.clear()
+        else:
+            self._stop_event.set()
 
     @abstractmethod
     def start(self) -> None:
@@ -72,12 +84,9 @@ class PluginBase(ABC):
 
     def _sleep_while_active(self, seconds: float) -> None:
         """Sleep for up to `seconds`, exiting early if the plugin is stopped."""
-        deadline = time.monotonic() + float(seconds)
-        while self._active:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(remaining, 1.0))
+        # Event-based: wakes instantly when _active flips to False, vs. the prior
+        # 1-second busy-poll that delayed shutdown by up to ~1s per sleeping thread.
+        self._stop_event.wait(timeout=float(seconds))
 
     def _start_log_reader(self, process: Any, prefix: str = "") -> threading.Thread:
         """Start a daemon thread that reads process stdout line-by-line and logs it.

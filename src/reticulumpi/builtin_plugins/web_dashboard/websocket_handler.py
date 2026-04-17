@@ -482,6 +482,39 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
+            # Collect space tracker snapshot (if plugin enabled).  Live
+            # position deltas are published via the plugin's own event bus
+            # message; here we only surface the lightweight snapshot.
+            space_data: dict = {}
+            space_tracker = plugin.app.get_plugin("space_tracker")
+            if space_tracker and hasattr(space_tracker, "get_snapshot"):
+                try:
+                    snap = space_tracker.get_snapshot()
+                    space_data = {
+                        "tle_groups": snap.get("tle_groups", {}),
+                        "launches": (snap.get("launches") or [])[:5],
+                        "weather": snap.get("weather"),
+                        "observer": snap.get("observer"),
+                    }
+                    # Propagated positions: trim to top N (by elevation if
+                    # observer, otherwise as-is) to keep broadcast size bounded.
+                    positions = snap.get("positions") or {}
+                    objects = positions.get("objects") or []
+                    if objects:
+                        if snap.get("observer"):
+                            objects = sorted(
+                                objects,
+                                key=lambda o: o.get("el", -999),
+                                reverse=True,
+                            )
+                        space_data["positions"] = {
+                            "fetched_at": positions.get("fetched_at"),
+                            "count": positions.get("count", len(objects)),
+                            "objects": objects[:60],
+                        }
+                except Exception:
+                    pass
+
             # Collect recent messages from messaging hub (if available)
             messaging_data: dict = {}
             msg_hub = plugin.app.get_plugin("messaging_hub")
@@ -537,6 +570,8 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 data["messaging"] = messaging_data
             if mesh_data:
                 data["mesh"] = mesh_data
+            if space_data:
+                data["space"] = space_data
 
             message = json.dumps({
                 "type": "update",

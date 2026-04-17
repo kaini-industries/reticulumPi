@@ -220,6 +220,29 @@ class TestMessageStore:
         deleted = store.prune(100)
         assert deleted == 0
 
+    def test_delete_conversation_removes_only_that_thread(self, store):
+        store.store(
+            transport="lxmf", direction="received", msg_type="direct",
+            text="keep A", from_id="aaaa", to_id="zzzz",
+        )
+        store.store(
+            transport="lxmf", direction="received", msg_type="direct",
+            text="delete me 1", from_id="bbbb", to_id="zzzz",
+        )
+        store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="delete me 2", from_id="zzzz", to_id="bbbb",
+        )
+        deleted = store.delete_conversation("bbbb")
+        assert deleted == 2
+        remaining = [c["contact_id"] for c in store.get_conversations()]
+        assert "bbbb" not in remaining
+        assert "aaaa" in remaining
+
+    def test_delete_conversation_missing_contact(self, store):
+        deleted = store.delete_conversation("nobody")
+        assert deleted == 0
+
     def test_metadata_round_trip(self, store):
         meta = {"key": "value", "num": 42}
         msg_id = store.store(
@@ -229,22 +252,39 @@ class TestMessageStore:
         msg = store.get_message(msg_id)
         assert msg["metadata"] == meta
 
-    def test_dm_contact_id_groups_by_peer(self, store):
-        """DMs from the same Meshtastic peer land in one conversation."""
+    def test_dm_contact_id_splits_by_sub_transport(self, store):
+        """DMs from the same Meshtastic peer split by MQTT vs LoRa source."""
         store.store(
             transport="meshtastic", direction="received", msg_type="direct",
             text="Hello via LoRa", from_id="!aabb1122", to_id="!ccdd3344",
-            sub_transport="",
+            sub_transport="lora",
         )
         store.store(
             transport="meshtastic", direction="received", msg_type="direct",
             text="Hello via MQTT", from_id="!aabb1122", to_id="!ccdd3344",
-            sub_transport="",
+            sub_transport="mqtt",
         )
         convos = store.get_conversations()
-        # Both messages in one conversation keyed by from_id
-        mesh_dm_convos = [c for c in convos if c["contact_id"] == "!aabb1122"]
-        assert len(mesh_dm_convos) == 1
+        # Each source produces its own conversation
+        contact_ids = [c["contact_id"] for c in convos]
+        assert "!aabb1122__lora" in contact_ids
+        assert "!aabb1122__mqtt" in contact_ids
+
+    def test_dm_same_sub_transport_groups(self, store):
+        """Two DMs from the same peer via the same sub_transport group."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="First via LoRa", from_id="!aabb1122", to_id="!ccdd3344",
+            sub_transport="lora",
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="Second via LoRa", from_id="!aabb1122", to_id="!ccdd3344",
+            sub_transport="lora",
+        )
+        convos = store.get_conversations()
+        lora_dm = [c for c in convos if c["contact_id"] == "!aabb1122__lora"]
+        assert len(lora_dm) == 1
 
     def test_broadcast_and_dm_are_separate_conversations(self, store):
         """Broadcast and DM from the same peer create separate conversations."""
@@ -256,13 +296,51 @@ class TestMessageStore:
         store.store(
             transport="meshtastic", direction="received", msg_type="direct",
             text="Direct msg", from_id="!aabb1122", to_id="!ccdd3344",
-            sub_transport="",
+            sub_transport="lora",
         )
         convos = store.get_conversations()
         contact_ids = [c["contact_id"] for c in convos]
         assert "__broadcast_meshtastic_lora__" in contact_ids
-        assert "!aabb1122" in contact_ids
+        assert "!aabb1122__lora" in contact_ids
         assert len(convos) == 2
+
+    def test_sub_transport_filter_on_conversations(self, store):
+        """get_conversations(sub_transport=...) filters by source channel."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="MQTT broadcast", from_id="!aabb1122",
+            sub_transport="mqtt",
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="LoRa broadcast", from_id="!ccdd3344",
+            sub_transport="lora",
+        )
+        mqtt_convos = store.get_conversations(
+            transport="meshtastic", sub_transport="mqtt",
+        )
+        lora_convos = store.get_conversations(
+            transport="meshtastic", sub_transport="lora",
+        )
+        assert len(mqtt_convos) == 1
+        assert len(lora_convos) == 1
+        assert mqtt_convos[0]["sub_transport"] == "mqtt"
+        assert lora_convos[0]["sub_transport"] == "lora"
+
+    def test_sub_transport_filter_on_messages(self, store):
+        """get_messages(sub_transport=...) filters by source channel."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="MQTT msg", from_id="!aa", sub_transport="mqtt",
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="LoRa msg", from_id="!aa", sub_transport="lora",
+        )
+        mqtt = store.get_messages(sub_transport="mqtt")
+        lora = store.get_messages(sub_transport="lora")
+        assert len(mqtt) == 1 and mqtt[0]["text"] == "MQTT msg"
+        assert len(lora) == 1 and lora[0]["text"] == "LoRa msg"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -715,7 +793,8 @@ class TestMeshtasticAdapter:
         result = adapter.send("Hello mesh!", "!abcd1234")
 
         gw.send_message.assert_called_once_with(
-            "Hello mesh!", destination_id="!abcd1234", via="lora", on_ack=ANY,
+            "Hello mesh!", destination_id="!abcd1234", channel=None,
+            via="lora", on_ack=ANY,
         )
         assert result["sent"] is True
 
@@ -732,7 +811,8 @@ class TestMeshtasticAdapter:
         result = adapter.send("Hello all!", "broadcast")
 
         gw.send_message.assert_called_once_with(
-            "Hello all!", destination_id=None, via="", on_ack=ANY,
+            "Hello all!", destination_id=None, channel=None, via="",
+            on_ack=ANY,
         )
         assert result["sent"] is True
 
@@ -749,7 +829,8 @@ class TestMeshtasticAdapter:
         result = adapter.send("Local msg!", "broadcast", sub_transport="lora")
 
         gw.send_message.assert_called_once_with(
-            "Local msg!", destination_id=None, via="lora", on_ack=ANY,
+            "Local msg!", destination_id=None, channel=None, via="lora",
+            on_ack=ANY,
         )
         assert result["sent"] is True
 
@@ -864,7 +945,48 @@ class TestMeshtasticAdapter:
         assert call_args["from_id"] == "!aabb1122"
         assert call_args["from_name"] == "Solar Node"
         assert call_args["to_id"] == "!ccdd3344"
-        assert call_args["sub_transport"] == ""  # DMs don't split by source
+        # DMs now carry sub_transport so MQTT vs LoRa panels stay separate
+        assert call_args["sub_transport"] == "lora"
+
+    def test_mqtt_dm_event_tags_sub_transport(self, mock_app):
+        """DMs arriving via MQTT are tagged sub_transport='mqtt'."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        adapter = MeshtasticAdapter(hub)
+        callback = MagicMock()
+        adapter.on_message_received(callback)
+
+        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
+            "from_id": "!aabb1122",
+            "to_id": "!ccdd3344",
+            "is_broadcast": False,
+            "text": "Hello via MQTT",
+            "source": "MQTT",
+        })
+
+        call_args = callback.call_args[0][0]
+        assert call_args["msg_type"] == "direct"
+        assert call_args["sub_transport"] == "mqtt"
+
+    def test_legacy_event_without_source_defaults_lora(self, mock_app):
+        """Events that predate the source field fall back to 'lora'."""
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        adapter = MeshtasticAdapter(hub)
+        callback = MagicMock()
+        adapter.on_message_received(callback)
+
+        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
+            "from_id": "!aabb1122",
+            "text": "No source field",
+            "is_broadcast": True,
+        })
+
+        assert callback.call_args[0][0]["sub_transport"] == "lora"
 
     def test_missing_is_broadcast_defaults_to_broadcast(self, mock_app):
         hub = MagicMock()

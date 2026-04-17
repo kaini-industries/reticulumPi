@@ -237,6 +237,86 @@ async def handle_meshtastic_lora_neighbors(
     return _ok({"neighbors": gw.get_lora_neighbors()})
 
 
+async def handle_meshtastic_channels(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshtastic/channels — Radio channel configuration (serial mode)."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "get_channels"):
+        return _ok({"channels": [], "message": "meshtastic_gateway plugin not enabled"})
+    return _ok({"channels": gw.get_channels()})
+
+
+async def handle_meshtastic_channel_join(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/meshtastic/channels/join — Join a channel on the radio.
+
+    Body: ``{"name": "...", "psk": "..."}`` or ``{"url": "https://meshtastic.org/e/#..."}``
+    ``psk`` accepts: "none", "default", "random", "simple1"-"simple254", or base64 key.
+    ``index`` (1-7) is optional; omit to use the first available slot.
+    """
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw:
+        return _error("meshtastic_gateway plugin not enabled", 503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+
+    # URL-based join
+    url = body.get("url", "").strip()
+    if url:
+        if not hasattr(gw, "join_channel_url"):
+            return _error("Channel URL join not supported", 501)
+        result = gw.join_channel_url(url)
+        if result.get("ok"):
+            return _ok(result)
+        return _error(result.get("reason", "Join failed"), 400)
+
+    # Name + PSK join
+    name = body.get("name", "").strip()
+    psk = body.get("psk", "default").strip()
+    if not name:
+        return _error("name field is required", 400)
+    index = body.get("index")
+    if index is not None:
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            return _error("index must be an integer 1-7", 400)
+
+    if not hasattr(gw, "join_channel"):
+        return _error("Channel join not supported", 501)
+    result = gw.join_channel(name, psk, index=index)
+    if result.get("ok"):
+        return _ok(result)
+    return _error(result.get("reason", "Join failed"), 400)
+
+
+async def handle_meshtastic_channel_delete(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """DELETE /api/meshtastic/channels/{index} — Remove a SECONDARY channel."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "delete_channel"):
+        return _error("meshtastic_gateway plugin not enabled", 503)
+
+    try:
+        index = int(request.match_info["index"])
+    except (KeyError, ValueError):
+        return _error("Invalid channel index", 400)
+
+    result = gw.delete_channel(index)
+    if result.get("ok"):
+        return _ok(result)
+    return _error(result.get("reason", "Delete failed"), 400)
+
+
 # ── MeshCore gateway ───────────────────────────────────────────────
 
 
@@ -295,6 +375,7 @@ async def handle_messages(
         return _error("limit and offset must be integers", 400)
 
     transport = request.query.get("transport") or None
+    sub_transport = request.query.get("sub_transport")
     direction = request.query.get("direction") or None
     since_str = request.query.get("since")
     try:
@@ -304,7 +385,7 @@ async def handle_messages(
 
     messages = hub.get_messages(
         limit=limit, offset=offset, transport=transport,
-        direction=direction, since=since,
+        direction=direction, since=since, sub_transport=sub_transport,
     )
     return _ok({"messages": messages})
 
@@ -344,6 +425,11 @@ async def handle_send_message(
         kwargs["msg_type"] = body["msg_type"]
     if body.get("sub_transport"):
         kwargs["sub_transport"] = body["sub_transport"]
+    if body.get("channel") is not None:
+        try:
+            kwargs["channel"] = int(body["channel"])
+        except (TypeError, ValueError):
+            return _error("channel must be an integer 0-7", 400)
     result = hub.send_message(transport, text, destination, **kwargs)
     if result.get("sent"):
         return _ok(result)
@@ -376,7 +462,19 @@ async def handle_contacts(
         return _ok({"contacts": []})
     transport = request.query.get("transport") or None
     query = request.query.get("q") or None
-    return _ok({"contacts": hub.get_contacts(transport, query=query)})
+    sub_transport = request.query.get("sub_transport")
+    contacts = hub.get_contacts(transport, query=query)
+    # The hub aggregates from adapters which don't know about sub_transport
+    # today, so filter client-side here on any sub_transport hint the
+    # contact carries.  Adapters that expose a sub_transport on contacts
+    # (e.g. Meshtastic MQTT vs serial peers) will work cleanly; the rest
+    # ignore the filter because their contacts have no sub_transport key.
+    if sub_transport is not None:
+        contacts = [
+            c for c in contacts
+            if (c.get("sub_transport") or "") == sub_transport
+        ]
+    return _ok({"contacts": contacts})
 
 
 async def handle_message_stats(
@@ -399,7 +497,10 @@ async def handle_conversations(
     if not hub or not hasattr(hub, "get_conversations"):
         return _ok({"conversations": []})
     transport = request.query.get("transport") or None
-    return _ok({"conversations": hub.get_conversations(transport=transport)})
+    sub_transport = request.query.get("sub_transport")
+    return _ok({"conversations": hub.get_conversations(
+        transport=transport, sub_transport=sub_transport,
+    )})
 
 
 async def handle_conversation_messages(
@@ -434,7 +535,27 @@ async def handle_message_search(
         return _ok({"messages": []})
     limit = min(int(request.query.get("limit", "50")), 200)
     transport = request.query.get("transport") or None
-    return _ok({"messages": hub.search_messages(query, limit=limit, transport=transport)})
+    sub_transport = request.query.get("sub_transport")
+    return _ok({"messages": hub.search_messages(
+        query, limit=limit, transport=transport, sub_transport=sub_transport,
+    )})
+
+
+async def handle_delete_conversation(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """DELETE /api/messages/conversation/{contact_id} — Delete all messages."""
+    plugin = _get_plugin(request)
+    hub = plugin.app.get_plugin("messaging_hub")
+    if not hub or not hasattr(hub, "delete_conversation"):
+        return _error("messaging_hub not available", 503)
+    contact_id = request.match_info["contact_id"]
+    if not contact_id:
+        return aiohttp.web.json_response(
+            {"ok": False, "error": "contact_id required"}, status=400,
+        )
+    deleted = hub.delete_conversation(contact_id)
+    return _ok({"deleted": deleted})
 
 
 async def handle_mark_read(
@@ -468,7 +589,35 @@ async def handle_unread_counts(
     hub = plugin.app.get_plugin("messaging_hub")
     if not hub or not hasattr(hub, "get_unread_counts"):
         return _ok({"unread": {}})
-    return _ok({"unread": hub.get_unread_counts()})
+    transport = request.query.get("transport") or None
+    sub_transport = request.query.get("sub_transport")
+    return _ok({"unread": hub.get_unread_counts(
+        transport=transport, sub_transport=sub_transport,
+    )})
+
+
+# ── Space tracker ────────────────────────────────────────────────────
+
+
+async def handle_space_snapshot(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/space — current snapshot (TLE groups, launches, weather, quotas).
+
+    Live satellite positions are delivered via the WebSocket stream
+    (event: ``space.positions.snapshot``) rather than this endpoint, so
+    the REST call stays cheap regardless of how many sats are tracked.
+    """
+    plugin = _get_plugin(request)
+    tracker = plugin.app.get_plugin("space_tracker")
+    if not tracker or not hasattr(tracker, "get_snapshot"):
+        return _ok({"available": False, "message": "space_tracker plugin not enabled"})
+    try:
+        snap = tracker.get_snapshot()
+    except Exception:
+        return _error("Failed to gather space_tracker snapshot", 500)
+    snap["available"] = True
+    return _ok(snap)
 
 
 def setup_service_routes(app: aiohttp.web.Application) -> None:
@@ -491,6 +640,9 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/meshtastic/nodes", handle_meshtastic_nodes)
     app.router.add_get("/api/meshtastic/device", handle_meshtastic_device)
     app.router.add_get("/api/meshtastic/lora_neighbors", handle_meshtastic_lora_neighbors)
+    app.router.add_get("/api/meshtastic/channels", handle_meshtastic_channels)
+    app.router.add_post("/api/meshtastic/channels/join", handle_meshtastic_channel_join)
+    app.router.add_delete("/api/meshtastic/channels/{index}", handle_meshtastic_channel_delete)
     # MeshCore
     app.router.add_get("/api/meshcore/status", handle_meshcore_status)
     app.router.add_get("/api/meshcore/contacts", handle_meshcore_contacts)
@@ -505,6 +657,11 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get(
         "/api/messages/conversation/{contact_id}", handle_conversation_messages,
     )
+    app.router.add_delete(
+        "/api/messages/conversation/{contact_id}", handle_delete_conversation,
+    )
     app.router.add_get("/api/messages/search", handle_message_search)
     app.router.add_post("/api/messages/read", handle_mark_read)
     app.router.add_get("/api/messages/unread", handle_unread_counts)
+    # Space tracker
+    app.router.add_get("/api/space", handle_space_snapshot)

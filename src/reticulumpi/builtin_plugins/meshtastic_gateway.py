@@ -1971,6 +1971,206 @@ class MeshtasticGateway(PluginBase):
         with self._lock:
             return list(self._cached_lora_neighbors)
 
+    # ── Channel management (serial mode only) ──────────────────────
+
+    def _get_serial_node(self) -> Any | None:
+        """Return the localNode for a serial interface, or ``None``.
+
+        In serial mode, uses the main mesh interface.
+        In MQTT mode, falls back to the serial listener (device probe) if present.
+        """
+        with self._lock:
+            if self._mode == MODE_SERIAL:
+                iface = self._mesh_interface
+            else:
+                iface = self._serial_listener
+        if iface is None:
+            return None
+        return getattr(iface, "localNode", None)
+
+    def get_channels(self) -> list[dict[str, Any]]:
+        """Return the radio's configured channels (serial mode only).
+
+        Each entry: ``{index, name, role, psk_label, active}``.
+        ``psk_label`` is a privacy-safe description (e.g. "default", "secret").
+        """
+        node = self._get_serial_node()
+        if node is None:
+            return []
+
+        from meshtastic import channel_pb2
+        from meshtastic.util import pskToString
+
+        result: list[dict[str, Any]] = []
+        channels = getattr(node, "channels", None) or []
+        for ch in channels:
+            role_name = channel_pb2.Channel.Role.Name(ch.role)
+            name = ""
+            psk_label = "unencrypted"
+            if ch.settings:
+                name = ch.settings.name or ""
+                psk_label = pskToString(ch.settings.psk) if ch.settings.psk else "unencrypted"
+            result.append({
+                "index": ch.index,
+                "name": name,
+                "role": role_name,
+                "psk_label": psk_label,
+                "active": role_name in ("PRIMARY", "SECONDARY"),
+            })
+        return result
+
+    def join_channel(
+        self, name: str, psk: str, index: int | None = None,
+    ) -> dict[str, Any]:
+        """Configure a channel slot on the radio (serial mode only).
+
+        Args:
+            name: Channel name (displayed on the radio).
+            psk: PSK value — "none", "default", "random", "simple1"-"simple254",
+                 or a base64-encoded key.
+            index: Channel slot (1-7).  If ``None``, uses the first DISABLED slot.
+
+        Returns:
+            ``{"ok": True, "index": N}`` on success,
+            ``{"ok": False, "reason": str}`` on failure.
+        """
+        node = self._get_serial_node()
+        if node is None:
+            return {"ok": False, "reason": "Not connected in serial mode"}
+
+        from meshtastic import channel_pb2
+        from meshtastic.util import fromPSK
+
+        channels = getattr(node, "channels", None) or []
+        if not channels:
+            return {"ok": False, "reason": "Channel list not loaded from device"}
+
+        # Find target slot
+        if index is not None:
+            if not isinstance(index, int) or not 1 <= index <= 7:
+                return {"ok": False, "reason": "index must be 1-7 (0 is PRIMARY)"}
+            ch = node.getChannelByChannelIndex(index)
+            if ch is None:
+                return {"ok": False, "reason": f"Channel slot {index} not found"}
+            if ch.role == channel_pb2.Channel.Role.PRIMARY:
+                return {"ok": False, "reason": "Cannot overwrite PRIMARY channel"}
+        else:
+            ch = node.getDisabledChannel()
+            if ch is None:
+                return {"ok": False, "reason": "No available channel slots (all 8 in use)"}
+            index = ch.index
+
+        # Parse PSK — strict mode: accept only the well-known labels
+        # ("none", "default", "random", "simple1"-"simple254") and
+        # base64-encoded raw AES keys (16 or 32 bytes).  Anything else
+        # is rejected so we stay interoperable with stock Meshtastic
+        # clients that don't derive a key from a free-form passphrase.
+        import base64
+        import binascii
+        import re
+
+        label_pattern = re.compile(r"^simple([0-9]{1,3})$")
+        if psk in ("none", "default", "random") or label_pattern.match(psk):
+            try:
+                psk_bytes = fromPSK(psk)
+            except Exception as exc:
+                return {"ok": False, "reason": f"Invalid PSK label: {exc}"}
+            if not isinstance(psk_bytes, (bytes, bytearray)):
+                return {
+                    "ok": False,
+                    "reason": f"fromPSK returned {type(psk_bytes).__name__}, expected bytes",
+                }
+        else:
+            try:
+                psk_bytes = base64.b64decode(psk, validate=True)
+            except (binascii.Error, ValueError):
+                return {
+                    "ok": False,
+                    "reason": (
+                        "PSK must be a base64-encoded 16 or 32 byte key, "
+                        "or one of: none, default, random, simple1-simple254"
+                    ),
+                }
+            if len(psk_bytes) not in (16, 32):
+                return {
+                    "ok": False,
+                    "reason": (
+                        f"PSK key length is {len(psk_bytes)} bytes; "
+                        "Meshtastic requires 16 (AES-128) or 32 (AES-256) bytes"
+                    ),
+                }
+
+        # Configure the channel
+        ch.role = channel_pb2.Channel.Role.SECONDARY
+        ch.settings.name = name
+        ch.settings.psk = bytes(psk_bytes)
+
+        try:
+            node.writeChannel(index)
+        except Exception as exc:
+            self.log.exception("Error writing channel %d to device", index)
+            return {"ok": False, "reason": f"Device write failed: {exc}"}
+
+        self.log.info("Joined channel %d: %r", index, name)
+        return {"ok": True, "index": index}
+
+    def join_channel_url(self, url: str) -> dict[str, Any]:
+        """Join channel(s) from a Meshtastic URL (serial mode only).
+
+        Args:
+            url: Meshtastic channel URL (e.g. ``https://meshtastic.org/e/#...``).
+
+        Returns:
+            ``{"ok": True}`` on success,
+            ``{"ok": False, "reason": str}`` on failure.
+        """
+        node = self._get_serial_node()
+        if node is None:
+            return {"ok": False, "reason": "Not connected in serial mode"}
+
+        try:
+            node.setURL(url, addOnly=True)
+        except Exception as exc:
+            self.log.exception("Error applying channel URL")
+            return {"ok": False, "reason": str(exc)}
+
+        self.log.info("Applied channel URL: %s", url[:60])
+        return {"ok": True}
+
+    def delete_channel(self, index: int) -> dict[str, Any]:
+        """Remove a SECONDARY channel from the radio (serial mode only).
+
+        Args:
+            index: Channel slot (1-7).  PRIMARY (0) cannot be deleted.
+
+        Returns:
+            ``{"ok": True}`` on success,
+            ``{"ok": False, "reason": str}`` on failure.
+        """
+        node = self._get_serial_node()
+        if node is None:
+            return {"ok": False, "reason": "Not connected in serial mode"}
+
+        from meshtastic import channel_pb2
+
+        if not isinstance(index, int) or not 1 <= index <= 7:
+            return {"ok": False, "reason": "index must be 1-7 (0 is PRIMARY)"}
+
+        ch = node.getChannelByChannelIndex(index)
+        if ch is None:
+            return {"ok": False, "reason": f"Channel slot {index} not found"}
+        if ch.role != channel_pb2.Channel.Role.SECONDARY:
+            return {"ok": False, "reason": f"Channel {index} is {channel_pb2.Channel.Role.Name(ch.role)}, only SECONDARY can be deleted"}
+
+        try:
+            node.deleteChannel(index)
+        except Exception as exc:
+            self.log.exception("Error deleting channel %d", index)
+            return {"ok": False, "reason": f"Device write failed: {exc}"}
+
+        self.log.info("Deleted channel %d", index)
+        return {"ok": True}
+
     # ── Public send API (for messaging hub / dashboard) ────────────
 
     def send_message(

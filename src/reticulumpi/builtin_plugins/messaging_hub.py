@@ -121,7 +121,7 @@ class MessageStore:
             self._migrate_schema()
 
     def _migrate_schema(self) -> None:
-        """Add conversation-related columns if missing (v2 migration)."""
+        """Add conversation-related columns if missing (v2/v3 migration)."""
         cols = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
@@ -158,6 +158,40 @@ class MessageStore:
                 "WHERE direction = 'received' AND read = 0"
             )
             self._conn.commit()
+
+        # v3: sub_transport column for MQTT/LoRa split on Meshtastic
+        if "sub_transport" not in cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN sub_transport TEXT DEFAULT ''"
+            )
+            # Historical Meshtastic messages had sub_transport embedded in
+            # contact_id for broadcasts only.  Back-fill the new column
+            # from that, and assume "lora" for any Meshtastic DM whose
+            # sub_transport we can't recover — LoRa is by far the most
+            # common path for pre-existing users.
+            self._conn.execute("""
+                UPDATE messages
+                SET sub_transport = CASE
+                    WHEN contact_id = '__broadcast_meshtastic_mqtt__' THEN 'mqtt'
+                    WHEN contact_id = '__broadcast_meshtastic_lora__' THEN 'lora'
+                    WHEN transport = 'meshtastic' AND msg_type = 'direct' THEN 'lora'
+                    ELSE ''
+                END
+                WHERE sub_transport IS NULL OR sub_transport = ''
+            """)
+            # Rewrite Meshtastic DM contact_ids to include the sub_transport
+            # suffix so each panel sees its own conversation thread.
+            self._conn.execute("""
+                UPDATE messages
+                SET contact_id = contact_id || '__' || sub_transport
+                WHERE transport = 'meshtastic'
+                  AND msg_type = 'direct'
+                  AND sub_transport <> ''
+                  AND contact_id NOT LIKE '%\\_\\_mqtt' ESCAPE '\\'
+                  AND contact_id NOT LIKE '%\\_\\_lora' ESCAPE '\\'
+            """)
+            self._conn.commit()
+
         # Ensure indexes exist (idempotent)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_contact "
@@ -166,6 +200,10 @@ class MessageStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_read "
             "ON messages(read) WHERE read = 0"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_sub_transport "
+            "ON messages(transport, sub_transport)"
         )
         self._conn.commit()
 
@@ -177,16 +215,19 @@ class MessageStore:
     ) -> str:
         """Compute the contact_id for a message.
 
-        For broadcasts, ``sub_transport`` (e.g. "mqtt" or "lora") creates
-        separate conversations per source channel.
+        ``sub_transport`` (e.g. "mqtt" or "lora") creates separate
+        conversations per source channel for broadcasts AND direct
+        messages.  This lets the dashboard split the same Meshtastic
+        peer's MQTT vs LoRa traffic into their own panels.
         """
         if msg_type == "broadcast":
             if sub_transport:
                 return f"__broadcast_{transport}_{sub_transport}__"
             return f"__broadcast_{transport}__"
-        if direction == "sent":
-            return to_id or "__unknown__"
-        return from_id or "__unknown__"
+        peer = (to_id if direction == "sent" else from_id) or "__unknown__"
+        if sub_transport:
+            return f"{peer}__{sub_transport}"
+        return peer
 
     # ── Write ──────────────────────────────────────────────────────
 
@@ -221,13 +262,13 @@ class MessageStore:
                    (timestamp, transport, direction, msg_type,
                     from_id, from_name, to_id, to_name,
                     text, status, metadata,
-                    contact_id, read, search_text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    contact_id, read, search_text, sub_transport)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ts, transport, direction, msg_type,
                     from_id, from_name, to_id, to_name,
                     text, status, meta_json,
-                    contact_id, read_flag, search_text,
+                    contact_id, read_flag, search_text, sub_transport,
                 ),
             )
             self._conn.commit()
@@ -268,6 +309,7 @@ class MessageStore:
         transport: str | None = None,
         direction: str | None = None,
         since: float | None = None,
+        sub_transport: str | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve messages with optional filters.  Newest first."""
         clauses: list[str] = []
@@ -281,6 +323,9 @@ class MessageStore:
         if since is not None:
             clauses.append("timestamp > ?")
             params.append(since)
+        if sub_transport is not None:
+            clauses.append("sub_transport = ?")
+            params.append(sub_transport)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT * FROM messages{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -322,20 +367,27 @@ class MessageStore:
 
     def get_conversations(
         self, transport: str | None = None,
+        sub_transport: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return conversation summaries, one per contact_id.
 
-        Each entry: ``{contact_id, contact_name, transport, msg_type,
-        last_text, last_ts, unread_count}``.  Ordered by most recent first.
+        Each entry: ``{contact_id, contact_name, transport, sub_transport,
+        msg_type, last_text, last_ts, unread_count}``.  Ordered by most
+        recent first.
         """
-        where = ""
+        clauses: list[str] = []
         params: list[Any] = []
         if transport:
-            where = " WHERE transport = ?"
+            clauses.append("transport = ?")
             params.append(transport)
+        if sub_transport is not None:
+            clauses.append("sub_transport = ?")
+            params.append(sub_transport)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"""
             SELECT contact_id,
                    transport,
+                   MAX(sub_transport) AS sub_transport,
                    msg_type,
                    MAX(timestamp) AS last_ts,
                    MAX(CASE
@@ -365,6 +417,7 @@ class MessageStore:
                     "contact_id": cid,
                     "contact_name": r["contact_name"],
                     "transport": r["transport"],
+                    "sub_transport": r["sub_transport"] or "",
                     "msg_type": r["msg_type"],
                     "last_ts": r["last_ts"],
                     "last_text": last_row["text"] if last_row else None,
@@ -399,6 +452,7 @@ class MessageStore:
         query: str,
         limit: int = 50,
         transport: str | None = None,
+        sub_transport: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search messages by text content (case-insensitive)."""
         clauses = ["search_text LIKE ?"]
@@ -406,6 +460,9 @@ class MessageStore:
         if transport:
             clauses.append("transport = ?")
             params.append(transport)
+        if sub_transport is not None:
+            clauses.append("sub_transport = ?")
+            params.append(sub_transport)
         where = " AND ".join(clauses)
         params.append(limit)
         sql = (
@@ -430,14 +487,36 @@ class MessageStore:
             self._conn.commit()
             return cur.rowcount
 
-    def get_unread_counts(self) -> dict[str, int]:
-        """Return ``{contact_id: unread_count}`` for contacts with unread > 0."""
+    def delete_conversation(self, contact_id: str) -> int:
+        """Delete all messages for a conversation.  Returns rows deleted."""
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT contact_id, COUNT(*) AS cnt FROM messages "
-                "WHERE direction = 'received' AND read = 0 "
-                "GROUP BY contact_id"
-            ).fetchall()
+            cur = self._conn.execute(
+                "DELETE FROM messages WHERE contact_id = ?", (contact_id,),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def get_unread_counts(
+        self,
+        transport: str | None = None,
+        sub_transport: str | None = None,
+    ) -> dict[str, int]:
+        """Return ``{contact_id: unread_count}`` for contacts with unread > 0."""
+        clauses = ["direction = 'received'", "read = 0"]
+        params: list[Any] = []
+        if transport:
+            clauses.append("transport = ?")
+            params.append(transport)
+        if sub_transport is not None:
+            clauses.append("sub_transport = ?")
+            params.append(sub_transport)
+        where = " AND ".join(clauses)
+        sql = (
+            f"SELECT contact_id, COUNT(*) AS cnt FROM messages "
+            f"WHERE {where} GROUP BY contact_id"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
         return {r["contact_id"]: r["cnt"] for r in rows}
 
     def close(self) -> None:
@@ -807,35 +886,28 @@ class MeshtasticAdapter(TransportAdapter):
             or self._resolve_node_name(from_id)
             or from_id
         )
-        source = data.get("source", "")
+        # Normalize the gateway's "LoRa"/"MQTT" source tag to lowercase
+        # sub_transport values; fall back to "lora" for legacy events
+        # that predate the source field.
+        source = (data.get("source") or "").lower()
+        if source not in ("lora", "mqtt"):
+            source = "lora"
         is_broadcast = data.get("is_broadcast", True)
 
-        if is_broadcast:
-            # Broadcast — split by source (LoRa vs MQTT) via sub_transport
-            self._hub_callback({
-                "transport": "meshtastic",
-                "sub_transport": source.lower() if source else "",
-                "from_id": from_id,
-                "from_name": from_name,
-                "to_id": None,
-                "to_name": None,
-                "text": data.get("text", ""),
-                "msg_type": "broadcast",
-                "metadata": {k: v for k, v in data.items() if k not in ("text",)},
-            })
-        else:
-            # Direct message — group by peer (no sub_transport split)
-            self._hub_callback({
-                "transport": "meshtastic",
-                "sub_transport": "",
-                "from_id": from_id,
-                "from_name": from_name,
-                "to_id": data.get("to_id", ""),
-                "to_name": None,
-                "text": data.get("text", ""),
-                "msg_type": "direct",
-                "metadata": {k: v for k, v in data.items() if k not in ("text",)},
-            })
+        # Tag every Meshtastic message (broadcast AND direct) with
+        # sub_transport so the dashboard can show MQTT and LoRa traffic
+        # in separate panels.
+        self._hub_callback({
+            "transport": "meshtastic",
+            "sub_transport": source,
+            "from_id": from_id,
+            "from_name": from_name,
+            "to_id": None if is_broadcast else data.get("to_id", ""),
+            "to_name": None,
+            "text": data.get("text", ""),
+            "msg_type": "broadcast" if is_broadcast else "direct",
+            "metadata": {k: v for k, v in data.items() if k not in ("text",)},
+        })
 
     def _resolve_node_name(self, node_id: str) -> str | None:
         """Look up a Meshtastic node's human-readable name from the gateway."""
@@ -886,8 +958,10 @@ class MeshtasticAdapter(TransportAdapter):
             )
             self._hub._on_delivery_status_update(msg_id, "meshtastic", status)
 
+        channel = kwargs.get("channel")
         result = gw.send_message(
-            text, destination_id=dest_id, via=via, on_ack=_on_ack,
+            text, destination_id=dest_id, channel=channel, via=via,
+            on_ack=_on_ack,
         )
         # Stash the holder ref so the hub's send_message can bind msg_id
         if result.get("sent"):
@@ -1444,9 +1518,13 @@ class MessagingHubPlugin(PluginBase):
         """Mark all unread messages from a contact as read."""
         return self._store.mark_read(contact_id)
 
-    def get_unread_counts(self) -> dict[str, int]:
+    def delete_conversation(self, contact_id: str) -> int:
+        """Delete all stored messages for a conversation."""
+        return self._store.delete_conversation(contact_id)
+
+    def get_unread_counts(self, **kwargs: Any) -> dict[str, int]:
         """Return unread counts per contact."""
-        return self._store.get_unread_counts()
+        return self._store.get_unread_counts(**kwargs)
 
     def get_status(self) -> dict[str, Any]:
         stats = self._store.get_stats()

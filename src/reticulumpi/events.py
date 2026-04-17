@@ -108,3 +108,10 @@ MESHTASTIC_MESSAGE_ACKED = "meshtastic.message_acked"
 
 # MeshCore message ack
 MESHCORE_MESSAGE_ACKED = "meshcore.message_acked"
+
+# Space tracker — satellites, launches, space weather
+SPACE_TLE_UPDATED = "space.tle.updated"
+SPACE_POSITIONS_SNAPSHOT = "space.positions.snapshot"
+SPACE_PASS_UPCOMING = "space.pass.upcoming"
+SPACE_LAUNCH_UPCOMING = "space.launch.upcoming"
+SPACE_WEATHER_UPDATED = "space.weather.updated"

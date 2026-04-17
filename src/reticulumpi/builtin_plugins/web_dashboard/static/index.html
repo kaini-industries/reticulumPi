@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=25">
+  <link rel="stylesheet" href="/static/style.css?v=29">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -48,64 +48,186 @@
       </div>
     </div>
 
-    <!-- Messaging Hub -->
-    <div class="section" id="messaging-section">
-      <div class="section-header">
-        <span>Messages</span>
-        <span class="count" id="msg-count"></span>
-        <span class="msg-unread-total" id="msg-unread-total"></span>
+    <!-- ═══════════ Messages ═══════════ -->
+    <div class="service-group service-group-msg">
+      <span class="service-group-name">Messages</span>
+    </div>
+
+    <!-- LXMF Messages -->
+    <div class="section" id="msg-lxmf-section">
+      <div class="section-header collapsible" id="msg-lxmf-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> LXMF</span>
+        <span class="count" id="msg-lxmf-count"></span>
+        <span class="msg-unread-total" id="msg-lxmf-unread-total"></span>
       </div>
-      <div class="msg-layout">
-        <!-- Sidebar: conversations list -->
-        <div class="msg-sidebar" id="msg-sidebar">
-          <div class="msg-sidebar-toolbar">
-            <input type="text" id="msg-search-input" class="rt-input"
-                   placeholder="Search messages..." autocomplete="off">
-            <select id="msg-transport-filter" class="rt-select">
-              <option value="">All</option>
-            </select>
-            <button class="msg-new-btn" id="msg-new-btn" title="New message">+</button>
-          </div>
-          <div class="msg-conversations" id="msg-conversations"></div>
-        </div>
-        <!-- Thread: messages for selected conversation -->
-        <div class="msg-thread" id="msg-thread">
-          <div class="msg-thread-header" id="msg-thread-header">
-            <button class="msg-back-btn" id="msg-back-btn">&larr;</button>
-            <span class="msg-thread-name" id="msg-thread-name">Select a conversation</span>
-            <span class="msg-transport-badge" id="msg-thread-transport"></span>
-          </div>
-          <div class="msg-chat" id="msg-chat"></div>
-          <div class="msg-compose" id="msg-compose" style="display:none">
-            <div class="msg-compose-row">
-              <textarea id="msg-send-text" class="rt-input" rows="1"
-                        placeholder="Type a message..." autocomplete="off"></textarea>
-              <button id="msg-send-btn" class="msg-send-btn" disabled>Send</button>
+      <div class="section-body hidden" id="msg-lxmf-body">
+        <div class="msg-layout">
+          <div class="msg-sidebar">
+            <div class="msg-sidebar-toolbar">
+              <input type="text" id="msg-lxmf-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
+              <button class="msg-new-btn" id="msg-lxmf-new-btn" title="New message">+</button>
             </div>
-            <div class="msg-compose-meta">
-              <span class="msg-byte-count" id="msg-byte-count"></span>
-              <span class="msg-feedback" id="msg-feedback"></span>
-            </div>
+            <div class="msg-conversations" id="msg-lxmf-conversations"></div>
           </div>
-          <!-- New message compose (hidden until + clicked) -->
-          <div class="msg-new-compose" id="msg-new-compose" style="display:none">
-            <div class="msg-compose-row">
-              <select id="msg-send-transport" class="rt-select"></select>
-              <div class="msg-dest-combo" id="msg-dest-combo">
-                <input type="text" id="msg-dest-input" class="rt-input"
-                       placeholder="Search recipients..." autocomplete="off" />
-                <input type="hidden" id="msg-send-dest" value="" />
-                <div class="msg-dest-list" id="msg-dest-list"></div>
+          <div class="msg-thread">
+            <div class="msg-thread-header">
+              <button class="msg-back-btn" id="msg-lxmf-back-btn">&larr;</button>
+              <span class="msg-thread-name" id="msg-lxmf-thread-name">Select a conversation</span>
+              <button class="msg-delete-btn hidden" id="msg-lxmf-delete-btn" title="Delete conversation">&#128465;</button>
+            </div>
+            <div class="msg-chat" id="msg-lxmf-chat"></div>
+            <div class="msg-compose hidden" id="msg-lxmf-compose">
+              <div class="msg-compose-row">
+                <textarea id="msg-lxmf-text" class="rt-input" rows="1" placeholder="Type a message..." autocomplete="off"></textarea>
+                <button id="msg-lxmf-send-btn" class="msg-send-btn" disabled>Send</button>
+              </div>
+              <div class="msg-compose-meta">
+                <span class="msg-byte-count" id="msg-lxmf-byte-count"></span>
+                <span class="msg-feedback" id="msg-lxmf-feedback"></span>
               </div>
             </div>
-            <div class="msg-compose-row">
-              <textarea id="msg-new-text" class="rt-input" rows="1"
-                        placeholder="Type a message..." autocomplete="off"></textarea>
-              <button id="msg-new-send-btn" class="msg-send-btn" disabled>Send</button>
+            <div class="msg-new-compose hidden" id="msg-lxmf-new-compose">
+              <div class="msg-compose-row">
+                <select id="msg-lxmf-dest-select" class="rt-select"></select>
+                <input type="text" id="msg-lxmf-lxmf-raw" class="rt-input" placeholder="Destination hash (32 hex chars)…" style="display:none" />
+              </div>
             </div>
-            <div class="msg-compose-meta">
-              <span class="msg-byte-count" id="msg-new-byte-count"></span>
-              <span class="msg-feedback" id="msg-new-feedback"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Meshtastic MQTT Messages -->
+    <div class="section" id="msg-mqtt-section">
+      <div class="section-header collapsible" id="msg-mqtt-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Meshtastic MQTT</span>
+        <span class="count" id="msg-mqtt-count"></span>
+        <span class="msg-unread-total" id="msg-mqtt-unread-total"></span>
+      </div>
+      <div class="section-body hidden" id="msg-mqtt-body">
+        <div class="msg-layout">
+          <div class="msg-sidebar">
+            <div class="msg-sidebar-toolbar">
+              <input type="text" id="msg-mqtt-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
+              <button class="msg-channels-btn" id="msg-mqtt-ch-manage-btn" title="Manage channels">Channels</button>
+              <button class="msg-new-btn" id="msg-mqtt-new-btn" title="New message">+</button>
+            </div>
+            <div class="msg-conversations" id="msg-mqtt-conversations"></div>
+          </div>
+          <div class="msg-thread">
+            <div class="msg-thread-header">
+              <button class="msg-back-btn" id="msg-mqtt-back-btn">&larr;</button>
+              <span class="msg-thread-name" id="msg-mqtt-thread-name">Select a conversation</span>
+              <button class="msg-delete-btn hidden" id="msg-mqtt-delete-btn" title="Delete conversation">&#128465;</button>
+            </div>
+            <div class="msg-chat" id="msg-mqtt-chat"></div>
+            <div class="msg-compose hidden" id="msg-mqtt-compose">
+              <div class="msg-compose-row">
+                <textarea id="msg-mqtt-text" class="rt-input" rows="1" placeholder="Type a message..." autocomplete="off"></textarea>
+                <button id="msg-mqtt-send-btn" class="msg-send-btn" disabled>Send</button>
+              </div>
+              <div class="msg-compose-meta">
+                <span class="msg-channel-wrap" id="msg-mqtt-channel-wrap" style="display:none">
+                  <select id="msg-mqtt-channel-select" class="rt-select rt-select-sm"></select>
+                </span>
+                <span class="msg-byte-count" id="msg-mqtt-byte-count"></span>
+                <span class="msg-feedback" id="msg-mqtt-feedback"></span>
+              </div>
+            </div>
+            <div class="msg-new-compose hidden" id="msg-mqtt-new-compose">
+              <div class="msg-compose-row">
+                <select id="msg-mqtt-dest-select" class="rt-select"></select>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Meshtastic LoRa Messages -->
+    <div class="section" id="msg-lora-section">
+      <div class="section-header collapsible" id="msg-lora-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Meshtastic LoRa</span>
+        <span class="count" id="msg-lora-count"></span>
+        <span class="msg-unread-total" id="msg-lora-unread-total"></span>
+      </div>
+      <div class="section-body hidden" id="msg-lora-body">
+        <div class="msg-layout">
+          <div class="msg-sidebar">
+            <div class="msg-sidebar-toolbar">
+              <input type="text" id="msg-lora-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
+              <button class="msg-channels-btn" id="msg-lora-ch-manage-btn" title="Manage channels">Channels</button>
+              <button class="msg-new-btn" id="msg-lora-new-btn" title="New message">+</button>
+            </div>
+            <div class="msg-conversations" id="msg-lora-conversations"></div>
+          </div>
+          <div class="msg-thread">
+            <div class="msg-thread-header">
+              <button class="msg-back-btn" id="msg-lora-back-btn">&larr;</button>
+              <span class="msg-thread-name" id="msg-lora-thread-name">Select a conversation</span>
+              <button class="msg-delete-btn hidden" id="msg-lora-delete-btn" title="Delete conversation">&#128465;</button>
+            </div>
+            <div class="msg-chat" id="msg-lora-chat"></div>
+            <div class="msg-compose hidden" id="msg-lora-compose">
+              <div class="msg-compose-row">
+                <textarea id="msg-lora-text" class="rt-input" rows="1" placeholder="Type a message..." autocomplete="off"></textarea>
+                <button id="msg-lora-send-btn" class="msg-send-btn" disabled>Send</button>
+              </div>
+              <div class="msg-compose-meta">
+                <span class="msg-channel-wrap" id="msg-lora-channel-wrap" style="display:none">
+                  <select id="msg-lora-channel-select" class="rt-select rt-select-sm"></select>
+                </span>
+                <span class="msg-byte-count" id="msg-lora-byte-count"></span>
+                <span class="msg-feedback" id="msg-lora-feedback"></span>
+              </div>
+            </div>
+            <div class="msg-new-compose hidden" id="msg-lora-new-compose">
+              <div class="msg-compose-row">
+                <select id="msg-lora-dest-select" class="rt-select"></select>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Meshcore Messages -->
+    <div class="section" id="msg-meshcore-section">
+      <div class="section-header collapsible" id="msg-meshcore-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Meshcore</span>
+        <span class="count" id="msg-meshcore-count"></span>
+        <span class="msg-unread-total" id="msg-meshcore-unread-total"></span>
+      </div>
+      <div class="section-body hidden" id="msg-meshcore-body">
+        <div class="msg-layout">
+          <div class="msg-sidebar">
+            <div class="msg-sidebar-toolbar">
+              <input type="text" id="msg-meshcore-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
+              <button class="msg-new-btn" id="msg-meshcore-new-btn" title="New message">+</button>
+            </div>
+            <div class="msg-conversations" id="msg-meshcore-conversations"></div>
+          </div>
+          <div class="msg-thread">
+            <div class="msg-thread-header">
+              <button class="msg-back-btn" id="msg-meshcore-back-btn">&larr;</button>
+              <span class="msg-thread-name" id="msg-meshcore-thread-name">Select a conversation</span>
+              <button class="msg-delete-btn hidden" id="msg-meshcore-delete-btn" title="Delete conversation">&#128465;</button>
+            </div>
+            <div class="msg-chat" id="msg-meshcore-chat"></div>
+            <div class="msg-compose hidden" id="msg-meshcore-compose">
+              <div class="msg-compose-row">
+                <textarea id="msg-meshcore-text" class="rt-input" rows="1" placeholder="Type a message..." autocomplete="off"></textarea>
+                <button id="msg-meshcore-send-btn" class="msg-send-btn" disabled>Send</button>
+              </div>
+              <div class="msg-compose-meta">
+                <span class="msg-byte-count" id="msg-meshcore-byte-count"></span>
+                <span class="msg-feedback" id="msg-meshcore-feedback"></span>
+              </div>
+            </div>
+            <div class="msg-new-compose hidden" id="msg-meshcore-new-compose">
+              <div class="msg-compose-row">
+                <select id="msg-meshcore-dest-select" class="rt-select"></select>
+              </div>
             </div>
           </div>
         </div>
@@ -517,6 +639,51 @@
       <div id="map-container" style="height: 450px; width: 100%;"></div>
     </div>
 
+    <!-- Space Tracker (satellites, launches, space weather) -->
+    <div class="section" id="space-section" style="display:none">
+      <div class="section-header collapsible" id="space-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Space Tracker</span>
+        <span class="count" id="space-count"></span>
+      </div>
+      <div class="section-body hidden" id="space-body">
+        <div class="space-grid">
+          <div class="space-tile">
+            <div class="space-tile-label">Satellites tracked</div>
+            <div class="space-tile-value" id="space-sat-count">--</div>
+            <div class="space-tile-sub" id="space-groups-sub"></div>
+          </div>
+          <div class="space-tile">
+            <div class="space-tile-label">Overhead now (el &gt; 10&deg;)</div>
+            <div class="space-tile-value" id="space-overhead">--</div>
+            <div class="space-tile-sub" id="space-overhead-names"></div>
+          </div>
+          <div class="space-tile">
+            <div class="space-tile-label">Kp index</div>
+            <div class="space-tile-value" id="space-kp">--</div>
+            <div class="space-tile-sub" id="space-kp-time"></div>
+          </div>
+          <div class="space-tile">
+            <div class="space-tile-label">Next launch</div>
+            <div class="space-tile-value space-tile-value-sm" id="space-next-launch">--</div>
+            <div class="space-tile-sub" id="space-next-launch-when"></div>
+          </div>
+        </div>
+        <div id="space-map-container" style="height: 420px; width: 100%; margin-top: 12px;"></div>
+        <div class="space-launch-list">
+          <div class="space-launch-heading">Upcoming Launches</div>
+          <table class="data-table">
+            <thead>
+              <tr><th>T-</th><th>Name</th><th>Provider</th><th>Pad</th></tr>
+            </thead>
+            <tbody id="space-launch-table"></tbody>
+          </table>
+        </div>
+        <div class="space-attribution">
+          Data: Celestrak, Launch Library 2, NOAA SWPC. Tiles &copy; OpenStreetMap.
+        </div>
+      </div>
+    </div>
+
     <!-- Plugins (collapsed by default) -->
     <div class="section" id="plugins-section">
       <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
@@ -545,8 +712,38 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=25"></script>
-  <script src="/static/messages.js?v=33"></script>
+  <!-- Channel management dialog -->
+  <div class="dialog-overlay" id="channel-dialog-overlay" style="display:none">
+    <div class="dialog">
+      <div class="dialog-header">
+        <span>Meshtastic Channels</span>
+        <button class="dialog-close" id="channel-dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div id="channel-list" class="channel-list"></div>
+        <div class="channel-join-form">
+          <div class="channel-join-heading">Join a channel</div>
+          <input type="text" id="channel-join-url" class="rt-input" placeholder="Meshtastic URL (https://meshtastic.org/e/#...)" />
+          <div class="channel-join-or">- or -</div>
+          <div class="channel-join-row">
+            <input type="text" id="channel-join-name" class="rt-input" placeholder="Channel name" />
+            <input type="text" id="channel-join-psk" class="rt-input" placeholder="PSK (default: default)" />
+          </div>
+          <div class="channel-join-actions">
+            <button id="channel-join-btn" class="msg-send-btn">Join</button>
+            <span class="msg-feedback" id="channel-join-feedback"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=26"></script>
+  <script src="/static/messages_panel.js?v=1"></script>
+  <script src="/static/messages_lxmf.js?v=1"></script>
+  <script src="/static/messages_meshtastic_mqtt.js?v=1"></script>
+  <script src="/static/messages_meshtastic_lora.js?v=1"></script>
+  <script src="/static/messages_meshcore.js?v=1"></script>
   <script src="/static/mesh.js?v=23"></script>
   <script src="/static/lora.js?v=23"></script>
   <script src="/static/routing.js?v=23"></script>
@@ -554,5 +751,6 @@
   <script src="/static/meshcore.js?v=2"></script>
   <script src="/static/vendor/leaflet.js"></script>
   <script src="/static/map.js?v=1"></script>
+  <script src="/static/space.js?v=1"></script>
 </body>
 </html>

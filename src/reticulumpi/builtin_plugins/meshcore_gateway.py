@@ -103,6 +103,8 @@ class MeshCoreGateway(PluginBase):
         self._subscriptions: list[Any] = []
         self._last_advert_time: float = 0
         self._advert_interval: float = self.config.get("advert_interval", 900)
+        self._last_contact_refresh: float = 0
+        self._contact_refresh_interval: float = self.config.get("contact_refresh_interval", 300)
 
         # Contact name cache (survives reconnects)
         self._contact_cache: dict[str, dict[str, Any]] = {}
@@ -227,6 +229,13 @@ class MeshCoreGateway(PluginBase):
                 if now - self._last_advert_time >= self._advert_interval:
                     self._send_periodic_advert()
 
+            # Periodic contact refresh
+            if self._connected and self._contact_refresh_interval > 0:
+                now = time.time()
+                if now - self._last_contact_refresh >= self._contact_refresh_interval:
+                    self._refresh_contacts()
+                    self._last_contact_refresh = now
+
     def _connect_device(self) -> None:
         """Open connection to the MeshCore companion radio."""
         from meshcore import MeshCore
@@ -284,10 +293,14 @@ class MeshCoreGateway(PluginBase):
         async def _on_ack(event):
             self._handle_ack_event(event)
 
+        async def _on_new_contact(event):
+            self._handle_new_contact(event)
+
         subs.append(mc.subscribe(EventType.CONTACT_MSG_RECV, _on_contact_msg))
         subs.append(mc.subscribe(EventType.CHANNEL_MSG_RECV, _on_channel_msg))
         subs.append(mc.subscribe(EventType.DISCONNECTED, _on_disconnect))
         subs.append(mc.subscribe(EventType.ACK, _on_ack))
+        subs.append(mc.subscribe(EventType.NEW_CONTACT, _on_new_contact))
 
         # Start auto-fetching queued messages
         auto_sub = self._run_async(mc.start_auto_message_fetching())
@@ -391,6 +404,39 @@ class MeshCoreGateway(PluginBase):
             self.log.debug("MeshCore periodic advertisement sent")
         except Exception:
             self.log.warning("Failed to send periodic MeshCore advertisement", exc_info=True)
+
+    def _handle_new_contact(self, event: Any) -> None:
+        """Process a NEW_CONTACT push from the device (new peer advert)."""
+        try:
+            payload = event.payload if hasattr(event, "payload") else event
+            if not isinstance(payload, dict):
+                return
+            key = payload.get("public_key", "")
+            if not key:
+                return
+            name = payload.get("adv_name", "")
+            self._contact_cache[key] = dict(payload)
+            self._save_contact_cache()
+            # Also update the library's contacts dict so get_contacts() sees it
+            with self._lock:
+                mc = self._mc
+            if mc is not None and hasattr(mc, "contacts"):
+                mc.contacts[key] = dict(payload)
+            self.log.info("New MeshCore peer: %s (%s…)", name or "unnamed", key[:12])
+        except Exception:
+            self.log.debug("Error handling new contact event", exc_info=True)
+
+    def _refresh_contacts(self) -> None:
+        """Re-fetch the contact list from the device."""
+        with self._lock:
+            mc = self._mc
+        if mc is None:
+            return
+        try:
+            self._run_async(mc.commands.get_contacts())
+            self._sync_contact_cache(mc)
+        except Exception:
+            self.log.debug("Error refreshing contacts", exc_info=True)
 
     # ── Message handling ────────────────────────────────────────────
 
