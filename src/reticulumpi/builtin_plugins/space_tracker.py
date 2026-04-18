@@ -14,10 +14,11 @@ All network calls go through a rate-limited HTTP helper that:
     * honours ETag / If-Modified-Since for bandwidth-friendly polls
     * backs off exponentially on failure (1 h → 24 h cap)
 
-Orbital propagation (sub-satellite points, observer az/el, pass prediction)
-requires the optional ``sgp4`` and/or ``skyfield`` packages.  If neither is
-installed the plugin still fetches and publishes TLEs and the other data
-sources — propagation is simply skipped with a one-time warning.
+Orbital propagation (sub-satellite points, observer az/el) and pass
+prediction (AOS/LOS with max-elevation search) require the optional
+``sgp4`` package.  If it is not installed the plugin still fetches and
+publishes TLEs, launches, and space weather — propagation and pass
+prediction are simply skipped with a one-time warning.
 
 Example config:
 
@@ -177,15 +178,23 @@ class _RateLimiter:
             self._failures = min(self._failures + 1, 16)  # cap to avoid overflow
 
     def status(self) -> dict[str, Any]:
+        # Inline the next_allowed_at calculation to avoid re-entering the lock
+        # (threading.Lock is non-reentrant, so calling self.next_allowed_at()
+        # from inside the locked block deadlocks).
         with self._lock:
-            self._trim_recent(time.time())
+            now = time.time()
+            self._trim_recent(now)
+            cooldown = self._last_request_ts + self._current_min_interval()
+            next_by_hour = 0.0
+            if self.max_per_hour is not None and len(self._recent) >= self.max_per_hour:
+                next_by_hour = self._recent[0] + 3600.0
             return {
                 "name": self.name,
                 "last_request_ts": self._last_request_ts,
                 "failures": self._failures,
                 "requests_last_hour": len(self._recent),
                 "max_per_hour": self.max_per_hour,
-                "next_allowed_at": self.next_allowed_at(),
+                "next_allowed_at": max(cooldown, next_by_hour),
             }
 
 
@@ -269,9 +278,9 @@ class SpaceTrackerPlugin(PluginBase):
     """Fetches satellite TLEs, launch schedules, and space weather; publishes
     to the event bus for dashboard consumption.
 
-    This is a scaffold: network fetch + caching + rate limiting are fully
-    implemented, but TLE propagation and pass prediction are left as stubs
-    to be filled in when ``sgp4`` / ``skyfield`` are installed.
+    Network fetch + caching + rate limiting are always active.  Orbital
+    propagation (sub-satellite points, observer az/el) and pass prediction
+    (AOS/LOS times, max elevation) run when ``sgp4`` is installed.
     """
 
     plugin_name = "space_tracker"
@@ -328,6 +337,22 @@ class SpaceTrackerPlugin(PluginBase):
                     f"space_weather.poll_interval_minutes must be >= {self._MIN_WEATHER_POLL_MIN}"
                 )
 
+        passes_cfg = self.config.get("passes", {}) or {}
+        if passes_cfg.get("enabled", True):
+            min_el = passes_cfg.get("min_elevation_deg", 10)
+            if not isinstance(min_el, (int, float)) or not (0 <= min_el <= 90):
+                raise ValueError(
+                    "passes.min_elevation_deg must be between 0 and 90"
+                )
+            lookahead = passes_cfg.get("lookahead_hours", 24)
+            if not isinstance(lookahead, (int, float)) or not (0 < lookahead <= 168):
+                raise ValueError(
+                    "passes.lookahead_hours must be in (0, 168]"
+                )
+            watchlist = passes_cfg.get("watchlist")
+            if watchlist is not None and not isinstance(watchlist, list):
+                raise ValueError("passes.watchlist must be a list of satellite names")
+
         groups = self.config.get("celestrak_groups", []) or []
         if not isinstance(groups, list):
             raise ValueError("celestrak_groups must be a list")
@@ -360,6 +385,17 @@ class SpaceTrackerPlugin(PluginBase):
 
         self._prop_cfg = self.config.get("propagation", {}) or {}
         self._passes_cfg = self.config.get("passes", {}) or {}
+
+        # Pass prediction settings
+        self._passes_enabled = bool(self._passes_cfg.get("enabled", True))
+        self._pass_lookahead_s = float(self._passes_cfg.get("lookahead_hours", 24)) * 3600.0
+        self._pass_min_el = float(self._passes_cfg.get("min_elevation_deg", 10))
+        self._pass_recompute_s = float(
+            self._passes_cfg.get("recompute_interval_minutes", 30)
+        ) * 60.0
+        self._pass_watchlist: set[str] = {
+            str(n) for n in (self._passes_cfg.get("watchlist") or [])
+        }
 
         # Cache dir
         self._cache_dir = os.path.expanduser(
@@ -403,6 +439,8 @@ class SpaceTrackerPlugin(PluginBase):
         self._launches: list[dict[str, Any]] = []
         self._weather: dict[str, Any] = {}
         self._latest_positions: dict[str, Any] = {}             # last propagation cycle output
+        self._passes: list[dict[str, Any]] = []                 # upcoming horizon passes
+        self._passes_computed_at: float | None = None
         self._cache_lock = threading.Lock()
 
         # Observer position (resolved lazily — gps_telemetry may not be up yet)
@@ -418,14 +456,27 @@ class SpaceTrackerPlugin(PluginBase):
         if self._weather_enabled:
             self._start_thread(self._weather_loop, "space-weather")
 
-        # Propagation / pass prediction are stubbed — only start the loop
-        # if the optional deps are available.
+        # Propagation loop — only starts if sgp4 is importable.
         if bool(self._prop_cfg.get("enabled", True)) and _sgp4_available():
             self._start_thread(self._propagation_loop, "space-propagation")
         elif bool(self._prop_cfg.get("enabled", True)):
             self.log.info(
                 "Orbital propagation disabled: install 'sgp4' (pip install sgp4) "
                 "to enable sub-satellite point publishing."
+            )
+
+        # Pass prediction — needs sgp4 and a non-empty watchlist.  Without
+        # a watchlist there's nothing to predict for, so we stay idle.
+        if self._passes_enabled and _sgp4_available() and self._pass_watchlist:
+            self._start_thread(self._passes_loop, "space-passes")
+        elif self._passes_enabled and not self._pass_watchlist:
+            self.log.info(
+                "Pass prediction idle: no satellites in passes.watchlist"
+            )
+        elif self._passes_enabled and not _sgp4_available():
+            self.log.info(
+                "Pass prediction disabled: install 'sgp4' (pip install sgp4) "
+                "to enable AOS/LOS computation."
             )
 
         self.log.info(
@@ -460,6 +511,8 @@ class SpaceTrackerPlugin(PluginBase):
                 "weather": dict(self._weather) if self._weather else None,
                 "observer": self._resolve_observer(),
                 "positions": dict(self._latest_positions) if self._latest_positions else None,
+                "passes": list(self._passes),
+                "passes_computed_at": self._passes_computed_at,
                 "sgp4_available": _sgp4_available(),
                 "skyfield_available": _skyfield_available(),
                 "rate_limiters": {k: v.status() for k, v in self._limiters.items()},
@@ -475,10 +528,12 @@ class SpaceTrackerPlugin(PluginBase):
             tle_summary = {g: len(sats) for g, sats in self._tle_cache.items()}
             launches_count = len(self._launches)
             weather_has = bool(self._weather)
+            passes_count = len(self._passes)
         return {
             "active": self._active,
             "groups_tracked": tle_summary,
             "upcoming_launches": launches_count,
+            "upcoming_passes": passes_count,
             "weather_loaded": weather_has,
             "rate_limiters": {k: v.status() for k, v in self._limiters.items()},
             "sgp4_available": _sgp4_available(),
@@ -620,16 +675,25 @@ class SpaceTrackerPlugin(PluginBase):
             self.log.exception("Malformed Launch Library response")
             return
 
+        def _flatten(val, key="name"):
+            if isinstance(val, dict):
+                return val.get(key)
+            return val  # list-mode already flattens to strings
+
         simplified = [
             {
                 "id": r.get("id"),
                 "name": r.get("name"),
                 "net": r.get("net"),           # ISO 8601 launch time (no earlier than)
-                "status": (r.get("status") or {}).get("name"),
-                "provider": (r.get("launch_service_provider") or {}).get("name"),
-                "pad": (r.get("pad") or {}).get("name"),
-                "pad_location": ((r.get("pad") or {}).get("location") or {}).get("name"),
-                "mission": (r.get("mission") or {}).get("name"),
+                "status": _flatten(r.get("status")),
+                "provider": _flatten(r.get("launch_service_provider")) or r.get("lsp_name"),
+                "pad": _flatten(r.get("pad")),
+                "pad_location": (
+                    _flatten((r.get("pad") or {}).get("location"))
+                    if isinstance(r.get("pad"), dict)
+                    else r.get("location")
+                ),
+                "mission": _flatten(r.get("mission")),
                 "webcast": bool(r.get("webcast_live")),
             }
             for r in results
@@ -667,22 +731,30 @@ class SpaceTrackerPlugin(PluginBase):
             self.log.warning("SWPC fetch failed (status=%s)", status)
             return
         try:
-            # Format: [["time_tag","Kp","a_running","station_count"], [...], ...]
+            # New format (2026+): list of dicts, keyed by "time_tag" / "Kp" / ...
+            # Legacy format: [["time_tag","Kp","a_running","station_count"], [...], ...]
             rows = json.loads(body.decode("utf-8", errors="replace"))
         except ValueError:
             self.log.exception("Malformed SWPC response")
             return
-        if not isinstance(rows, list) or len(rows) < 2:
+        if not isinstance(rows, list) or not rows:
             return
 
         latest = rows[-1]
+        kp = None
+        time_tag = None
         try:
-            kp = float(latest[1])
-        except (ValueError, TypeError, IndexError):
+            if isinstance(latest, dict):
+                kp = float(latest.get("Kp"))
+                time_tag = latest.get("time_tag")
+            elif isinstance(latest, (list, tuple)) and len(latest) >= 2:
+                kp = float(latest[1])
+                time_tag = latest[0]
+        except (ValueError, TypeError):
             kp = None
         snapshot = {
             "source": "NOAA SWPC",
-            "time_tag": latest[0] if len(latest) > 0 else None,
+            "time_tag": time_tag,
             "kp": kp,
             "fetched_at": time.time(),
         }
@@ -694,9 +766,9 @@ class SpaceTrackerPlugin(PluginBase):
         self.log.debug("Space weather refreshed: Kp=%s", kp)
 
     # ------------------------------------------------------------------
-    # Propagation — uses sgp4 (required) and optionally skyfield for
-    # observer az/el.  Without observer coords we still publish sub-
-    # satellite lat/lon/alt; az/el are omitted.
+    # Propagation — uses sgp4 (required) plus this module's hand-rolled
+    # TEME/ECEF/ENU math for observer az/el.  Without observer coords
+    # we still publish sub-satellite lat/lon/alt; az/el are omitted.
     # ------------------------------------------------------------------
     def _propagation_loop(self) -> None:
         """Publish sub-satellite points (and observer az/el when possible)."""
@@ -803,6 +875,104 @@ class SpaceTrackerPlugin(PluginBase):
         self.event_bus.publish(EVENT_POSITIONS_SNAPSHOT, snapshot)
 
     # ------------------------------------------------------------------
+    # Pass prediction — SGP4-based horizon-crossing search for each
+    # watchlisted satellite over ``lookahead_hours``.  Recomputed on a
+    # fixed cadence so new TLEs get picked up within one cycle.
+    # ------------------------------------------------------------------
+    def _passes_loop(self) -> None:
+        try:
+            from sgp4.api import Satrec, jday
+        except ImportError:
+            self.log.warning("sgp4 unavailable at loop start — exiting passes loop")
+            return
+
+        self.log.info(
+            "Pass prediction active — watchlist=%d sats, lookahead=%.0fh, "
+            "recompute=%.0fm, min_el=%.1f°",
+            len(self._pass_watchlist),
+            self._pass_lookahead_s / 3600.0,
+            self._pass_recompute_s / 60.0,
+            self._pass_min_el,
+        )
+
+        # Let the TLE loop do its first fetch
+        self._sleep_while_active(20)
+
+        while self._active:
+            try:
+                self._recompute_passes(Satrec, jday)
+            except Exception:
+                self.log.exception("Error computing upcoming passes")
+            self._sleep_while_active(self._pass_recompute_s)
+
+    def _recompute_passes(self, Satrec: Any, jday: Any) -> None:
+        """Single recompute sweep — finds upcoming passes for every
+        watchlisted satellite present in the current TLE cache."""
+        observer = self._resolve_observer()
+        if observer is None:
+            self.log.debug("Pass prediction skipped: observer not resolvable")
+            return
+
+        with self._cache_lock:
+            all_sats: list[dict[str, str]] = []
+            for group_sats in self._tle_cache.values():
+                all_sats.extend(group_sats)
+        if not all_sats:
+            return
+
+        targets = [s for s in all_sats if s["name"] in self._pass_watchlist]
+        if not targets:
+            self.log.debug(
+                "Pass prediction: no watchlisted sats match current TLE cache"
+            )
+            return
+
+        now = time.time()
+        t_end = now + self._pass_lookahead_s
+
+        def _el_fn_for(satrec: Any) -> Any:
+            def _fn(epoch_s: float) -> tuple[float, float] | None:
+                return _sat_el_az_at(satrec, jday, observer, epoch_s)
+            return _fn
+
+        all_passes: list[dict[str, Any]] = []
+        for sat in targets:
+            try:
+                satrec = Satrec.twoline2rv(sat["l1"], sat["l2"])
+            except (ValueError, RuntimeError):
+                continue
+            sat_passes = _find_passes(
+                _el_fn_for(satrec),
+                t_start=now,
+                t_end=t_end,
+                min_el_deg=self._pass_min_el,
+                max_passes=20,
+            )
+            for p in sat_passes:
+                p["name"] = sat["name"]
+                if sat.get("catnr"):
+                    p["catnr"] = sat["catnr"]
+                all_passes.append(p)
+
+        all_passes.sort(key=lambda p: p["aos_ts"])
+
+        computed_at = time.time()
+        with self._cache_lock:
+            self._passes = all_passes
+            self._passes_computed_at = computed_at
+
+        self.event_bus.publish(EVENT_PASS_UPCOMING, {
+            "passes": all_passes,
+            "computed_at": computed_at,
+            "observer": observer,
+            "watchlist_size": len(self._pass_watchlist),
+        })
+        self.log.info(
+            "Pass prediction: %d upcoming passes across %d target sats",
+            len(all_passes), len(targets),
+        )
+
+    # ------------------------------------------------------------------
     # Observer location — looked up lazily so gps_telemetry can feed it
     # ------------------------------------------------------------------
     def _resolve_observer(self) -> dict[str, float] | None:
@@ -845,7 +1015,8 @@ def _parse_tle_block(text: str) -> list[dict[str, str]]:
         l1 = lines[i + 1]
         l2 = lines[i + 2]
         if l1.startswith("1 ") and l2.startswith("2 "):
-            out.append({"name": name, "l1": l1, "l2": l2})
+            catnr = l1[2:7].strip() if len(l1) >= 7 else ""
+            out.append({"name": name, "l1": l1, "l2": l2, "catnr": catnr})
             i += 3
         else:
             i += 1
@@ -894,6 +1065,11 @@ def _teme_to_geodetic(r_teme: tuple, gmst: float) -> tuple[float, float, float]:
 
     lon = math.atan2(y, x)
     p = math.sqrt(x * x + y * y)
+    # Pole: on the Z-axis, Bowring's iteration divides by cos(±π/2). Closed form.
+    if p < 1e-6:
+        b = a * math.sqrt(1 - e2)
+        lat = math.pi / 2 if z >= 0 else -math.pi / 2
+        return math.degrees(lat), math.degrees(lon), abs(z) - b
     # Iterative lat/alt (Bowring's method — converges in ~3 iterations)
     lat = math.atan2(z, p * (1 - e2))
     for _ in range(5):
@@ -955,6 +1131,194 @@ def _observer_look_angles(
     el = math.degrees(math.asin(u / rng))
     az = math.degrees(math.atan2(e, n_)) % 360.0
     return az, el
+
+
+def _sat_el_az_at(
+    satrec: Any,
+    jday: Any,
+    observer: dict[str, float],
+    epoch_s: float,
+) -> tuple[float, float] | None:
+    """Return (elevation_deg, azimuth_deg) of a satellite from an observer
+    at the given epoch time, or ``None`` on propagation failure."""
+    import datetime as _dt
+
+    dt = _dt.datetime.fromtimestamp(epoch_s, _dt.timezone.utc)
+    jd, fr = jday(dt.year, dt.month, dt.day, dt.hour, dt.minute,
+                  dt.second + dt.microsecond * 1e-6)
+    err, r, _v = satrec.sgp4(jd, fr)
+    if err != 0:
+        return None
+    gmst = _gmst_rad(jd + fr)
+    lat, lon, alt_km = _teme_to_geodetic(r, gmst)
+    az, el = _observer_look_angles(
+        observer["lat"], observer["lon"], observer.get("elev_m", 0),
+        lat, lon, alt_km,
+    )
+    return (el, az)
+
+
+def _bisect_horizon(
+    el_fn: Any,
+    t_lo: float,
+    t_hi: float,
+    el_lo: float,
+    el_hi: float,
+    tol_s: float = 1.0,
+    max_iter: int = 20,
+) -> float:
+    """Binary-search the horizon crossing time in ``[t_lo, t_hi]``.
+
+    Preconditions
+    -------------
+    * ``t_lo < t_hi``
+    * ``el_lo`` and ``el_hi`` have opposite signs — i.e. the interval
+      genuinely brackets an elevation-zero crossing.
+
+    ``el_fn(t)`` must return either ``(el, az)`` or ``None``.  Returns
+    the midpoint epoch seconds once the interval shrinks to ``tol_s``
+    (or max_iter iterations elapse).
+    """
+    for _ in range(max_iter):
+        if t_hi - t_lo <= tol_s:
+            break
+        t_mid = 0.5 * (t_lo + t_hi)
+        cur = el_fn(t_mid)
+        if cur is None:
+            break
+        el_mid = cur[0]
+        # Preserve the opposite-sign invariant: drop whichever endpoint
+        # now lies on the same side of zero as the probe.
+        if (el_mid < 0) == (el_lo < 0):
+            t_lo, el_lo = t_mid, el_mid
+        else:
+            t_hi, el_hi = t_mid, el_mid
+    return 0.5 * (t_lo + t_hi)
+
+
+def _find_passes(
+    el_fn: Any,
+    t_start: float,
+    t_end: float,
+    min_el_deg: float = 0.0,
+    max_passes: int = 20,
+    step_s: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Enumerate upcoming above-horizon passes in ``[t_start, t_end]``.
+
+    Parameters
+    ----------
+    el_fn:
+        Callable ``t -> (el_deg, az_deg) | None``.  Drives both the
+        coarse sweep and the bisection refinement.
+    min_el_deg:
+        Drop passes whose peak elevation doesn't reach this threshold.
+    step_s:
+        Coarse sampling resolution.  30s catches any pass lasting
+        ≳1 min (real LEO passes are 2–15 min), and AOS/LOS are then
+        refined to ~1 s via bisection.
+
+    Each returned dict contains: ``aos_ts``, ``los_ts``, ``duration_s``,
+    ``max_el``, ``max_el_ts``, ``aos_az``, ``los_az``, ``max_el_az``.
+    ``truncated=True`` is set when a pass runs past ``t_end``.
+    """
+    passes: list[dict[str, Any]] = []
+
+    first = el_fn(t_start)
+    if first is None:
+        return passes
+    prev_el: float | None = first[0]
+    prev_az = first[1]
+    prev_t = t_start
+
+    inside = prev_el >= 0
+    aos_ts: float | None = t_start if inside else None
+    aos_az: float | None = prev_az if inside else None
+    max_el: float = prev_el if inside else -999.0
+    max_el_ts: float | None = t_start if inside else None
+    max_el_az: float | None = prev_az if inside else None
+
+    t = t_start
+    while t < t_end and len(passes) < max_passes:
+        t = min(t + step_s, t_end)
+        cur = el_fn(t)
+        if cur is None:
+            # Propagation gap — clear prev_el so we don't bisect across it.
+            prev_el = None
+            prev_t = t
+            if t >= t_end:
+                break
+            continue
+        el, az = cur
+
+        if prev_el is None:
+            # Recovering from a prior gap — re-establish state.
+            inside = el >= 0
+            if inside:
+                aos_ts = t
+                aos_az = az
+                max_el = el
+                max_el_ts = t
+                max_el_az = az
+            prev_el, prev_az, prev_t = el, az, t
+            if t >= t_end:
+                break
+            continue
+
+        if not inside and el >= 0:
+            # Rising — AOS.
+            aos_ts = _bisect_horizon(el_fn, prev_t, t, prev_el, el)
+            aos_probe = el_fn(aos_ts)
+            aos_az = aos_probe[1] if aos_probe is not None else az
+            inside = True
+            max_el = el
+            max_el_ts = t
+            max_el_az = az
+        elif inside:
+            if el > max_el:
+                max_el = el
+                max_el_ts = t
+                max_el_az = az
+            if el < 0:
+                # Falling — LOS.
+                los_ts = _bisect_horizon(el_fn, prev_t, t, prev_el, el)
+                los_probe = el_fn(los_ts)
+                los_az = los_probe[1] if los_probe is not None else az
+                if max_el >= min_el_deg and aos_ts is not None:
+                    passes.append({
+                        "aos_ts": aos_ts,
+                        "los_ts": los_ts,
+                        "duration_s": max(0.0, los_ts - aos_ts),
+                        "max_el": round(max_el, 1),
+                        "max_el_ts": max_el_ts,
+                        "aos_az": round(aos_az, 1) if aos_az is not None else None,
+                        "los_az": round(los_az, 1),
+                        "max_el_az": round(max_el_az, 1) if max_el_az is not None else None,
+                    })
+                inside = False
+                aos_ts = None
+                aos_az = None
+                max_el = -999.0
+
+        prev_el, prev_az, prev_t = el, az, t
+        if t >= t_end:
+            break
+
+    # Close an in-progress pass at t_end so the caller can still show it.
+    if inside and aos_ts is not None and max_el >= min_el_deg:
+        passes.append({
+            "aos_ts": aos_ts,
+            "los_ts": t_end,
+            "duration_s": max(0.0, t_end - aos_ts),
+            "max_el": round(max_el, 1),
+            "max_el_ts": max_el_ts,
+            "aos_az": round(aos_az, 1) if aos_az is not None else None,
+            "los_az": None,
+            "max_el_az": round(max_el_az, 1) if max_el_az is not None else None,
+            "truncated": True,
+        })
+
+    return passes
 
 
 def _sgp4_available() -> bool:

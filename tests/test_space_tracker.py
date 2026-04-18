@@ -16,9 +16,12 @@ import pytest
 
 from reticulumpi.builtin_plugins.space_tracker import (
     _RateLimiter,
+    _bisect_horizon,
+    _find_passes,
     _gmst_rad,
     _observer_look_angles,
     _parse_tle_block,
+    _sat_el_az_at,
     _sgp4_available,
     _skyfield_available,
     _teme_to_geodetic,
@@ -253,6 +256,199 @@ class TestOptionalDeps:
 
 
 # ---------------------------------------------------------------------------
+# Pass prediction — deterministic tests with a synthetic elevation curve
+# (no sgp4 required).  The real-TLE test below is gated on sgp4 import.
+# ---------------------------------------------------------------------------
+def _sine_el_fn(period_s=600.0, amplitude=30.0, az=90.0, t_offset=0.0):
+    """Return an el_fn whose elevation traces a sine wave.
+
+    This gives deterministic AOS/LOS at integer multiples of period/2,
+    with peak elevation == amplitude at quarter-period offsets.
+    """
+    import math
+
+    def fn(t):
+        phase = 2.0 * math.pi * (t - t_offset) / period_s
+        return (amplitude * math.sin(phase), az)
+    return fn
+
+
+class TestBisectHorizon:
+    def test_converges_within_tolerance(self):
+        fn = _sine_el_fn(period_s=600.0, amplitude=30.0)
+        # Known zero crossing at t=0 and t=300 (period/2).  Bracket around 300.
+        ts = _bisect_horizon(fn, 270.0, 330.0, el_lo=fn(270.0)[0], el_hi=fn(330.0)[0], tol_s=1.0)
+        assert abs(ts - 300.0) <= 1.0
+
+    def test_narrows_from_wide_bracket(self):
+        fn = _sine_el_fn(period_s=600.0, amplitude=30.0)
+        ts = _bisect_horizon(fn, 1.0, 299.0, el_lo=fn(1.0)[0], el_hi=fn(299.0)[0], tol_s=1.0)
+        # Both ends of this bracket are positive — no crossing.  Bisection
+        # still terminates without exploding.
+        assert 1.0 <= ts <= 299.0
+
+    def test_handles_rising_crossing(self):
+        # el < 0 at t=270 (near period, approaching zero from below) and
+        # el > 0 at t=330 (past period, rising).
+        fn = _sine_el_fn(period_s=600.0, amplitude=30.0)
+        # Shift so [270, 330] brackets the rising zero at t=600.
+        # fn at t=570 is negative (sin of 5.969 rad ≈ -0.31), at t=630 positive
+        ts = _bisect_horizon(fn, 570.0, 630.0, el_lo=fn(570.0)[0], el_hi=fn(630.0)[0])
+        assert abs(ts - 600.0) <= 1.0
+
+    def test_gap_aborts_cleanly(self):
+        # el_fn that returns None partway — shouldn't infinite-loop
+        calls = {"n": 0}
+
+        def fn(t):
+            calls["n"] += 1
+            if calls["n"] > 2:
+                return None
+            return (-1.0 if t < 10.0 else 1.0, 0.0)
+
+        ts = _bisect_horizon(fn, 0.0, 20.0, el_lo=-1.0, el_hi=1.0)
+        assert 0.0 <= ts <= 20.0
+
+
+class TestFindPasses:
+    def test_finds_passes_in_range(self):
+        # Over one full period (600s), a sine crosses horizon once rising
+        # and once setting -> exactly one pass.  Over 3 periods -> 3 passes.
+        fn = _sine_el_fn(period_s=600.0, amplitude=45.0, t_offset=50.0)
+        passes = _find_passes(fn, t_start=0.0, t_end=1800.0, min_el_deg=0.0)
+        assert len(passes) >= 3
+
+    def test_filters_by_min_elevation(self):
+        fn = _sine_el_fn(period_s=600.0, amplitude=20.0)
+        high = _find_passes(fn, t_start=0.0, t_end=1800.0, min_el_deg=0.0)
+        low = _find_passes(fn, t_start=0.0, t_end=1800.0, min_el_deg=25.0)
+        assert len(high) >= 3
+        assert len(low) == 0  # peak is 20° < threshold 25°
+
+    def test_max_passes_cap_respected(self):
+        fn = _sine_el_fn(period_s=600.0, amplitude=45.0)
+        passes = _find_passes(
+            fn, t_start=0.0, t_end=100000.0, min_el_deg=0.0, max_passes=5,
+        )
+        assert len(passes) <= 5
+
+    def test_pass_fields_populated(self):
+        fn = _sine_el_fn(period_s=600.0, amplitude=45.0, az=135.0)
+        passes = _find_passes(fn, t_start=0.0, t_end=1800.0, min_el_deg=0.0)
+        assert passes
+        p = passes[0]
+        assert "aos_ts" in p and "los_ts" in p
+        assert p["los_ts"] > p["aos_ts"]
+        assert p["duration_s"] == pytest.approx(p["los_ts"] - p["aos_ts"])
+        assert 0 <= p["max_el"] <= 45.1
+        assert p["aos_az"] == 135.0
+        assert p["los_az"] == 135.0
+
+    def test_starting_inside_a_pass_truncates_aos_to_t_start(self):
+        # Start at a time where elevation is already positive
+        fn = _sine_el_fn(period_s=600.0, amplitude=45.0)
+        # At t=100, sin(2π·100/600) ≈ sin(1.047) ≈ 0.866 → el ≈ 39°
+        passes = _find_passes(fn, t_start=100.0, t_end=500.0, min_el_deg=0.0)
+        assert passes
+        assert passes[0]["aos_ts"] == 100.0
+
+    def test_ending_mid_pass_truncates_los(self):
+        # Pick a t_end inside a pass — the last entry should be marked truncated
+        fn = _sine_el_fn(period_s=600.0, amplitude=45.0)
+        passes = _find_passes(fn, t_start=0.0, t_end=200.0, min_el_deg=0.0)
+        # Peak is at t=150, still inside the pass at t=200
+        assert passes
+        last = passes[-1]
+        assert last.get("truncated") is True
+        assert last["los_ts"] == 200.0
+        assert last["los_az"] is None
+
+    def test_empty_when_never_rises(self):
+        def always_below(t):
+            return (-5.0, 0.0)
+        passes = _find_passes(always_below, 0.0, 3600.0, min_el_deg=0.0)
+        assert passes == []
+
+    def test_handles_propagation_gap(self):
+        # el_fn returns None inside the [t_start, t_end] window
+        def gappy(t):
+            if 200.0 <= t <= 400.0:
+                return None
+            # A proper pass that would straddle the gap without it
+            if 100.0 <= t <= 500.0:
+                return (15.0, 0.0)
+            return (-5.0, 0.0)
+
+        # Should not raise and should return a list (possibly empty)
+        passes = _find_passes(gappy, 0.0, 600.0, min_el_deg=0.0)
+        assert isinstance(passes, list)
+
+
+@pytest.mark.skipif(not _sgp4_available(), reason="sgp4 not installed")
+class TestSgp4IntegratedPasses:
+    """End-to-end pass detection against a real SGP4 propagator.
+
+    Uses an ISS TLE whose epoch is 2024-01-01 12:00 UTC.  Pass prediction
+    runs starting from the TLE epoch so propagation error stays small.
+    """
+
+    def _iss_satrec(self):
+        from sgp4.api import Satrec
+
+        # Syntactic ISS TLE at epoch 2024-001.5 (day 1, 12:00 UTC)
+        l1 = "1 25544U 98067A   24001.50000000  .00016717  00000-0  10270-3 0  9008"
+        l2 = "2 25544  51.6412  23.4567 0004192  45.1234 315.6789 15.50000000123456"
+        return Satrec.twoline2rv(l1, l2)
+
+    def _epoch_start(self):
+        import datetime as _dt
+        # 2024-01-01 12:00 UTC
+        return _dt.datetime(2024, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc).timestamp()
+
+    def test_iss_produces_passes_over_24h(self):
+        from sgp4.api import jday
+        satrec = self._iss_satrec()
+        observer = {"lat": 40.0, "lon": 0.0, "elev_m": 0.0}
+
+        t_start = self._epoch_start()
+        t_end = t_start + 24 * 3600
+
+        def el_fn(t):
+            return _sat_el_az_at(satrec, jday, observer, t)
+
+        passes = _find_passes(el_fn, t_start, t_end, min_el_deg=0.0)
+        # 24h at 40°N should yield several ISS passes
+        assert len(passes) >= 3
+        for p in passes:
+            assert p["aos_ts"] < p["los_ts"]
+            assert p["max_el"] >= 0.0
+
+    def test_iss_min_elevation_filter(self):
+        from sgp4.api import jday
+        satrec = self._iss_satrec()
+        observer = {"lat": 40.0, "lon": 0.0, "elev_m": 0.0}
+        t_start = self._epoch_start()
+        t_end = t_start + 24 * 3600
+
+        def el_fn(t):
+            return _sat_el_az_at(satrec, jday, observer, t)
+
+        all_passes = _find_passes(el_fn, t_start, t_end, min_el_deg=0.0)
+        high_passes = _find_passes(el_fn, t_start, t_end, min_el_deg=60.0)
+        assert len(high_passes) <= len(all_passes)
+
+    def test_sat_el_az_at_returns_numeric(self):
+        from sgp4.api import jday
+        satrec = self._iss_satrec()
+        observer = {"lat": 40.0, "lon": 0.0, "elev_m": 0.0}
+        result = _sat_el_az_at(satrec, jday, observer, self._epoch_start())
+        assert result is not None
+        el, az = result
+        assert -90.0 <= el <= 90.0
+        assert 0.0 <= az < 360.0
+
+
+# ---------------------------------------------------------------------------
 # Plugin config validation — ensures the floors are actually enforced
 # ---------------------------------------------------------------------------
 @pytest.fixture
@@ -306,6 +502,64 @@ class TestValidateConfig:
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
         with pytest.raises(ValueError, match="celestrak_groups"):
             SpaceTrackerPlugin(mock_app, {"celestrak_groups": "stations"})
+
+    def test_rejects_pass_min_elevation_out_of_range(self, mock_app):
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        with pytest.raises(ValueError, match="min_elevation_deg"):
+            SpaceTrackerPlugin(
+                mock_app,
+                {"passes": {"enabled": True, "min_elevation_deg": 120}},
+            )
+        with pytest.raises(ValueError, match="min_elevation_deg"):
+            SpaceTrackerPlugin(
+                mock_app,
+                {"passes": {"enabled": True, "min_elevation_deg": -5}},
+            )
+
+    def test_rejects_pass_lookahead_out_of_range(self, mock_app):
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        with pytest.raises(ValueError, match="lookahead_hours"):
+            SpaceTrackerPlugin(
+                mock_app,
+                {"passes": {"enabled": True, "lookahead_hours": 0}},
+            )
+        with pytest.raises(ValueError, match="lookahead_hours"):
+            SpaceTrackerPlugin(
+                mock_app,
+                {"passes": {"enabled": True, "lookahead_hours": 200}},
+            )
+
+    def test_rejects_non_list_watchlist(self, mock_app):
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        with pytest.raises(ValueError, match="watchlist"):
+            SpaceTrackerPlugin(
+                mock_app,
+                {"passes": {"enabled": True, "watchlist": "ISS (ZARYA)"}},
+            )
+
+    def test_accepts_valid_passes_config(self, mock_app):
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        plugin = SpaceTrackerPlugin(
+            mock_app,
+            {
+                "passes": {
+                    "enabled": True,
+                    "min_elevation_deg": 10,
+                    "lookahead_hours": 24,
+                    "watchlist": ["ISS (ZARYA)", "NOAA 18"],
+                },
+            },
+        )
+        assert plugin is not None
+
+    def test_passes_disabled_skips_validation(self, mock_app):
+        """When passes.enabled is false, out-of-range values don't error."""
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        plugin = SpaceTrackerPlugin(
+            mock_app,
+            {"passes": {"enabled": False, "min_elevation_deg": 999}},
+        )
+        assert plugin is not None
 
 
 # ---------------------------------------------------------------------------
@@ -405,5 +659,66 @@ class TestPluginLifecycle:
             with patch.object(plugin._http, "get") as mock_get:
                 plugin._refresh_due_groups()
                 mock_get.assert_not_called()
+        finally:
+            plugin.stop()
+
+    def test_passes_loop_stays_idle_without_watchlist(self, mock_app, tmp_path):
+        """Empty watchlist → no passes thread starts (nothing to predict for)."""
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        cfg = {
+            "cache_dir": str(tmp_path),
+            "launches": {"enabled": False},
+            "space_weather": {"enabled": False},
+            "propagation": {"enabled": False},
+            "passes": {"enabled": True, "watchlist": []},
+        }
+        plugin = SpaceTrackerPlugin(mock_app, cfg)
+        plugin.start()
+        try:
+            thread_names = [t.name for t in plugin._threads]
+            assert "space-passes" not in thread_names
+            # Snapshot still reports an empty passes list
+            snap = plugin.get_snapshot()
+            assert snap["passes"] == []
+            assert snap["passes_computed_at"] is None
+        finally:
+            plugin.stop()
+
+    def test_get_status_reports_upcoming_passes(self, mock_app, tmp_path):
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        cfg = {
+            "cache_dir": str(tmp_path),
+            "launches": {"enabled": False},
+            "space_weather": {"enabled": False},
+            "propagation": {"enabled": False},
+            "passes": {"enabled": False},
+        }
+        plugin = SpaceTrackerPlugin(mock_app, cfg)
+        plugin.start()
+        try:
+            status = plugin.get_status()
+            assert status["upcoming_passes"] == 0
+        finally:
+            plugin.stop()
+
+    def test_recompute_passes_skips_without_observer(self, mock_app, tmp_path):
+        """No observer → no passes computed, no event published."""
+        if not _sgp4_available():
+            pytest.skip("sgp4 not installed")
+        from sgp4.api import Satrec, jday
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+        cfg = {
+            "cache_dir": str(tmp_path),
+            "launches": {"enabled": False},
+            "space_weather": {"enabled": False},
+            "propagation": {"enabled": False},
+            "passes": {"enabled": True, "watchlist": ["ISS (ZARYA)"]},
+            # no observer block and gps_telemetry is absent on mock_app
+        }
+        plugin = SpaceTrackerPlugin(mock_app, cfg)
+        plugin.start()
+        try:
+            plugin._recompute_passes(Satrec, jday)
+            assert plugin._passes == []
         finally:
             plugin.stop()

@@ -181,12 +181,22 @@ class MeshCoreGateway(PluginBase):
         reconnect_delay = self.config.get("reconnect_delay", 10)
         health_check_interval = self.config.get("health_check_interval", 30)
         max_attempts = self.config.get("max_reconnect_attempts", 10)
+        # Require N consecutive failed health checks before tearing down
+        # the connection.  A single transient ``is_connected`` hiccup used
+        # to trigger a full reconnect (~15-30s of lost messages); require
+        # repeated failures so only a genuine outage escalates.
+        health_failure_threshold = max(
+            1, int(self.config.get("health_failure_threshold", 3))
+        )
+
+        consecutive_health_failures = 0
 
         while self._active:
             if not self._connected:
                 try:
                     self._connect_device()
                     self._reconnect_failures = 0
+                    consecutive_health_failures = 0
                 except Exception as exc:
                     self._reconnect_failures += 1
                     self.log.warning(
@@ -215,13 +225,33 @@ class MeshCoreGateway(PluginBase):
 
             # Health check
             self._sleep_while_active(health_check_interval)
-            if self._connected and not self._check_health():
-                self.log.warning("MeshCore health check failed, reconnecting")
-                self._disconnect_device()
-                self.event_bus.publish(events.MESHCORE_DISCONNECTED, {
-                    "reason": "health_check_failed",
-                })
-                continue
+            if self._connected:
+                if self._check_health():
+                    if consecutive_health_failures > 0:
+                        self.log.info(
+                            "MeshCore health recovered after %d failed check(s)",
+                            consecutive_health_failures,
+                        )
+                    consecutive_health_failures = 0
+                else:
+                    consecutive_health_failures += 1
+                    if consecutive_health_failures < health_failure_threshold:
+                        self.log.info(
+                            "MeshCore health check failed (%d/%d) — will retry",
+                            consecutive_health_failures,
+                            health_failure_threshold,
+                        )
+                        continue
+                    self.log.warning(
+                        "MeshCore health check failed %d times, reconnecting",
+                        consecutive_health_failures,
+                    )
+                    consecutive_health_failures = 0
+                    self._disconnect_device()
+                    self.event_bus.publish(events.MESHCORE_DISCONNECTED, {
+                        "reason": "health_check_failed",
+                    })
+                    continue
 
             # Periodic advertisement
             if self._connected and self._advert_interval > 0:
@@ -348,11 +378,19 @@ class MeshCoreGateway(PluginBase):
             except Exception:
                 pass
 
-        # Disconnect
-        try:
-            self._run_async(self._async_disconnect_mc(mc), timeout=5)
-        except Exception:
-            self.log.debug("Error disconnecting MeshCore", exc_info=True)
+        # Disconnect — only schedule the coroutine if the async loop is
+        # actually running.  Creating the coroutine when ``_run_async``
+        # would raise leaves it un-awaited and produces a RuntimeWarning;
+        # check loop state first and skip cleanly when it's already down.
+        if self._loop and self._loop.is_running():
+            try:
+                self._run_async(self._async_disconnect_mc(mc), timeout=5)
+            except Exception:
+                self.log.debug("Error disconnecting MeshCore", exc_info=True)
+        else:
+            self.log.debug(
+                "MeshCore async loop not running; skipping device disconnect"
+            )
 
         self._save_contact_cache()
 
@@ -451,6 +489,35 @@ class MeshCoreGateway(PluginBase):
                 return key, contact.get("adv_name", "")
         return prefix, ""
 
+    def _resolve_name_to_key(self, name: str) -> str:
+        """Look up a contact's full pubkey by adv_name.  Returns "" if unknown."""
+        if not name:
+            return ""
+        for key, contact in self._contact_cache.items():
+            if contact.get("adv_name", "") == name:
+                return key
+        return ""
+
+    @staticmethod
+    def _split_channel_sender(text: str) -> tuple[str, str]:
+        """Split a channel message into (sender_name, body).
+
+        MeshCore channel (broadcast) packets carry no pubkey, so the sending
+        client prepends its advertised name as ``"<name>: <body>"``.  If the
+        format is not present (or the prefix is implausibly long / contains a
+        newline), fall back to ``("", text)``.
+        """
+        if not text:
+            return "", text
+        idx = text.find(": ")
+        if idx <= 0 or idx > 40:
+            return "", text
+        prefix = text[:idx]
+        # Reject prefixes that span lines or look like URL-ish content
+        if "\n" in prefix or "/" in prefix:
+            return "", text
+        return prefix, text[idx + 2:]
+
     def _handle_incoming_message(
         self, event: Any, msg_type: str = "direct",
     ) -> None:
@@ -460,13 +527,20 @@ class MeshCoreGateway(PluginBase):
             text = payload.get("text", str(event.payload) if not isinstance(event.payload, dict) else "")
             channel = payload.get("channel_idx")
 
-            # Direct messages carry a pubkey_prefix; channel messages don't
+            # Direct messages carry a pubkey_prefix; channel messages don't —
+            # the sender name is prepended to the text as "<name>: <body>".
             pubkey_prefix = payload.get("pubkey_prefix", "")
             if pubkey_prefix:
                 from_key, from_name = self._resolve_pubkey_prefix(pubkey_prefix)
             else:
                 from_key = ""
                 from_name = ""
+                if msg_type == "broadcast":
+                    parsed_name, parsed_body = self._split_channel_sender(text)
+                    if parsed_name:
+                        from_name = parsed_name
+                        from_key = self._resolve_name_to_key(parsed_name)
+                        text = parsed_body
 
             if not text.strip():
                 return
@@ -700,13 +774,21 @@ class MeshCoreGateway(PluginBase):
             contacts_dict = dict(self._contact_cache)
 
         # Filter stale contacts (0 = show all)
+        now = time.time()
         max_age_days = self.config.get("stale_contact_days", 30)
-        cutoff = (time.time() - max_age_days * 86400) if max_age_days > 0 else 0
+        cutoff = (now - max_age_days * 86400) if max_age_days > 0 else 0
+        # Some devices send adverts with badly-skewed RTCs, producing
+        # last_advert values hours/days ahead of host time. Treat anything
+        # >60 s in the future as missing so consumers don't render "just now"
+        # forever.
+        future_cutoff = now + 60
 
         result = []
         for key, contact in contacts_dict.items():
             last_advert = contact.get("last_advert", 0)
-            if cutoff and last_advert < cutoff:
+            if last_advert and last_advert > future_cutoff:
+                last_advert = 0
+            if cutoff and last_advert and last_advert < cutoff:
                 continue
             result.append({
                 "public_key": key,

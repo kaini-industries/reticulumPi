@@ -36,8 +36,70 @@
     var _expanded = false;
     var _dom = null;       // resolved DOM refs, cached on first data arrival
     var _available = false;
+    var _destOptions = [];
+    var _destSelection = null;
 
     var id = function (suffix) { return cfg.rootId + '-' + suffix; };
+
+    // ── Broadcast contact-id helpers ───────────────────────────────
+    // Per-channel broadcast ids look like:
+    //   __broadcast_meshtastic_lora_ch0__
+    //   __broadcast_meshtastic_mqtt_ch2__
+    // Legacy (pre-channel-split) ids were
+    //   __broadcast_meshtastic_lora__
+    // and have been purged from the DB on first startup after upgrade.
+    function _broadcastCid(chIndex) {
+      var base = '__broadcast_' + cfg.transport +
+        (cfg.subTransport ? '_' + cfg.subTransport : '');
+      if (chIndex !== undefined && chIndex !== null) base += '_ch' + chIndex;
+      return base + '__';
+    }
+    function _parseBroadcastChannel(cid) {
+      // Channel key may be a numeric radio-slot index (LoRa, or an MQTT
+      // channel we have locally) or a sanitized channel name (MQTT peer
+      // on a channel we don't have locally, e.g. "LongFast").
+      var m = /_ch([A-Za-z0-9_-]+)__$/.exec(cid || '');
+      if (!m) return null;
+      var raw = m[1];
+      if (/^\d+$/.test(raw)) return parseInt(raw, 10);
+      return raw;
+    }
+    function _channelName(key) {
+      if (typeof key === 'number') {
+        for (var i = 0; i < _channels.length; i++) {
+          if (_channels[i].index === key) {
+            return _channels[i].name ||
+              (key === 0 ? 'Primary' : 'Ch ' + key);
+          }
+        }
+        return (key === 0 ? 'Primary' : 'Ch ' + key);
+      }
+      // String key — channel not configured locally, show the name as-is.
+      return key;
+    }
+
+    // Channels with identical (name, psk_label) are functionally the
+    // same conversation on the radio — same encryption key, same
+    // display name — so the UI treats the lowest-indexed slot as
+    // canonical and merges the others into it.  Returns the canonical
+    // list and an alias map (aliasIndex -> canonicalIndex) for any
+    // duplicates.
+    function _canonicalize(channels) {
+      var canonical = [];
+      var aliasToCanonical = {};
+      var seen = {};
+      for (var i = 0; i < channels.length; i++) {
+        var ch = channels[i];
+        var key = (ch.name || '') + '|' + (ch.psk_label || '');
+        if (seen.hasOwnProperty(key)) {
+          aliasToCanonical[ch.index] = seen[key];
+        } else {
+          seen[key] = ch.index;
+          canonical.push(ch);
+        }
+      }
+      return { canonical: canonical, aliasToCanonical: aliasToCanonical };
+    }
 
     // ── DOM ────────────────────────────────────────────────────────
     function _resolveDom() {
@@ -66,7 +128,9 @@
         feedback: $(id('feedback')),
         chSelectWrap: $(id('channel-wrap')),
         chSelect: $(id('channel-select')),
-        destSelect: $(id('dest-select')),
+        destCombo: $(id('dest-combo')),
+        destInput: $(id('dest-input')),
+        destList: $(id('dest-list')),
         lxmfRaw: $(id('lxmf-raw')),
       };
       _wire();
@@ -107,9 +171,32 @@
                                       el.getAttribute('data-msgtype'));
         });
       }
-      if (_dom.destSelect) {
-        _dom.destSelect.addEventListener('change', _onDestChange);
+      if (_dom.destInput) {
+        _dom.destInput.addEventListener('focus', function () {
+          if (_dom.destInput) _dom.destInput.select();
+          _openDestList();
+        });
+        _dom.destInput.addEventListener('input', function () {
+          if (_dom.destCombo) _dom.destCombo.classList.add('open');
+          _renderDestList();
+        });
+        _dom.destInput.addEventListener('keydown', _onDestKeydown);
       }
+      if (_dom.destList) {
+        _dom.destList.addEventListener('mousedown', function (e) {
+          var el = e.target.closest('.msg-dest-item');
+          if (!el) return;
+          e.preventDefault();
+          _pickDest(el.getAttribute('data-id'));
+        });
+      }
+      document.addEventListener('mousedown', function (e) {
+        if (!_dom.destCombo) return;
+        if (!_dom.destCombo.classList.contains('open')) return;
+        if (!_dom.destCombo.contains(e.target)) _closeDestList();
+      });
+      window.addEventListener('resize', _positionDestList);
+      window.addEventListener('scroll', _positionDestList, true);
       if (_dom.chManage) {
         _dom.chManage.addEventListener('click', function () {
           if (R.openChannelDialog) R.openChannelDialog();
@@ -184,6 +271,9 @@
           return ch.active;
         });
         _renderChannelSelect();
+        // Channels drive the pinned per-channel broadcast rows.
+        _renderConversations();
+        _renderDestSelect();
       });
     }
 
@@ -198,32 +288,82 @@
     // ── Rendering ──────────────────────────────────────────────────
     function _renderConversations() {
       if (!_dom.convs) return;
-      // Prepend the broadcast conversation as a pinned entry so users can
-      // always jump straight to a broadcast without creating one first.
-      var broadcastCid = '__broadcast_' + cfg.transport +
-        (cfg.subTransport ? '_' + cfg.subTransport : '') + '__';
-      var rows = [{
-        contact_id: broadcastCid,
-        msg_type: 'broadcast',
-        contact_name: cfg.broadcastLabel || 'Broadcast',
-        last_text: '',
-        last_ts: null,
-        unread_count: _unreadCounts[broadcastCid] || 0,
-        _pinned: true,
-      }];
+      // Pin one broadcast row per active Meshtastic channel (Primary,
+      // private channels, etc.).  Panels without channel support fall
+      // back to a single broadcast row using the legacy id shape.
+      var pinnedRows = [];
       var seen = {};
-      seen[broadcastCid] = true;
+      var canon = _canonicalize(_channels);
+      if (cfg.supportsChannels && canon.canonical.length > 0) {
+        for (var k = 0; k < canon.canonical.length; k++) {
+          var ch = canon.canonical[k];
+          var cid = _broadcastCid(ch.index);
+          pinnedRows.push({
+            contact_id: cid,
+            msg_type: 'broadcast',
+            contact_name: cfg.broadcastLabel || 'Broadcast',
+            _channelIndex: ch.index,
+            _channelName: _channelName(ch.index),
+            last_text: '',
+            last_ts: null,
+            unread_count: 0,
+            _pinned: true,
+          });
+          seen[cid] = pinnedRows.length - 1;
+        }
+      } else {
+        var legacy = _broadcastCid(null);
+        pinnedRows.push({
+          contact_id: legacy,
+          msg_type: 'broadcast',
+          contact_name: cfg.broadcastLabel || 'Broadcast',
+          last_text: '',
+          last_ts: null,
+          unread_count: _unreadCounts[legacy] || 0,
+          _pinned: true,
+        });
+        seen[legacy] = 0;
+      }
+
+      var rows = pinnedRows.slice();
       for (var i = 0; i < _conversations.length; i++) {
         var c = _conversations[i];
-        if (seen[c.contact_id]) {
-          // merge with pinned broadcast (it already existed in DB)
-          rows[0].last_text = c.last_text;
-          rows[0].last_ts = c.last_ts;
-          rows[0].unread_count = c.unread_count || 0;
+        // Re-key aliased broadcast conversations onto their canonical
+        // pinned row so duplicate same-PSK/same-name slots don't show
+        // up as distinct conversations.
+        var effectiveCid = c.contact_id;
+        var parsedCh = _parseBroadcastChannel(c.contact_id);
+        if (typeof parsedCh === 'number'
+            && canon.aliasToCanonical.hasOwnProperty(parsedCh)) {
+          effectiveCid = _broadcastCid(canon.aliasToCanonical[parsedCh]);
+        }
+        if (seen[effectiveCid] !== undefined) {
+          var idx = seen[effectiveCid];
+          // Use the newest preview across merged aliases.
+          if (!rows[idx].last_ts
+              || (c.last_ts && c.last_ts > rows[idx].last_ts)) {
+            rows[idx].last_text = c.last_text;
+            rows[idx].last_ts = c.last_ts;
+          }
+          rows[idx].unread_count = (rows[idx].unread_count || 0)
+            + (c.unread_count || 0);
           continue;
         }
+        // Includes DMs and any broadcast rows on channels no longer
+        // active on this node — still worth surfacing so history isn't
+        // orphaned.
         rows.push(c);
-        seen[c.contact_id] = true;
+        seen[effectiveCid] = rows.length - 1;
+      }
+
+      // Layer canonical cid unread counts (from /api/messages/unread)
+      // on top — handles the case where a conversation isn't yet in
+      // _conversations but has unread tracked.
+      for (var ci = 0; ci < pinnedRows.length; ci++) {
+        var pcid = pinnedRows[ci].contact_id;
+        if (!rows[ci].last_ts && _unreadCounts[pcid]) {
+          rows[ci].unread_count = _unreadCounts[pcid];
+        }
       }
 
       var html = '';
@@ -252,7 +392,11 @@
 
     function _displayName(conv) {
       if (conv.msg_type === 'broadcast') {
-        return cfg.broadcastLabel || 'Broadcast';
+        var label = cfg.broadcastLabel || 'Broadcast';
+        if (conv._channelName) return label + ': ' + conv._channelName;
+        var chIdx = _parseBroadcastChannel(conv.contact_id);
+        if (chIdx !== null) return label + ': ' + _channelName(chIdx);
+        return label;
       }
       if (conv.contact_name && conv.contact_name !== conv.contact_id) {
         // Strip sub_transport suffix from display id tail, show clean name
@@ -268,7 +412,14 @@
     function _renderThread() {
       if (!_dom.chat) return;
       if (_threadMessages.length === 0) {
-        _dom.chat.innerHTML = '';
+        if (_activeContactId) {
+          _dom.chat.innerHTML =
+            '<div class="msg-empty-notice">' +
+            'No messages yet. Send one below to start the conversation.' +
+            '</div>';
+        } else {
+          _dom.chat.innerHTML = '';
+        }
         return;
       }
       var sorted = _threadMessages.slice().reverse();  // chronological
@@ -307,47 +458,186 @@
       if (!cfg.supportsChannels || !_dom.chSelect) return;
       var cur = _dom.chSelect.value;
       var html = '';
-      for (var i = 0; i < _channels.length; i++) {
-        var ch = _channels[i];
-        var label = ch.name || (ch.index === 0 ? 'Primary' : 'Ch ' + ch.index);
+      var canonical = _canonicalize(_channels).canonical;
+      for (var i = 0; i < canonical.length; i++) {
+        var ch = canonical[i];
+        var label = _channelName(ch.index);
         if (ch.psk_label === 'unencrypted') label += ' (open)';
         html += '<option value="' + ch.index + '">' + esc(label) + '</option>';
       }
       _dom.chSelect.innerHTML = html;
       if (cur) _dom.chSelect.value = cur;
-      // Hide the selector when the node only has one active channel
+      // Hide the selector when the node only has one active channel, or
+      // while composing a new message — the destination picker's broadcast
+      // options already encode the channel and mirror it onto this select.
       if (_dom.chSelectWrap) {
-        _dom.chSelectWrap.style.display = (_channels.length > 1) ? '' : 'none';
+        var show = (canonical.length > 1) && !_newComposeOpen;
+        _dom.chSelectWrap.style.display = show ? '' : 'none';
       }
     }
 
     function _renderDestSelect() {
-      if (!_dom.destSelect) return;
-      var html = '';
-      var bcid = '__broadcast_' + cfg.transport +
-        (cfg.subTransport ? '_' + cfg.subTransport : '') + '__';
-      html += '<option value="' + esc(bcid) + '" data-type="broadcast">'
-           + esc(cfg.broadcastLabel || 'Broadcast') + '</option>';
+      if (!_dom.destCombo) return;
+      var bcLabel = cfg.broadcastLabel || 'Broadcast';
+      var canonical = _canonicalize(_channels).canonical;
+      _destOptions = [];
+      if (cfg.supportsChannels && canonical.length > 0) {
+        for (var k = 0; k < canonical.length; k++) {
+          var ch = canonical[k];
+          _destOptions.push({
+            id: _broadcastCid(ch.index),
+            type: 'broadcast',
+            label: bcLabel + ': ' + _channelName(ch.index),
+            channel: ch.index,
+            group: 'broadcasts',
+          });
+        }
+      } else {
+        _destOptions.push({
+          id: _broadcastCid(null),
+          type: 'broadcast',
+          label: bcLabel,
+          group: 'broadcasts',
+        });
+      }
       if (cfg.transport === 'lxmf') {
-        html += '<option value="__raw__" data-type="raw">Enter address…</option>';
+        _destOptions.push({
+          id: '__raw__', type: 'raw', label: 'Enter address…', group: 'other',
+        });
       }
       for (var i = 0; i < _contacts.length; i++) {
         var c = _contacts[i];
-        var label = c.name || c.id;
-        if (c.name && c.id && c.name !== c.id) {
-          label = c.name + ' (' + c.id.substring(0, 10) + '…)';
-        }
-        html += '<option value="' + esc(c.id) + '" data-type="direct">'
-             + esc(label) + '</option>';
+        var nm = c.name || c.id;
+        var hint = (c.name && c.id && c.name !== c.id)
+          ? (c.id.length > 14 ? c.id.substring(0, 12) + '…' : c.id)
+          : '';
+        _destOptions.push({
+          id: c.id, type: 'direct', label: nm, hint: hint, group: 'nodes',
+        });
       }
-      _dom.destSelect.innerHTML = html;
+      // Preserve a prior selection if the same id still exists; otherwise
+      // fall back to the first available option (usually the first broadcast).
+      var prev = _destSelection;
+      _destSelection = null;
+      if (prev) {
+        for (var j = 0; j < _destOptions.length; j++) {
+          if (_destOptions[j].id === prev.id) {
+            _destSelection = _destOptions[j];
+            break;
+          }
+        }
+      }
+      if (!_destSelection && _destOptions.length) {
+        _destSelection = _destOptions[0];
+      }
+      if (_dom.destInput && _destSelection) {
+        _dom.destInput.value = _destSelection.label;
+      }
+      _onDestChange();
+      if (_dom.destCombo.classList.contains('open')) _renderDestList();
+    }
+
+    function _renderDestList() {
+      if (!_dom.destList || !_dom.destInput) return;
+      var raw = _dom.destInput.value || '';
+      // When the input still matches the selected label, treat as
+      // unfiltered — the list just opened.
+      var q = (_destSelection && raw === _destSelection.label)
+        ? '' : raw.trim().toLowerCase();
+      var groups = ['broadcasts', 'other', 'nodes'];
+      var groupLabels = {broadcasts: 'Broadcasts', other: '', nodes: 'Nodes'};
+      var html = '';
+      for (var gi = 0; gi < groups.length; gi++) {
+        var g = groups[gi];
+        var items = [];
+        for (var i = 0; i < _destOptions.length; i++) {
+          var o = _destOptions[i];
+          if (o.group !== g) continue;
+          if (q && g === 'nodes') {
+            var hay = (o.label + ' ' + (o.hint || '') + ' ' + o.id).toLowerCase();
+            if (hay.indexOf(q) < 0) continue;
+          }
+          items.push(o);
+        }
+        if (!items.length) continue;
+        if (groupLabels[g]) {
+          html += '<div class="msg-dest-group-label">'
+               + esc(groupLabels[g]) + '</div>';
+        }
+        for (var k = 0; k < items.length; k++) {
+          var it = items[k];
+          var active = _destSelection && it.id === _destSelection.id;
+          html += '<div class="msg-dest-item' + (active ? ' active' : '') + '"'
+               + ' data-id="' + esc(it.id) + '">'
+               + '<span class="dest-name">' + esc(it.label) + '</span>'
+               + (it.hint
+                    ? '<span class="dest-hint">' + esc(it.hint) + '</span>'
+                    : '')
+               + '</div>';
+        }
+      }
+      if (!html) html = '<div class="msg-dest-empty">No matches</div>';
+      _dom.destList.innerHTML = html;
+      _positionDestList();
+    }
+
+    function _positionDestList() {
+      if (!_dom.destCombo || !_dom.destInput || !_dom.destList) return;
+      if (!_dom.destCombo.classList.contains('open')) return;
+      var r = _dom.destInput.getBoundingClientRect();
+      _dom.destList.style.top = r.bottom + 'px';
+      _dom.destList.style.left = r.left + 'px';
+      _dom.destList.style.width = r.width + 'px';
+    }
+
+    function _openDestList() {
+      if (!_dom.destCombo) return;
+      _dom.destCombo.classList.add('open');
+      _renderDestList();
+    }
+
+    function _closeDestList() {
+      if (!_dom.destCombo) return;
+      _dom.destCombo.classList.remove('open');
+      if (_destSelection && _dom.destInput) {
+        _dom.destInput.value = _destSelection.label;
+      }
+    }
+
+    function _pickDest(optId) {
+      var picked = null;
+      for (var i = 0; i < _destOptions.length; i++) {
+        if (_destOptions[i].id === optId) { picked = _destOptions[i]; break; }
+      }
+      if (!picked) return;
+      _destSelection = picked;
+      if (_dom.destInput) _dom.destInput.value = picked.label;
+      _closeDestList();
+      _onDestChange();
+      if (picked.type === 'raw' && _dom.lxmfRaw) _dom.lxmfRaw.focus();
+    }
+
+    function _onDestKeydown(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        var first = _dom.destList && _dom.destList.querySelector('.msg-dest-item');
+        if (first) _pickDest(first.getAttribute('data-id'));
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        _closeDestList();
+      }
     }
 
     function _onDestChange() {
-      if (!_dom.destSelect || !_dom.lxmfRaw) return;
-      var opt = _dom.destSelect.options[_dom.destSelect.selectedIndex];
-      var t = opt && opt.getAttribute('data-type');
-      _dom.lxmfRaw.style.display = (t === 'raw') ? '' : 'none';
+      var sel = _destSelection;
+      if (_dom.lxmfRaw) {
+        _dom.lxmfRaw.style.display = (sel && sel.type === 'raw') ? '' : 'none';
+      }
+      if (cfg.supportsChannels && _dom.chSelect
+          && sel && sel.type === 'broadcast'
+          && sel.channel !== undefined && sel.channel !== null) {
+        _dom.chSelect.value = String(sel.channel);
+      }
     }
 
     // ── Unread UI ──────────────────────────────────────────────────
@@ -412,6 +702,25 @@
       if (_dom.newCompose) _dom.newCompose.classList.add('hidden');
       if (_dom.deleteBtn) _dom.deleteBtn.classList.remove('hidden');
 
+      // Broadcast threads imply a channel — lock the selector to it
+      // and disable editing (it's informational only for these threads).
+      // String-keyed threads come from MQTT peers on channels we don't
+      // have locally; we can't transmit on them, so disable the selector
+      // and leave the value alone.
+      if (cfg.supportsChannels && _dom.chSelect) {
+        var chKey = (_activeMsgType === 'broadcast')
+          ? _parseBroadcastChannel(_activeContactId) : null;
+        if (typeof chKey === 'number') {
+          _dom.chSelect.value = String(chKey);
+          _dom.chSelect.disabled = true;
+        } else if (typeof chKey === 'string') {
+          _dom.chSelect.disabled = true;
+        } else {
+          _dom.chSelect.disabled = false;
+        }
+        _renderChannelSelect();
+      }
+
       var layout = _dom.body && _dom.body.querySelector('.msg-layout');
       if (layout) layout.classList.add('thread-active');
 
@@ -445,9 +754,17 @@
             _setFeedback((r && r.error) || 'Delete failed', 'error');
             return;
           }
+          var deleted = (r.data && r.data.deleted) || 0;
           // Clear local thread state and drop the conversation from the list
           _threadMessages = [];
-          if (_dom.chat) _dom.chat.innerHTML = '';
+          if (_dom.chat) {
+            // Visible success banner in the chat pane — the feedback span
+            // lives inside compose (hidden next line), so use the chat area
+            // so the user sees confirmation that the delete succeeded.
+            _dom.chat.innerHTML = '<div class="msg-deleted-notice">Deleted ' +
+              deleted + ' message' + (deleted === 1 ? '' : 's') +
+              ' from &ldquo;' + esc(name) + '&rdquo;</div>';
+          }
           if (_unreadCounts[cid]) {
             delete _unreadCounts[cid];
             _updateUnreadUI();
@@ -469,12 +786,17 @@
         _activeContactId = null;
         _activeMsgType = null;
         _threadMessages = [];
+        _destSelection = null;
+        if (_dom.destCombo) _dom.destCombo.classList.remove('open');
         if (_dom.chat) _dom.chat.innerHTML = '';
         if (_dom.threadName) _dom.threadName.textContent = 'New Message';
         // Show both: destination picker (newCompose) and the shared textarea (compose)
         if (_dom.compose) _dom.compose.classList.remove('hidden');
         if (_dom.newCompose) _dom.newCompose.classList.remove('hidden');
         if (_dom.deleteBtn) _dom.deleteBtn.classList.add('hidden');
+        // No active broadcast thread while composing — selector unlocks.
+        if (cfg.supportsChannels && _dom.chSelect) _dom.chSelect.disabled = false;
+        _renderChannelSelect();
         var items = _dom.convs
           ? _dom.convs.querySelectorAll('.msg-conv-item') : [];
         for (var i = 0; i < items.length; i++) items[i].classList.remove('active');
@@ -484,22 +806,23 @@
       } else {
         if (_dom.newCompose) _dom.newCompose.classList.add('hidden');
         if (_dom.threadName) _dom.threadName.textContent = 'Select a conversation';
+        _renderChannelSelect();
       }
     }
 
     // ── Send ───────────────────────────────────────────────────────
     function _resolveSendTarget() {
       if (_newComposeOpen) {
-        if (!_dom.destSelect) return null;
-        var val = _dom.destSelect.value;
-        if (val === '__raw__') {
+        var sel = _destSelection;
+        if (!sel) return null;
+        if (sel.type === 'raw') {
           var raw = _dom.lxmfRaw ? _dom.lxmfRaw.value.trim() : '';
           return raw ? {destination: raw, msgType: 'direct'} : null;
         }
-        if (val.indexOf('__broadcast_') === 0) {
+        if (sel.type === 'broadcast') {
           return {destination: 'broadcast', msgType: 'broadcast'};
         }
-        return {destination: val, msgType: 'direct'};
+        return {destination: sel.id, msgType: 'direct'};
       }
       if (!_activeContactId) return null;
       if (_activeMsgType === 'broadcast') {
@@ -525,8 +848,24 @@
       };
       if (target.msgType === 'broadcast') body.msg_type = 'broadcast';
       if (cfg.subTransport) body.sub_transport = cfg.subTransport;
-      if (cfg.supportsChannels && _dom.chSelect && _channels.length > 1) {
-        body.channel = parseInt(_dom.chSelect.value, 10);
+      if (cfg.supportsChannels) {
+        // Broadcast threads carry channel in their contact_id; that
+        // wins over the standalone selector (which is disabled while
+        // such a thread is active).  DMs still use the selector.
+        var chFromThread = null;
+        if (_newComposeOpen && _destSelection
+            && _destSelection.channel !== undefined
+            && _destSelection.channel !== null) {
+          chFromThread = _destSelection.channel;
+        } else if (_activeContactId && _activeMsgType === 'broadcast') {
+          chFromThread = _parseBroadcastChannel(_activeContactId);
+        }
+        if (chFromThread !== null) {
+          body.channel = chFromThread;
+        } else if (_dom.chSelect
+                   && _canonicalize(_channels).canonical.length > 1) {
+          body.channel = parseInt(_dom.chSelect.value, 10);
+        }
       }
 
       api('/api/messages/send', {method: 'POST', body: body})
@@ -545,6 +884,7 @@
           if (_newComposeOpen) {
             _newComposeOpen = false;
             if (_dom.newCompose) _dom.newCompose.classList.add('hidden');
+            _renderChannelSelect();
           } else if (_activeContactId) {
             _fetchThread(_activeContactId);
           }
@@ -671,6 +1011,28 @@
       }
     }
 
+    function _renderTransportAddress(addr) {
+      if (!_dom || !_dom.toggle || !addr) return;
+      var el = _dom.toggle.querySelector('.msg-transport-address');
+      if (!el) {
+        el = document.createElement('span');
+        el.className = 'msg-transport-address';
+        el.title = 'Click to copy address';
+        el.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(addr).then(function () {
+              var prev = el.textContent;
+              el.textContent = 'Copied';
+              setTimeout(function () { el.textContent = prev; }, 900);
+            });
+          }
+        });
+        _dom.toggle.appendChild(el);
+      }
+      el.textContent = '<' + addr + '>';
+    }
+
     // ── Section-availability bootstrap ─────────────────────────────
     // Even before the first WS tick, hide the section until we know the
     // transport is registered — avoids showing empty panels on load.
@@ -684,12 +1046,24 @@
       api('/api/messages/transports').then(function (r) {
         if (!r || !r.ok) return;
         var list = r.data.transports || [];
-        _available = list.some(function (t) { return t.name === cfg.transport; });
+        var entry = null;
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].name === cfg.transport) { entry = list[i]; break; }
+        }
+        _available = !!entry;
         if (_dom.section) _dom.section.style.display = _available ? '' : 'none';
+        if (entry && entry.address) _renderTransportAddress(entry.address);
       });
       // First pass so counts appear before the user expands
       _fetchUnread();
       _fetchConversations();
+    }
+
+    // Register for cross-panel channel refresh so join/delete from the
+    // shared dialog updates this panel's selector without a hard reload.
+    if (cfg.supportsChannels) {
+      R._channelRefreshHooks = R._channelRefreshHooks || [];
+      R._channelRefreshHooks.push(_fetchChannels);
     }
 
     _init();
@@ -773,14 +1147,26 @@
         }
         if (fb) { fb.textContent = 'Joined!'; fb.className = 'msg-feedback ok'; }
         _refreshChannelList();
+        _notifyChannelChange();
       },
     );
   }
 
   function _deleteChannel(idx) {
     api('/api/meshtastic/channels/' + idx, {method: 'DELETE'}).then(
-      function (r) { if (r && r.ok) _refreshChannelList(); },
+      function (r) {
+        if (!r || !r.ok) return;
+        _refreshChannelList();
+        _notifyChannelChange();
+      },
     );
+  }
+
+  function _notifyChannelChange() {
+    var hooks = R._channelRefreshHooks || [];
+    for (var i = 0; i < hooks.length; i++) {
+      try { hooks[i](); } catch (e) { /* ignore */ }
+    }
   }
 
   // Wire dialog close/join buttons once the DOM is ready

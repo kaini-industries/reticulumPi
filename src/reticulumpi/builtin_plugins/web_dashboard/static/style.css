@@ -1066,6 +1066,23 @@ body {
   align-self: center;
   margin: auto;
 }
+.msg-deleted-notice {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 2rem 1rem;
+  align-self: center;
+  margin: auto;
+  font-style: italic;
+}
+.msg-empty-notice {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 2rem 1rem;
+  align-self: center;
+  margin: auto;
+}
 
 /* Message bubble */
 .msg-bubble {
@@ -1112,6 +1129,16 @@ body {
   margin-left: 0.35rem;
 }
 .msg-unread-total:empty { display: none; }
+.msg-transport-address {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-left: 0.6rem;
+  opacity: 0.75;
+  cursor: pointer;
+  user-select: all;
+}
+.msg-transport-address:hover { opacity: 1; color: var(--accent); }
 
 /* Compose */
 .msg-compose {
@@ -1649,6 +1676,11 @@ body {
   border-color: var(--accent);
   outline: none;
 }
+.rt-input:disabled, .rt-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--bg-alt, var(--bg));
+}
 .routing-pagination {
   display: flex;
   justify-content: center;
@@ -1923,6 +1955,45 @@ body {
   box-shadow: 0 0 6px rgba(88, 166, 255, 0.6);
 }
 
+/* Meshtastic node marker (Meshtastic green dot) */
+.map-marker-meshtastic {
+  background: #67ea94;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 4px rgba(103, 234, 148, 0.6);
+}
+
+/* MeshCore contact marker (orange dot) */
+.map-marker-meshcore {
+  background: #f59e0b;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 4px rgba(245, 158, 11, 0.6);
+}
+
+/* Source-tag pills inside map popup */
+.map-source-tag {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0 0.4rem;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.map-source-tag.mc {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.map-source-tag.msh {
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+  border: 1px solid rgba(88, 166, 255, 0.35);
+}
+
 /* Popup styling */
 .map-popup {
   font-family: var(--font);
@@ -2164,59 +2235,679 @@ body {
   .lora-metric-value { font-size: 0.78rem; }
 }
 
-/* Space tracker tiles ---------------------------------------------------- */
-.space-grid {
+/* Space tracker ---------------------------------------------------------- */
+#space-body {
+  padding: 0.75rem;
+}
+.space-band {
+  margin-bottom: 0.75rem;
+}
+.space-band-status {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: 260px 240px 1fr;
   gap: 0.75rem;
-  margin-bottom: 0.5rem;
 }
-.space-tile {
-  background: var(--card-bg, #1b1d22);
-  border: 1px solid var(--border, #2a2d33);
-  border-radius: 6px;
+.space-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 0.75rem 0.9rem;
+  min-width: 0;
 }
-.space-tile-label {
+.space-panel-label {
   font-size: 0.7rem;
-  color: var(--muted, #9ba2ad);
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
-.space-tile-value {
-  font-size: 1.7rem;
-  font-weight: 600;
-  margin-top: 0.25rem;
-  color: var(--fg, #e4e6ea);
+.space-panel-sub {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-muted);
+  font-weight: 400;
 }
-.space-tile-value-sm {
-  font-size: 1.05rem;
-  font-weight: 500;
-}
-.space-tile-sub {
+.space-muted-line {
   font-size: 0.7rem;
-  color: var(--muted, #9ba2ad);
-  margin-top: 0.25rem;
+  color: var(--text-muted);
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.space-launch-list { margin-top: 1rem; }
-.space-launch-heading {
+
+/* Sky Dome panel */
+.space-skydome-panel { display: flex; flex-direction: column; }
+.space-skydome {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 220px;
+  margin: 0 auto;
+  font-family: var(--mono);
+}
+.space-skydome-meta {
+  margin-top: 0.5rem;
+  min-height: 2em;
+}
+
+/* Kp gauge panel */
+.space-kp-panel { display: flex; flex-direction: column; }
+.space-kp-gauge {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 220px;
+  margin: 0 auto;
+}
+.space-kp-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: -0.5rem;
+}
+.space-kp-value {
+  font-size: 1.7rem;
+  font-weight: 700;
+  color: var(--text-bright);
+  font-family: var(--mono);
+}
+.space-kp-label {
   font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.space-kp-label.kp-quiet   { color: var(--green); }
+.space-kp-label.kp-unsettled { color: var(--yellow); }
+.space-kp-label.kp-active  { color: var(--orange); }
+.space-kp-label.kp-storm   { color: var(--red); }
+
+/* Launch hero */
+.space-launch-hero { display: flex; flex-direction: column; justify-content: space-between; }
+.space-hero-countdown {
+  font-size: 2.4rem;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--accent);
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+  margin: 0.2rem 0 0.4rem 0;
+}
+.space-hero-countdown.imminent { color: var(--red); animation: space-hero-pulse 1.5s ease-in-out infinite; }
+@keyframes space-hero-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.space-hero-name {
+  font-size: 1.05rem;
   font-weight: 600;
-  color: var(--muted, #9ba2ad);
+  color: var(--text-bright);
+  line-height: 1.3;
+  max-height: 2.6em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* Timeline band */
+.space-band-timeline {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+}
+.space-band-timeline .space-panel-label {
+  margin-bottom: 0.4rem;
+}
+.space-next-pass-inline {
+  margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.space-next-pass-inline #space-next-pass {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.space-next-pass-inline .space-muted-line { display: inline; }
+.space-timeline {
+  display: block;
+  width: 100%;
+  height: 200px;
+  font-family: var(--mono);
+}
+
+/* Map band */
+.space-band-map { }
+.space-map {
+  height: 420px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.space-details {
+  margin-top: 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.75rem;
+}
+.space-details > summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  list-style: none;
+  padding: 0.25rem 0;
+  user-select: none;
+}
+.space-details > summary::-webkit-details-marker { display: none; }
+.space-details > summary::before {
+  content: '\25B8';  /* ► */
+  display: inline-block;
+  width: 0.9em;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.space-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.space-tables {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+.space-table-heading {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   margin-bottom: 0.3rem;
 }
 .space-attribution {
   font-size: 0.65rem;
-  color: var(--muted, #9ba2ad);
-  margin-top: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
   text-align: right;
 }
-@media (max-width: 900px) {
-  .space-grid { grid-template-columns: 1fr 1fr; }
+.sat-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--accent);
 }
-@media (max-width: 500px) {
-  .space-grid { grid-template-columns: 1fr; }
+.sat-link:hover {
+  text-decoration: none;
+  border-bottom-style: solid;
+}
+
+/* SVG internals - styled by class names emitted from space.js */
+.sd-ring { fill: none; stroke: var(--border); stroke-width: 1; }
+.sd-ring-mid { stroke-dasharray: 2 3; opacity: 0.7; }
+.sd-axis { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
+.sd-compass { fill: var(--text-muted); font-size: 9px; text-anchor: middle; dominant-baseline: middle; }
+.sd-arc { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0.5; stroke-dasharray: 3 3; }
+.sd-arc-pt { fill: var(--accent); opacity: 0.9; }
+.sd-sat { fill: var(--accent); stroke: var(--bg-card); stroke-width: 1; }
+.sd-sat-overhead { fill: var(--green); }
+.sd-sat-low { fill: var(--text-muted); }
+.sd-observer { fill: var(--orange); }
+.sd-empty { fill: var(--text-muted); font-size: 10px; text-anchor: middle; dominant-baseline: middle; }
+
+.kp-track { fill: none; stroke: var(--border); stroke-width: 12; stroke-linecap: round; opacity: 0.5; }
+.kp-fill { fill: none; stroke-width: 12; stroke-linecap: round; }
+.kp-fill.kp-quiet     { stroke: var(--green); }
+.kp-fill.kp-unsettled { stroke: var(--yellow); }
+.kp-fill.kp-active    { stroke: var(--orange); }
+.kp-fill.kp-storm     { stroke: var(--red); }
+.kp-tick { stroke: var(--text-muted); stroke-width: 1; opacity: 0.7; }
+.kp-tick-label { fill: var(--text-muted); font-size: 8px; text-anchor: middle; font-family: var(--mono); }
+.kp-needle { stroke: var(--text-bright); stroke-width: 2; stroke-linecap: round; }
+.kp-needle-hub { fill: var(--text-bright); }
+
+.tl-grid { stroke: var(--border); stroke-width: 1; opacity: 0.45; }
+.tl-now { stroke: var(--red); stroke-width: 1.5; }
+.tl-now-label { fill: var(--red); font-size: 9px; }
+.tl-hour-label { fill: var(--text-muted); font-size: 9px; text-anchor: middle; }
+.tl-lane-label { fill: var(--text-bright); font-size: 10px; text-anchor: end; dominant-baseline: middle; }
+.tl-lane-more { fill: var(--text-muted); font-size: 9px; text-anchor: end; dominant-baseline: middle; font-style: italic; }
+.tl-pass { fill: var(--accent); opacity: 0.5; }
+.tl-pass.high { opacity: 0.85; }
+.tl-pass.med  { opacity: 0.65; }
+.tl-tca { fill: var(--text-bright); }
+.tl-empty { fill: var(--text-muted); font-size: 11px; text-anchor: middle; dominant-baseline: middle; }
+
+@media (max-width: 1100px) {
+  .space-band-status { grid-template-columns: 1fr 1fr; }
+  .space-launch-hero { grid-column: 1 / -1; }
+}
+@media (max-width: 700px) {
+  .space-band-status { grid-template-columns: 1fr; }
+  .space-launch-hero { grid-column: auto; }
+  .space-tables { grid-template-columns: 1fr; }
+  .space-hero-countdown { font-size: 1.8rem; }
+}
+
+/* ============================================================================
+ * SDR Spectrum panel — spectrum_scanner plugin
+ *   Header meta row → live metadata (span, bins, gain, status, freshness).
+ *   Plot wrap      → SVG line plot (top) stacked on canvas waterfall (bottom).
+ *   Hover readout  → absolute-positioned crosshair info.
+ * ========================================================================= */
+.spectrum-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.2rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg-card, #121722);
+  border-bottom: 1px solid var(--border, #1e2430);
+  font-size: 0.85rem;
+  color: var(--text, #d6dee8);
+  align-items: center;
+}
+.spectrum-meta-item { white-space: nowrap; }
+.spectrum-meta-label {
+  color: var(--text-muted, #6e7a8a);
+  margin-right: 0.3em;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+}
+.spectrum-status-running   { color: var(--green,  #4ade80); }
+.spectrum-status-starting,
+.spectrum-status-restarting{ color: var(--accent, #58a6ff); }
+.spectrum-status-error,
+.spectrum-status-unavailable { color: var(--red,   #f87171); }
+.spectrum-status-stopped   { color: var(--text-muted, #6e7a8a); }
+
+.spectrum-plot-wrap {
+  position: relative;
+  background: #0a0d17;
+  padding: 0;
+}
+/* Band ribbon: thin strip sitting directly above the line plot, each
+ * allocated band drawn as a colour-coded rectangle mapped 1:1 to the
+ * plot's frequency axis.  Positioned via percent left/width from JS. */
+.spectrum-bands {
+  position: relative;
+  width: 100%;
+  height: 22px;
+  background: #060912;
+  border-bottom: 1px solid var(--border, #1e2430);
+  overflow: hidden;
+  user-select: none;
+}
+.spectrum-band {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-left: 1px solid;
+  border-right: 1px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: #f0f3f8;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: help;
+  transition: filter 120ms ease;
+  letter-spacing: 0.02em;
+}
+.spectrum-band:hover { filter: brightness(1.35) saturate(1.1); z-index: 3; }
+/* Landmark vertical guide lines span the full plot height (band strip +
+ * line plot + waterfall) so users can visually trace single-frequency
+ * points of interest (ADS-B, GPS L1, NOAA WX) across all three views. */
+.spectrum-overlay {
+  position: absolute;
+  left: 0; right: 0;
+  top: 0; bottom: 0;
+  pointer-events: none;  /* must not intercept canvas hover */
+}
+.spectrum-landmark {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 0;
+  border-left: 1px dashed rgba(255, 255, 255, 0.28);
+}
+.spectrum-landmark-label {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 8px;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(8, 12, 22, 0.85);
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.spectrum-line {
+  display: block;
+  width: 100%;
+  height: 160px;
+  background: linear-gradient(180deg, #0a0d17 0%, #0c1120 100%);
+  border-bottom: 1px solid var(--border, #1e2430);
+}
+.spectrum-waterfall {
+  display: block;
+  width: 100%;
+  height: 320px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  cursor: crosshair;
+}
+.spectrum-hover {
+  position: absolute;
+  bottom: 6px;
+  right: 8px;
+  display: none;
+  padding: 5px 9px;
+  background: rgba(6, 10, 18, 0.92);
+  color: var(--text, #d6dee8);
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  border: 1px solid var(--accent, #58a6ff);
+  border-radius: 3px;
+  pointer-events: none;
+  letter-spacing: 0.02em;
+  max-width: 70%;
+  line-height: 1.45;
+}
+.spectrum-hover-band {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-muted, #8b949e);
+  font-size: 0.72rem;
+}
+.spectrum-hover-band strong {
+  color: var(--text, #d6dee8);
+  font-weight: 600;
+}
+/* Collapsible legend — auto-generated from the band data so additions
+ * in spectrum.js can't drift out of sync with what the UI shows. */
+.spectrum-legend-toggle {
+  padding: 0.45rem 0.8rem;
+  background: var(--bg-card, #121722);
+  border-top: 1px solid var(--border, #1e2430);
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-muted, #8b949e);
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  transition: color 120ms ease;
+}
+.spectrum-legend-toggle:hover { color: var(--text, #d6dee8); }
+.spectrum-legend-toggle .chevron { display: inline-block; font-size: 0.75rem; }
+.spectrum-legend {
+  padding: 0.7rem 0.9rem;
+  background: var(--bg-card, #121722);
+  border-top: 1px solid var(--border, #1e2430);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.55rem 1rem;
+  font-size: 0.78rem;
+}
+.spectrum-legend.hidden { display: none; }
+.spectrum-legend-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  line-height: 1.3;
+}
+.spectrum-legend-swatch {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+.spectrum-legend-body { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+.spectrum-legend-cat {
+  color: var(--text, #d6dee8);
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+.spectrum-legend-bands {
+  color: var(--text-muted, #8b949e);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+.spectrum-scale {
+  font-size: 0.7rem;
+  color: var(--text-muted, #6e7a8a);
+  padding: 0.3rem 0.8rem;
+  background: var(--bg-card, #121722);
+  border-top: 1px solid var(--border, #1e2430);
+}
+
+@media (max-width: 700px) {
+  .spectrum-waterfall { height: 220px; }
+  .spectrum-line      { height: 110px; }
+  .spectrum-meta      { font-size: 0.78rem; }
+  .spectrum-bands     { height: 20px; }
+  .spectrum-band      { font-size: 9px; }
+  .spectrum-landmark-label { font-size: 7px; padding: 1px 3px; }
+  .spectrum-legend    { grid-template-columns: 1fr; }
+}
+
+/* ============================================================================
+ * LoRa Spectrum panel — zoomed project-aware view of the LoRa ISM band
+ *   Layout: meta strip + [plot-wrap | sidebar] + scale.
+ *   Overlays on plot-wrap: RNode highlight rect, Meshtastic channel grid,
+ *   regulatory edges, right-edge arrivals strip.
+ *   Sidebar: occupancy bars, RNS load, neighbor summary, transport times.
+ * ========================================================================= */
+.lora-spectrum-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.8rem;
+  padding: 0.55rem 0.8rem;
+  background: var(--bg-card, #121722);
+  border-bottom: 1px solid var(--border, #1e2430);
+  font-size: 0.82rem;
+  color: var(--text, #d6dee8);
+  align-items: center;
+  line-height: 1.4;
+}
+.lora-meta-region {
+  color: var(--accent, #58a6ff);
+  font-weight: 600;
+}
+.lora-meta-src {
+  color: var(--text-muted, #8b949e);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+.lora-meta-rnode {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  color: var(--text, #d6dee8);
+  background: rgba(86, 210, 216, 0.10);
+  border: 1px solid rgba(86, 210, 216, 0.30);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+.lora-meta-rnode.lora-meta-muted {
+  color: var(--text-muted, #8b949e);
+  background: rgba(120, 120, 120, 0.10);
+  border-color: rgba(120, 120, 120, 0.20);
+}
+.lora-meta-preset {
+  color: var(--text-muted, #8b949e);
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+}
+.lora-meta-warn {
+  color: #f0ad4e;
+  background: rgba(240, 173, 78, 0.12);
+  border: 1px solid rgba(240, 173, 78, 0.35);
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 0.76rem;
+}
+
+/* Layout: plot-wrap fills the panel. */
+.lora-spectrum-layout {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+  background: var(--bg-card, #121722);
+}
+.lora-spectrum-plot-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: #0a0d17;
+}
+
+.lora-spectrum-bands {
+  position: relative;
+  width: 100%;
+  height: 18px;
+  background: #060912;
+  border-bottom: 1px solid var(--border, #1e2430);
+  overflow: hidden;
+  user-select: none;
+}
+.lora-spectrum-line {
+  display: block;
+  width: 100%;
+  height: 120px;
+  background: linear-gradient(180deg, #0a0d17 0%, #0c1120 100%);
+  border-bottom: 1px solid var(--border, #1e2430);
+}
+.lora-spectrum-waterfall {
+  display: block;
+  width: 100%;
+  height: 200px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  cursor: crosshair;
+}
+.lora-spectrum-overlay {
+  position: absolute;
+  left: 0; right: 0;
+  top: 18px;          /* skip the bands strip so overlays align with line plot + waterfall */
+  bottom: 0;
+  pointer-events: none;
+}
+.lora-rnode-box {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(86, 210, 216, 0.14);
+  border-left: 1px solid rgba(86, 210, 216, 0.85);
+  border-right: 1px solid rgba(86, 210, 216, 0.85);
+  box-shadow: inset 0 0 12px rgba(86, 210, 216, 0.12);
+}
+.lora-rnode-box-label {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 9px;
+  color: rgba(230, 245, 246, 0.95);
+  background: rgba(8, 18, 22, 0.88);
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(86, 210, 216, 0.4);
+}
+.lora-mt-tick {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.09);
+}
+.lora-mt-tick-active {
+  border-left: 1px solid rgba(88, 166, 255, 0.6);
+  box-shadow: 0 0 4px rgba(88, 166, 255, 0.5);
+}
+.lora-mt-tick-label {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 8px;
+  color: rgba(200, 220, 255, 0.95);
+  background: rgba(8, 12, 22, 0.85);
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+  border: 1px solid rgba(88, 166, 255, 0.28);
+}
+.lora-reg-edge {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 0;
+  border-left: 1px dashed rgba(240, 173, 78, 0.55);
+}
+
+.lora-spectrum-hover {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  display: none;
+  padding: 5px 9px;
+  background: rgba(6, 10, 18, 0.92);
+  color: var(--text, #d6dee8);
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  border: 1px solid var(--accent, #58a6ff);
+  border-radius: 3px;
+  pointer-events: none;
+  letter-spacing: 0.02em;
+  max-width: 70%;
+  line-height: 1.45;
+}
+.lora-spectrum-hover-band {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-muted, #8b949e);
+  font-size: 0.72rem;
+}
+.lora-spectrum-hover-band strong {
+  color: var(--text, #d6dee8);
+  font-weight: 600;
+}
+
+.lora-spectrum-scale {
+  font-size: 0.7rem;
+  color: var(--text-muted, #6e7a8a);
+  padding: 0.3rem 0.8rem;
+  background: var(--bg-card, #121722);
+  border-top: 1px solid var(--border, #1e2430);
+}
+
+@media (max-width: 900px) {
+  .lora-spectrum-layout   { flex-direction: column; }
+}
+@media (max-width: 700px) {
+  .lora-spectrum-waterfall { height: 160px; }
+  .lora-spectrum-line      { height: 90px; }
+  .lora-spectrum-meta      { font-size: 0.76rem; }
+  .lora-rnode-box-label    { font-size: 8px; }
+  .lora-mt-tick-label      { font-size: 7px; padding: 1px 3px; }
 }

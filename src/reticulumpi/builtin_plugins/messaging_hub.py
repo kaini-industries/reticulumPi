@@ -205,6 +205,42 @@ class MessageStore:
             "CREATE INDEX IF NOT EXISTS idx_msg_sub_transport "
             "ON messages(transport, sub_transport)"
         )
+        # One-time cleanup (idempotent): pre-channel-split Meshtastic
+        # broadcast rows can't be re-bucketed by channel, so drop them.
+        self._conn.execute(
+            "DELETE FROM messages WHERE msg_type = 'broadcast' "
+            "AND transport = 'meshtastic' "
+            "AND contact_id IN ("
+            "  '__broadcast_meshtastic_lora__', "
+            "  '__broadcast_meshtastic_mqtt__'"
+            ")"
+        )
+        # One-time cleanup (idempotent): an interim MQTT path keyed
+        # broadcast threads by the envelope channel-name string (e.g.
+        # __broadcast_meshtastic_mqtt_chLongFast__) while outbound kept
+        # using the configured local slot index, which split the same
+        # conversation across two rows.  Inbound now also uses the
+        # local index, so any surviving name-keyed rows are orphans
+        # and can be dropped.  GLOB matches rows whose channel suffix
+        # contains a letter; index-keyed rows (digits only) are left
+        # untouched.
+        self._conn.execute(
+            "DELETE FROM messages WHERE msg_type = 'broadcast' "
+            "AND transport = 'meshtastic' AND sub_transport = 'mqtt' "
+            "AND contact_id GLOB '__broadcast_meshtastic_mqtt_ch*[A-Za-z]*__'"
+        )
+        # One-time cleanup (idempotent): MeshCore broadcasts briefly
+        # inherited the meshtastic channel-suffix scheme, but the
+        # MeshCore panel doesn't support per-channel threads, so
+        # outbound landed at "__broadcast_meshcore_ch0__" while inbound
+        # stayed at "__broadcast_meshcore__".  Fold any surviving
+        # _chN suffixed rows back onto the canonical cid.
+        self._conn.execute(
+            "UPDATE messages "
+            "SET contact_id = '__broadcast_meshcore__' "
+            "WHERE msg_type = 'broadcast' AND transport = 'meshcore' "
+            "AND contact_id GLOB '__broadcast_meshcore_ch*__'"
+        )
         self._conn.commit()
 
     @staticmethod
@@ -212,6 +248,7 @@ class MessageStore:
         direction: str, msg_type: str, transport: str,
         from_id: str | None, to_id: str | None,
         sub_transport: str = "",
+        channel: int | str | None = None,
     ) -> str:
         """Compute the contact_id for a message.
 
@@ -219,11 +256,24 @@ class MessageStore:
         conversations per source channel for broadcasts AND direct
         messages.  This lets the dashboard split the same Meshtastic
         peer's MQTT vs LoRa traffic into their own panels.
+
+        ``channel`` further splits broadcast threads by Meshtastic
+        channel.  Usually an integer index (local radio channel), but
+        may be a string channel name when the source (typically MQTT)
+        reports a channel we don't have mapped locally.  DMs ignore
+        channel (same peer is the same conversation regardless of
+        which channel carried it).  Other transports (meshcore, lxmf)
+        don't expose per-channel broadcast threads in the UI, so the
+        channel suffix is only applied for meshtastic — this keeps all
+        meshcore public-channel traffic on the single pinned broadcast
+        row the panel renders.
         """
         if msg_type == "broadcast":
+            use_channel = channel is not None and transport == "meshtastic"
+            ch_suffix = f"_ch{channel}" if use_channel else ""
             if sub_transport:
-                return f"__broadcast_{transport}_{sub_transport}__"
-            return f"__broadcast_{transport}__"
+                return f"__broadcast_{transport}_{sub_transport}{ch_suffix}__"
+            return f"__broadcast_{transport}{ch_suffix}__"
         peer = (to_id if direction == "sent" else from_id) or "__unknown__"
         if sub_transport:
             return f"{peer}__{sub_transport}"
@@ -245,13 +295,17 @@ class MessageStore:
         status: str = "sent",
         metadata: dict | None = None,
         sub_transport: str = "",
+        channel: int | str | None = None,
     ) -> int:
         """Insert a message and return its row ID."""
         ts = time.time()
+        if channel is not None:
+            metadata = dict(metadata) if metadata else {}
+            metadata.setdefault("channel", channel)
         meta_json = json.dumps(metadata) if metadata else None
         contact_id = self._compute_contact_id(
             direction, msg_type, transport, from_id, to_id,
-            sub_transport=sub_transport,
+            sub_transport=sub_transport, channel=channel,
         )
         search_text = text.lower() if text else None
         # New received messages default to unread
@@ -283,22 +337,45 @@ class MessageStore:
             self._conn.commit()
 
     def prune(self, max_messages: int) -> int:
-        """Delete oldest messages beyond *max_messages*.  Returns rows deleted."""
+        """Delete oldest messages beyond *max_messages* PER transport.
+
+        Pruning is bucketed per ``transport`` so a chatty transport (e.g.
+        Meshtastic MQTT broadcasts) can't starve out a sparse one (e.g.
+        LXMF DMs) — a single global cap caused exactly that, with LXMF
+        history evaporating as MQTT traffic refilled the table.  Each
+        transport now independently keeps its newest ``max_messages``
+        rows.  Returns total rows deleted across all transports.
+        """
         if max_messages <= 0:
             return 0
         with self._lock:
-            cur = self._conn.execute("SELECT COUNT(*) FROM messages")
-            count = cur.fetchone()[0]
-            if count <= max_messages:
-                return 0
-            excess = count - max_messages
-            self._conn.execute(
-                "DELETE FROM messages WHERE id IN "
-                "(SELECT id FROM messages ORDER BY timestamp ASC LIMIT ?)",
-                (excess,),
-            )
-            self._conn.commit()
-            return excess
+            over_quota = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT transport FROM messages "
+                    "GROUP BY transport HAVING COUNT(*) > ?",
+                    (max_messages,),
+                ).fetchall()
+            ]
+            total_deleted = 0
+            for tr in over_quota:
+                count = self._conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE transport = ?", (tr,)
+                ).fetchone()[0]
+                excess = count - max_messages
+                if excess <= 0:
+                    continue
+                self._conn.execute(
+                    "DELETE FROM messages WHERE id IN ("
+                    "  SELECT id FROM messages WHERE transport = ? "
+                    "  ORDER BY timestamp ASC LIMIT ?"
+                    ")",
+                    (tr, excess),
+                )
+                total_deleted += excess
+            if total_deleted:
+                self._conn.commit()
+            return total_deleted
 
     # ── Read ───────────────────────────────────────────────────────
 
@@ -894,6 +971,29 @@ class MeshtasticAdapter(TransportAdapter):
             source = "lora"
         is_broadcast = data.get("is_broadcast", True)
 
+        # Meshtastic channel identity.  Serial/LoRa gives us a local
+        # integer index (0..7).  MQTT gives us a channel-name string
+        # resolved from the ServiceEnvelope — falls back to the name
+        # itself when we have no matching local channel (e.g. a peer
+        # broadcasting on a channel we don't have configured).  DMs
+        # ignore channel.
+        raw_ch = data.get("channel")
+        channel: int | str | None
+        if raw_ch is None:
+            channel = None
+        elif isinstance(raw_ch, bool):
+            # bool is a subclass of int — reject it explicitly.
+            channel = None
+        elif isinstance(raw_ch, int):
+            channel = raw_ch
+        elif isinstance(raw_ch, str):
+            channel = raw_ch
+        else:
+            try:
+                channel = int(raw_ch)
+            except (TypeError, ValueError):
+                channel = None
+
         # Tag every Meshtastic message (broadcast AND direct) with
         # sub_transport so the dashboard can show MQTT and LoRa traffic
         # in separate panels.
@@ -906,6 +1006,7 @@ class MeshtasticAdapter(TransportAdapter):
             "to_name": None,
             "text": data.get("text", ""),
             "msg_type": "broadcast" if is_broadcast else "direct",
+            "channel": channel if is_broadcast else None,
             "metadata": {k: v for k, v in data.items() if k not in ("text",)},
         })
 
@@ -958,9 +1059,37 @@ class MeshtasticAdapter(TransportAdapter):
             )
             self._hub._on_delivery_status_update(msg_id, "meshtastic", status)
 
+        # The hub passes `channel` as the thread's channel identity,
+        # which is normally an int radio-slot index but may be a string
+        # channel name when the thread came from an MQTT peer broadcasting
+        # on a channel we don't have locally.  The radio call below needs
+        # an int; resolve strings against local channels and refuse if we
+        # don't have a matching slot (we can't transmit on a channel the
+        # radio isn't configured for).
         channel = kwargs.get("channel")
+        tx_channel: int | None = None
+        if isinstance(channel, bool):
+            pass  # reject bool (subclass of int) explicitly
+        elif isinstance(channel, int):
+            tx_channel = channel
+        elif isinstance(channel, str):
+            try:
+                for ch in gw.get_channels() or []:
+                    if ch.get("active") and ch.get("name") == channel:
+                        tx_channel = int(ch["index"])
+                        break
+            except Exception:
+                tx_channel = None
+            if tx_channel is None:
+                return {
+                    "sent": False,
+                    "reason": (
+                        f"Channel '{channel}' is not configured on the local "
+                        "radio, so this node can't transmit on it."
+                    ),
+                }
         result = gw.send_message(
-            text, destination_id=dest_id, channel=channel, via=via,
+            text, destination_id=dest_id, channel=tx_channel, via=via,
             on_ack=_on_ack,
         )
         # Stash the holder ref so the hub's send_message can bind msg_id
@@ -1060,6 +1189,12 @@ class MeshCoreAdapter(TransportAdapter):
         )
         msg_type = data.get("msg_type", "direct")
 
+        channel = data.get("channel")
+        try:
+            channel = int(channel) if channel is not None else None
+        except (TypeError, ValueError):
+            channel = None
+
         self._hub_callback({
             "transport": "meshcore",
             "sub_transport": "",
@@ -1069,6 +1204,7 @@ class MeshCoreAdapter(TransportAdapter):
             "to_name": None,
             "text": data.get("text", ""),
             "msg_type": msg_type,
+            "channel": channel,
             "metadata": {k: v for k, v in data.items() if k not in ("text",)},
         })
 
@@ -1249,6 +1385,7 @@ class MessagingHubPlugin(PluginBase):
                 status="received",
                 metadata=msg.get("metadata"),
                 sub_transport=msg.get("sub_transport", ""),
+                channel=msg.get("channel"),
             )
             self._maybe_prune()
             self.event_bus.publish(events.MESSAGE_RECEIVED, {
@@ -1294,6 +1431,12 @@ class MessagingHubPlugin(PluginBase):
                     to_name = c.get("name")
                     break
 
+        # Broadcast without an explicit channel lands on 0 (Primary),
+        # matching the gateway's radio-side default, so the stored
+        # thread aligns with the channel the packet was actually sent on.
+        channel = kwargs.get("channel")
+        if channel is None and kwargs.get("msg_type") == "broadcast":
+            channel = 0
         msg_id = self._store.store(
             transport=transport,
             direction="sent",
@@ -1306,6 +1449,7 @@ class MessagingHubPlugin(PluginBase):
             status="sent" if result.get("sent") else "failed",
             metadata=kwargs.get("metadata"),
             sub_transport=kwargs.get("sub_transport", ""),
+            channel=channel,
         )
         self._maybe_prune()
 

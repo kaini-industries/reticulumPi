@@ -495,6 +495,8 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                         "launches": (snap.get("launches") or [])[:5],
                         "weather": snap.get("weather"),
                         "observer": snap.get("observer"),
+                        "passes": (snap.get("passes") or [])[:10],
+                        "passes_computed_at": snap.get("passes_computed_at"),
                     }
                     # Propagated positions: trim to top N (by elevation if
                     # observer, otherwise as-is) to keep broadcast size bounded.
@@ -512,6 +514,41 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                             "count": positions.get("count", len(objects)),
                             "objects": objects[:60],
                         }
+                except Exception:
+                    pass
+
+            # Collect spectrum scanner snapshot (if plugin enabled).  The
+            # plugin hands us a pruned, wire-ready dict; we attach it
+            # verbatim.  Snapshot includes a rolling waterfall buffer
+            # (capped by the plugin's config), so size is bounded.
+            spectrum_data: dict = {}
+            scanner = plugin.app.get_plugin("spectrum_scanner")
+            if scanner and hasattr(scanner, "get_snapshot"):
+                try:
+                    spectrum_data = scanner.get_snapshot()
+                except Exception:
+                    pass
+
+            # Collect RNode PHY channel-load / airtime from lora_diagnostics.
+            # Surfaces RNode's own view of how busy the channel is, so the
+            # LoRa Spectrum panel can show it next to the SDR-derived bars.
+            # channel_load_* / announce_queue / online populate at runtime
+            # after the first monitor tick; before that they're absent and
+            # .get(...) returns None, which the frontend handles.
+            lora_diag_data: dict = {}
+            lora_diag = plugin.app.get_plugin("lora_diagnostics")
+            if lora_diag and hasattr(lora_diag, "get_diagnostics"):
+                try:
+                    d = lora_diag.get_diagnostics()
+                    li = d.get("lora_interface", {}) or {}
+                    lora_diag_data = {
+                        "channel_load_short": li.get("channel_load_short"),
+                        "channel_load_long":  li.get("channel_load_long"),
+                        "airtime_short":      li.get("airtime_short"),
+                        "airtime_long":       li.get("airtime_long"),
+                        "announce_queue":     li.get("announce_queue"),
+                        "online":             li.get("online"),
+                    }
                 except Exception:
                     pass
 
@@ -572,6 +609,10 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 data["mesh"] = mesh_data
             if space_data:
                 data["space"] = space_data
+            if spectrum_data:
+                data["spectrum"] = spectrum_data
+            if lora_diag_data:
+                data["lora_diagnostics"] = lora_diag_data
 
             message = json.dumps({
                 "type": "update",

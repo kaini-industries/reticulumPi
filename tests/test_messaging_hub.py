@@ -220,6 +220,28 @@ class TestMessageStore:
         deleted = store.prune(100)
         assert deleted == 0
 
+    def test_prune_is_per_transport(self, store):
+        # Regression: a single global cap let a chatty transport (mqtt
+        # broadcasts) starve a sparse one (lxmf) by evicting it entirely.
+        for i in range(10):
+            store.store(
+                transport="meshtastic", direction="received",
+                msg_type="broadcast", text=f"mt {i}",
+            )
+        for i in range(2):
+            store.store(
+                transport="lxmf", direction="received",
+                msg_type="direct", text=f"lx {i}",
+            )
+        deleted = store.prune(5)
+        assert deleted == 5  # only the 5 oldest meshtastic rows
+        msgs = store.get_messages(limit=100)
+        by_t = {}
+        for m in msgs:
+            by_t[m["transport"]] = by_t.get(m["transport"], 0) + 1
+        assert by_t.get("lxmf") == 2     # untouched
+        assert by_t.get("meshtastic") == 5
+
     def test_delete_conversation_removes_only_that_thread(self, store):
         store.store(
             transport="lxmf", direction="received", msg_type="direct",
@@ -342,6 +364,114 @@ class TestMessageStore:
         assert len(mqtt) == 1 and mqtt[0]["text"] == "MQTT msg"
         assert len(lora) == 1 and lora[0]["text"] == "LoRa msg"
 
+    def test_broadcast_contact_id_splits_by_channel(self, store):
+        """Broadcasts on different Meshtastic channels get their own threads."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="Primary", from_id="!aabb1122",
+            sub_transport="lora", channel=0,
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="Private channel", from_id="!aabb1122",
+            sub_transport="lora", channel=1,
+        )
+        contact_ids = [c["contact_id"] for c in store.get_conversations()]
+        assert "__broadcast_meshtastic_lora_ch0__" in contact_ids
+        assert "__broadcast_meshtastic_lora_ch1__" in contact_ids
+        assert len(contact_ids) == 2
+
+    def test_dm_contact_id_ignores_channel(self, store):
+        """DMs from the same peer stay in one thread regardless of channel."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="via ch0", from_id="!aabb1122", to_id="!ccdd3344",
+            sub_transport="lora", channel=0,
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="via ch3", from_id="!aabb1122", to_id="!ccdd3344",
+            sub_transport="lora", channel=3,
+        )
+        contact_ids = [c["contact_id"] for c in store.get_conversations()]
+        assert contact_ids == ["!aabb1122__lora"]
+
+    def test_store_records_channel_in_metadata(self, store):
+        """channel kwarg mirrors into metadata['channel'] for display/query."""
+        msg_id = store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="hi", from_id="!aa", sub_transport="lora", channel=2,
+        )
+        msg = store.get_message(msg_id)
+        assert msg["metadata"]["channel"] == 2
+
+    def test_broadcast_channel_accepts_string(self, store):
+        """String channel (MQTT peer on an unmapped channel) creates its own thread."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="from LongFast peer", from_id="!aa",
+            sub_transport="mqtt", channel="LongFast",
+        )
+        contact_ids = [c["contact_id"] for c in store.get_conversations()]
+        assert "__broadcast_meshtastic_mqtt_chLongFast__" in contact_ids
+
+    def test_broadcast_int_and_str_channels_are_distinct(self, store):
+        """int 0 and str 'LongFast' create separate conversations even if they semantically overlap."""
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="via index 0", from_id="!aa",
+            sub_transport="mqtt", channel=0,
+        )
+        store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="via name", from_id="!bb",
+            sub_transport="mqtt", channel="LongFast",
+        )
+        contact_ids = [c["contact_id"] for c in store.get_conversations()]
+        assert "__broadcast_meshtastic_mqtt_ch0__" in contact_ids
+        assert "__broadcast_meshtastic_mqtt_chLongFast__" in contact_ids
+        assert len(contact_ids) == 2
+
+    def test_legacy_broadcast_rows_cleaned_on_init(self, tmp_path):
+        """Pre-channel-split Meshtastic broadcast rows are purged at init."""
+        db = str(tmp_path / "legacy.db")
+        # Seed with a legacy-format Meshtastic broadcast row plus an LXMF
+        # broadcast (no channels -> shouldn't be purged) and a DM.
+        s1 = MessageStore(db)
+        import sqlite3
+        with sqlite3.connect(db) as conn:
+            # Insert a legacy-format broadcast row directly to simulate
+            # pre-upgrade data that the new code can't bucket by channel.
+            conn.execute(
+                "INSERT INTO messages "
+                "(timestamp, transport, direction, msg_type, "
+                " from_id, text, contact_id, sub_transport) "
+                "VALUES (?, 'meshtastic', 'received', 'broadcast', "
+                " '!aa', 'legacy', '__broadcast_meshtastic_lora__', 'lora')",
+                (time.time(),),
+            )
+            conn.execute(
+                "INSERT INTO messages "
+                "(timestamp, transport, direction, msg_type, "
+                " from_id, text, contact_id, sub_transport) "
+                "VALUES (?, 'lxmf', 'received', 'broadcast', "
+                " 'peer', 'lxmf_bcast', '__broadcast_lxmf__', '')",
+                (time.time(),),
+            )
+            conn.commit()
+        s1.close()
+
+        # Re-open — the cleanup runs in __init__ via _migrate_schema.
+        s2 = MessageStore(db)
+        try:
+            contact_ids = [c["contact_id"] for c in s2.get_conversations()]
+            # Legacy Meshtastic broadcast gone
+            assert "__broadcast_meshtastic_lora__" not in contact_ids
+            # LXMF broadcast untouched (no channel concept on LXMF)
+            assert "__broadcast_lxmf__" in contact_ids
+        finally:
+            s2.close()
+
 
 # ═══════════════════════════════════════════════════════════════════
 # MessagingHubPlugin
@@ -448,6 +578,42 @@ class TestMessagingHubPlugin:
         assert msgs[0]["direction"] == "received"
         assert msgs[0]["status"] == "received"
         hub_plugin.event_bus.publish.assert_called()
+
+    def test_send_broadcast_defaults_channel_to_zero(self, hub_plugin):
+        """send_message(broadcast) with no channel lands on channel 0."""
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "meshtastic"
+        adapter.display_name = "Meshtastic"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": True}
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+
+        hub_plugin.send_message(
+            "meshtastic", "hello", "broadcast",
+            msg_type="broadcast", sub_transport="lora",
+        )
+        msgs = hub_plugin.get_messages()
+        assert len(msgs) == 1
+        assert msgs[0]["contact_id"] == "__broadcast_meshtastic_lora_ch0__"
+
+    def test_adapter_message_propagates_channel(self, hub_plugin):
+        """Inbound broadcast with channel kwarg lands in per-channel thread."""
+        hub_plugin._on_adapter_message({
+            "transport": "meshtastic",
+            "sub_transport": "lora",
+            "from_id": "!aabb1122",
+            "from_name": "Alice",
+            "to_id": None,
+            "to_name": None,
+            "text": "private chat",
+            "msg_type": "broadcast",
+            "channel": 4,
+        })
+        msgs = hub_plugin.get_messages()
+        assert len(msgs) == 1
+        assert msgs[0]["contact_id"] == "__broadcast_meshtastic_lora_ch4__"
+        assert msgs[0]["metadata"]["channel"] == 4
 
     def test_get_transports(self, hub_plugin):
         adapter = MagicMock(spec=TransportAdapter)

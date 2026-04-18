@@ -88,7 +88,10 @@
             </div>
             <div class="msg-new-compose hidden" id="msg-lxmf-new-compose">
               <div class="msg-compose-row">
-                <select id="msg-lxmf-dest-select" class="rt-select"></select>
+                <div class="msg-dest-combo" id="msg-lxmf-dest-combo">
+                  <input type="text" class="rt-input msg-dest-input" id="msg-lxmf-dest-input" autocomplete="off" spellcheck="false" placeholder="Select destination…" />
+                  <div class="msg-dest-list" id="msg-lxmf-dest-list"></div>
+                </div>
                 <input type="text" id="msg-lxmf-lxmf-raw" class="rt-input" placeholder="Destination hash (32 hex chars)…" style="display:none" />
               </div>
             </div>
@@ -136,7 +139,10 @@
             </div>
             <div class="msg-new-compose hidden" id="msg-mqtt-new-compose">
               <div class="msg-compose-row">
-                <select id="msg-mqtt-dest-select" class="rt-select"></select>
+                <div class="msg-dest-combo" id="msg-mqtt-dest-combo">
+                  <input type="text" class="rt-input msg-dest-input" id="msg-mqtt-dest-input" autocomplete="off" spellcheck="false" placeholder="Select destination…" />
+                  <div class="msg-dest-list" id="msg-mqtt-dest-list"></div>
+                </div>
               </div>
             </div>
           </div>
@@ -183,7 +189,10 @@
             </div>
             <div class="msg-new-compose hidden" id="msg-lora-new-compose">
               <div class="msg-compose-row">
-                <select id="msg-lora-dest-select" class="rt-select"></select>
+                <div class="msg-dest-combo" id="msg-lora-dest-combo">
+                  <input type="text" class="rt-input msg-dest-input" id="msg-lora-dest-input" autocomplete="off" spellcheck="false" placeholder="Select destination…" />
+                  <div class="msg-dest-list" id="msg-lora-dest-list"></div>
+                </div>
               </div>
             </div>
           </div>
@@ -226,7 +235,10 @@
             </div>
             <div class="msg-new-compose hidden" id="msg-meshcore-new-compose">
               <div class="msg-compose-row">
-                <select id="msg-meshcore-dest-select" class="rt-select"></select>
+                <div class="msg-dest-combo" id="msg-meshcore-dest-combo">
+                  <input type="text" class="rt-input msg-dest-input" id="msg-meshcore-dest-input" autocomplete="off" spellcheck="false" placeholder="Select destination…" />
+                  <div class="msg-dest-list" id="msg-meshcore-dest-list"></div>
+                </div>
               </div>
             </div>
           </div>
@@ -646,41 +658,124 @@
         <span class="count" id="space-count"></span>
       </div>
       <div class="section-body hidden" id="space-body">
-        <div class="space-grid">
-          <div class="space-tile">
-            <div class="space-tile-label">Satellites tracked</div>
-            <div class="space-tile-value" id="space-sat-count">--</div>
-            <div class="space-tile-sub" id="space-groups-sub"></div>
+
+        <!-- Band 1: Status Strip (sky dome, Kp gauge, launch hero) -->
+        <div class="space-band space-band-status">
+          <div class="space-panel space-skydome-panel">
+            <div class="space-panel-label">Sky Dome <span class="space-panel-sub" id="space-sat-count">--</span></div>
+            <svg id="space-skydome" class="space-skydome" viewBox="0 0 240 240" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="space-skydome-meta">
+              <span id="space-overhead-names" class="space-muted-line"></span>
+              <span id="space-groups-sub" class="space-muted-line"></span>
+            </div>
           </div>
-          <div class="space-tile">
-            <div class="space-tile-label">Overhead now (el &gt; 10&deg;)</div>
-            <div class="space-tile-value" id="space-overhead">--</div>
-            <div class="space-tile-sub" id="space-overhead-names"></div>
+
+          <div class="space-panel space-kp-panel">
+            <div class="space-panel-label">Geomagnetic Activity</div>
+            <svg id="space-kp-gauge" class="space-kp-gauge" viewBox="0 0 220 140" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="space-kp-readout">
+              <span class="space-kp-value" id="space-kp">--</span>
+              <span class="space-kp-label" id="space-kp-band">&nbsp;</span>
+            </div>
+            <div class="space-muted-line"><span id="space-overhead">--</span> overhead &middot; <span id="space-kp-time"></span></div>
           </div>
-          <div class="space-tile">
-            <div class="space-tile-label">Kp index</div>
-            <div class="space-tile-value" id="space-kp">--</div>
-            <div class="space-tile-sub" id="space-kp-time"></div>
-          </div>
-          <div class="space-tile">
-            <div class="space-tile-label">Next launch</div>
-            <div class="space-tile-value space-tile-value-sm" id="space-next-launch">--</div>
-            <div class="space-tile-sub" id="space-next-launch-when"></div>
+
+          <div class="space-panel space-launch-hero">
+            <div class="space-panel-label">Next Launch</div>
+            <div class="space-hero-countdown" id="space-hero-countdown">T--</div>
+            <div class="space-hero-name" id="space-next-launch">No upcoming launch</div>
+            <div class="space-muted-line" id="space-next-launch-when"></div>
           </div>
         </div>
-        <div id="space-map-container" style="height: 420px; width: 100%; margin-top: 12px;"></div>
-        <div class="space-launch-list">
-          <div class="space-launch-heading">Upcoming Launches</div>
-          <table class="data-table">
-            <thead>
-              <tr><th>T-</th><th>Name</th><th>Provider</th><th>Pad</th></tr>
-            </thead>
-            <tbody id="space-launch-table"></tbody>
-          </table>
+
+        <!-- Band 2: Pass Timeline (12h swimlane) -->
+        <div class="space-band space-band-timeline">
+          <div class="space-panel-label">
+            Next Passes <span class="space-panel-sub">&middot; 12h window</span>
+            <span class="space-next-pass-inline">
+              <span id="space-next-pass">--</span>
+              <span class="space-muted-line" id="space-next-pass-when"></span>
+            </span>
+          </div>
+          <svg id="space-timeline" class="space-timeline" preserveAspectRatio="none"></svg>
         </div>
-        <div class="space-attribution">
-          Data: Celestrak, Launch Library 2, NOAA SWPC. Tiles &copy; OpenStreetMap.
+
+        <!-- Band 3: World Map + collapsible tables -->
+        <div class="space-band space-band-map">
+          <div id="space-map-container" class="space-map"></div>
+          <details class="space-details">
+            <summary>Data Tables &middot; upcoming launches &amp; passes</summary>
+            <div class="space-tables">
+              <div class="space-table-wrap">
+                <div class="space-table-heading">Upcoming Launches</div>
+                <table class="data-table">
+                  <thead><tr><th>T-</th><th>Name</th><th>Provider</th><th>Pad</th></tr></thead>
+                  <tbody id="space-launch-table"></tbody>
+                </table>
+              </div>
+              <div class="space-table-wrap">
+                <div class="space-table-heading">Upcoming Passes</div>
+                <table class="data-table">
+                  <thead><tr><th>AOS (T-)</th><th>Satellite</th><th>Max El</th><th>Dir</th><th>Dur</th></tr></thead>
+                  <tbody id="space-pass-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+          <div class="space-attribution">
+            Data: Celestrak, Launch Library 2, NOAA SWPC. Tiles &copy; OpenStreetMap.
+          </div>
         </div>
+
+      </div>
+    </div>
+
+    <!-- SDR Spectrum (RTL-SDR sweep + waterfall) -->
+    <div class="section" id="spectrum-section" style="display:none">
+      <div class="section-header collapsible" id="spectrum-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> SDR Spectrum</span>
+        <span class="count" id="spectrum-count"></span>
+      </div>
+      <div class="section-body hidden" id="spectrum-body">
+        <div class="spectrum-meta">
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Span</span> <span id="spectrum-span">&mdash;</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Bins</span> <span id="spectrum-bins-info">&mdash;</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Gain</span> <span id="spectrum-gain">&mdash;</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Sweeps</span> <span id="spectrum-sweeps">0</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Status</span> <span id="spectrum-status">&mdash;</span></span>
+          <span class="freshness" id="spectrum-freshness"></span>
+        </div>
+        <div class="spectrum-plot-wrap">
+          <div class="spectrum-bands" id="spectrum-bands" title="Frequency band allocations — hover a band for details"></div>
+          <svg id="spectrum-line" class="spectrum-line" viewBox="0 0 800 160" preserveAspectRatio="none"></svg>
+          <canvas id="spectrum-waterfall" class="spectrum-waterfall" width="800" height="256"></canvas>
+          <div class="spectrum-overlay" id="spectrum-overlay"></div>
+          <div class="spectrum-hover" id="spectrum-hover"></div>
+        </div>
+        <div class="spectrum-legend-toggle" id="spectrum-legend-toggle" title="Show / hide band legend"><span class="chevron">&#9656;</span> Band legend</div>
+        <div class="spectrum-legend hidden" id="spectrum-legend"></div>
+        <div class="spectrum-scale" id="spectrum-scale"></div>
+      </div>
+    </div>
+
+    <!-- LoRa Spectrum (zoomed, project-aware view of the LoRa ISM band) -->
+    <div class="section" id="lora-spectrum-section" style="display:none">
+      <div class="section-header collapsible" id="lora-spectrum-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> LoRa Spectrum</span>
+        <span class="count" id="lora-spectrum-count"></span>
+      </div>
+      <div class="section-body hidden" id="lora-spectrum-body">
+        <div class="lora-spectrum-meta" id="lora-spectrum-meta"></div>
+        <div class="lora-spectrum-layout">
+          <div class="lora-spectrum-plot-wrap">
+            <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
+            <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
+            <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall" width="800" height="200"></canvas>
+            <div class="lora-spectrum-overlay" id="lora-spectrum-overlay"></div>
+            <div class="lora-spectrum-hover" id="lora-spectrum-hover"></div>
+          </div>
+        </div>
+        <div class="lora-spectrum-scale" id="lora-spectrum-scale"></div>
       </div>
     </div>
 
@@ -739,7 +834,7 @@
   </div>
 
   <script src="/static/app.js?v=26"></script>
-  <script src="/static/messages_panel.js?v=1"></script>
+  <script src="/static/messages_panel.js?v=3"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
   <script src="/static/messages_meshtastic_mqtt.js?v=1"></script>
   <script src="/static/messages_meshtastic_lora.js?v=1"></script>
@@ -751,6 +846,9 @@
   <script src="/static/meshcore.js?v=2"></script>
   <script src="/static/vendor/leaflet.js"></script>
   <script src="/static/map.js?v=1"></script>
-  <script src="/static/space.js?v=1"></script>
+  <script src="/static/space.js?v=2"></script>
+  <script src="/static/spectrum_common.js?v=1"></script>
+  <script src="/static/spectrum.js?v=8"></script>
+  <script src="/static/lora_spectrum.js?v=7"></script>
 </body>
 </html>

@@ -1012,6 +1012,7 @@
     api('/api/meshcore/contacts').then(function(r) {
       _mcContacts = (r && r.ok) ? r.data.contacts : [];
       mergeMeshCore();
+      if (RPI.updateMapMeshCore) RPI.updateMapMeshCore(_mcContacts);
     });
     api('/api/meshcore/device').then(function(r) {
       if (r && r.ok && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(r.data);
@@ -1097,6 +1098,7 @@
             if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(msg.data.meshtastic_lora_neighbors);
           }
           if (msg.data.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(msg.data.meshcore_status, msg.data.meshcore_contacts);
+          if (msg.data.meshcore_contacts && RPI.updateMapMeshCore) RPI.updateMapMeshCore(msg.data.meshcore_contacts);
           if (msg.data.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(msg.data.meshcore_device);
           if (msg.data.messaging) {
             if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(msg.data.messaging);
@@ -1105,6 +1107,8 @@
             if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(msg.data.messaging);
           }
           if (msg.data.space && RPI.space && RPI.space.update) RPI.space.update(msg.data.space);
+          if (msg.data.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(msg.data.spectrum);
+          if (msg.data.spectrum && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
         }
       } catch(e) { /* ignore parse errors */ }
     };

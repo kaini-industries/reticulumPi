@@ -345,6 +345,7 @@ reticulumpi:
     #  storage_path: ~/.local/share/reticulumpi/meshcore_gw
     #  max_messages_per_minute: 0     # Rate limit outbound sends (0=unlimited)
     #  health_check_interval: 30      # Seconds between health checks
+    #  health_failure_threshold: 3    # Consecutive failed checks before reconnect
     #  reconnect_delay: 10            # Seconds between reconnect attempts
     #  max_reconnect_attempts: 10     # 0 = unlimited
     #  advert_interval: 900           # Seconds between advertisements (min 60)
@@ -356,7 +357,7 @@ reticulumpi:
     #messaging_hub:
     #  enabled: false
     #  db_path: ~/.local/share/reticulumpi/messaging_hub.db
-    #  message_history_limit: 500    # Max stored messages (0 = unlimited)
+    #  message_history_limit: 500    # Max stored messages PER transport (0 = unlimited)
     #  lxmf:
     #    enabled: true
     #    storage_path: ~/.local/share/reticulumpi/messaging_hub_lxmf
@@ -439,3 +440,35 @@ reticulumpi:
     #  # reach you if something goes wrong with your node.
     #  user_agent: "reticulumpi/0.2 (+https://example.invalid/contact)"
     #  request_timeout_seconds: 15
+
+    # --------------------------------------------------------------------
+    # SDR spectrum scanner — RTL-SDR sweep feeding a waterfall panel in
+    # the dashboard.  Publishes a rolling set of FFT sweeps from rtl_power
+    # to the web dashboard; read-only (no transmit).
+    #
+    # Requires:
+    #   * rtl_power, rtl_test on PATH (apt install rtl-sdr)
+    #   * Kernel DVB-T driver blacklisted so userspace can claim the dongle
+    #     (see /etc/modprobe.d/blacklist-rtlsdr.conf)
+    #   * The reticulumpi user must be in the plugdev group
+    #     (the rtl-sdr udev rule grants device access to plugdev).
+    #
+    # Default span (88-108 MHz, FM broadcast) is chosen so obvious signal
+    # peaks appear immediately and confirm the antenna + gain settings.
+    # Other useful spans:
+    #   * 118-137 MHz  (aviation AM)         * 144-148 MHz  (2m ham)
+    #   * 420-450 MHz  (70cm ham)            * 462-467 MHz  (FRS/GMRS)
+    #   * 902-928 MHz  (33cm / US ISM)
+    # The Elonics E4000 tuner (shipped in some NESDR SMArTee XTR units) has
+    # a local-oscillator dead zone at 1101-1234 MHz — avoid spans there.
+    #spectrum_scanner:
+    #  enabled: false
+    #  freq_start_mhz: 88.0             # Lower bound (MHz); tuner min ~24-52 MHz
+    #  freq_stop_mhz: 108.0             # Upper bound (MHz); tuner max ~1.7-2.2 GHz
+    #  bin_khz: 25.0                    # FFT bin width (1-1000 kHz)
+    #  sweep_seconds: 2                 # Integration time per sweep (1-60 s)
+    #  gain_db: 40.0                    # Tuner gain (dB); null = auto
+    #  ppm: 0                           # Tuner frequency correction (ppm)
+    #  waterfall_rows: 128              # In-memory rolling history depth (8-2048)
+    #  device_index: 0                  # RTL-SDR device index (-d) for multi-dongle setups
+    #  max_restarts: 5                  # Subprocess crash-restart cap (per plugin session)

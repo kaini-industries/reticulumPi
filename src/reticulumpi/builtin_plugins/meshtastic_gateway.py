@@ -62,6 +62,16 @@ _MESHTASTIC_DEFAULT_KEY = bytes([
 # Broadcast address for all nodes
 _MESH_BROADCAST = 0xFFFFFFFF
 
+# Characters allowed in a channel-name suffix of contact_id (conservative set
+# to avoid any surprises in URLs, SQL-ish identifiers, regex matchers).
+_CHANNEL_TAG_SANITIZER = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitize_channel_tag(name: str) -> str:
+    """Make a Meshtastic channel name safe for use inside a contact_id."""
+    s = _CHANNEL_TAG_SANITIZER.sub("_", (name or "").strip())
+    return s or "unknown"
+
 
 # ---------------------------------------------------------------------------
 # Native Meshtastic MQTT client (replaces non-existent MQTTInterface)
@@ -288,6 +298,12 @@ class _MeshtasticMQTTClient:
                 },
                 "rxSnr": packet.rx_snr if packet.rx_snr else None,
                 "rxTime": packet.rx_time if packet.rx_time else None,
+                # Over-the-air MeshPacket.channel is the channel hash byte,
+                # not a local index.  Pass channel_id (the MQTT topic tail,
+                # e.g. "LongFast") as the authoritative channel identity;
+                # _on_mesh_text resolves it against local channels.
+                "channel": packet.channel,
+                "channelName": envelope.channel_id or None,
             }
 
             try:
@@ -672,9 +688,21 @@ class MeshtasticGateway(PluginBase):
         self._device_probe_interval: float = self.config.get(
             "device_probe_interval", 300
         )
+        # Bounded wait on the blocking SerialInterface() constructor.  If the
+        # radio never returns config_complete_id the probe thread would
+        # otherwise hang forever with no log.
+        self._device_probe_open_timeout: float = self.config.get(
+            "device_probe_open_timeout", 30
+        )
 
         # Persistent serial listener for LoRa message reception (MQTT mode)
         self._serial_listener: Any = None
+
+        # Channel-list cache — returned by get_channels() when the serial
+        # listener is unavailable, so the dashboard doesn't flip to "no
+        # channels" every time the probe stalls or the USB device hiccups.
+        self._cached_channels: list[dict[str, Any]] = []
+        self._channels_cache_time: float = 0.0  # monotonic; 0 = never populated
 
         # Packet dedup — same message can arrive via both MQTT and serial
         self._seen_packet_ids: dict[int, float] = {}  # packet_id → timestamp
@@ -1014,73 +1042,146 @@ class MeshtasticGateway(PluginBase):
 
     # ── Device info probe (for dashboard device card) ────────────
 
-    def _device_probe_loop(self) -> None:
-        """Background thread: probe the physical device and listen for LoRa messages.
+    def _open_serial_interface_with_timeout(self) -> Any | None:
+        """Open a Meshtastic SerialInterface with a bounded timeout.
 
-        Only runs in MQTT mode when ``device_probe_port`` is configured.
-        Opens a SerialInterface, reads hardware/radio/telemetry data, then
-        **keeps the connection open** between probes so the meshtastic library
-        can receive local LoRa text messages via pubsub.  The existing
-        ``_on_mesh_text`` callback fires for both MQTT and serial sources;
-        packet-level dedup prevents double-processing.
+        ``SerialInterface()`` blocks until the radio sends a config_complete
+        reply.  If the device is unresponsive this hangs indefinitely with
+        no log — which is how we lost visibility into the channel list for
+        7 hours.  Run the constructor on a daemon worker and give up after
+        ``_device_probe_open_timeout`` seconds.  On timeout the worker is
+        abandoned; it may keep the tty claimed until its blocking read
+        unblocks, so the next iteration can fail once before recovering —
+        acceptable vs silent permanent hang.
         """
         import meshtastic.serial_interface
 
+        timeout_s = self._device_probe_open_timeout
+        result: dict[str, Any] = {"iface": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["iface"] = meshtastic.serial_interface.SerialInterface(
+                    devPath=self._device_probe_port
+                )
+            except Exception as exc:
+                result["error"] = exc
+
+        t = threading.Thread(
+            target=worker, name="meshtastic-serial-open", daemon=True,
+        )
+        t.start()
+        t.join(timeout=timeout_s)
+
+        if t.is_alive():
+            self.log.warning(
+                "Meshtastic serial open on %s timed out after %.0fs — "
+                "abandoning worker, retrying in %.0fs",
+                self._device_probe_port,
+                timeout_s,
+                self._device_probe_interval,
+            )
+            return None
+        if result["error"] is not None:
+            self.log.warning(
+                "Meshtastic serial open on %s failed: %s",
+                self._device_probe_port,
+                result["error"],
+            )
+            return None
+        return result["iface"]
+
+    def _device_probe_loop(self) -> None:
+        """Background thread: keep a persistent serial listener for LoRa reception.
+
+        Only runs in MQTT mode when ``device_probe_port`` is configured.
+        Opens a ``SerialInterface`` **once** and leaves it open — the
+        meshtastic library's internal reader delivers local LoRa packets
+        via pubsub continuously while we periodically re-read device
+        info/neighbors from the live interface.  The earlier design
+        closed and reopened every probe interval, which produced a
+        multi-second reception gap every cycle; this keeps LoRa
+        reception uninterrupted except during startup or error recovery.
+        """
         # Small initial delay so the gateway MQTT connection settles first
         self._sleep_while_active(10)
 
+        # Outer loop: manage the serial interface lifecycle.  Each
+        # iteration opens the device once, runs the inner probe loop
+        # until the interface looks broken, then closes & retries.
         while self._active:
-            iface = None
+            iface = self._open_serial_interface_with_timeout()
+            if iface is None:
+                self._sleep_while_active(self._device_probe_interval)
+                continue
+
+            # Publish the listener reference before the first probe so
+            # _on_mesh_text tags packets correctly from the very first
+            # arrival (interface is self._serial_listener → LoRa tag).
+            with self._lock:
+                self._serial_listener = iface
+            self.log.info(
+                "Serial listener active on %s — receiving LoRa messages",
+                self._device_probe_port,
+            )
+
+            consecutive_failures = 0
             try:
-                iface = meshtastic.serial_interface.SerialInterface(
-                    devPath=self._device_probe_port
-                )
+                # Inner loop: refresh device info from the LIVE interface
+                # without closing it.  The meshtastic library's reader
+                # thread updates iface.nodesByNum / iface.myInfo as
+                # packets arrive, so each read sees fresh state.
+                while self._active:
+                    try:
+                        info = self._read_device_info_from_interface(iface)
+                        neighbors = self._extract_lora_neighbors(iface)
+                        self._request_missing_nodeinfo(iface, neighbors)
 
-                # ── Read device info (same as before) ────────────────
-                info = self._read_device_info_from_interface(iface)
-                neighbors = self._extract_lora_neighbors(iface)
-                self._request_missing_nodeinfo(iface, neighbors)
+                        if info:
+                            with self._lock:
+                                self._cached_device_info = info
+                                self._device_info_cache_time = time.monotonic()
+                                self._cached_lora_neighbors = neighbors
+                            self._save_name_cache()
+                            self.log.debug(
+                                "Device probe OK: %s %s (%s), %d LoRa neighbors",
+                                info.get("hw_model"),
+                                info.get("firmware_version"),
+                                info.get("node_id"),
+                                len(neighbors),
+                            )
 
-                if info:
-                    with self._lock:
-                        self._cached_device_info = info
-                        self._device_info_cache_time = time.monotonic()
-                        self._cached_lora_neighbors = neighbors
-                    self._save_name_cache()
-                    self.log.debug(
-                        "Device probe OK: %s %s (%s), %d LoRa neighbors",
-                        info.get("hw_model"),
-                        info.get("firmware_version"),
-                        info.get("node_id"),
-                        len(neighbors),
-                    )
+                        self._refresh_channel_cache(iface)
+                        consecutive_failures = 0
+                    except Exception:
+                        consecutive_failures += 1
+                        self.log.warning(
+                            "Device probe read failed (%d consecutive)",
+                            consecutive_failures,
+                            exc_info=True,
+                        )
+                        # Two consecutive read failures likely mean the
+                        # interface is unusable — bail to outer loop so
+                        # we close + reopen.  A single failure is
+                        # tolerated (transient library glitch).
+                        if consecutive_failures >= 2:
+                            self.log.warning(
+                                "Serial listener appears broken — reopening",
+                            )
+                            break
 
-                # ── Keep serial open to receive local LoRa messages ──
-                with self._lock:
-                    self._serial_listener = iface
-                self.log.info(
-                    "Serial listener active on %s — receiving LoRa messages",
-                    self._device_probe_port,
-                )
-
-                # Sleep until next probe.  The meshtastic library's
-                # internal reader thread delivers packets via pubsub
-                # while we wait — _on_mesh_text handles them.
-                self._sleep_while_active(self._device_probe_interval)
-
-            except Exception:
-                self.log.debug("Device probe / serial listener failed", exc_info=True)
-                # Wait before retrying on failure
-                self._sleep_while_active(self._device_probe_interval)
+                    self._sleep_while_active(self._device_probe_interval)
             finally:
-                # Close serial so next iteration can reopen cleanly
+                # Close BEFORE clearing _serial_listener so the identity
+                # check in _on_mesh_disconnect (interface is
+                # self._serial_listener) correctly suppresses the pubsub
+                # event fired by close().
+                try:
+                    iface.close()
+                except Exception:
+                    pass
                 with self._lock:
                     self._serial_listener = None
-                if iface is not None:
-                    try:
-                        iface.close()
-                    except Exception:
-                        pass
 
     def _request_missing_nodeinfo(
         self, iface: Any, neighbors: list[dict[str, Any]],
@@ -1529,6 +1630,23 @@ class MeshtasticGateway(PluginBase):
                 to_num = packet.get("to", 0)
                 to_id = packet.get("toId", "")
                 is_broadcast = (to_num == _MESH_BROADCAST)
+                # Channel identity.  On LoRa the local radio translates
+                # hash→index before dispatch, so packet["channel"] is a
+                # valid local slot.  On MQTT there's no local translation
+                # — but the gateway only subscribes to a single root
+                # topic (its configured channel), so every inbound MQTT
+                # packet is on that same local slot.  Keying both paths
+                # by the configured local index keeps inbound MQTT and
+                # outbound MQTT (which uses the same configured index)
+                # on one broadcast thread instead of diverging between
+                # a name-keyed and an index-keyed row.
+                channel_name = packet.get("channelName")
+                if channel_name:
+                    channel_idx: Any = self.config.get(
+                        "meshtastic_channel", 0,
+                    )
+                else:
+                    channel_idx = packet.get("channel", 0)
 
                 decoded = packet.get("decoded", {})
                 payload = decoded.get("payload", b"")
@@ -1585,6 +1703,7 @@ class MeshtasticGateway(PluginBase):
             "text": text[:100],
             "forwarded_to": len(self._recipient_hashes),
             "source": source_tag,  # "LoRa" or "MQTT"
+            "channel": channel_idx,
         })
 
     def _on_mesh_connect(self, interface: Any = None, topic: Any = None) -> None:
@@ -1988,16 +2107,8 @@ class MeshtasticGateway(PluginBase):
             return None
         return getattr(iface, "localNode", None)
 
-    def get_channels(self) -> list[dict[str, Any]]:
-        """Return the radio's configured channels (serial mode only).
-
-        Each entry: ``{index, name, role, psk_label, active}``.
-        ``psk_label`` is a privacy-safe description (e.g. "default", "secret").
-        """
-        node = self._get_serial_node()
-        if node is None:
-            return []
-
+    def _channels_from_node(self, node: Any) -> list[dict[str, Any]]:
+        """Build the channel list from a Meshtastic localNode object."""
         from meshtastic import channel_pb2
         from meshtastic.util import pskToString
 
@@ -2018,6 +2129,67 @@ class MeshtasticGateway(PluginBase):
                 "active": role_name in ("PRIMARY", "SECONDARY"),
             })
         return result
+
+    def _refresh_channel_cache(self, iface: Any) -> None:
+        """Read channels from ``iface.localNode`` and update the in-memory cache."""
+        node = getattr(iface, "localNode", None)
+        if node is None:
+            return
+        try:
+            channels = self._channels_from_node(node)
+        except Exception:
+            self.log.debug("Error reading channels from localNode", exc_info=True)
+            return
+        if not channels:
+            # localNode not yet populated — don't clobber a known-good cache
+            return
+        with self._lock:
+            self._cached_channels = channels
+            self._channels_cache_time = time.monotonic()
+
+    def get_channels(self) -> list[dict[str, Any]]:
+        """Return the radio's configured channels.
+
+        Serves live from the serial listener when available; otherwise
+        returns the most recent cached list.  Returns ``[]`` only if the
+        cache has never been populated.  Check ``channels_cache_age_seconds``
+        for staleness.
+
+        Each entry: ``{index, name, role, psk_label, active}``.
+        ``psk_label`` is a privacy-safe description (e.g. "default", "secret").
+        """
+        node = self._get_serial_node()
+        if node is not None:
+            try:
+                channels = self._channels_from_node(node)
+                if channels:
+                    with self._lock:
+                        self._cached_channels = channels
+                        self._channels_cache_time = time.monotonic()
+                    return channels
+            except Exception:
+                self.log.debug(
+                    "Error reading live channels from localNode", exc_info=True,
+                )
+                # fall through to cached value
+        with self._lock:
+            return list(self._cached_channels)
+
+    @property
+    def channels_live(self) -> bool:
+        """True when the serial listener is currently connected."""
+        return self._get_serial_node() is not None
+
+    @property
+    def channels_cache_age_seconds(self) -> float | None:
+        """Seconds since the channel cache was last populated.
+
+        Returns ``None`` if the cache has never been populated.
+        """
+        with self._lock:
+            if self._channels_cache_time <= 0:
+                return None
+            return time.monotonic() - self._channels_cache_time
 
     def join_channel(
         self, name: str, psk: str, index: int | None = None,
