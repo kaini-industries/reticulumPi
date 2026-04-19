@@ -300,7 +300,14 @@ class AuthManager:
             del self.sessions[token]
             return False
 
-        session["last_seen"] = now
+        # Re-assign via __setitem__ so SqliteSessionStore persists the slide —
+        # __getitem__ there returns a fresh json.loads() copy, so mutating the
+        # dict alone is a no-op. Throttled to avoid a SQLite write on every
+        # API poll.
+        if now - session["last_seen"] >= 60:
+            session["last_seen"] = now
+            self.sessions[token] = session
+
         return True
 
     def cleanup_expired_sessions(self) -> int:

@@ -26,8 +26,12 @@ import RNS.vendor.umsgpack as umsgpack
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
 
-# Meshtastic payload limit (bytes).  Messages longer than this are truncated.
-MESHTASTIC_MTU = 237
+# Meshtastic payload limit (bytes). Matches mesh_pb2.Constants.DATA_PAYLOAD_LEN
+# (233). Messages longer than this are truncated before sendText.
+MESHTASTIC_MTU = 233
+
+# Meshtastic hop_limit is a 3-bit field; 7 is the protocol maximum.
+MESHTASTIC_HOP_LIMIT = 7
 
 # Default message prefixes
 DEFAULT_MESH_PREFIX = "[Mesh]"
@@ -106,6 +110,7 @@ class _MeshtasticMQTTClient:
         node_num: int | None = None,
         long_name: str = "",
         short_name: str = "",
+        tls: dict[str, Any] | None = None,
     ):
         import base64
         import hashlib
@@ -176,18 +181,81 @@ class _MeshtasticMQTTClient:
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
 
+        # Enable TLS if configured. Without TLS, username/password are sent
+        # in cleartext and messages can be tampered with on-path.
+        if tls and tls.get("enabled"):
+            import ssl as _ssl
+            ca_cert = tls.get("ca_cert") or None
+            certfile = tls.get("certfile") or None
+            keyfile = tls.get("keyfile") or None
+            self.client.tls_set(
+                ca_certs=ca_cert,
+                certfile=certfile,
+                keyfile=keyfile,
+                cert_reqs=_ssl.CERT_NONE if tls.get("insecure") else _ssl.CERT_REQUIRED,
+                tls_version=_ssl.PROTOCOL_TLS_CLIENT,
+            )
+            if tls.get("insecure"):
+                self.client.tls_insecure_set(True)
+                if logger:
+                    logger.warning(
+                        "MQTT TLS certificate verification DISABLED "
+                        "(mqtt.tls.insecure=true) — connection is encrypted "
+                        "but not authenticated; on-path attacker can MITM.",
+                    )
+
         # Set connect timeout to avoid hanging on unresponsive brokers
         self.client.connect_timeout = 10.0
         self.client.connect(broker, port, keepalive=60)
         self.client.loop_start()
+        # Register a finalizer so the paho loop thread is reliably stopped
+        # if ``close()`` is never called — e.g., if the plugin is hot-
+        # reloaded and the old instance is garbage-collected without
+        # going through its normal shutdown path. Without this the old
+        # paho thread outlives the plugin and keeps publishing NODEINFOs.
+        import weakref
+        self._finalizer = weakref.finalize(
+            self, _MeshtasticMQTTClient._safe_shutdown_client,
+            self.client, self._logger,
+        )
+        self._closed = False
+
+    @staticmethod
+    def _safe_shutdown_client(client: Any, logger: Any) -> None:
+        """Finalizer callback — stop the paho thread without touching self."""
+        try:
+            client.loop_stop()
+        except Exception:
+            if logger:
+                logger.debug(
+                    "Error stopping MQTT loop during finalize", exc_info=True,
+                )
+        try:
+            client.disconnect()
+        except Exception:
+            if logger:
+                logger.debug(
+                    "Error disconnecting MQTT client during finalize",
+                    exc_info=True,
+                )
 
     def close(self) -> None:
-        """Disconnect and clean up."""
+        """Disconnect and clean up. Safe to call multiple times."""
+        if self._closed:
+            return
+        self._closed = True
         try:
             self.client.loop_stop()
             self.client.disconnect()
         except Exception:
-            pass  # Best-effort cleanup
+            if self._logger:
+                self._logger.debug(
+                    "Error during MQTT client close (ignored)", exc_info=True,
+                )
+        # Normal close — detach the finalizer so it doesn't re-run later.
+        fin = getattr(self, "_finalizer", None)
+        if fin is not None:
+            fin.detach()
 
     # ── paho callbacks ──────────────────────────────────────────────
 
@@ -202,11 +270,18 @@ class _MeshtasticMQTTClient:
         except Exception:
             if self._logger:
                 self._logger.debug("Error sending NODEINFO on connect", exc_info=True)
+        # pypubsub IS required by the meshtastic library — failures here
+        # indicate a broken install, not an optional feature. Log so we can
+        # see it if connection-state callbacks stop firing.
         try:
             from pubsub import pub
             pub.sendMessage("meshtastic.connection.established", interface=self)
         except Exception:
-            pass  # pubsub is optional
+            if self._logger:
+                self._logger.warning(
+                    "Failed to dispatch meshtastic.connection.established via pubsub",
+                    exc_info=True,
+                )
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         """Notify on disconnect."""
@@ -214,7 +289,11 @@ class _MeshtasticMQTTClient:
             from pubsub import pub
             pub.sendMessage("meshtastic.connection.lost", interface=self)
         except Exception:
-            pass  # pubsub is optional
+            if self._logger:
+                self._logger.warning(
+                    "Failed to dispatch meshtastic.connection.lost via pubsub",
+                    exc_info=True,
+                )
 
     def _on_message(self, client, userdata, msg):
         """Decode incoming MQTT message and dispatch via pubsub."""
@@ -407,7 +486,7 @@ class _MeshtasticMQTTClient:
         setattr(packet, "from", self._my_node_num)
         packet.to = _MESH_BROADCAST
         packet.id = packet_id
-        packet.hop_limit = 3
+        packet.hop_limit = MESHTASTIC_HOP_LIMIT
         packet.want_ack = False
 
         if self._aes_key:
@@ -483,7 +562,8 @@ class _MeshtasticMQTTClient:
 
         packet.id = packet_id
         packet.channel = channelIndex
-        packet.hop_limit = 3
+        hop_limit = kwargs.get("hopLimit")
+        packet.hop_limit = hop_limit if hop_limit is not None else MESHTASTIC_HOP_LIMIT
 
         if self._aes_key:
             # Encrypt the payload
@@ -704,8 +784,22 @@ class MeshtasticGateway(PluginBase):
         self._cached_channels: list[dict[str, Any]] = []
         self._channels_cache_time: float = 0.0  # monotonic; 0 = never populated
 
-        # Packet dedup — same message can arrive via both MQTT and serial
+        # Packet dedup — same message can arrive via both MQTT and serial,
+        # and MQTT bridges can replay packets many minutes apart. Keep a
+        # bounded TTL cache of seen packet IDs.
         self._seen_packet_ids: dict[int, float] = {}  # packet_id → timestamp
+        self._dedup_ttl_seconds: float = max(
+            30.0, float(self.config.get("dedup_ttl_seconds", 300.0)),
+        )
+        self._dedup_max_entries: int = max(
+            64, int(self.config.get("dedup_max_entries", 2048)),
+        )
+        # Amortized cleanup: scan for stale entries every N inserts, not
+        # every packet (was O(n) per packet via min()).
+        self._dedup_cleanup_interval: int = max(
+            32, self._dedup_max_entries // 8,
+        )
+        self._dedup_inserts_since_cleanup: int = 0
 
         # ── LXMF setup (same pattern as message_echo.py) ───────────
         default_storage = "~/.local/share/reticulumpi/meshtastic_gw_lxmf"
@@ -792,15 +886,15 @@ class MeshtasticGateway(PluginBase):
             if listener is not None:
                 listener.close()
         except Exception:
-            pass
+            self.log.debug("Error closing serial listener", exc_info=True)
         try:
             RNS.Transport.deregister_announce_handler(self._propagation_handler)
         except Exception:
-            pass  # Best-effort cleanup
+            self.log.debug("Error deregistering announce handler", exc_info=True)
         try:
             self.lxmf_router.register_delivery_callback(None)
         except Exception:
-            pass  # Best-effort cleanup
+            self.log.debug("Error clearing LXMF delivery callback", exc_info=True)
         self._close_mesh_interface()
         self._join_threads()
 
@@ -969,17 +1063,41 @@ class MeshtasticGateway(PluginBase):
         mqtt_cfg = self.config.get("mqtt", {})
         broker = mqtt_cfg.get("broker", _MQTT_DEFAULTS["broker"])
         port = mqtt_cfg.get("port", _MQTT_DEFAULTS["port"])
-        username = mqtt_cfg.get("username", _MQTT_DEFAULTS["username"])
-        password = mqtt_cfg.get("password", _MQTT_DEFAULTS["password"])
+        # Credentials: env vars take precedence over config so that secrets
+        # stay out of config.yaml on disk. Fall back to the public Meshtastic
+        # community broker defaults only when the broker is unchanged.
+        username = (
+            os.environ.get(mqtt_cfg.get("username_env", "")) if mqtt_cfg.get("username_env")
+            else None
+        ) or mqtt_cfg.get("username")
+        password = (
+            os.environ.get(mqtt_cfg.get("password_env", "")) if mqtt_cfg.get("password_env")
+            else None
+        ) or mqtt_cfg.get("password")
+        if username is None:
+            username = _MQTT_DEFAULTS["username"] if broker == _MQTT_DEFAULTS["broker"] else ""
+        if password is None:
+            password = _MQTT_DEFAULTS["password"] if broker == _MQTT_DEFAULTS["broker"] else ""
         root_topic = mqtt_cfg.get("root_topic", _MQTT_DEFAULTS["root_topic"])
         channel_key = mqtt_cfg.get("channel_key", _MQTT_DEFAULTS["channel_key"])
         channel = self.config.get("meshtastic_channel", 0)
+        tls_cfg = mqtt_cfg.get("tls") or {}
+
+        # Security warning: non-public broker over plaintext sends creds in
+        # cleartext on every reconnect and allows on-path message tampering.
+        if not tls_cfg.get("enabled") and broker != _MQTT_DEFAULTS["broker"] and username:
+            self.log.warning(
+                "MQTT connection to %s:%d is NOT using TLS. Credentials are "
+                "sent in cleartext. Set mqtt.tls.enabled=true in config.",
+                broker, port,
+            )
 
         self.log.info(
-            "Connecting to Meshtastic MQTT (broker=%s:%d, topic=%s)...",
+            "Connecting to Meshtastic MQTT (broker=%s:%d, topic=%s, tls=%s)...",
             broker,
             port,
             root_topic,
+            "yes" if tls_cfg.get("enabled") else "no",
         )
 
         return _MeshtasticMQTTClient(
@@ -994,6 +1112,7 @@ class MeshtasticGateway(PluginBase):
             node_num=self._mqtt_node_num,
             long_name=self._mqtt_long_name or "",
             short_name=self._mqtt_short_name or "",
+            tls=tls_cfg if tls_cfg.get("enabled") else None,
         )
 
     def _get_own_node_id(self, iface: Any) -> str:
@@ -1614,16 +1733,33 @@ class MeshtasticGateway(PluginBase):
                 packet_id = packet.get("id", 0)
                 now = time.time()
                 if packet_id:
+                    cutoff = now - self._dedup_ttl_seconds
                     if packet_id in self._seen_packet_ids:
                         return  # Already processed via the other source
                     self._seen_packet_ids[packet_id] = now
-                    # Prune old entries every 64 packets
-                    if len(self._seen_packet_ids) > 512:
-                        cutoff = now - 120
+                    self._dedup_inserts_since_cleanup += 1
+                    # Amortized cleanup: drop expired + enforce cap every
+                    # N inserts (or when exceeded), not every packet.
+                    if (
+                        self._dedup_inserts_since_cleanup
+                        >= self._dedup_cleanup_interval
+                        or len(self._seen_packet_ids) > self._dedup_max_entries
+                    ):
+                        self._dedup_inserts_since_cleanup = 0
                         self._seen_packet_ids = {
                             k: v for k, v in self._seen_packet_ids.items()
                             if v > cutoff
                         }
+                        if len(self._seen_packet_ids) > self._dedup_max_entries:
+                            # Drop oldest half rather than thrashing one-
+                            # at-a-time on subsequent inserts.
+                            items = sorted(
+                                self._seen_packet_ids.items(),
+                                key=lambda kv: kv[1],
+                            )
+                            self._seen_packet_ids = dict(
+                                items[self._dedup_max_entries // 2:]
+                            )
 
                 from_id = packet.get("fromId", "?")
                 from_num = packet.get("from", 0)
@@ -1700,7 +1836,10 @@ class MeshtasticGateway(PluginBase):
             "from_name": node_name,
             "to_id": to_id,
             "is_broadcast": is_broadcast,
-            "text": text[:100],
+            # Meshtastic packets are already capped at MTU on the wire;
+            # pass the full text so subscribers (responder command parsing,
+            # messaging_hub persistence) see what the sender actually typed.
+            "text": _truncate_bytes(text, MESHTASTIC_MTU),
             "forwarded_to": len(self._recipient_hashes),
             "source": source_tag,  # "LoRa" or "MQTT"
             "channel": channel_idx,
@@ -1789,7 +1928,7 @@ class MeshtasticGateway(PluginBase):
 
         # Send outside the lock to avoid blocking during I/O
         try:
-            iface.sendText(formatted, channelIndex=channel)
+            iface.sendText(formatted, channelIndex=channel, hopLimit=MESHTASTIC_HOP_LIMIT)
         except Exception:
             self.log.exception("Error sending text to Meshtastic")
             return
@@ -2399,18 +2538,23 @@ class MeshtasticGateway(PluginBase):
                 if can_ack:
                     # Serial interface supports wantAck + onResponse
                     iface.sendText(
-                        text[:MESHTASTIC_MTU], channelIndex=ch,
+                        _truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                         destinationId=destination_id,
                         wantAck=True,
                         onResponse=self._make_ack_handler(on_ack),
+                        hopLimit=MESHTASTIC_HOP_LIMIT,
                     )
                 else:
                     iface.sendText(
-                        text[:MESHTASTIC_MTU], channelIndex=ch,
+                        _truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                         destinationId=destination_id,
+                        hopLimit=MESHTASTIC_HOP_LIMIT,
                     )
             else:
-                iface.sendText(text[:MESHTASTIC_MTU], channelIndex=ch)
+                iface.sendText(
+                    _truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
+                    hopLimit=MESHTASTIC_HOP_LIMIT,
+                )
         except Exception as exc:
             self.log.exception("Error sending Meshtastic message via %s", via_label)
             return {"sent": False, "reason": str(exc)}
@@ -2437,14 +2581,15 @@ class MeshtasticGateway(PluginBase):
             "ack_tracking": "serial" if can_ack else None,
         }
 
-    @staticmethod
-    def _make_ack_handler(on_ack: Any) -> Any:
+    def _make_ack_handler(self, on_ack: Any) -> Any:
         """Create a Meshtastic onResponse callback that calls *on_ack(bool)*.
 
         The meshtastic library invokes ``onResponse(packet_dict)`` when an
         ack or nak arrives.  We inspect the routing field to determine
         whether it's an ack (no error) or a nak.
         """
+        log = self.log
+
         def _handler(packet: dict) -> None:
             try:
                 routing = (packet or {}).get("decoded", {}).get("routing", {})
@@ -2452,7 +2597,12 @@ class MeshtasticGateway(PluginBase):
                 acked = (error == "NONE")
                 on_ack(acked)
             except Exception:
-                pass
+                # Log so delivery-tracking failures aren't invisible; still
+                # swallow since raising would kill the meshtastic library's
+                # response dispatcher thread.
+                log.warning(
+                    "Error in Meshtastic ACK handler", exc_info=True,
+                )
         return _handler
 
 
@@ -2506,6 +2656,18 @@ def _derive_short_name(long_name: str) -> str:
     initials = "".join(w[0] for w in words).upper()
     padding = long_name.replace(" ", "").upper()
     return (initials + padding)[:4]
+
+
+def _truncate_bytes(text: str, max_bytes: int) -> str:
+    """Truncate *text* so its UTF-8 encoding fits within *max_bytes*.
+
+    Never splits a multi-byte character. Returns *text* unchanged if it
+    already fits.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _truncate_for_mtu(header: str, body: str, mtu: int) -> str:

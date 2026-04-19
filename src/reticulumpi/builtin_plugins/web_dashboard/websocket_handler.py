@@ -248,6 +248,10 @@ def setup_websocket_routes(app: aiohttp.web.Application) -> None:
 
 _ws_clients: set[aiohttp.web.WebSocketResponse] = set()
 _broadcast_task: asyncio.Task | None = None
+# Loop + plugin refs captured at startup so cross-thread event-bus
+# callbacks can push straight into the WS broadcast path without polling.
+_ws_loop: asyncio.AbstractEventLoop | None = None
+_ws_plugin: Any | None = None
 
 
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
@@ -552,6 +556,15 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
+            # Collect GPS telemetry snapshot (if plugin enabled).
+            gps_data: dict = {}
+            gps = plugin.app.get_plugin("gps_telemetry")
+            if gps and hasattr(gps, "get_snapshot"):
+                try:
+                    gps_data = gps.get_snapshot()
+                except Exception:
+                    pass
+
             # Collect recent messages from messaging hub (if available)
             messaging_data: dict = {}
             msg_hub = plugin.app.get_plugin("messaging_hub")
@@ -613,6 +626,8 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 data["spectrum"] = spectrum_data
             if lora_diag_data:
                 data["lora_diagnostics"] = lora_diag_data
+            if gps_data:
+                data["gps"] = gps_data
 
             message = json.dumps({
                 "type": "update",
@@ -639,12 +654,32 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
 
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task
+    global _broadcast_task, _ws_loop, _ws_plugin
+    _ws_loop = asyncio.get_running_loop()
+    _ws_plugin = app["plugin"]
     _broadcast_task = asyncio.create_task(_broadcast_metrics(app))
+    # Subscribe to messaging events so inbound messages and delivery status
+    # changes reach the dashboard in <100 ms instead of waiting for the
+    # next metrics poll (up to 5 s).
+    try:
+        from reticulumpi import events as _events
+        event_bus = _ws_plugin.app.event_bus
+        event_bus.subscribe(_events.MESSAGE_RECEIVED, _on_message_event)
+        event_bus.subscribe(_events.MESSAGE_SENT, _on_message_event)
+        event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
+    except Exception:
+        log.exception("Failed to subscribe WS handler to messaging events")
 
 
 async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task
+    global _broadcast_task, _ws_loop, _ws_plugin
+    try:
+        if _ws_plugin is not None:
+            event_bus = _ws_plugin.app.event_bus
+            event_bus.unsubscribe_all(_on_message_event)
+            event_bus.unsubscribe_all(_on_status_event)
+    except Exception:
+        log.debug("Error unsubscribing WS handler", exc_info=True)
     if _broadcast_task:
         _broadcast_task.cancel()
         try:
@@ -652,7 +687,72 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
         except asyncio.CancelledError:
             pass
         _broadcast_task = None
+    _ws_loop = None
+    _ws_plugin = None
     # Close all WebSocket connections
     for ws in list(_ws_clients):
         await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
     _ws_clients.clear()
+
+
+def _on_message_event(event_type: str, data: dict) -> None:
+    """Event-bus callback (runs in any thread). Push to WS asynchronously."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    payload = {"event": event_type, **data}
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "message", payload)
+    except RuntimeError:
+        # Loop already closed — happens during shutdown; safe to ignore.
+        pass
+
+
+def _on_status_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for MESSAGE_STATUS_CHANGED — same pattern."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    payload = {"event": event_type, **data}
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "message_status", payload)
+    except RuntimeError:
+        pass
+
+
+def _schedule_push(push_type: str, payload: dict) -> None:
+    """Schedule an async broadcast on the WS event loop."""
+    try:
+        asyncio.create_task(_push_to_clients(push_type, payload))
+    except RuntimeError:
+        # No running loop — shutting down.
+        pass
+
+
+async def _push_to_clients(push_type: str, payload: dict) -> None:
+    """Send a targeted update to all connected clients.
+
+    Fans out sends concurrently so a single slow peer (congested link,
+    large TCP send-queue) can't block other subscribers from getting
+    status updates during the same event.
+    """
+    if not _ws_clients:
+        return
+    message = json.dumps({
+        "type": push_type,
+        "data": payload,
+        "timestamp": time.time(),
+    })
+    clients = list(_ws_clients)
+
+    async def _send_one(ws: aiohttp.web.WebSocketResponse) -> bool:
+        try:
+            await ws.send_str(message)
+            return True
+        except Exception:
+            return False
+
+    results = await asyncio.gather(
+        *(_send_one(ws) for ws in clients), return_exceptions=False,
+    )
+    for ws, ok in zip(clients, results):
+        if not ok:
+            _ws_clients.discard(ws)

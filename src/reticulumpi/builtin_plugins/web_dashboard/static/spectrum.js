@@ -44,9 +44,13 @@
   // one-shot REST fetch for the plugin's full rolling buffer (capped by
   // its `waterfall_rows` config) so the panel opens populated rather than
   // accumulating ~16 s of pre-load history from the WS tail.
-  // States: 'pending' → 'fetching' → 'ready' | 'failed'.  Live WS sweeps
-  // are deferred while 'fetching' to avoid duplicate/out-of-order paints.
+  // States: 'pending' → 'fetching' → 'ready' | 'failed' | 'abandoned'.
+  // Live WS sweeps are deferred while 'fetching' to avoid out-of-order
+  // paints; if the fetch outlasts ABANDON_MS we give up waiting and start
+  // painting live so no sweeps fall through the 8-row tail window.
   var _historyState = 'pending';
+  var _fetchStartedAt = 0;
+  var _FETCH_ABANDON_MS = 4000;
 
   // Waterfall canvas native dims — scaled up via CSS to fit panel width.
   var WF_ROWS = 256;
@@ -421,20 +425,26 @@
   function _fetchHistory() {
     if (_historyState !== 'pending') return;
     _historyState = 'fetching';
-    var capturedBinCount = _binCount;
+    _fetchStartedAt = Date.now();
     fetch('/api/spectrum/history', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (payload) {
+        // If the main loop gave up waiting on us and started painting
+        // live rows, applying history now would scroll those live rows
+        // off and invert temporal order — skip the backfill silently.
+        if (_historyState === 'abandoned') return;
         var d = (payload && payload.data) ? payload.data : null;
         if (!d || !d.available || !d.rows || !d.rows.length) {
           _historyState = 'failed';
           return;
         }
-        // Defensive: if the bin grid changed between when we issued the
-        // fetch and when it returned (config reload, scanner restart),
-        // the historical rows wouldn't line up with the current axis.
-        // Drop them and let the WS tail fill in normally.
-        if (d.bin_count && capturedBinCount && d.bin_count !== capturedBinCount) {
+        // Defensive: if the bin grid changed during or after the fetch
+        // (config reload, scanner restart), the historical rows won't
+        // line up with the CURRENT axis — drop them and let the WS tail
+        // fill in normally.  Compare against live `_binCount`, not a
+        // value captured at fetch-start, so we stay correct even across
+        // multiple re-arms.
+        if (d.bin_count && _binCount && d.bin_count !== _binCount) {
           _historyState = 'failed';
           return;
         }
@@ -448,7 +458,7 @@
         _historyState = 'ready';
       })
       .catch(function () {
-        _historyState = 'failed';
+        if (_historyState !== 'abandoned') _historyState = 'failed';
       });
   }
 
@@ -581,7 +591,14 @@
       if (_historyState === 'pending') {
         _fetchHistory();
       }
-      if (_historyState === 'ready' || _historyState === 'failed') {
+      // If the fetch is taking too long, give up waiting and start
+      // painting live — otherwise sweeps older than the 8-row tail get
+      // lost while we hold out for the backfill.
+      if (_historyState === 'fetching'
+          && Date.now() - _fetchStartedAt > _FETCH_ABANDON_MS) {
+        _historyState = 'abandoned';
+      }
+      if (_historyState !== 'pending' && _historyState !== 'fetching') {
         _ingestNewSweeps(data);
       }
     }

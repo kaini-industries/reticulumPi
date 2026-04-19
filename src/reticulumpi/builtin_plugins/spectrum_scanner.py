@@ -36,6 +36,7 @@ back-off up to ``max_restarts`` attempts.
 
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 import threading
@@ -130,12 +131,16 @@ class SpectrumScanner(PluginBase):
 
         # Rolling in-memory state the dashboard reads via get_snapshot().
         self._bins_hz: list[int] = []
-        self._latest_powers_db: list[float] = []
-        self._waterfall: deque[list[float]] = deque(maxlen=self._waterfall_rows)
+        # Power arrays carry None for bins rtl_power couldn't sample
+        # (nan/inf from the CSV, filtered in _handle_csv_line).  The
+        # snapshot serializer already passes None straight through to
+        # JSON null, which the dashboard treats as "no reading".
+        self._latest_powers_db: list[float | None] = []
+        self._waterfall: deque[list[float | None]] = deque(maxlen=self._waterfall_rows)
 
         # Parser-local accumulator (flushed per sweep).  Maps
         # segment_start_hz -> (bin_step_hz, [power_db, ...]).
-        self._segments: dict[int, tuple[int, list[float]]] = {}
+        self._segments: dict[int, tuple[int, list[float | None]]] = {}
         self._current_ts: str | None = None
 
         self._active = True
@@ -436,7 +441,20 @@ class SpectrumScanner(PluginBase):
             _freq_hi = int(float(parts[3]))  # unused directly; we derive from bin_step × count
             bin_step = int(float(parts[4]))
             # parts[5] = samples count, unused
-            dbs = [float(x) for x in parts[6:] if x]
+            # rtl_power can emit "nan" / "-inf" for bins it couldn't
+            # sample (DC-spike filter edges, tuner settling, etc.).
+            # float() parses those successfully but they break strict
+            # JSON serialization and corrupt auto-scale / colourmap
+            # math downstream.  Substitute None (JSON null) so the
+            # bin *position* is preserved — dbs is indexed by position
+            # to compute per-bin frequencies in _flush_current_sweep.
+            dbs: list[float | None] = []
+            for x in parts[6:]:
+                if not x:
+                    dbs.append(None)
+                    continue
+                v = float(x)
+                dbs.append(v if math.isfinite(v) else None)
         except (ValueError, IndexError):
             return
         if not dbs or bin_step <= 0:
@@ -456,7 +474,7 @@ class SpectrumScanner(PluginBase):
             return
 
         freqs: list[int] = []
-        powers: list[float] = []
+        powers: list[float | None] = []
         for freq_lo in sorted(segs.keys()):
             step, dbs = segs[freq_lo]
             for i, db in enumerate(dbs):

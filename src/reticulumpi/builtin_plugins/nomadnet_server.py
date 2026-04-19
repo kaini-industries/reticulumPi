@@ -11,6 +11,7 @@ import subprocess
 from typing import Any
 
 from reticulumpi import events
+from reticulumpi._paths import find_repo_asset
 from reticulumpi.plugin_base import PluginBase
 
 _HASH_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -375,13 +376,8 @@ class NomadNetServer(PluginBase):
         if existing:
             return
 
-        example_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
-            "config",
-            "nomadnet",
-            "pages",
-        )
-        if not os.path.isdir(example_dir):
+        example_dir = find_repo_asset("config", "nomadnet", "pages")
+        if not example_dir or not os.path.isdir(example_dir):
             return
 
         for mu_file in glob.glob(os.path.join(example_dir, "*.mu")):

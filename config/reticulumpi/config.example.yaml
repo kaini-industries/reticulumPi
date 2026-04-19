@@ -472,3 +472,18 @@ reticulumpi:
     #  waterfall_rows: 128              # In-memory rolling history depth (8-2048)
     #  device_index: 0                  # RTL-SDR device index (-d) for multi-dongle setups
     #  max_restarts: 5                  # Subprocess crash-restart cap (per plugin session)
+
+    # --- GPS telemetry --------------------------------------------------------
+    # Reads NMEA 0183 from a USB GPS receiver (e.g. GlobalSat BU-353N) and
+    # exposes position / altitude / speed / satellite state. Drives the
+    # dashboard GPS panel and provides observer coordinates to space_tracker
+    # (set observer.latitude/longitude to null in space_tracker to use GPS).
+    # Requires: pip install reticulumpi[gps]
+    #gps_telemetry:
+    #  enabled: false
+    #  serial_port: /dev/ttyUSB0        # Serial device (use a stable by-id/udev symlink where possible)
+    #  baudrate: 4800                   # BU-353N default is 4800; many other pucks use 9600
+    #  read_timeout: 2.0                # Serial read timeout (seconds)
+    #  reconnect_delay: 5               # Base backoff on device loss (seconds; exponential up to 300s)
+    #  max_reconnect_attempts: 0        # 0 = retry forever
+    #  fix_stale_seconds: 30            # Mark fix as lost if no RMC within this window

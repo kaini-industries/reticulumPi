@@ -242,6 +242,29 @@ class TestMessageStore:
         assert by_t.get("lxmf") == 2     # untouched
         assert by_t.get("meshtastic") == 5
 
+    def test_prune_is_per_sub_transport(self, store):
+        # Regression: bucketing by transport alone let chatty Meshtastic
+        # MQTT broadcasts starve sparse LoRa DMs inside the same 500-row
+        # meshtastic bucket. Prune must bucket per (transport, sub_transport).
+        for i in range(10):
+            store.store(
+                transport="meshtastic", direction="received",
+                sub_transport="mqtt", msg_type="broadcast", text=f"mq {i}",
+            )
+        for i in range(2):
+            store.store(
+                transport="meshtastic", direction="received",
+                sub_transport="lora", msg_type="direct", text=f"lr {i}",
+            )
+        deleted = store.prune(5)
+        assert deleted == 5  # only the 5 oldest mqtt rows
+        msgs = store.get_messages(limit=100)
+        by_sub: dict[str, int] = {}
+        for m in msgs:
+            by_sub[m["sub_transport"]] = by_sub.get(m["sub_transport"], 0) + 1
+        assert by_sub.get("lora") == 2     # untouched
+        assert by_sub.get("mqtt") == 5
+
     def test_delete_conversation_removes_only_that_thread(self, store):
         store.store(
             transport="lxmf", direction="received", msg_type="direct",

@@ -14,6 +14,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 import RNS
@@ -94,6 +95,10 @@ class MessageStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        # Wall-clock timestamps can jump backwards (NTP correction, manual
+        # clock changes). Track the highest timestamp we've written so we
+        # can keep the stored message order monotonic even across a jump.
+        self._last_ts: float = 0.0
         self._create_tables()
 
     def _create_tables(self) -> None:
@@ -298,7 +303,7 @@ class MessageStore:
         channel: int | str | None = None,
     ) -> int:
         """Insert a message and return its row ID."""
-        ts = time.time()
+        now = time.time()
         if channel is not None:
             metadata = dict(metadata) if metadata else {}
             metadata.setdefault("channel", channel)
@@ -311,6 +316,20 @@ class MessageStore:
         # New received messages default to unread
         read_flag = 0 if direction == "received" else 1
         with self._lock:
+            # Guarantee monotonic insert order even if the wall clock
+            # jumped backwards — readers sort by timestamp so a regression
+            # would reshuffle history. Nudge forward by 1 ms per conflict.
+            if now <= self._last_ts:
+                if self._last_ts - now > 5.0:
+                    log.warning(
+                        "Wall clock regressed by %.1fs while storing a "
+                        "message; compensating to keep history ordered.",
+                        self._last_ts - now,
+                    )
+                ts = self._last_ts + 0.001
+            else:
+                ts = now
+            self._last_ts = ts
             cur = self._conn.execute(
                 """INSERT INTO messages
                    (timestamp, transport, direction, msg_type,
@@ -336,41 +355,52 @@ class MessageStore:
             )
             self._conn.commit()
 
-    def prune(self, max_messages: int) -> int:
-        """Delete oldest messages beyond *max_messages* PER transport.
+    def get_status(self, msg_id: int) -> str | None:
+        """Return the current delivery status for *msg_id*, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status FROM messages WHERE id = ?", (msg_id,)
+            ).fetchone()
+            return row[0] if row else None
 
-        Pruning is bucketed per ``transport`` so a chatty transport (e.g.
-        Meshtastic MQTT broadcasts) can't starve out a sparse one (e.g.
-        LXMF DMs) — a single global cap caused exactly that, with LXMF
-        history evaporating as MQTT traffic refilled the table.  Each
-        transport now independently keeps its newest ``max_messages``
-        rows.  Returns total rows deleted across all transports.
+    def prune(self, max_messages: int) -> int:
+        """Delete oldest messages beyond *max_messages* PER (transport, sub_transport).
+
+        Pruning is bucketed per ``(transport, sub_transport)`` so a chatty
+        channel can't starve a sparse one.  Originally a single global cap
+        let MQTT evict LXMF; bucketing by transport fixed that but left a
+        second-order version of the same bug inside Meshtastic, where
+        chatty MQTT broadcasts (~500/day) evicted rare LoRa direct
+        messages from the shared 500-row Meshtastic bucket.  Each
+        ``(transport, sub_transport)`` pair now independently keeps its
+        newest ``max_messages`` rows.  Returns total rows deleted.
         """
         if max_messages <= 0:
             return 0
         with self._lock:
-            over_quota = [
-                row[0]
-                for row in self._conn.execute(
-                    "SELECT transport FROM messages "
-                    "GROUP BY transport HAVING COUNT(*) > ?",
-                    (max_messages,),
-                ).fetchall()
-            ]
+            over_quota = self._conn.execute(
+                "SELECT transport, COALESCE(sub_transport, '') FROM messages "
+                "GROUP BY transport, COALESCE(sub_transport, '') "
+                "HAVING COUNT(*) > ?",
+                (max_messages,),
+            ).fetchall()
             total_deleted = 0
-            for tr in over_quota:
+            for tr, sub in over_quota:
                 count = self._conn.execute(
-                    "SELECT COUNT(*) FROM messages WHERE transport = ?", (tr,)
+                    "SELECT COUNT(*) FROM messages "
+                    "WHERE transport = ? AND COALESCE(sub_transport, '') = ?",
+                    (tr, sub),
                 ).fetchone()[0]
                 excess = count - max_messages
                 if excess <= 0:
                     continue
                 self._conn.execute(
                     "DELETE FROM messages WHERE id IN ("
-                    "  SELECT id FROM messages WHERE transport = ? "
+                    "  SELECT id FROM messages "
+                    "  WHERE transport = ? AND COALESCE(sub_transport, '') = ? "
                     "  ORDER BY timestamp ASC LIMIT ?"
                     ")",
-                    (tr, excess),
+                    (tr, sub, excess),
                 )
                 total_deleted += excess
             if total_deleted:
@@ -1036,21 +1066,27 @@ class MeshtasticAdapter(TransportAdapter):
 
         # Create an ack callback that will be passed to the gateway.
         # The actual msg_id gets bound after the hub stores the message,
-        # via the track_pending() method.
-        ack_holder: dict[str, Any] = {}
+        # via the track_pending() method. Use an Event to block until
+        # binding completes, rather than polling — this eliminates a
+        # previous race where a very fast ACK could arrive before the
+        # hub finished storing and would be silently dropped after 500ms.
+        ack_holder: dict[str, Any] = {"bound": threading.Event()}
 
         def _on_ack(acked: bool) -> None:
-            # msg_id may not be bound yet if the radio acks very quickly;
-            # wait briefly for _register_delivery_tracking to set it.
+            # Wait for _register_delivery_tracking to set msg_id. If the
+            # bind never arrives within 5s something is broken upstream,
+            # so log and give up instead of hanging the ACK thread.
+            if ack_holder.get("msg_id") is None:
+                if not ack_holder["bound"].wait(timeout=5.0):
+                    self._hub.log.warning(
+                        "Meshtastic ACK arrived but msg_id never bound "
+                        "(acked=%s) — hub tracking state is inconsistent",
+                        acked,
+                    )
+                    return
             msg_id = ack_holder.get("msg_id")
             if msg_id is None:
-                for _ in range(50):  # up to 500ms
-                    time.sleep(0.01)
-                    msg_id = ack_holder.get("msg_id")
-                    if msg_id is not None:
-                        break
-                else:
-                    return
+                return
             with self._pending_lock:
                 self._pending_delivery.pop(msg_id, None)
             status = "delivered" if acked else "delivery_failed"
@@ -1296,6 +1332,18 @@ class MessagingHubPlugin(PluginBase):
         self._adapters: dict[str, TransportAdapter] = {}
         self._recent_status_updates: list[dict[str, Any]] = []
 
+        # Outbound retry queue. When a transport is disconnected, outbound
+        # sends land here with status=queued in the store; we drain on the
+        # transport's CONNECTED event and on a periodic sweep.
+        self._outbound_lock = threading.Lock()
+        self._outbound_queues: dict[str, deque[dict[str, Any]]] = {}
+        self._outbound_max_per_transport = int(
+            self.config.get("outbound_queue_max", 50)
+        )
+        self._outbound_max_age_s = float(
+            self.config.get("outbound_queue_ttl_seconds", 600.0)
+        )
+
         # Initialize SQLite store
         db_path = os.path.expanduser(
             self.config.get("db_path", _DEFAULT_DB_PATH)
@@ -1323,6 +1371,14 @@ class MessagingHubPlugin(PluginBase):
             mc_adapter = MeshCoreAdapter(self)
             self.register_adapter(mc_adapter)
 
+        # Drain queued sends as soon as a transport comes back online.
+        self.event_bus.subscribe(
+            events.MESHTASTIC_CONNECTED, self._on_transport_connected
+        )
+        self.event_bus.subscribe(
+            events.MESHCORE_CONNECTED, self._on_transport_connected
+        )
+
         self._active = True
         self._delivery_timeout = float(
             self.config.get("delivery_timeout", 300)
@@ -1336,6 +1392,10 @@ class MessagingHubPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        try:
+            self.event_bus.unsubscribe_all(self._on_transport_connected)
+        except Exception:
+            self.log.debug("Error unsubscribing connected handler", exc_info=True)
         for adapter in list(self._adapters.values()):
             try:
                 adapter.stop()
@@ -1344,8 +1404,11 @@ class MessagingHubPlugin(PluginBase):
                     "Error stopping adapter %s", adapter.transport_name
                 )
         self._adapters.clear()
-        if hasattr(self, "_store"):
-            self._store.close()
+        # Don't close the store here: plugins stop in reverse order, so
+        # messaging_hub stops before web_dashboard (the HTTP server).
+        # Between our stop() and web_dashboard's, in-flight requests can
+        # still call get_unread_counts() etc. The connection is released
+        # when Python GCs the store at process exit moments later.
         self._join_threads()
 
     # ── Adapter registry ───────────────────────────────────────────
@@ -1412,17 +1475,42 @@ class MessagingHubPlugin(PluginBase):
         """Send a message via the named transport.
 
         Returns ``{"sent": bool, "msg_id": int, ...}`` on success, or
-        ``{"sent": False, "reason": str}`` on failure.
+        ``{"sent": False, "reason": str}`` on failure. If the transport is
+        registered but currently unavailable, the send is queued for retry
+        (up to ``outbound_queue_ttl_seconds``) and the result includes
+        ``"queued": True``.
         """
         with self._lock:
             adapter = self._adapters.get(transport)
         if not adapter:
             return {"sent": False, "reason": f"Transport '{transport}' not registered"}
+
+        # If the transport is down, queue for retry rather than failing.
         if not adapter.is_available():
-            return {"sent": False, "reason": f"Transport '{transport}' not available"}
+            return self._queue_outbound(transport, text, destination, kwargs)
 
         result = adapter.send(text, destination, **kwargs)
+        # Some adapters (Meshtastic, MeshCore) can detect "not_connected" at
+        # send time even though is_available() returned True — queue those too.
+        if (
+            not result.get("sent")
+            and result.get("reason", "") in {"not_connected", "not connected"}
+        ):
+            return self._queue_outbound(transport, text, destination, kwargs)
 
+        return self._finalize_send(
+            adapter, transport, text, destination, kwargs, result,
+        )
+
+    def _finalize_send(
+        self,
+        adapter: TransportAdapter,
+        transport: str,
+        text: str,
+        destination: str,
+        kwargs: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
         # Resolve destination name from contacts if possible
         to_name = kwargs.get("to_name")
         if not to_name:
@@ -1466,6 +1554,185 @@ class MessagingHubPlugin(PluginBase):
 
         return {**result, "msg_id": msg_id}
 
+    # ── Outbound retry queue ───────────────────────────────────────
+
+    def _queue_outbound(
+        self,
+        transport: str,
+        text: str,
+        destination: str,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a send that couldn't go out, to be retried on reconnect."""
+        to_name = kwargs.get("to_name")
+        channel = kwargs.get("channel")
+        if channel is None and kwargs.get("msg_type") == "broadcast":
+            channel = 0
+        msg_id = self._store.store(
+            transport=transport,
+            direction="sent",
+            msg_type=kwargs.get("msg_type", "direct"),
+            text=text,
+            from_id="self",
+            from_name=self.app.node_name,
+            to_id=destination,
+            to_name=to_name,
+            status="queued",
+            metadata=kwargs.get("metadata"),
+            sub_transport=kwargs.get("sub_transport", ""),
+            channel=channel,
+        )
+        entry = {
+            "msg_id": msg_id,
+            "text": text,
+            "destination": destination,
+            "kwargs": dict(kwargs),
+            "queued_at": time.time(),
+            "attempts": 0,
+        }
+        evicted: dict[str, Any] | None = None
+        with self._outbound_lock:
+            q = self._outbound_queues.setdefault(transport, deque())
+            if len(q) >= self._outbound_max_per_transport:
+                evicted = q.popleft()
+            q.append(entry)
+        if evicted is not None:
+            self.log.warning(
+                "Outbound queue for %s full; evicting oldest msg_id=%d",
+                transport, evicted["msg_id"],
+            )
+            self._on_delivery_status_update(
+                evicted["msg_id"], transport, "failed",
+            )
+        self.log.info(
+            "Queued outbound %s msg_id=%d for retry (dest=%s)",
+            transport, msg_id, destination,
+        )
+        return {
+            "sent": False,
+            "queued": True,
+            "msg_id": msg_id,
+            "reason": f"Transport '{transport}' not available — queued for retry",
+        }
+
+    def _on_transport_connected(self, event_type: str, data: dict[str, Any]) -> None:
+        """Event-bus callback: drain the queue when a transport reconnects."""
+        # Event names are "<transport>.connected"
+        transport = event_type.split(".")[0]
+        try:
+            drained, requeued, expired = self._drain_outbound_queue(transport)
+            if drained or requeued or expired:
+                self.log.info(
+                    "Outbound queue drain for %s: sent=%d requeued=%d expired=%d",
+                    transport, drained, requeued, expired,
+                )
+        except Exception:
+            self.log.exception(
+                "Error draining outbound queue for %s", transport,
+            )
+
+    def _drain_outbound_queue(
+        self, transport: str,
+    ) -> tuple[int, int, int]:
+        """Retry queued sends for *transport*. Returns (sent, requeued, expired)."""
+        with self._outbound_lock:
+            q = self._outbound_queues.get(transport)
+            if not q:
+                return 0, 0, 0
+            pending = list(q)
+            q.clear()
+
+        with self._lock:
+            adapter = self._adapters.get(transport)
+        if not adapter:
+            # Transport vanished; expire everything.
+            for item in pending:
+                self._on_delivery_status_update(
+                    item["msg_id"], transport, "failed",
+                )
+            return 0, 0, len(pending)
+
+        now = time.time()
+        sent = requeued = expired = 0
+        for idx, item in enumerate(pending):
+            age = now - item["queued_at"]
+            if age > self._outbound_max_age_s:
+                self._on_delivery_status_update(
+                    item["msg_id"], transport, "expired",
+                )
+                expired += 1
+                continue
+            if not adapter.is_available():
+                # Transport flapped back down. Requeue THIS item and all
+                # remaining ones in order, then stop — no point checking
+                # availability again for each item in the same drain.
+                with self._outbound_lock:
+                    dest_q = self._outbound_queues.setdefault(
+                        transport, deque(),
+                    )
+                    for remaining in pending[idx:]:
+                        dest_q.append(remaining)
+                        requeued += 1
+                break
+            item["attempts"] += 1
+            try:
+                result = adapter.send(
+                    item["text"], item["destination"], **item["kwargs"],
+                )
+            except Exception:
+                self.log.exception(
+                    "Error retrying queued send msg_id=%d", item["msg_id"],
+                )
+                result = {"sent": False, "reason": "exception during retry"}
+            if result.get("sent"):
+                # Update stored message status to "sent" and register tracking.
+                self._store.update_status(item["msg_id"], "sent")
+                self.event_bus.publish(events.MESSAGE_SENT, {
+                    "id": item["msg_id"],
+                    "transport": transport,
+                    "destination": item["destination"],
+                    "text": item["text"][:100],
+                    "timestamp": time.time(),
+                })
+                self._register_delivery_tracking(adapter, item["msg_id"], result)
+                sent += 1
+            elif result.get("reason", "") in {"not_connected", "not connected"}:
+                with self._outbound_lock:
+                    self._outbound_queues.setdefault(transport, deque()).append(item)
+                requeued += 1
+            else:
+                self._on_delivery_status_update(
+                    item["msg_id"], transport, "failed",
+                )
+                expired += 1
+        if sent or expired:
+            self._maybe_prune()
+        return sent, requeued, expired
+
+    def expire_queued_outbound(self) -> int:
+        """Drop queued sends older than the TTL. Returns count expired."""
+        now = time.time()
+        expired: list[tuple[str, dict[str, Any]]] = []
+        with self._outbound_lock:
+            for transport, q in self._outbound_queues.items():
+                kept: deque = deque()
+                for item in q:
+                    if now - item["queued_at"] > self._outbound_max_age_s:
+                        expired.append((transport, item))
+                    else:
+                        kept.append(item)
+                self._outbound_queues[transport] = kept
+        for transport, item in expired:
+            self._on_delivery_status_update(
+                item["msg_id"], transport, "expired",
+            )
+        return len(expired)
+
+    def get_queued_outbound(self) -> dict[str, int]:
+        """Return a snapshot of queued outbound counts per transport."""
+        with self._outbound_lock:
+            return {t: len(q) for t, q in self._outbound_queues.items() if q}
+
     # ── Delivery tracking ─────────────────────────────────────────
 
     def _register_delivery_tracking(
@@ -1478,19 +1745,39 @@ class MessagingHubPlugin(PluginBase):
         if isinstance(adapter, LXMFAdapter):
             adapter.track_pending(msg_id, result.get("lxm_hash"))
         elif isinstance(adapter, MeshtasticAdapter):
-            # Bind the msg_id into the ack callback's closure
+            # Order matters: register with adapter BEFORE releasing the
+            # ACK waiter. If the ACK arrives before track_pending runs,
+            # its pop() is a no-op and the entry we add next goes stale,
+            # eventually getting overwritten with "timeout" 300s later.
             ack_holder = result.pop("_ack_holder", None)
             if ack_holder is not None:
                 ack_holder["msg_id"] = msg_id
             adapter.track_pending(msg_id, result.get("ack_tracking"))
+            if ack_holder is not None:
+                bound = ack_holder.get("bound")
+                if bound is not None:
+                    bound.set()
         elif isinstance(adapter, MeshCoreAdapter):
             adapter.track_pending(msg_id, result.get("expected_ack"))
+
+    # Terminal statuses are final — once set, later updates from slower
+    # sources (e.g. 300s stale-pending sweeper) must not overwrite them.
+    _TERMINAL_STATUSES = frozenset({"delivered", "delivery_failed", "failed"})
+    _NON_OVERWRITING_STATUSES = frozenset({"timeout", "expired"})
 
     def _on_delivery_status_update(
         self, msg_id: int, transport: str, status: str,
     ) -> None:
         """Called by adapter callbacks when a delivery status changes."""
         try:
+            if status in self._NON_OVERWRITING_STATUSES:
+                current = self._store.get_status(msg_id)
+                if current in self._TERMINAL_STATUSES:
+                    self.log.debug(
+                        "Ignoring %s for msg %d — already %s",
+                        status, msg_id, current,
+                    )
+                    return
             self._store.update_status(msg_id, status)
             ts = time.time()
             self.event_bus.publish(events.MESSAGE_STATUS_CHANGED, {
@@ -1560,12 +1847,16 @@ class MessagingHubPlugin(PluginBase):
         return expired
 
     def _delivery_timeout_loop(self) -> None:
-        """Periodically expire stale pending delivery entries."""
+        """Periodically expire stale pending delivery entries + queued sends."""
         while self._active:
             try:
                 self.expire_stale_pending(self._delivery_timeout)
             except Exception:
                 self.log.exception("Error in delivery timeout loop")
+            try:
+                self.expire_queued_outbound()
+            except Exception:
+                self.log.exception("Error expiring queued outbound messages")
             # Check every 60 seconds
             for _ in range(60):
                 if not self._active:

@@ -436,12 +436,13 @@ class TestTruncation:
 
     def test_long_response_truncated(self):
         from reticulumpi.builtin_plugins.meshtastic_responder import (
+            _MESHTASTIC_MTU,
             _truncate_response,
         )
 
-        text = "A " * 200  # Well over 237 bytes
+        text = "A " * 200  # Well over the MTU
         result = _truncate_response(text)
-        assert len(result.encode("utf-8")) <= 237
+        assert len(result.encode("utf-8")) <= _MESHTASTIC_MTU
         assert result.endswith("...(more)")
 
     def test_truncation_at_word_boundary(self):
@@ -458,20 +459,22 @@ class TestTruncation:
 
     def test_utf8_byte_counting(self):
         from reticulumpi.builtin_plugins.meshtastic_responder import (
+            _MESHTASTIC_MTU,
             _truncate_response,
         )
 
         # Multi-byte characters
         text = "Hello " + "\u00e9" * 200  # é is 2 bytes in UTF-8
         result = _truncate_response(text)
-        assert len(result.encode("utf-8")) <= 237
+        assert len(result.encode("utf-8")) <= _MESHTASTIC_MTU
 
     def test_exact_boundary_unchanged(self):
         from reticulumpi.builtin_plugins.meshtastic_responder import (
+            _MESHTASTIC_MTU,
             _truncate_response,
         )
 
-        text = "x" * 237
+        text = "x" * _MESHTASTIC_MTU
         assert _truncate_response(text) == text
 
 
@@ -483,19 +486,14 @@ class TestIndividualCommands:
 
     def test_help_lists_all_commands(self, responder):
         result = responder._cmd_help()
-        assert "Mesh Responder" in result
-        assert "ping" in result
-        assert "weather" in result
-        assert "calc" in result
+        assert result.startswith("Cmds:")
+        assert "!ping" in result
+        assert "!weather" in result
+        assert "!calc" in result
+        assert len(result.encode("utf-8")) <= 180
 
-    def test_help_shows_custom_count(self, responder):
-        result = responder._cmd_help()
-        assert "2 keyword" in result
-
-    def test_ping_returns_pong_with_uptime(self, responder):
-        result = responder._cmd_ping()
-        assert result.startswith("Pong!")
-        assert "h" in result and "m" in result
+    def test_ping_returns_pong(self, responder):
+        assert responder._cmd_ping() == "Pong!"
 
     def test_time_utc(self, responder):
         result = responder._cmd_time()
@@ -517,20 +515,21 @@ class TestIndividualCommands:
     def test_nodes_with_gateway(self, responder, mock_gateway, mock_app):
         mock_app.get_plugin.return_value = mock_gateway
         result = responder._cmd_nodes()
-        assert "2 known" in result
-        assert "AlphaNode" in result
+        assert "2 nodes" in result
+        # Either short_name (AN/BN) or long_name prefix should appear
+        assert "AN" in result or "AlphaNode" in result
 
     def test_nodes_no_gateway(self, responder, mock_app):
         mock_app.get_plugin.return_value = None
         result = responder._cmd_nodes()
-        assert "not available" in result
+        assert "unavailable" in result.lower()
 
     def test_nodes_empty(self, responder, mock_app):
         gw = MagicMock()
         gw.get_meshtastic_nodes.return_value = []
         mock_app.get_plugin.return_value = gw
         result = responder._cmd_nodes()
-        assert "No Meshtastic nodes" in result
+        assert "No nodes" in result
 
     def test_weather_no_args(self, responder):
         result = responder._cmd_weather()

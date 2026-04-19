@@ -394,6 +394,29 @@ class TestAuthManagerPersistent:
         mgr.logout(token)
         assert not mgr.validate_token(token)
 
+    def test_last_seen_persists_with_sqlite(self, tmp_path):
+        """Sliding-window: validate_token must write last_seen back to SQLite
+        so an active session doesn't hard-expire session_timeout seconds
+        after login regardless of use."""
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        db = str(tmp_path / "sessions.db")
+        mgr = AuthManager(plaintext_password="test", session_db_path=db)
+        token = mgr.login("test", "127.0.0.1")
+
+        # Push last_seen back past the 60s write-throttle so the next
+        # validate_token call is expected to persist a new value.
+        session = mgr.sessions[token]
+        session["last_seen"] -= 120
+        mgr.sessions[token] = session
+        pushed_back = mgr.sessions[token]["last_seen"]
+
+        assert mgr.validate_token(token)
+
+        # A fresh manager reading the same DB must see the advanced value.
+        mgr2 = AuthManager(plaintext_password="test", session_db_path=db)
+        assert mgr2.sessions[token]["last_seen"] > pushed_back
+
 
 # --- Plugin config validation tests ---
 

@@ -239,6 +239,17 @@ class WebDashboardPlugin(PluginBase):
                 pass
         if self._runner:
             await self._runner.cleanup()
+        # Drain lingering tasks (e.g. aiohttp's compressed-frame writer
+        # offloaded to the executor) so asyncio doesn't log
+        # "Task was destroyed but it is pending" when the loop stops.
+        pending = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        if pending:
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def _setup_ssl(self):
         """Configure SSL context if enabled in config."""

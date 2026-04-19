@@ -304,11 +304,7 @@ class InfoBot(PluginBase):
         return "\n".join(lines)
 
     def _cmd_ping(self, _args: str = "") -> str:
-        """Simple alive check."""
-        uptime_s = int(time.monotonic() - self._start_time)
-        h, rem = divmod(uptime_s, 3600)
-        m, s = divmod(rem, 60)
-        return f"Pong! Bot uptime: {h}h {m}m {s}s"
+        return "Pong!"
 
     def _cmd_time(self, args: str = "") -> str:
         """Return current time, optionally in a given timezone."""

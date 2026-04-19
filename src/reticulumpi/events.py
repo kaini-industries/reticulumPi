@@ -83,6 +83,13 @@ MESHCORE_CONNECT_FAILED = "meshcore.connect_failed"
 MESHCORE_MESSAGE_RECEIVED = "meshcore.message_received"
 MESHCORE_MESSAGE_SENT = "meshcore.message_sent"
 
+# GPS telemetry
+GPS_DEVICE_CONNECTED = "gps.device_connected"
+GPS_DEVICE_DISCONNECTED = "gps.device_disconnected"
+GPS_FIX_RECEIVED = "gps.fix_received"
+GPS_FIX_UPDATED = "gps.fix_updated"
+GPS_FIX_LOST = "gps.fix_lost"
+
 # Yggdrasil transport
 YGGDRASIL_ONLINE = "yggdrasil.online"
 YGGDRASIL_OFFLINE = "yggdrasil.offline"

@@ -23,6 +23,33 @@
   var api = R.api, $ = R.$, esc = R.esc;
   var formatTimeAgo = R.formatTimeAgo;
 
+  // Shared /api/meshtastic/channels fetcher.  Both Meshtastic panels
+  // (MQTT, LoRa) and the channel-management dialog hit the same
+  // endpoint, which talks to the radio over serial — so we coalesce
+  // in-flight requests and reuse a brief cache to make one call
+  // instead of three on page load.  Invalidate after join/delete.
+  var _chCache = null;        // {data: [...], ts: <ms>}
+  var _chInflight = null;     // shared Promise
+  var CH_CACHE_MS = 5000;
+  function _fetchChannelsShared() {
+    if (_chCache && Date.now() - _chCache.ts < CH_CACHE_MS) {
+      return Promise.resolve(_chCache.data);
+    }
+    if (_chInflight) return _chInflight;
+    _chInflight = api('/api/meshtastic/channels').then(function (r) {
+      _chInflight = null;
+      if (!r || !r.ok) return [];
+      var data = r.data.channels || [];
+      _chCache = {data: data, ts: Date.now()};
+      return data;
+    }, function () {
+      _chInflight = null;
+      return [];
+    });
+    return _chInflight;
+  }
+  function _invalidateChannels() { _chCache = null; }
+
   function createMessagesPanel(cfg) {
     // ── Per-panel state ────────────────────────────────────────────
     var _conversations = [];
@@ -265,11 +292,8 @@
 
     function _fetchChannels() {
       if (!cfg.supportsChannels) return;
-      return api('/api/meshtastic/channels').then(function (r) {
-        if (!r || !r.ok) return;
-        _channels = (r.data.channels || []).filter(function (ch) {
-          return ch.active;
-        });
+      return _fetchChannelsShared().then(function (channels) {
+        _channels = channels.filter(function (ch) { return ch.active; });
         _renderChannelSelect();
         // Channels drive the pinned per-channel broadcast rows.
         _renderConversations();
@@ -1054,9 +1078,14 @@
         if (_dom.section) _dom.section.style.display = _available ? '' : 'none';
         if (entry && entry.address) _renderTransportAddress(entry.address);
       });
-      // First pass so counts appear before the user expands
+      // First pass so counts appear before the user expands.
+      // Pre-fetch channels too: without them, the conversation render
+      // can't merge per-channel broadcast rows onto canonical pinned
+      // ones, so the first paint after expand flickers as channels
+      // arrive late.  The shared fetcher coalesces the LoRa+MQTT calls.
       _fetchUnread();
       _fetchConversations();
+      if (cfg.supportsChannels) _fetchChannels();
     }
 
     // Register for cross-panel channel refresh so join/delete from the
@@ -1082,13 +1111,14 @@
     var overlay = $('channel-dialog-overlay');
     if (!overlay) return;
     overlay.style.display = 'flex';
+    // Always show fresh state when the dialog opens — a stale cache
+    // here would mislead the user about what's currently configured.
+    _invalidateChannels();
     _refreshChannelList();
   };
 
   function _refreshChannelList() {
-    api('/api/meshtastic/channels').then(function (r) {
-      if (!r || !r.ok) return;
-      var all = r.data.channels || [];
+    _fetchChannelsShared().then(function (all) {
       var listEl = $('channel-list');
       if (!listEl) return;
       var html = '';
@@ -1146,8 +1176,8 @@
           return;
         }
         if (fb) { fb.textContent = 'Joined!'; fb.className = 'msg-feedback ok'; }
+        _notifyChannelChange();   // invalidates cache before refresh
         _refreshChannelList();
-        _notifyChannelChange();
       },
     );
   }
@@ -1156,13 +1186,16 @@
     api('/api/meshtastic/channels/' + idx, {method: 'DELETE'}).then(
       function (r) {
         if (!r || !r.ok) return;
+        _notifyChannelChange();   // invalidates cache before refresh
         _refreshChannelList();
-        _notifyChannelChange();
       },
     );
   }
 
   function _notifyChannelChange() {
+    // Invalidate first so each panel's hook re-fetches live data
+    // instead of replaying the cached list from before the change.
+    _invalidateChannels();
     var hooks = R._channelRefreshHooks || [];
     for (var i = 0; i < hooks.length; i++) {
       try { hooks[i](); } catch (e) { /* ignore */ }

@@ -40,7 +40,10 @@ PrivateTmp=yes
 # (14k+ nodes), thread counts can spike during announce storms.
 # network_map uses a queue-based architecture to cap its own threads,
 # but other RNS consumers (meshchat, nomadnet) still spawn freely.
-MemoryMax=1G
+# MemoryMax covers the whole cgroup (reticulumpi + nomadnet + meshchat +
+# rtl_power). Steady state ~986M with old 1G ceiling left only ~38M of
+# headroom and triggered OOM risk during announce storms.
+MemoryMax=2G
 TasksMax=2048
 CPUQuota=90%
 

@@ -1052,6 +1052,11 @@
 
     // LoRa nodes panel
     if (RPI.fetchLoraReachability) RPI.fetchLoraReachability();
+
+    // GPS telemetry
+    api('/api/gps').then(function(r) {
+      if (r && r.ok && RPI.updateGps) RPI.updateGps(r.data);
+    });
   }
 
   // --- WebSocket ---
@@ -1109,6 +1114,7 @@
           if (msg.data.space && RPI.space && RPI.space.update) RPI.space.update(msg.data.space);
           if (msg.data.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(msg.data.spectrum);
           if (msg.data.spectrum && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
+          if (msg.data.gps && RPI.updateGps) RPI.updateGps(msg.data.gps);
         }
       } catch(e) { /* ignore parse errors */ }
     };
@@ -1396,6 +1402,17 @@
   $('meshcore-show-more').addEventListener('click', function() {
     if (RPI.meshcoreShowMore) RPI.meshcoreShowMore();
   });
+
+  // Wire up sortable GPS satellites table headers
+  var gpsSortHeaders = document.querySelectorAll('#gps-section th[data-sort]');
+  for (var gi = 0; gi < gpsSortHeaders.length; gi++) {
+    (function(th) {
+      th.addEventListener('click', function() {
+        var key = th.getAttribute('data-sort').replace('gps-', '');
+        if (RPI.onGpsSort) RPI.onGpsSort(key);
+      });
+    })(gpsSortHeaders[gi]);
+  }
 
   // Interface management -- event delegation (CSP blocks inline handlers)
   $('restart-btn').addEventListener('click', doRestart);

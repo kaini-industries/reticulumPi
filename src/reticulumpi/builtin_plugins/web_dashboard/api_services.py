@@ -6,9 +6,59 @@ MeshCore gateway, sensors, alerts, emergency broadcasts, and file transfers.
 
 from __future__ import annotations
 
+import threading
+import time
+from collections import deque
+
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok
+
+
+# ── Send-endpoint rate limiter ─────────────────────────────────────
+# LoRa transmit is a limited, regulated resource. A runaway caller could
+# saturate the channel or trigger duty-cycle violations. Gate every call
+# to /api/messages/send through a sliding-window limiter.
+#
+# State is stashed on the plugin instance so hot-reload reinitializes it
+# cleanly (module-level globals survive `importlib.reload` and would leak
+# stale buckets across reloads).
+
+
+def _get_rate_state(plugin) -> tuple[threading.Lock, dict[str, deque]]:
+    """Return the (lock, buckets) pair for *plugin*, creating on first use."""
+    state = getattr(plugin, "_send_rate_state", None)
+    # Mock-based tests have auto-vivified attributes, so don't trust a
+    # truthy value alone — require the shape we wrote.
+    if not isinstance(state, tuple) or len(state) != 2:
+        state = (threading.Lock(), {})
+        plugin._send_rate_state = state
+    return state
+
+
+def _check_send_rate_limit(
+    plugin, key: str, max_per_window: int, window_seconds: float,
+) -> tuple[bool, float]:
+    """Return ``(allowed, retry_after)``. Uses a per-key sliding window."""
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    lock, buckets = _get_rate_state(plugin)
+    with lock:
+        bucket = buckets.setdefault(key, deque())
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= max_per_window:
+            retry_after = max(0.0, window_seconds - (now - bucket[0]))
+            return False, retry_after
+        bucket.append(now)
+        # Bound memory: drop buckets that have no recent activity.
+        if len(buckets) > 256:
+            stale = [
+                k for k, b in buckets.items() if not b or b[-1] < cutoff
+            ]
+            for k in stale:
+                buckets.pop(k, None)
+    return True, 0.0
 
 
 # ── LoRa diagnostics ────────────────────────────────────────────────
@@ -400,11 +450,48 @@ async def handle_send_message(
     """POST /api/messages/send — Send a message via a transport.
 
     Body: ``{"transport": "lxmf"|"meshtastic", "text": "...", "destination": "..."}``
+
+    Requires a valid session token. Unauthenticated localhost callers are
+    rejected unless ``allow_localhost_send`` is explicitly enabled, so that
+    a compromised local process can't spoof messages under this node's
+    identity. All callers are rate-limited.
     """
     plugin = _get_plugin(request)
     hub = plugin.app.get_plugin("messaging_hub")
     if not hub or not hasattr(hub, "send_message"):
         return _error("messaging_hub not enabled", 503)
+
+    # Explicit auth gate: the global middleware bypasses auth for localhost
+    # requests so that internal tooling (NomadNet pages, scripts) can reach
+    # read-only endpoints. Sending radio traffic is not read-only and needs
+    # a stricter check — require a token unless the operator has opted in.
+    has_token = bool(request.get("token"))
+    if not has_token and not plugin.config.get("allow_localhost_send", False):
+        return _error(
+            "Authentication required to send messages. Log in first, or set "
+            "allow_localhost_send=true in the web_dashboard config to permit "
+            "unauthenticated sends from localhost.",
+            401,
+        )
+
+    # Rate limit per-token (or per-remote-IP if unauth-localhost is allowed).
+    # Defaults: 30 sends/min — enough for interactive use, low enough to
+    # keep a misbehaving caller from saturating LoRa airtime.
+    rl_cfg = plugin.config.get("send_rate_limit") or {}
+    max_sends = int(rl_cfg.get("max_per_window", 30))
+    window_s = float(rl_cfg.get("window_seconds", 60))
+    rate_key = request.get("token") or f"local:{request.remote or 'unknown'}"
+    ok, retry_after = _check_send_rate_limit(
+        plugin, rate_key, max_sends, window_s,
+    )
+    if not ok:
+        resp = _error(
+            f"Send rate limit exceeded (max {max_sends} per {int(window_s)}s). "
+            f"Retry in {retry_after:.1f}s.",
+            429,
+        )
+        resp.headers["Retry-After"] = str(int(retry_after) + 1)
+        return resp
 
     try:
         body = await request.json()
@@ -650,6 +737,52 @@ async def handle_spectrum_history(
         return _error("Failed to gather spectrum history", 500)
 
 
+# ── GPS telemetry ────────────────────────────────────────────────────
+
+
+async def handle_gps_snapshot(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/gps — status + last fix + satellites-in-view."""
+    plugin = _get_plugin(request)
+    gps = plugin.app.get_plugin("gps_telemetry")
+    if not gps or not hasattr(gps, "get_snapshot"):
+        return _ok({"available": False, "message": "gps_telemetry plugin not enabled"})
+    snap = gps.get_snapshot()
+    snap["available"] = True
+    return _ok(snap)
+
+
+async def handle_gps_status(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/gps/status — connection + fix presence, without the fix payload."""
+    plugin = _get_plugin(request)
+    gps = plugin.app.get_plugin("gps_telemetry")
+    if not gps or not hasattr(gps, "get_status"):
+        return _ok({"available": False})
+    status = gps.get_status()
+    status["available"] = True
+    return _ok(status)
+
+
+async def handle_gps_satellites(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/gps/satellites — just the per-SV sky view."""
+    plugin = _get_plugin(request)
+    gps = plugin.app.get_plugin("gps_telemetry")
+    if not gps or not hasattr(gps, "get_snapshot"):
+        return _ok({"available": False, "satellites": []})
+    snap = gps.get_snapshot()
+    return _ok(
+        {
+            "available": True,
+            "satellites": snap.get("satellites_in_view", []),
+        }
+    )
+
+
 def setup_service_routes(app: aiohttp.web.Application) -> None:
     """Register plugin service API routes."""
     # LoRa
@@ -697,3 +830,7 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/spectrum/history", handle_spectrum_history)
     # Space tracker
     app.router.add_get("/api/space", handle_space_snapshot)
+    # GPS telemetry
+    app.router.add_get("/api/gps", handle_gps_snapshot)
+    app.router.add_get("/api/gps/status", handle_gps_status)
+    app.router.add_get("/api/gps/satellites", handle_gps_satellites)

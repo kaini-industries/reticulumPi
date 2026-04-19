@@ -245,6 +245,23 @@ class TestCsvParser:
         # Non-parseable dBs → no segment stored
         assert not p._segments
 
+    def test_nan_and_inf_become_none_preserving_positions(self):
+        """rtl_power emits 'nan'/'-inf' for bins it couldn't sample;
+        filter them to None so bin positions — and therefore the frequency
+        map built from them in _flush_current_sweep — stay aligned, and
+        strict JSON serialization of the snapshot doesn't trip over
+        non-finite floats."""
+        p = _make_plugin({"freq_start_mhz": 88.0, "freq_stop_mhz": 90.0})
+        p._handle_csv_line(
+            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, "
+            "-55.0, nan, -inf, -52.0"
+        )
+        p._flush_current_sweep()
+        assert p._sweep_count == 1
+        # Positions preserved: 4 bins → 4 frequencies → 4 power values.
+        assert p._bins_hz == [88_000_000, 88_500_000, 89_000_000, 89_500_000]
+        assert p._latest_powers_db == [-55.0, None, None, -52.0]
+
     def test_waterfall_respects_max_rows(self):
         p = _make_plugin({"waterfall_rows": 8})
         for i in range(20):

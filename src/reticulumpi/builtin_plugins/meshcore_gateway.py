@@ -106,6 +106,24 @@ class MeshCoreGateway(PluginBase):
         self._last_contact_refresh: float = 0
         self._contact_refresh_interval: float = self.config.get("contact_refresh_interval", 300)
 
+        # Fuzzy dedup cache — MeshCore packets may arrive twice under mesh
+        # flooding, and the companion radio exposes no packet ID. Key on
+        # (from_key_prefix, msg_type, text) and drop duplicates within a
+        # small window.
+        self._dedup_ttl_seconds: float = max(
+            10.0, float(self.config.get("dedup_ttl_seconds", 60.0)),
+        )
+        self._dedup_max_entries: int = max(
+            32, int(self.config.get("dedup_max_entries", 256)),
+        )
+        self._seen_msg_keys: dict[tuple[str, str, int], float] = {}
+        # Cleanup is amortized: we only scan for stale/over-cap entries
+        # every N inserts, not per-packet, to keep dedup O(1) amortized.
+        self._seen_msg_cleanup_interval: int = max(
+            16, self._dedup_max_entries // 8,
+        )
+        self._seen_msg_inserts_since_cleanup: int = 0
+
         # Contact name cache (survives reconnects)
         self._contact_cache: dict[str, dict[str, Any]] = {}
         self._cache_path = ""
@@ -376,7 +394,9 @@ class MeshCoreGateway(PluginBase):
             try:
                 mc.unsubscribe(sub)
             except Exception:
-                pass
+                self.log.debug(
+                    "Error unsubscribing MeshCore event handler", exc_info=True,
+                )
 
         # Disconnect — only schedule the coroutine if the async loop is
         # actually running.  Creating the coroutine when ``_run_async``
@@ -401,23 +421,26 @@ class MeshCoreGateway(PluginBase):
             try:
                 await mc.stop_auto_message_fetching()
             except Exception:
-                pass
+                self.log.debug(
+                    "Error stopping MeshCore auto-fetch", exc_info=True,
+                )
             try:
                 await mc.disconnect()
             except Exception:
-                pass
+                self.log.debug("Error during MeshCore disconnect", exc_info=True)
 
-    @staticmethod
-    async def _async_disconnect_mc(mc: Any) -> None:
+    async def _async_disconnect_mc(self, mc: Any) -> None:
         """Async helper — disconnect a specific MeshCore instance."""
         try:
             await mc.stop_auto_message_fetching()
         except Exception:
-            pass
+            self.log.debug(
+                "Error stopping MeshCore auto-fetch (mc)", exc_info=True,
+            )
         try:
             await mc.disconnect()
         except Exception:
-            pass
+            self.log.debug("Error during MeshCore disconnect (mc)", exc_info=True)
 
     def _check_health(self) -> bool:
         """Return True if the MeshCore connection appears healthy."""
@@ -544,6 +567,50 @@ class MeshCoreGateway(PluginBase):
 
             if not text.strip():
                 return
+
+            # Fuzzy dedup: drop repeats of the same (sender, type, body)
+            # within the configured TTL. Missing pubkey means broadcast —
+            # key on the stripped-name payload instead so the same
+            # channel post relayed twice still collapses.
+            dedup_key = (
+                (from_key or "").lower(),
+                msg_type,
+                hash(text),
+            )
+            now = time.time()
+            cutoff = now - self._dedup_ttl_seconds
+            with self._lock:
+                prior = self._seen_msg_keys.get(dedup_key)
+                if prior is not None and prior > cutoff:
+                    self.log.debug(
+                        "Dropping duplicate MeshCore %s from %s",
+                        msg_type, from_key[:12] or "anon",
+                    )
+                    return
+                self._seen_msg_keys[dedup_key] = now
+                self._seen_msg_inserts_since_cleanup += 1
+                # Amortized cleanup: drop TTL-expired entries, then trim
+                # oldest if still over the absolute cap.
+                if (
+                    self._seen_msg_inserts_since_cleanup
+                    >= self._seen_msg_cleanup_interval
+                    or len(self._seen_msg_keys) > self._dedup_max_entries
+                ):
+                    self._seen_msg_inserts_since_cleanup = 0
+                    self._seen_msg_keys = {
+                        k: v for k, v in self._seen_msg_keys.items()
+                        if v > cutoff
+                    }
+                    if len(self._seen_msg_keys) > self._dedup_max_entries:
+                        # Hard cap — keep newest N by timestamp
+                        sorted_items = sorted(
+                            self._seen_msg_keys.items(),
+                            key=lambda kv: kv[1],
+                            reverse=True,
+                        )
+                        self._seen_msg_keys = dict(
+                            sorted_items[: self._dedup_max_entries]
+                        )
 
             from_label = f"{from_name} ({from_key[:12]})" if from_name else (from_key[:12] or "unknown")
 

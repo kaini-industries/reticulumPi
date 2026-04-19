@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=29">
+  <link rel="stylesheet" href="/static/style.css?v=31">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -637,6 +637,39 @@
       <button id="meshcore-show-more" class="show-more-btn" style="display:none">Show all</button>
     </div>
 
+    <!-- ═══════════ GPS ═══════════ -->
+    <div class="service-group service-group-gps">
+      <span class="service-group-name">GPS</span>
+    </div>
+
+    <!-- GPS Telemetry -->
+    <div class="section svc-gps" id="gps-section" style="display:none">
+      <div class="section-header">
+        <span>GPS Telemetry <span class="svc-tag svc-tag-gps">GPS</span></span>
+        <span class="count" id="gps-status"></span>
+      </div>
+      <div class="gps-overview" id="gps-overview"></div>
+      <div class="gps-visuals">
+        <div class="gps-map-wrap"><div id="gps-map"></div></div>
+        <div class="gps-sky-wrap">
+          <svg id="gps-sky" viewBox="-115 -115 230 230" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="gps-prn">PRN<span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="gps-elevation">Elevation<span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="gps-azimuth">Azimuth<span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="gps-snr">SNR<span class="sort-arrow"></span></th>
+            </tr>
+          </thead>
+          <tbody id="gps-sats-table"></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Node Map -->
     <div class="section" id="map-section">
       <div class="section-header">
@@ -766,14 +799,14 @@
       </div>
       <div class="section-body hidden" id="lora-spectrum-body">
         <div class="lora-spectrum-meta" id="lora-spectrum-meta"></div>
-        <div class="lora-spectrum-layout">
-          <div class="lora-spectrum-plot-wrap">
-            <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
-            <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
-            <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall" width="800" height="200"></canvas>
-            <div class="lora-spectrum-overlay" id="lora-spectrum-overlay"></div>
-            <div class="lora-spectrum-hover" id="lora-spectrum-hover"></div>
-          </div>
+        <div class="lora-spectrum-plot-wrap">
+          <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
+          <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
+          <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall" width="800" height="256"></canvas>
+          <canvas id="lora-spec-activity-col" class="lora-spec-activity-col" width="6" height="256"></canvas>
+          <div class="lora-spectrum-overlay" id="lora-spectrum-overlay"></div>
+          <div class="lora-spectrum-hover" id="lora-spectrum-hover"></div>
+          <div class="lora-spec-zoom-reset" id="lora-spec-zoom-reset" style="display:none">Reset zoom</div>
         </div>
         <div class="lora-spectrum-scale" id="lora-spectrum-scale"></div>
       </div>
@@ -834,7 +867,7 @@
   </div>
 
   <script src="/static/app.js?v=26"></script>
-  <script src="/static/messages_panel.js?v=3"></script>
+  <script src="/static/messages_panel.js?v=4"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
   <script src="/static/messages_meshtastic_mqtt.js?v=1"></script>
   <script src="/static/messages_meshtastic_lora.js?v=1"></script>
@@ -846,9 +879,10 @@
   <script src="/static/meshcore.js?v=2"></script>
   <script src="/static/vendor/leaflet.js"></script>
   <script src="/static/map.js?v=1"></script>
+  <script src="/static/gps.js?v=1"></script>
   <script src="/static/space.js?v=2"></script>
   <script src="/static/spectrum_common.js?v=1"></script>
-  <script src="/static/spectrum.js?v=8"></script>
-  <script src="/static/lora_spectrum.js?v=7"></script>
+  <script src="/static/spectrum.js?v=9"></script>
+  <script src="/static/lora_spectrum.js?v=17"></script>
 </body>
 </html>

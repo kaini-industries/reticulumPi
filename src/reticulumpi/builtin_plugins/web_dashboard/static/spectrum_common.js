@@ -247,6 +247,47 @@
     ctx.putImageData(img, 0, 0);
   }
 
+  // -- Bulk waterfall repaint ----------------------------------------------
+  // Paints many rows at once in a single putImageData call.  Avoids N
+  // drawImage() scrolls from repeated paintRowToCanvas() calls (each scroll
+  // is a full-canvas copy — 256 of them during a zoom was ~100ms of jank).
+  // `rows` is oldest→newest; newest lands at y=0.
+  function paintHistoryToCanvas(ctx, canvas, rows, cols, maxRows, minDb, maxDb) {
+    if (!ctx || !rows || !rows.length) return;
+    var img = ctx.createImageData(cols, maxRows);
+    var data = img.data;
+    var lo = minDb, hi = maxDb;
+    var range = hi - lo;
+    if (range < 1) range = 1;
+    var count = rows.length < maxRows ? rows.length : maxRows;
+    // Newest at y=0 → iterate newest first
+    for (var r = 0; r < count; r++) {
+      var powers = rows[rows.length - 1 - r];
+      if (!powers || !powers.length) continue;
+      var n = powers.length;
+      var rowOff = r * cols * 4;
+      for (var x = 0; x < cols; x++) {
+        var srcIdx = (n > 1) ? Math.floor((x * (n - 1)) / (cols - 1)) : 0;
+        if (srcIdx < 0) srcIdx = 0; else if (srcIdx >= n) srcIdx = n - 1;
+        var p = powers[srcIdx];
+        var norm;
+        if (p == null || !isFinite(p)) {
+          norm = 0;
+        } else {
+          norm = (p - lo) / range;
+          if (norm < 0) norm = 0; else if (norm > 1) norm = 1;
+        }
+        var rgb = colorForNorm(norm);
+        var off = rowOff + x * 4;
+        data[off]     = rgb[0];
+        data[off + 1] = rgb[1];
+        data[off + 2] = rgb[2];
+        data[off + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
   R.spectrumCommon = {
     RAMP: RAMP,
     colorForNorm: colorForNorm,
@@ -262,5 +303,6 @@
     findNearLandmark: findNearLandmark,
     emaAutoScale: emaAutoScale,
     paintRowToCanvas: paintRowToCanvas,
+    paintHistoryToCanvas: paintHistoryToCanvas,
   };
 })();

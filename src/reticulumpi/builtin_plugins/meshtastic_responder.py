@@ -28,7 +28,7 @@ from reticulumpi.plugin_base import PluginBase
 
 # ── Constants ────────────────────────────────────────────────────────
 
-_MESHTASTIC_MTU = 237  # max payload bytes per Meshtastic text message
+_MESHTASTIC_MTU = 180  # conservative ceiling — LongFast firmware drops ~>200 byte texts
 _HTTP_TIMEOUT = 10  # seconds for external API calls
 _COOLDOWN_PRUNE_THRESHOLD = 256  # prune cooldown dict when it exceeds this
 
@@ -144,6 +144,25 @@ _ALL_COMMANDS = frozenset({
     "weather", "fortune", "dice", "flip", "calc",
 })
 
+# US state abbreviation → full name, for disambiguating "City, TX" style queries.
+_US_STATE_ABBREV = {
+    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
+    "ca": "california", "co": "colorado", "ct": "connecticut", "de": "delaware",
+    "fl": "florida", "ga": "georgia", "hi": "hawaii", "id": "idaho",
+    "il": "illinois", "in": "indiana", "ia": "iowa", "ks": "kansas",
+    "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
+    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota",
+    "ms": "mississippi", "mo": "missouri", "mt": "montana", "ne": "nebraska",
+    "nv": "nevada", "nh": "new hampshire", "nj": "new jersey",
+    "nm": "new mexico", "ny": "new york", "nc": "north carolina",
+    "nd": "north dakota", "oh": "ohio", "ok": "oklahoma", "or": "oregon",
+    "pa": "pennsylvania", "ri": "rhode island", "sc": "south carolina",
+    "sd": "south dakota", "tn": "tennessee", "tx": "texas", "ut": "utah",
+    "vt": "vermont", "va": "virginia", "wa": "washington",
+    "wv": "west virginia", "wi": "wisconsin", "wy": "wyoming",
+    "dc": "district of columbia",
+}
+
 
 # ── Plugin ───────────────────────────────────────────────────────────
 
@@ -183,6 +202,18 @@ class MeshtasticResponder(PluginBase):
             )
 
     def start(self) -> None:
+        # Initialise state that stop()/get_status() touch BEFORE any work
+        # that could raise, so a mid-start failure still leaves a coherent
+        # object for the plugin manager to shut down.
+        self._lock = threading.Lock()
+        self._node_cooldowns: dict[str, float] = {}
+        self._msgs_handled = 0
+        self._msgs_cooldown_skipped = 0
+        self._start_time = time.monotonic()
+        self._own_node_id: str | None = None
+        self._commands: dict[str, tuple[Callable[..., str], str]] = {}
+        self._custom_responses: dict[str, str] = {}
+
         self._prefix: str = self.config.get("prefix", "!")
         self._respond_to_broadcast: bool = self.config.get(
             "respond_to_broadcast", False
@@ -194,25 +225,13 @@ class MeshtasticResponder(PluginBase):
 
         # Custom responses — lowercased keys for case-insensitive matching
         raw_custom = self.config.get("custom_responses", {})
-        self._custom_responses: dict[str, str] = {
+        self._custom_responses = {
             k.lower(): v for k, v in raw_custom.items()
         }
 
         # Build command registry from enabled commands list
         enabled = self.config.get("commands", [])
         self._commands = self._build_command_registry(enabled)
-
-        # Per-node cooldown tracking
-        self._lock = threading.Lock()
-        self._node_cooldowns: dict[str, float] = {}
-
-        # Counters for status reporting
-        self._msgs_handled = 0
-        self._msgs_cooldown_skipped = 0
-        self._start_time = time.monotonic()
-
-        # Cache for the gateway's own node ID (self-reply guard)
-        self._own_node_id: str | None = None
 
         self.event_bus.subscribe(
             events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message
@@ -226,24 +245,37 @@ class MeshtasticResponder(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        self.event_bus.unsubscribe(
-            events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message
-        )
-        with self._lock:
-            self._node_cooldowns.clear()
+        try:
+            self.event_bus.unsubscribe(
+                events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message
+            )
+        except Exception:
+            self.log.debug("unsubscribe during stop() failed", exc_info=True)
+        lock = getattr(self, "_lock", None)
+        cooldowns = getattr(self, "_node_cooldowns", None)
+        if lock is not None and cooldowns is not None:
+            with lock:
+                cooldowns.clear()
         self.log.info(
             "Meshtastic responder stopped — handled %d, cooldown-skipped %d",
-            self._msgs_handled,
-            self._msgs_cooldown_skipped,
+            getattr(self, "_msgs_handled", 0),
+            getattr(self, "_msgs_cooldown_skipped", 0),
         )
 
     def get_status(self) -> dict[str, Any]:
+        # Use getattr guards because get_status may be called before
+        # start() finishes (e.g. hot-reload status probes during init
+        # or when a plugin failed partway through start()).
         return {
-            "active": self._active,
-            "msgs_handled": self._msgs_handled,
-            "msgs_cooldown_skipped": self._msgs_cooldown_skipped,
-            "enabled_commands": sorted(self._commands.keys()),
-            "custom_responses": len(self._custom_responses),
+            "active": getattr(self, "_active", False),
+            "msgs_handled": getattr(self, "_msgs_handled", 0),
+            "msgs_cooldown_skipped": getattr(
+                self, "_msgs_cooldown_skipped", 0,
+            ),
+            "enabled_commands": sorted(
+                getattr(self, "_commands", {}).keys()
+            ),
+            "custom_responses": len(getattr(self, "_custom_responses", {})),
         }
 
     # ── Command registry ──────────────────────────────────────────
@@ -275,42 +307,63 @@ class MeshtasticResponder(PluginBase):
 
     def _on_mesh_message(self, event_type: str, data: dict[str, Any]) -> None:
         """Event bus callback for incoming Meshtastic messages."""
-        from_id = data.get("from_id", "")
-        is_broadcast = data.get("is_broadcast", True)
-        text = data.get("text", "").strip()
+        try:
+            from_id = data.get("from_id", "")
+            is_broadcast = data.get("is_broadcast", True)
+            text = data.get("text", "").strip()
 
-        if not text or not from_id:
-            return
-        if is_broadcast and not self._respond_to_broadcast:
-            return
+            if not text or not from_id:
+                return
+            if is_broadcast and not self._respond_to_broadcast:
+                return
 
-        # Self-reply guard — don't respond to our own node
-        if self._is_own_node(from_id):
-            return
+            # Self-reply guard — don't respond to our own node
+            if self._is_own_node(from_id):
+                return
 
-        # Per-node cooldown
-        if not self._check_cooldown(from_id):
-            self._msgs_cooldown_skipped += 1
-            return
+            # Cheap trigger detection first so chat noise doesn't consume
+            # a cooldown slot. Then enforce cooldown BEFORE executing the
+            # handler — some commands hit external APIs (weather, etc.)
+            # and running them only to drop the reply wastes bandwidth.
+            if not self._is_trigger(text):
+                return
 
-        response = self._match_and_respond(text)
-        if response:
+            if not self._check_cooldown(from_id):
+                self._msgs_cooldown_skipped += 1
+                self.log.info(
+                    "Cooldown skipped reply to %s (%.0fs window)",
+                    from_id,
+                    self._cooldown_seconds,
+                )
+                return
+
+            response = self._match_and_respond(text)
+            if not response:
+                return
+
             self._msgs_handled += 1
             truncated = _truncate_response(response)
             self._send_reply(truncated, from_id)
+        except Exception:
+            self.log.exception("Error handling Meshtastic message")
 
     def _is_own_node(self, node_id: str) -> bool:
         """Check if *node_id* is our own gateway node (prevent self-reply loops)."""
-        if self._own_node_id is not None:
+        # Truthy check — an empty string (gateway not yet connected) must
+        # NOT be treated as "resolved", or we lock in a broken cache that
+        # lets self-announcements through once the gateway comes online.
+        if self._own_node_id:
             return node_id == self._own_node_id
         try:
             gw = self.app.get_plugin("meshtastic_gateway")
             if gw and hasattr(gw, "get_status"):
                 status = gw.get_status()
-                self._own_node_id = status.get("node_id", "")
-                return node_id == self._own_node_id
+                resolved = status.get("node_id") or ""
+                if resolved:
+                    self._own_node_id = resolved
+                    return node_id == resolved
         except Exception:
-            pass
+            self.log.debug("gateway status lookup failed", exc_info=True)
         return False
 
     def _check_cooldown(self, node_id: str) -> bool:
@@ -338,6 +391,24 @@ class MeshtasticResponder(PluginBase):
                     if ts > cutoff
                 }
         return True
+
+    def _is_trigger(self, text: str) -> bool:
+        """Return True if *text* would produce any response.
+
+        Cheap detection only — no handler execution, no network calls.
+        Used to gate cooldown consumption on actual triggers.
+        """
+        if text.lower().strip() in self._custom_responses:
+            return True
+        if text.startswith(self._prefix):
+            without_prefix = text[len(self._prefix):]
+            parts = without_prefix.split(None, 1)
+            # Empty prefix-only (e.g. "!") → help response
+            if not parts:
+                return True
+            cmd_name = parts[0].lower()
+            return cmd_name in self._commands
+        return False
 
     def _match_and_respond(self, text: str) -> str | None:
         """Try custom responses first, then command prefix, else None."""
@@ -395,20 +466,12 @@ class MeshtasticResponder(PluginBase):
     # ── Commands ──────────────────────────────────────────────────
 
     def _cmd_help(self, _args: str = "") -> str:
-        """List enabled commands with descriptions."""
-        lines = [f"{self.app.node_name} Mesh Responder"]
-        for name, (_handler, desc) in sorted(self._commands.items()):
-            lines.append(f" {self._prefix}{name} - {desc}")
-        if self._custom_responses:
-            lines.append(f" + {len(self._custom_responses)} keyword(s)")
-        return "\n".join(lines)
+        """Return compact command list — one line, fits in a single LoRa packet."""
+        names = sorted(self._commands.keys())
+        return "Cmds: " + " ".join(f"{self._prefix}{n}" for n in names)
 
     def _cmd_ping(self, _args: str = "") -> str:
-        """Simple alive check with uptime."""
-        elapsed = time.monotonic() - self._start_time
-        hours = int(elapsed // 3600)
-        minutes = int((elapsed % 3600) // 60)
-        return f"Pong! Uptime: {hours}h {minutes}m"
+        return "Pong!"
 
     def _cmd_time(self, args: str = "") -> str:
         """Return current time, optionally in a named timezone."""
@@ -438,7 +501,7 @@ class MeshtasticResponder(PluginBase):
             tz = zoneinfo.ZoneInfo(resolved)
             now = datetime.now(tz)
             return f"{resolved}: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
-        except (KeyError, Exception):
+        except (zoneinfo.ZoneInfoNotFoundError, ValueError):
             return f"Unknown timezone: {tz_name}\nExamples: UTC, PST, Europe/London"
 
     def _cmd_uptime(self, _args: str = "") -> str:
@@ -460,32 +523,29 @@ class MeshtasticResponder(PluginBase):
         return f"Bot: {bh}h {bm}m\nSystem: {sys_str}"
 
     def _cmd_nodes(self, _args: str = "") -> str:
-        """Show known Meshtastic node count and top entries."""
+        """Show known Meshtastic node count and a few recent entries."""
         try:
             gw = self.app.get_plugin("meshtastic_gateway")
             if not gw or not hasattr(gw, "get_meshtastic_nodes"):
-                return "Meshtastic gateway not available."
+                return "Gateway unavailable."
             nodes = gw.get_meshtastic_nodes()
             if not nodes:
-                return "No Meshtastic nodes known."
+                return "No nodes known."
 
             total = len(nodes)
-            # Sort by last_heard descending (most recent first)
-            with_heard = [
-                n for n in nodes if n.get("last_heard")
-            ]
+            with_heard = [n for n in nodes if n.get("last_heard")]
             with_heard.sort(key=lambda n: n["last_heard"], reverse=True)
 
-            lines = [f"Nodes: {total} known"]
-            # Show top 5 most recently heard
-            for n in with_heard[:5]:
-                name = n.get("long_name") or n.get("short_name") or n.get("id", "?")
-                lines.append(f" {name}")
-            if total > 5:
-                lines.append(f" ...and {total - 5} more")
-            return "\n".join(lines)
+            # Prefer short_name (<=4 chars) to stay within one LoRa packet
+            recent = []
+            for n in with_heard[:3]:
+                recent.append(
+                    n.get("short_name")
+                    or (n.get("long_name") or "?")[:12]
+                )
+            return f"{total} nodes. Recent: " + ", ".join(recent)
         except Exception as exc:
-            return f"Error querying nodes: {exc}"
+            return f"Error: {str(exc)[:80]}"
 
     def _cmd_weather(self, args: str = "") -> str:
         """Fetch current weather for a location via Open-Meteo."""
@@ -508,8 +568,13 @@ class MeshtasticResponder(PluginBase):
             if not results:
                 return f"Location not found: {location}"
 
-            place = results[0]
+            place = None
             if filter_terms:
+                # Expand US state abbreviations ("tx" → "texas") so short
+                # forms substring-match the admin1 field.
+                expanded = [
+                    _US_STATE_ABBREV.get(t, t) for t in filter_terms
+                ]
                 for r in results:
                     searchable = " ".join([
                         r.get("admin1", ""),
@@ -517,9 +582,23 @@ class MeshtasticResponder(PluginBase):
                         r.get("country", ""),
                         r.get("country_code", ""),
                     ]).lower()
-                    if all(term in searchable for term in filter_terms):
+                    if all(term in searchable for term in expanded):
                         place = r
                         break
+                if place is None and len(results) > 1:
+                    # Multiple candidates but the filter matched none — show
+                    # a few alternatives (compact, LoRa-sized).
+                    alts = []
+                    for r in results[:3]:
+                        name = r.get("name", "?")
+                        region = (
+                            r.get("country_code")
+                            or r.get("admin1", "")
+                        )
+                        alts.append(f"{name},{region}" if region else name)
+                    return "No match. Try: " + " / ".join(alts)
+            if place is None:
+                place = results[0]
 
             lat = place["latitude"]
             lon = place["longitude"]
@@ -552,21 +631,21 @@ class MeshtasticResponder(PluginBase):
             )
             conditions = _WMO_CODES.get(weather_code, "Unknown")
 
-            loc_parts = [place_name]
-            if admin1:
-                loc_parts.append(admin1)
-            if country:
-                loc_parts.append(country)
-            loc_label = ", ".join(loc_parts)
+            # Keep it compact for LoRa — one tight location label + one data line
+            loc_label = place_name
+            if admin1 and admin1 != place_name:
+                loc_label += f", {admin1}"
+            elif country:
+                loc_label += f", {country}"
 
-            lines = [f"Weather: {loc_label}", f" {conditions}"]
+            bits = [conditions]
             if temp_f is not None:
-                lines.append(f" {temp_f}F ({temp_c}C)")
+                bits.append(f"{temp_f}F/{temp_c}C")
             if humidity is not None:
-                lines.append(f" Humidity: {humidity}%")
+                bits.append(f"{humidity}%RH")
             if wind_mph is not None:
-                lines.append(f" Wind: {wind_mph} mph")
-            return "\n".join(lines)
+                bits.append(f"{wind_mph}mph")
+            return f"{loc_label}: " + ", ".join(bits)
 
         except urllib.error.URLError:
             return "Weather fetch failed (network error)."
@@ -588,8 +667,8 @@ class MeshtasticResponder(PluginBase):
             n_str, m_str = args.split("d", 1)
             n = int(n_str) if n_str else 1
             m = int(m_str)
-            if n < 1 or n > 100 or m < 2 or m > 1000:
-                return "Limits: 1-100 dice, 2-1000 sides."
+            if n < 1 or n > 20 or m < 2 or m > 1000:
+                return "Limits: 1-20 dice, 2-1000 sides."
             rolls = [random.randint(1, m) for _ in range(n)]
             total = sum(rolls)
             if n == 1:
@@ -611,10 +690,14 @@ class MeshtasticResponder(PluginBase):
         try:
             tree = ast.parse(expr, mode="eval")
             result = _safe_eval(tree)
-            if isinstance(result, float) and result == int(result) and abs(result) < 1e15:
-                result = int(result)
+            if isinstance(result, float):
+                if not math.isfinite(result):
+                    return "Error: result overflowed"
+                if result == int(result) and abs(result) < 1e15:
+                    result = int(result)
             return f"{expr} = {result}"
-        except (ValueError, TypeError, SyntaxError, ZeroDivisionError) as exc:
+        except (ValueError, TypeError, SyntaxError,
+                ZeroDivisionError, OverflowError) as exc:
             return f"Error: {exc}"
 
 

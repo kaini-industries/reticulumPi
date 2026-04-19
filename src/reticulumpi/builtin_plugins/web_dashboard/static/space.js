@@ -462,7 +462,7 @@
     _timelineEl.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
     _timelineEl.setAttribute('height', H);
 
-    var leftGutter = 96;
+    var leftGutter = 160;
     var topMargin = 24;
     var bottomMargin = 6;
     var plotW = W - leftGutter - 8;

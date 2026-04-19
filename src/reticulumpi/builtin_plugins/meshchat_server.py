@@ -6,6 +6,7 @@ import os
 import subprocess
 from typing import Any
 
+from reticulumpi._paths import find_repo_asset
 from reticulumpi.plugin_base import PluginBase
 
 
@@ -54,18 +55,16 @@ class MeshChatServer(PluginBase):
         self._meshchat_script = meshchat_script
         self._python_bin = python_bin
 
-        # Resolve the launcher wrapper (lives in ReticulumPi's tree, not MeshChat's)
-        project_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        )
-        launcher = os.path.join(project_root, "scripts", "meshchat_launcher.py")
-        if os.path.isfile(launcher):
+        # Resolve the launcher wrapper (lives in ReticulumPi's tree, not
+        # MeshChat's). Try multiple candidate roots because __file__ may
+        # resolve inside site-packages rather than the repo tree.
+        launcher = find_repo_asset("scripts", "meshchat_launcher.py")
+        if launcher:
             self._launcher_script = launcher
         else:
             self.log.warning(
-                "meshchat_launcher.py not found at %s — "
-                "falling back to direct meshchat.py (timeouts will not be patched)",
-                launcher,
+                "meshchat_launcher.py not found in any known location — "
+                "falling back to direct meshchat.py (timeouts will not be patched)"
             )
             self._launcher_script = None
 

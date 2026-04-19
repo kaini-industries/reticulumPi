@@ -386,6 +386,46 @@ def _apply_patches(meshchat_module):
     except Exception as exc:
         print(f"{_TAG} Warning: could not start failed message sweep ({exc})")
 
+    # --- Patch 9: Make LXMF.display_name_from_app_data tolerant of str payloads ---
+    # Upstream LXMF unconditionally calls dn.decode("utf-8") on the display-name
+    # field, but msgpack may already return a str (raw=False). The result is a
+    # torrent of "Could not decode display name … 'str' object has no attribute
+    # 'decode'" errors whenever peers announce with a non-bytes name. Replace the
+    # function with one that accepts either bytes or str.
+    try:
+        import LXMF as _lxmf_module
+        import RNS.vendor.umsgpack as _msgpack
+
+        def _safe_display_name_from_app_data(app_data=None):
+            if app_data is None or len(app_data) == 0:
+                return None
+            first = app_data[0]
+            if (0x90 <= first <= 0x9f) or first == 0xdc:
+                peer_data = _msgpack.unpackb(app_data)
+                if not isinstance(peer_data, list) or len(peer_data) < 1:
+                    return None
+                dn = peer_data[0]
+                if dn is None:
+                    return None
+                if isinstance(dn, str):
+                    return dn
+                if isinstance(dn, bytes):
+                    try:
+                        return dn.decode("utf-8")
+                    except Exception:
+                        return None
+                return None
+            # Original announce format — always bytes
+            try:
+                return app_data.decode("utf-8")
+            except Exception:
+                return None
+
+        _lxmf_module.display_name_from_app_data = _safe_display_name_from_app_data
+        print(f"{_TAG} Patched LXMF.display_name_from_app_data() to accept bytes or str")
+    except Exception as exc:
+        print(f"{_TAG} Warning: could not patch display_name_from_app_data ({exc})")
+
     return ok
 
 
