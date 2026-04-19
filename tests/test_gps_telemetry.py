@@ -171,6 +171,7 @@ class TestSentenceHandling:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
@@ -201,6 +202,7 @@ class TestSentenceHandling:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
@@ -222,6 +224,7 @@ class TestSentenceHandling:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
@@ -246,6 +249,7 @@ class TestSentenceHandling:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
@@ -259,6 +263,8 @@ class TestSentenceHandling:
         assert fix["fix_type"] == 3
         assert fix["pdop"] == pytest.approx(2.5)
         assert fix["vdop"] == pytest.approx(2.1)
+        # GSA sv_id fields: 04, 05, 09, 12, 24 are used; blanks are ignored.
+        assert plugin._sats_in_use_by_talker["GP"] == {4, 5, 9, 12, 24}
 
     def test_gsv_reassembles_full_group(self, mock_app, gps_config):
         plugin = _make_plugin(mock_app, gps_config)
@@ -268,6 +274,7 @@ class TestSentenceHandling:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
@@ -298,6 +305,7 @@ class TestSentenceHandling:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
@@ -306,6 +314,41 @@ class TestSentenceHandling:
 
         plugin._handle_sentence("$GPABC,bogus,data,here*XX")
         assert plugin._parse_errors >= 1
+
+    def test_multi_talker_gsa_union(self, mock_app, gps_config):
+        """Two GSA sentences from different talkers should union their PRN sets."""
+        plugin = _make_plugin(mock_app, gps_config)
+        plugin._active = True
+        plugin._lock = threading.Lock()
+        plugin.last_fix = None
+        plugin._satellites_in_view = []
+        plugin._gsv_accum = {}
+        plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
+        plugin._have_fix = False
+        plugin._msgs_received = 0
+        plugin._sentences_parsed = 0
+        plugin._parse_errors = 0
+        plugin._last_msg_time = 0.0
+        plugin._connected = True
+        plugin._reconnect_failures = 0
+        plugin._start_time = time.time()
+        plugin._serial_port = "/dev/ttyUSB0"
+        plugin._baudrate = 4800
+
+        # Need a valid fix first so GSA is applied to last_fix
+        plugin._handle_sentence(RMC_VALID)
+        # GP GSA: uses PRNs 4, 5
+        plugin._handle_sentence("$GPGSA,A,3,04,05,,,,,,,,,,,2.5,1.3,2.1*35")
+        # GL GSA: uses PRNs 65, 66 (GLONASS)
+        plugin._handle_sentence("$GLGSA,A,3,65,66,,,,,,,,,,,2.5,1.3,2.1*2B")
+
+        # Two separate per-talker sets tracked
+        assert plugin._sats_in_use_by_talker["GP"] == {4, 5}
+        assert plugin._sats_in_use_by_talker["GL"] == {65, 66}
+        # Snapshot unions them
+        snap = plugin.get_snapshot()
+        assert set(snap["satellites_used_prns"]) == {4, 5, 65, 66}
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +365,7 @@ class TestSnapshotShape:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
@@ -357,6 +401,15 @@ class TestSnapshotShape:
         assert snap["last_fix"] is not None
         assert snap["last_fix"]["satellites_used"] == 8
         assert len(snap["satellites_in_view"]) == 11
+        # Every per-sat dict is annotated with an in_use flag;
+        # the PRNs from GSA_3D (4, 5, 9, 12, 24) should resolve to True,
+        # and any sat whose PRN is not in that set should resolve to False.
+        by_prn = {s["prn"]: s for s in snap["satellites_in_view"]}
+        assert by_prn[4]["in_use"] is True
+        assert by_prn[24]["in_use"] is True
+        assert by_prn[3]["in_use"] is False  # visible but not in the fix
+        # satellites_used_prns mirrors the union across talkers.
+        assert snap["satellites_used_prns"] == [4, 5, 9, 12, 24]
 
     def test_snapshot_shape_without_fix(self, mock_app, gps_config):
         plugin = _make_plugin(mock_app, gps_config)
@@ -366,6 +419,7 @@ class TestSnapshotShape:
         plugin._satellites_in_view = []
         plugin._gsv_accum = {}
         plugin._gsv_expected = {}
+        plugin._sats_in_use_by_talker = {}
         plugin._have_fix = False
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0

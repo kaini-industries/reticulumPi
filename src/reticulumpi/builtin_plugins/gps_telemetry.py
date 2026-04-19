@@ -83,6 +83,11 @@ class GpsTelemetry(PluginBase):
         self._satellites_in_view: list[dict[str, Any]] = []
         self._gsv_accum: dict[str, list[dict[str, Any]]] = {}
         self._gsv_expected: dict[str, int] = {}
+        # PRNs reported as used-in-fix by the most recent GSA per talker.
+        # Multi-GNSS receivers emit one GSA per constellation (GP/GL/GA/...) or
+        # a combined GN GSA; a single-GNSS puck like the BU-353N emits only GP.
+        # Snapshot takes the union so either shape works transparently.
+        self._sats_in_use_by_talker: dict[str, set[int]] = {}
 
         self._serial = None
         self._connected = False
@@ -139,7 +144,14 @@ class GpsTelemetry(PluginBase):
         snap = self.get_status()
         with self._lock:
             snap["last_fix"] = dict(self.last_fix) if self.last_fix else None
-            snap["satellites_in_view"] = list(self._satellites_in_view)
+            in_use: set[int] = set()
+            for s in self._sats_in_use_by_talker.values():
+                in_use |= s
+            snap["satellites_in_view"] = [
+                {**sat, "in_use": sat.get("prn") in in_use}
+                for sat in self._satellites_in_view
+            ]
+            snap["satellites_used_prns"] = sorted(in_use)
         return snap
 
     # ── Read loop ───────────────────────────────────────────────────────
@@ -338,7 +350,14 @@ class GpsTelemetry(PluginBase):
         pdop = _decimal_or_none(getattr(msg, "pdop", None))
         hdop = _decimal_or_none(getattr(msg, "hdop", None))
         vdop = _decimal_or_none(getattr(msg, "vdop", None))
+        talker = getattr(msg, "talker", "GP") or "GP"
+        in_use: set[int] = set()
+        for i in range(1, 13):
+            prn = _int_or_none(getattr(msg, f"sv_id{i:02d}", None))
+            if prn:
+                in_use.add(prn)
         with self._lock:
+            self._sats_in_use_by_talker[talker] = in_use
             if self.last_fix is None:
                 return
             fix = dict(self.last_fix)

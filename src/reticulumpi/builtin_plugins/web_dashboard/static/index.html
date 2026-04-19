@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=31">
+  <link rel="stylesheet" href="/static/style.css?v=32">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -655,19 +655,23 @@
           <svg id="gps-sky" viewBox="-115 -115 230 230" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
       </div>
-      <div class="table-scroll">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th class="sortable" data-sort="gps-prn">PRN<span class="sort-arrow"></span></th>
-              <th class="sortable" data-sort="gps-elevation">Elevation<span class="sort-arrow"></span></th>
-              <th class="sortable" data-sort="gps-azimuth">Azimuth<span class="sort-arrow"></span></th>
-              <th class="sortable" data-sort="gps-snr">SNR<span class="sort-arrow"></span></th>
-            </tr>
-          </thead>
-          <tbody id="gps-sats-table"></tbody>
-        </table>
-      </div>
+      <details class="space-details">
+        <summary>Satellites in View</summary>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="sortable" data-sort="gps-prn">PRN<span class="sort-arrow"></span></th>
+                <th class="sortable" data-sort="gps-elevation">Elevation<span class="sort-arrow"></span></th>
+                <th class="sortable" data-sort="gps-azimuth">Azimuth<span class="sort-arrow"></span></th>
+                <th class="sortable" data-sort="gps-snr">SNR<span class="sort-arrow"></span></th>
+                <th class="sortable" data-sort="gps-in_use">Used<span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="gps-sats-table"></tbody>
+          </table>
+        </div>
+      </details>
     </div>
 
     <!-- Node Map -->
@@ -879,7 +883,7 @@
   <script src="/static/meshcore.js?v=2"></script>
   <script src="/static/vendor/leaflet.js"></script>
   <script src="/static/map.js?v=1"></script>
-  <script src="/static/gps.js?v=1"></script>
+  <script src="/static/gps.js?v=2"></script>
   <script src="/static/space.js?v=2"></script>
   <script src="/static/spectrum_common.js?v=1"></script>
   <script src="/static/spectrum.js?v=9"></script>

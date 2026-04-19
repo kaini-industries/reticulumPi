@@ -139,15 +139,24 @@
       var x = r * Math.sin(rad);
       var y = -r * Math.cos(rad);
       var g = document.createElementNS(ns, 'g');
-      g.setAttribute('class', 'sat-group');
+      g.setAttribute('class', 'sat-group' + (s.in_use ? ' sat-in-use' : ''));
+      if (s.in_use) {
+        var ring = document.createElementNS(ns, 'circle');
+        ring.setAttribute('cx', x.toFixed(2));
+        ring.setAttribute('cy', y.toFixed(2));
+        ring.setAttribute('r', 8);
+        ring.setAttribute('class', 'sat-use-ring');
+        g.appendChild(ring);
+      }
       var c = document.createElementNS(ns, 'circle');
       c.setAttribute('cx', x.toFixed(2));
       c.setAttribute('cy', y.toFixed(2));
       c.setAttribute('r', 5);
       c.setAttribute('class', 'sat-dot ' + _snrClass(s.snr_db));
       var snrTxt = s.snr_db != null ? s.snr_db + ' dB' : 'no SNR';
+      var useTxt = s.in_use ? ' — in fix' : '';
       c.appendChild(document.createElementNS(ns, 'title')).textContent =
-        'PRN ' + s.prn + ' — elev ' + s.elevation_deg + '°, azim ' + s.azimuth_deg + '°, ' + snrTxt;
+        'PRN ' + s.prn + ' — elev ' + s.elevation_deg + '°, azim ' + s.azimuth_deg + '°, ' + snrTxt + useTxt;
       var t = document.createElementNS(ns, 'text');
       t.setAttribute('x', x.toFixed(2));
       t.setAttribute('y', (y + 3).toFixed(2));
@@ -169,6 +178,7 @@
       if (key === 'prn') { va = a.prn || 0; vb = b.prn || 0; }
       else if (key === 'elevation') { va = a.elevation_deg || 0; vb = b.elevation_deg || 0; }
       else if (key === 'azimuth') { va = a.azimuth_deg || 0; vb = b.azimuth_deg || 0; }
+      else if (key === 'in_use') { va = a.in_use ? 1 : 0; vb = b.in_use ? 1 : 0; }
       else { va = a.snr_db == null ? -1 : a.snr_db; vb = b.snr_db == null ? -1 : b.snr_db; }
       return asc ? va - vb : vb - va;
     });
@@ -193,16 +203,21 @@
     var html = '';
     for (var i = 0; i < sorted.length; i++) {
       var s = sorted[i];
-      html += '<tr>'
+      var rowCls = s.in_use ? ' class="sat-in-use"' : '';
+      var usedCell = s.in_use
+        ? '<span class="sat-used-badge" title="Contributing to position fix">✓</span>'
+        : '<span class="sat-unused">–</span>';
+      html += '<tr' + rowCls + '>'
         + '<td>' + esc(String(s.prn)) + '</td>'
         + '<td>' + (s.elevation_deg != null ? s.elevation_deg + '°' : '--') + '</td>'
         + '<td>' + (s.azimuth_deg != null ? s.azimuth_deg + '°' : '--') + '</td>'
         + '<td class="' + _snrClass(s.snr_db) + '">'
         + (s.snr_db != null ? s.snr_db + ' dB' : '--')
         + '</td>'
+        + '<td class="sat-used-cell">' + usedCell + '</td>'
         + '</tr>';
     }
-    tbody.innerHTML = html || '<tr><td colspan="4" class="table-empty">No satellites in view</td></tr>';
+    tbody.innerHTML = html || '<tr><td colspan="5" class="table-empty">No satellites in view</td></tr>';
     _updateSortIndicators();
   }
 
