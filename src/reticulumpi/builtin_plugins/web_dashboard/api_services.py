@@ -712,31 +712,6 @@ async def handle_space_snapshot(
     return _ok(snap)
 
 
-# ── Spectrum scanner ─────────────────────────────────────────────────
-
-
-async def handle_spectrum_history(
-    request: aiohttp.web.Request,
-) -> aiohttp.web.Response:
-    """GET /api/spectrum/history — full waterfall backfill (one-shot).
-
-    The WebSocket broadcast carries only the last few sweeps to keep
-    each tick compact; this endpoint returns the plugin's full rolling
-    buffer (capped by ``waterfall_rows`` in config) so the dashboard
-    can paint a populated waterfall on page load instead of starting
-    blank and accumulating only ~16 s of pre-load history from the WS
-    tail.
-    """
-    plugin = _get_plugin(request)
-    scanner = plugin.app.get_plugin("spectrum_scanner")
-    if not scanner or not hasattr(scanner, "get_history"):
-        return _ok({"available": False, "rows": []})
-    try:
-        return _ok(scanner.get_history())
-    except Exception:
-        return _error("Failed to gather spectrum history", 500)
-
-
 # ── GPS telemetry ────────────────────────────────────────────────────
 
 
@@ -826,8 +801,6 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/messages/search", handle_message_search)
     app.router.add_post("/api/messages/read", handle_mark_read)
     app.router.add_get("/api/messages/unread", handle_unread_counts)
-    # Spectrum scanner
-    app.router.add_get("/api/spectrum/history", handle_spectrum_history)
     # Space tracker
     app.router.add_get("/api/space", handle_space_snapshot)
     # GPS telemetry

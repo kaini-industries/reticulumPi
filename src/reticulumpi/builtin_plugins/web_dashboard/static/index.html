@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=32">
+  <link rel="stylesheet" href="/static/style.css?v=34">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -82,6 +82,7 @@
                 <button id="msg-lxmf-send-btn" class="msg-send-btn" disabled>Send</button>
               </div>
               <div class="msg-compose-meta">
+                <button type="button" class="msg-gps-btn" id="msg-lxmf-gps-btn" title="Insert current GPS location">&#128205; GPS</button>
                 <span class="msg-byte-count" id="msg-lxmf-byte-count"></span>
                 <span class="msg-feedback" id="msg-lxmf-feedback"></span>
               </div>
@@ -183,6 +184,7 @@
                 <span class="msg-channel-wrap" id="msg-lora-channel-wrap" style="display:none">
                   <select id="msg-lora-channel-select" class="rt-select rt-select-sm"></select>
                 </span>
+                <button type="button" class="msg-gps-btn" id="msg-lora-gps-btn" title="Insert current GPS location">&#128205; GPS</button>
                 <span class="msg-byte-count" id="msg-lora-byte-count"></span>
                 <span class="msg-feedback" id="msg-lora-feedback"></span>
               </div>
@@ -229,6 +231,7 @@
                 <button id="msg-meshcore-send-btn" class="msg-send-btn" disabled>Send</button>
               </div>
               <div class="msg-compose-meta">
+                <button type="button" class="msg-gps-btn" id="msg-meshcore-gps-btn" title="Insert current GPS location">&#128205; GPS</button>
                 <span class="msg-byte-count" id="msg-meshcore-byte-count"></span>
                 <span class="msg-feedback" id="msg-meshcore-feedback"></span>
               </div>
@@ -807,7 +810,6 @@
           <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
           <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
           <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall" width="800" height="256"></canvas>
-          <canvas id="lora-spec-activity-col" class="lora-spec-activity-col" width="6" height="256"></canvas>
           <div class="lora-spectrum-overlay" id="lora-spectrum-overlay"></div>
           <div class="lora-spectrum-hover" id="lora-spectrum-hover"></div>
           <div class="lora-spec-zoom-reset" id="lora-spec-zoom-reset" style="display:none">Reset zoom</div>
@@ -871,7 +873,7 @@
   </div>
 
   <script src="/static/app.js?v=26"></script>
-  <script src="/static/messages_panel.js?v=4"></script>
+  <script src="/static/messages_panel.js?v=5"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
   <script src="/static/messages_meshtastic_mqtt.js?v=1"></script>
   <script src="/static/messages_meshtastic_lora.js?v=1"></script>
@@ -883,7 +885,7 @@
   <script src="/static/meshcore.js?v=2"></script>
   <script src="/static/vendor/leaflet.js"></script>
   <script src="/static/map.js?v=1"></script>
-  <script src="/static/gps.js?v=2"></script>
+  <script src="/static/gps.js?v=3"></script>
   <script src="/static/space.js?v=2"></script>
   <script src="/static/spectrum_common.js?v=1"></script>
   <script src="/static/spectrum.js?v=9"></script>

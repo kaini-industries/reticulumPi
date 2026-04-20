@@ -57,6 +57,14 @@ class WebDashboardPlugin(PluginBase):
         if not isinstance(ssl_config, dict):
             raise ValueError("ssl must be a dict")
 
+        lora_region = self.config.get("lora_region", "US")
+        if not isinstance(lora_region, str) or lora_region not in {
+            "US", "EU_868", "EU_433", "CN", "JP", "ANZ",
+        }:
+            raise ValueError(
+                "lora_region must be one of: US, EU_868, EU_433, CN, JP, ANZ"
+            )
+
     def start(self) -> None:
         self._active = True
         self._host = self.config.get("host", "127.0.0.1")

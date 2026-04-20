@@ -1082,7 +1082,22 @@
     ws.onmessage = function(ev) {
       try {
         var msg = JSON.parse(ev.data);
+        if (msg.type === 'spectrum_history' && msg.data) {
+          // Server pushes this once per WS connect as the initial waterfall
+          // backfill.  Panels see the generation bump on their next update()
+          // tick and bulk-paint from the store.
+          if (RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
+            RPI.spectrumCommon.historyStore.loadHistory(msg.data);
+          }
+          return;
+        }
         if (msg.type === 'update' && msg.data) {
+          // Maintain the shared spectrum history ring BEFORE panel updates
+          // run, so both panels read a consistent snapshot.
+          if (msg.data.spectrum
+              && RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
+            RPI.spectrumCommon.historyStore.ingestTick(msg.data.spectrum);
+          }
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
           if (msg.data.interfaces) {
             updateInterfaces(msg.data.interfaces);

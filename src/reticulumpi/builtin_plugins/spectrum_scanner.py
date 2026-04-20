@@ -136,7 +136,15 @@ class SpectrumScanner(PluginBase):
         # snapshot serializer already passes None straight through to
         # JSON null, which the dashboard treats as "no reading".
         self._latest_powers_db: list[float | None] = []
-        self._waterfall: deque[list[float | None]] = deque(maxlen=self._waterfall_rows)
+        # Each waterfall entry is (flush_timestamp, powers).  Carrying the
+        # timestamp alongside the power row lets the dashboard report a
+        # real wall-clock age per row instead of the drift-prone
+        # rowIdx * sweep_seconds approximation — which is wrong whenever a
+        # wide-span sweep takes longer than sweep_seconds, the scanner
+        # restarts mid-history, or the tab was paused.
+        self._waterfall: deque[tuple[float, list[float | None]]] = deque(
+            maxlen=self._waterfall_rows
+        )
 
         # Parser-local accumulator (flushed per sweep).  Maps
         # segment_start_hz -> (bin_step_hz, [power_db, ...]).
@@ -214,6 +222,10 @@ class SpectrumScanner(PluginBase):
         """
         with self._state_lock:
             tail = list(self._waterfall)[-self._SNAPSHOT_TAIL_ROWS:]
+            # Decompose (ts, powers) tuples into two parallel lists kept in
+            # lock-step on the wire.  `waterfall_tail` is unchanged for
+            # backward-compat with older clients; `waterfall_tail_times` is
+            # the new sibling field the dashboard uses for honest per-row age.
             return {
                 "status": self._status,
                 "error": self._last_error,
@@ -232,9 +244,10 @@ class SpectrumScanner(PluginBase):
                     for v in self._latest_powers_db
                 ],
                 "waterfall_tail": [
-                    [round(v, 1) if v is not None else None for v in row]
-                    for row in tail
+                    [round(v, 1) if v is not None else None for v in powers]
+                    for _, powers in tail
                 ],
+                "waterfall_tail_times": [round(ts, 3) for ts, _ in tail],
             }
 
     def get_history(self) -> dict[str, Any]:
@@ -248,14 +261,20 @@ class SpectrumScanner(PluginBase):
         WS payload size.
         """
         with self._state_lock:
+            # Same decomposition pattern as get_snapshot: parallel arrays
+            # (rows / row_timestamps) stay in lock-step.  rows shape is
+            # unchanged for backward-compat; row_timestamps is the new sibling.
             return {
                 "available": True,
                 "sweep_count": self._sweep_count,
                 "bin_count": len(self._bins_hz),
                 "waterfall_rows": self._waterfall_rows,
                 "rows": [
-                    [round(v, 1) if v is not None else None for v in row]
-                    for row in self._waterfall
+                    [round(v, 1) if v is not None else None for v in powers]
+                    for _, powers in self._waterfall
+                ],
+                "row_timestamps": [
+                    round(ts, 3) for ts, _ in self._waterfall
                 ],
             }
 
@@ -488,7 +507,7 @@ class SpectrumScanner(PluginBase):
         with self._state_lock:
             self._bins_hz = freqs
             self._latest_powers_db = powers
-            self._waterfall.append(powers)
+            self._waterfall.append((now, powers))
             self._sweep_count += 1
             self._last_sweep_at = now
 

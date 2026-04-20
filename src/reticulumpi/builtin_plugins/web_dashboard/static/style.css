@@ -1300,6 +1300,21 @@ body {
 }
 .msg-channels-btn:hover { color: var(--accent); border-color: var(--accent); }
 
+.msg-gps-btn {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0.25rem 0.5rem;
+  white-space: nowrap;
+}
+.msg-gps-btn:hover {
+  color: var(--gps, #34c3c1);
+  border-color: var(--gps, #34c3c1);
+}
+
 /* Channel management dialog */
 .dialog-overlay {
   position: fixed;
@@ -2743,6 +2758,37 @@ body {
   color: var(--accent, #58a6ff);
   font-weight: 600;
 }
+.lora-meta-region-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+.lora-meta-region-label {
+  color: var(--text-muted, #8b949e);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.lora-meta-region-select {
+  background: var(--bg-card, #121722);
+  color: var(--accent, #58a6ff);
+  border: 1px solid var(--border, #2a3240);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+.lora-meta-region-select:hover {
+  border-color: var(--accent, #58a6ff);
+}
+.lora-meta-region-select:focus {
+  border-color: var(--accent, #58a6ff);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.20);
+}
 .lora-meta-src {
   color: var(--text-muted, #8b949e);
   font-size: 0.75rem;
@@ -3040,20 +3086,6 @@ body {
   background: rgba(240, 200, 80, 0.08);
 }
 
-/* ── Activity column (TX/RX markers on waterfall left edge) ─────────── */
-/* The activity col is the same height as the waterfall and aligns with
-   its bottom — position from `bottom:0` instead of computing a `top`
-   offset so changes to bands/line heights don't silently break alignment. */
-.lora-spec-activity-col {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  width: 6px;
-  height: 320px;
-  pointer-events: none;
-  z-index: 2;
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
-}
 @media (max-width: 700px) {
   .lora-spectrum-waterfall { height: 160px; }
   .lora-spectrum-line      { height: 90px; }
@@ -3066,8 +3098,6 @@ body {
   .lora-peakhold-toggle    { font-size: 0.68rem; padding: 1px 6px; margin-left: 0.2rem; }
   .lora-stat-rnode-group   { padding: 1px 6px; gap: 0.35rem; }
   .lora-stat-group-label   { font-size: 0.62rem; }
-  /* Match the mobile waterfall height; alignment is via bottom:0. */
-  .lora-spec-activity-col  { height: 160px; }
 }
 
 /* ── GPS telemetry panel ──────────────────────────────────────────────── */
@@ -3102,15 +3132,17 @@ body {
   gap: 1rem;
   padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--border);
-  align-items: flex-start;
+  align-items: stretch;
 }
 .gps-map-wrap {
   flex: 1 1 340px;
   min-width: 300px;
+  display: flex;
 }
 .gps-map-wrap #gps-map {
   width: 100%;
-  height: 260px;
+  height: 100%;
+  min-height: 260px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
 }
@@ -3127,6 +3159,9 @@ body {
   border-radius: var(--radius);
   border: 1px solid var(--border);
   padding: 4px;
+}
+.svc-gps > details.space-details {
+  margin: 0.75rem 1rem;
 }
 
 /* Sky-plot scaffold */
@@ -3187,6 +3222,6 @@ body {
 .sat-unused { color: var(--text-muted); }
 
 @media (max-width: 700px) {
-  .gps-map-wrap #gps-map { height: 200px; }
+  .gps-map-wrap #gps-map { height: 200px; min-height: 0; }
   .gps-sky-wrap #gps-sky { max-width: 240px; }
 }

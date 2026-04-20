@@ -279,6 +279,26 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
 
     ws = aiohttp.web.WebSocketResponse(heartbeat=60.0)
     await ws.prepare(request)
+
+    # Send the spectrum history buffer BEFORE joining the broadcast pool so
+    # a live update tick can't race ahead of the initial backfill.  The
+    # frontend's shared spectrumCommon.historyStore absorbs this frame and
+    # bumps its generation, which triggers a one-shot bulk paint in each
+    # spectrum panel.
+    scanner = plugin.app.get_plugin("spectrum_scanner")
+    if scanner and hasattr(scanner, "get_history"):
+        try:
+            history_payload = scanner.get_history()
+        except Exception:
+            history_payload = {"available": False, "rows": []}
+        try:
+            await ws.send_str(json.dumps({
+                "type": "spectrum_history",
+                "data": history_payload,
+            }))
+        except Exception:
+            log.debug("Failed to send spectrum history hello", exc_info=True)
+
     _ws_clients.add(ws)
     log.debug("WebSocket client connected (%d total)", len(_ws_clients))
 

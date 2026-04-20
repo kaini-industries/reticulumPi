@@ -293,13 +293,18 @@ class TestSnapshot:
             "bin_hz_requested", "sweep_seconds", "gain_db", "ppm",
             "sweep_count", "last_sweep_at", "waterfall_rows",
             "bins_hz", "latest_powers_db", "waterfall_tail",
+            "waterfall_tail_times",
         ):
             assert key in snap, f"missing key {key!r}"
         assert snap["sweep_count"] == 0
         assert snap["bins_hz"] == []
         assert snap["waterfall_tail"] == []
+        # Sibling timestamp array stays in lock-step with waterfall_tail.
+        assert snap["waterfall_tail_times"] == []
 
     def test_snapshot_after_sweep(self):
+        import time as _t
+        before = _t.time()
         p = _make_plugin()
         p._handle_csv_line(
             "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, "
@@ -315,6 +320,12 @@ class TestSnapshot:
         assert len(snap["waterfall_tail"]) == 1
         assert snap["freq_start_hz"] == 88_000_000
         assert snap["freq_stop_hz"] == 108_000_000
+        # Sibling timestamp array stays aligned with waterfall_tail; value is
+        # captured inside _flush_current_sweep so it sits between `before`
+        # and "now" with plenty of slack.
+        assert len(snap["waterfall_tail_times"]) == 1
+        ts = snap["waterfall_tail_times"][0]
+        assert before <= ts <= _t.time() + 1.0
 
     def test_snapshot_tail_caps_at_configured_length(self):
         """Plugin may retain hundreds of sweeps internally, but the snapshot
@@ -331,6 +342,12 @@ class TestSnapshot:
         snap = p.get_snapshot()
         # Snapshot tail is capped regardless of internal buffer depth.
         assert len(snap["waterfall_tail"]) == SpectrumScanner._SNAPSHOT_TAIL_ROWS
+        # Timestamp sibling stays same length, and sweeps were flushed in
+        # order so the captured times must be monotonically non-decreasing.
+        times = snap["waterfall_tail_times"]
+        assert len(times) == SpectrumScanner._SNAPSHOT_TAIL_ROWS
+        for a, b in zip(times, times[1:]):
+            assert a <= b
 
 
 # ---------------------------------------------------------------------------
@@ -340,12 +357,17 @@ class TestHistory:
     def test_empty_history_shape(self):
         p = _make_plugin()
         h = p.get_history()
-        for key in ("available", "sweep_count", "bin_count", "waterfall_rows", "rows"):
+        for key in (
+            "available", "sweep_count", "bin_count", "waterfall_rows",
+            "rows", "row_timestamps",
+        ):
             assert key in h
         assert h["available"] is True
         assert h["sweep_count"] == 0
         assert h["bin_count"] == 0
         assert h["rows"] == []
+        # Sibling array stays in lock-step with rows.
+        assert h["row_timestamps"] == []
 
     def test_history_returns_full_buffer_unlike_snapshot(self):
         """Unlike get_snapshot() (which caps at _SNAPSHOT_TAIL_ROWS), the
@@ -364,6 +386,10 @@ class TestHistory:
         assert h["bin_count"] == 4
         # Power values are rounded to 1 decimal for wire efficiency.
         assert h["rows"][0] == [-50.0, -50.0, -50.0, -50.0]
+        # Parallel timestamp array: same length, same ordering, monotonic.
+        assert len(h["row_timestamps"]) == 40
+        for a, b in zip(h["row_timestamps"], h["row_timestamps"][1:]):
+            assert a <= b
 
     def test_history_capped_by_waterfall_rows(self):
         """If the internal buffer is at its cap, history reflects that —
@@ -379,6 +405,35 @@ class TestHistory:
         assert h["sweep_count"] == 50  # monotonic counter unaffected
         assert h["waterfall_rows"] == 16
         assert len(h["rows"]) == 16  # only the most recent 16 retained
+
+    def test_row_timestamps_match_flush_wallclock(self):
+        """row_timestamps must carry the wall-clock time each sweep flushed,
+        in the same ordering as rows (oldest first → newest last).  Patch
+        time.time() to a controlled sequence so we can assert exact values
+        and confirm the ordering contract the frontend relies on."""
+        # Three flushes with three distinct timestamps.  The module-level
+        # `time.time()` call inside _flush_current_sweep is what we patch.
+        fake_times = iter([1000.0, 1002.5, 1005.0])
+        with patch(
+            "reticulumpi.builtin_plugins.spectrum_scanner.time.time",
+            side_effect=lambda: next(fake_times),
+        ):
+            p = _make_plugin()
+            for i in range(3):
+                p._handle_csv_line(
+                    f"2025-01-01, 12:00:{i:02d}, 88000000, 89000000, 500000, 1, -50, -50"
+                )
+            p._flush_current_sweep()
+
+        h = p.get_history()
+        assert len(h["rows"]) == 3
+        # Oldest first, newest last — same ordering as rows.
+        assert h["row_timestamps"] == [1000.0, 1002.5, 1005.0]
+
+        # And in the snapshot tail (8-row cap doesn't truncate 3 rows).
+        snap = p.get_snapshot()
+        assert snap["waterfall_tail_times"] == [1000.0, 1002.5, 1005.0]
+        assert len(snap["waterfall_tail"]) == len(snap["waterfall_tail_times"])
 
 
 # ---------------------------------------------------------------------------

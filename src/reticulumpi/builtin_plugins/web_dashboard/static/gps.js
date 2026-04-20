@@ -13,6 +13,7 @@
   var _sortKey = 'snr';
   var _sortAsc = false;
   var _lastSats = [];
+  var _lastFix = null;
 
   // ── Leaflet map (lazy init) ───────────────────────────────────────────
 
@@ -327,6 +328,7 @@
     section.style.display = '';
     markUpdated('gps-section');
     var fix = snap.last_fix || null;
+    _lastFix = (fix && fix.lat != null && fix.lon != null) ? fix : null;
     _renderBadge(snap, fix);
     _renderOverview(snap, fix);
     _lastSats = snap.satellites_in_view || [];
@@ -335,6 +337,11 @@
     if (fix) _updateMap(fix);
   }
 
+  function getLastGpsFix() {
+    return _lastFix;
+  }
+
   RPI.updateGps = updateGps;
   RPI.onGpsSort = onGpsSort;
+  RPI.getLastGpsFix = getLastGpsFix;
 })();

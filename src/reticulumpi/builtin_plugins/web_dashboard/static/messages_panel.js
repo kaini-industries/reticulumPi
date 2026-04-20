@@ -155,6 +155,7 @@
         feedback: $(id('feedback')),
         chSelectWrap: $(id('channel-wrap')),
         chSelect: $(id('channel-select')),
+        gpsBtn: $(id('gps-btn')),
         destCombo: $(id('dest-combo')),
         destInput: $(id('dest-input')),
         destList: $(id('dest-list')),
@@ -181,6 +182,7 @@
         });
       }
       if (_dom.sendBtn) _dom.sendBtn.addEventListener('click', _onSend);
+      if (_dom.gpsBtn) _dom.gpsBtn.addEventListener('click', _onInsertGps);
       if (_dom.newBtn) _dom.newBtn.addEventListener('click', _toggleNewCompose);
       if (_dom.backBtn) _dom.backBtn.addEventListener('click', _goBack);
       if (_dom.deleteBtn) _dom.deleteBtn.addEventListener('click', _onDeleteConversation);
@@ -916,6 +918,30 @@
         .finally(function () {
           if (_dom.sendBtn) _dom.sendBtn.disabled = false;
         });
+    }
+
+    function _onInsertGps() {
+      if (!_dom.text) return;
+      var fix = (R.getLastGpsFix && R.getLastGpsFix()) || null;
+      if (!fix || fix.lat == null || fix.lon == null) {
+        _setFeedback('No GPS fix available', 'error');
+        return;
+      }
+      var lat = Number(fix.lat).toFixed(5);
+      var lon = Number(fix.lon).toFixed(5);
+      var parts = ['GPS ' + lat + ',' + lon];
+      if (fix.alt_m != null) parts.push('alt ' + Math.round(fix.alt_m) + 'm');
+      parts.push('https://www.openstreetmap.org/?mlat=' + lat
+                 + '&mlon=' + lon + '&zoom=15');
+      var snippet = parts.join(' ');
+      var cur = _dom.text.value;
+      _dom.text.value = cur && !cur.endsWith(' ') && !cur.endsWith('\n')
+        ? cur + ' ' + snippet
+        : cur + snippet;
+      _autoGrow(_dom.text);
+      _updateByteCount();
+      _dom.text.focus();
+      _setFeedback('GPS inserted', 'ok');
     }
 
     function _setFeedback(text, cls) {

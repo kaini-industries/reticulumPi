@@ -206,6 +206,17 @@ class GpsTelemetry(PluginBase):
                     except (SerialException, OSError) as exc:
                         self.log.warning("GPS read failed: %s", exc)
                         break
+                    except TypeError:
+                        # stop() closed the port from under us: pyserial zeroes
+                        # its internal fd to None, then this thread wakes from
+                        # readline() → os.read(None, ...) and TypeErrors.  By
+                        # the time that happens stop() has already flipped
+                        # _active=False, so treat it as a clean shutdown and
+                        # bail.  Re-raise if we're still supposed to be active,
+                        # since that would be a real bug worth seeing.
+                        if self._active:
+                            raise
+                        break
                     if not raw:
                         continue  # read timeout — loop around to check _active
                     self._msgs_received += 1

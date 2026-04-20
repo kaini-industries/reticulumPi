@@ -536,6 +536,74 @@ class TestReadLoopAndStaleness:
         published = [c.args[0] for c in mock_app.event_bus.publish.call_args_list]
         assert events.GPS_DEVICE_CONNECTED in published
 
+    def test_typeerror_during_shutdown_does_not_crash_reader(
+        self, mock_app, gps_config
+    ):
+        """Race: stop() closes the serial port while readline() is blocked;
+        pyserial zeroes its internal fd and the waking readline() hits
+        os.read(None, ...) → TypeError.  By the time that fires stop() has
+        already flipped _active=False, so the reader must treat it as clean
+        shutdown, not crash the thread.
+
+        Pre-fix version had `except (SerialException, OSError)` only, so
+        TypeError escaped the try/finally and threading.excepthook fired.
+        Post-fix a dedicated `except TypeError` handler bails quietly when
+        _active is False.
+        """
+        fake = FakeSerial("/dev/ttyUSB0", 4800, timeout=0.1)
+        plugin_holder: list[Any] = [None]
+
+        def racing_readline() -> bytes:
+            # Model the race: stop() has already flipped _active to False
+            # and closed the port; pyserial's os.read(None, ...) TypeErrors.
+            plugin = plugin_holder[0]
+            if plugin is not None:
+                plugin._active = False
+            raise TypeError(
+                "'NoneType' object cannot be interpreted as an integer"
+            )
+
+        fake.readline = racing_readline  # type: ignore[method-assign]
+
+        # Capture unhandled thread exceptions — pre-fix this is how the
+        # TypeError would surface (and how it shows up in journalctl).
+        unhandled: list[threading.ExceptHookArgs] = []
+        original_hook = threading.excepthook
+        threading.excepthook = unhandled.append
+        try:
+            with patch("serial.Serial", return_value=fake):
+                # Construct first, populate the holder, THEN start — otherwise
+                # the reader thread can race into readline() before the holder
+                # is set, which would leave _active=True and (correctly) let
+                # the TypeError propagate, masking the real shutdown path.
+                plugin = _make_plugin(mock_app, gps_config)
+                plugin_holder[0] = plugin
+                plugin.start()
+
+                reader = next(
+                    (t for t in plugin._threads if "gps-reader" in t.name),
+                    None,
+                )
+                assert reader is not None, "gps-reader thread not spawned"
+                reader.join(timeout=3)
+                assert not reader.is_alive(), "gps-reader thread did not exit"
+
+                # The fix: no unhandled exception escaped the thread.
+                # (Filter to our reader — other daemon threads in the plugin
+                # are unrelated.)
+                reader_crashes = [
+                    h for h in unhandled if h.thread is reader
+                ]
+                assert not reader_crashes, (
+                    "gps-reader crashed with "
+                    f"{reader_crashes[0].exc_type.__name__}: "
+                    f"{reader_crashes[0].exc_value}"
+                )
+
+                plugin.stop()
+        finally:
+            threading.excepthook = original_hook
+
 
 # ---------------------------------------------------------------------------
 # space_tracker integration

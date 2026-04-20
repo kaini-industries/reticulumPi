@@ -33,24 +33,16 @@
                                  // so the two can't drift relative to each
                                  // other after a bin-count reset).
   var _lastData = null;      // most recent snapshot (for redraw on resize/expand)
-  var _binCount = 0;         // current snapshot's bin count
   var _minDb = -90, _maxDb = -30;  // running auto-scale for colour + line plot
   var _scaleInitialized = false;   // true once a real sweep has seeded _min/_maxDb
   var _lastBandSignature = '';     // "<start>|<stop>" of last band-strip render
   var _legendBuilt = false;        // one-time flag for legend DOM construction
   var _legendExpanded = false;
-  // History backfill state machine. The WS broadcast only carries the last
-  // few sweeps to keep payloads small; on first sweep arrival we fire a
-  // one-shot REST fetch for the plugin's full rolling buffer (capped by
-  // its `waterfall_rows` config) so the panel opens populated rather than
-  // accumulating ~16 s of pre-load history from the WS tail.
-  // States: 'pending' → 'fetching' → 'ready' | 'failed' | 'abandoned'.
-  // Live WS sweeps are deferred while 'fetching' to avoid out-of-order
-  // paints; if the fetch outlasts ABANDON_MS we give up waiting and start
-  // painting live so no sweeps fall through the 8-row tail window.
-  var _historyState = 'pending';
-  var _fetchStartedAt = 0;
-  var _FETCH_ABANDON_MS = 4000;
+  // Cursor into the shared historyStore — bumps on WS-hello reload or on
+  // a bin-grid reset.  When it changes we wipe the canvas and bulk-paint
+  // from the store; between bumps we just append live tail rows.
+  var _lastStoreGen = -1;
+  var _needsBulkPaint = false;
 
   // Waterfall canvas native dims — scaled up via CSS to fit panel width.
   var WF_ROWS = 256;
@@ -418,48 +410,22 @@
     _wfCtx.putImageData(img, 0, 0);
   }
 
-  // One-shot fetch of the plugin's full rolling waterfall buffer. Called
-  // once per page load (or per bin-grid change) — see _historyState.
-  // Painted rows go through _paintRowToCanvas oldest-first, so the oldest
-  // history ends up deepest in the waterfall, matching live behaviour.
-  function _fetchHistory() {
-    if (_historyState !== 'pending') return;
-    _historyState = 'fetching';
-    _fetchStartedAt = Date.now();
-    fetch('/api/spectrum/history', { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(function (payload) {
-        // If the main loop gave up waiting on us and started painting
-        // live rows, applying history now would scroll those live rows
-        // off and invert temporal order — skip the backfill silently.
-        if (_historyState === 'abandoned') return;
-        var d = (payload && payload.data) ? payload.data : null;
-        if (!d || !d.available || !d.rows || !d.rows.length) {
-          _historyState = 'failed';
-          return;
-        }
-        // Defensive: if the bin grid changed during or after the fetch
-        // (config reload, scanner restart), the historical rows won't
-        // line up with the CURRENT axis — drop them and let the WS tail
-        // fill in normally.  Compare against live `_binCount`, not a
-        // value captured at fetch-start, so we stay correct even across
-        // multiple re-arms.
-        if (d.bin_count && _binCount && d.bin_count !== _binCount) {
-          _historyState = 'failed';
-          return;
-        }
-        for (var i = 0; i < d.rows.length; i++) {
-          _paintRowToCanvas(d.rows[i]);
-        }
-        // Sync paint cursor to whatever sweep count history saw, so the
-        // next WS update only paints rows newer than the backfill (and
-        // doesn't double-paint anything we already drew).
-        _lastSweepCount = d.sweep_count || 0;
-        _historyState = 'ready';
-      })
-      .catch(function () {
-        if (_historyState !== 'abandoned') _historyState = 'failed';
-      });
+  // Bulk-paint the shared historyStore ring onto the waterfall canvas.
+  // Called whenever the store's generation cursor changes (WS hello, or
+  // bin-grid reset).  Uses the shared helper so we do a single
+  // putImageData instead of N scrolls.
+  function _bulkPaintFromStore() {
+    if (!_wfCtx || !SC.historyStore) return;
+    var rows = SC.historyStore.rows;
+    if (!rows.length) return;
+    // Helper expects oldest→newest; store is newest-first.
+    var chron = new Array(rows.length);
+    for (var i = 0; i < rows.length; i++) {
+      chron[rows.length - 1 - i] = rows[i];
+    }
+    SC.paintHistoryToCanvas(_wfCtx, _wfCanvas, chron, WF_COLS, WF_ROWS,
+                            _minDb, _maxDb);
+    _lastSweepCount = SC.historyStore.sweepCount;
   }
 
   function _ingestNewSweeps(data) {
@@ -491,12 +457,23 @@
     var idx = Math.min(n - 1, Math.max(0, Math.round(fracX * (n - 1))));
     var freqMhz = bins[idx] / 1e6;
     // Row age: the topmost pixel row (y=0) is the most recent sweep.
+    // Prefer the server-supplied per-row timestamp over the old
+    // rowIdx * sweep_seconds approximation — the latter drifts badly on
+    // wide spans where each sweep takes longer than sweep_seconds, and
+    // lies outright for rows from before a scanner restart.
     var rowIdx = Math.floor(fracY * WF_ROWS);
-    var agoSec = rowIdx * (_lastData.sweep_seconds || 2);
+    var rowTs = SC.historyStore.rowTimestamps[rowIdx];
+    var agoSec = (rowTs != null) ? (Date.now() / 1000 - rowTs) : null;
     // dB value: prefer the latest sweep's reading at that bin.
     var db = _lastData.latest_powers_db ? _lastData.latest_powers_db[idx] : null;
     var dbStr = (db != null && isFinite(db)) ? db.toFixed(1) + ' dB' : '—';
-    var ageStr = rowIdx === 0 ? 'now' : (agoSec + 's ago');
+    // '—' when we hover over a blank pixel below the filled region (no row
+    // stored), or when the backend didn't ship timestamps.  Honest silence
+    // beats the old fake-age behaviour.
+    var ageStr;
+    if (agoSec == null) ageStr = '—';
+    else if (rowIdx === 0 && agoSec < 2) ageStr = 'now';
+    else ageStr = SC.formatAge(agoSec);
 
     // Resolve what the user is pointing at — a band, a nearby landmark,
     // or neither.  Landmark tolerance scales with the current span so it
@@ -543,18 +520,18 @@
       }
     }
 
-    // Bin count changed?  That means the config was reconfigured —
-    // wipe our waterfall history so the new frequency axis lines up.
-    var newBinCount = data.bins_hz ? data.bins_hz.length : 0;
-    if (newBinCount !== _binCount) {
-      _binCount = newBinCount;
+    // Shared historyStore generation cursor — bumps on WS-hello backfill
+    // arrival and on bin-grid change.  Either event makes the current canvas
+    // stale relative to the store, so wipe and re-arm a bulk paint that runs
+    // after the next _renderLine (which seeds _minDb/_maxDb).
+    var gen = SC.historyStore.generation;
+    if (gen !== _lastStoreGen) {
+      _lastStoreGen = gen;
       _lastSweepCount = 0;
       _lastRenderedSweep = 0;
       _scaleInitialized = false;
       _lastBandSignature = '';  // force band ribbon rebuild at new axis
-      // Re-arm history backfill: previous rows used the old bin grid and
-      // would render at the wrong x positions on the new axis.
-      _historyState = 'pending';
+      _needsBulkPaint = true;
       if (_wfCtx) {
         _wfCtx.fillStyle = '#0a0d17';
         _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
@@ -581,24 +558,14 @@
     // something has actually changed.
     var sc = data.sweep_count || 0;
     if (sc > _lastRenderedSweep) {
-      // Always refresh the line plot — it's cheap and shows the latest
-      // sweep regardless of waterfall backfill state.  Auto-scale runs
-      // here, so _minDb/_maxDb are valid by the time history rows paint.
+      // Always refresh the line plot first — auto-scale runs here, so
+      // _minDb/_maxDb are valid by the time history rows paint below.
       _renderLine(data);
       _lastRenderedSweep = sc;
-      // Kick the one-shot history fetch on first real sweep, then defer
-      // live waterfall paints until it settles to keep row order clean.
-      if (_historyState === 'pending') {
-        _fetchHistory();
-      }
-      // If the fetch is taking too long, give up waiting and start
-      // painting live — otherwise sweeps older than the 8-row tail get
-      // lost while we hold out for the backfill.
-      if (_historyState === 'fetching'
-          && Date.now() - _fetchStartedAt > _FETCH_ABANDON_MS) {
-        _historyState = 'abandoned';
-      }
-      if (_historyState !== 'pending' && _historyState !== 'fetching') {
+      if (_needsBulkPaint) {
+        _bulkPaintFromStore();
+        _needsBulkPaint = false;
+      } else {
         _ingestNewSweeps(data);
       }
     }

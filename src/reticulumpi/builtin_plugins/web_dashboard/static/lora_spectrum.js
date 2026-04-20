@@ -2,18 +2,21 @@
  *
  * A project-aware zoom of the generic SDR sweep onto the LoRa ISM band.
  * Unlike the generic spectrum panel, this one overlays what matters for a
- * Reticulum / Meshtastic / MeshCore node:
+ * Reticulum node:
  *
  *   • Our RNode's configured RX channel (translucent rect).
- *   • The Meshtastic LongFast channel grid (one tick per channel, configured
- *     channel highlighted and labeled).
- *   • Regulatory band edges (dashed lines; warning badge if RNode is off-band).
+ *   • A region-defined channel grid (250/500 kHz ticks).
+ *   • Regulatory band edges (dashed lines).
  *   • Hover crosshair: frequency / dB / sweep age, plus context for whatever
- *     overlay (RNode TX window, MT channel, off-band edge) is under cursor.
+ *     overlay (RNode TX window, off-band edge) is under cursor.
+ *
+ * Region selection priority: localStorage override (panel dropdown) >
+ * server config (plugins.web_dashboard.lora_region in config.yaml) > US
+ * default.  There is no auto-detection from live data.
  *
  * Shares rtl_power data with `spectrum.js` — no second SDR stream; this
  * panel just clips `bins_hz` / `latest_powers_db` / `waterfall_tail` to the
- * detected region's band window.  Shared primitives (turbo colormap,
+ * selected region's band window.  Shared primitives (turbo colormap,
  * waterfall painter, SVG/DOM helpers, EMA auto-scale) come from
  * `window.RPI.spectrumCommon`.
  */
@@ -26,10 +29,9 @@
   if (!SC) return;  // common module must load first
 
   // -- Region / band reference --------------------------------------------
-  // LoRa ISM bands per Meshtastic's LoRaConfig.RegionCode enum.  Base,
-  // spacing (kHz), count from the Meshtastic `RegionInfo` tables
-  // (github.com/meshtastic/firmware).  Only the six commonly observed
-  // regions — others fall back to US with an advisory.
+  // LoRa ISM bands.  Base, spacing (kHz), count define the channel grid
+  // rendered as overlay ticks.  Only the six commonly observed regions;
+  // unknown configured values fall back to US.
   var REGIONS = {
     US:     { lo: 902.0, hi: 928.0,   base: 902.8625, spacing: 250, count: 108, label: 'US 902–928' },
     EU_868: { lo: 863.0, hi: 870.0,   base: 864.125,  spacing: 250, count: 24,  label: 'EU 868' },
@@ -38,14 +40,8 @@
     JP:     { lo: 920.8, hi: 927.8,   base: 921.875,  spacing: 500, count: 15,  label: 'JP 920–928' },
     ANZ:    { lo: 915.0, hi: 928.0,   base: 916.375,  spacing: 250, count: 52,  label: 'ANZ 915–928' },
   };
-
-  // Meshtastic LongFast default channel per region (from firmware).  Other
-  // presets use the same grid; we just highlight a different index.  For
-  // presets where we don't have a hard-coded default, we fall back to the
-  // region's LongFast channel.
-  var DEFAULT_CHANNEL = {
-    US: 20, EU_868: 8, EU_433: 0, CN: 0, JP: 0, ANZ: 20,
-  };
+  var REGION_ORDER = ['US', 'EU_868', 'EU_433', 'CN', 'JP', 'ANZ'];
+  var LS_KEY = 'rpi_lora_region';
 
   // -- Constants ----------------------------------------------------------
   var WF_COLS = 800;
@@ -58,23 +54,24 @@
   // -- Runtime state -------------------------------------------------------
   var _expanded = false;
   var _region = 'US', _regionInfo = REGIONS.US;
-  var _regionSource = 'default';
-  var _modemPreset = null;
-  var _mtChannelIdx = null;    // configured MT channel index, or null
+  // Priority: _userRegion (dropdown, localStorage) > _configRegion
+  // (/api/config) > 'US' default.  Populated on init.
+  var _userRegion = null;
+  var _configRegion = null;
+  var _regionSource = 'default';   // 'user' | 'config' | 'default'
+  var _regionSelectEl = null;
   var _ourFreqHz = null, _ourBwHz = null, _ourSf = null, _ourCr = null;
   var _lastSweepCount = 0;
   var _lastRenderedSweep = 0;
   var _scale = { minDb: -90, maxDb: -30, initialized: false };
-  // History backfill state machine — mirrors spectrum.js.  The WS broadcast
-  // only carries the last few sweeps, so on first sweep arrival we fetch the
-  // plugin's full rolling buffer and paint it oldest→newest.  Without this
-  // the waterfall takes WF_ROWS seconds to fill from empty on every reload.
-  // States: 'pending' → 'fetching' → 'ready' | 'failed' | 'abandoned'.
-  var _historyState = 'pending';
-  var _fetchStartedAt = 0;
-  var _FETCH_ABANDON_MS = 4000;
-  var _lastBinSig = '';        // "<start>|<stop>|<bincount>" for slice change detection
-  var _lastOverlaySig = '';    // "<region>|<freq>|<bw>|<preset>|<zoom>" for overlay rebuild
+  // Waterfall history lives in the shared `spectrumCommon.historyStore` —
+  // populated once per WS connect via the `spectrum_history` hello frame,
+  // then kept current by `ingestTick` on each broadcast.  We just track
+  // the store's generation counter here to know when to wipe canvas and
+  // bulk-paint (hello arrival, bin-grid change).
+  var _lastStoreGen = -1;
+  var _needsBulkPaint = false;
+  var _lastOverlaySig = '';    // "<region>|<freq>|<bw>|<zoom>" for overlay rebuild
   var _lastData = null;
   // Zoom: null = full clipped region; else [loMhz, hiMhz] user-selected window.
   var _zoom = null;
@@ -82,18 +79,8 @@
   var _zoomResetEl = null;     // "Reset zoom" chip
   var _presetBtns = {};        // {rnode, full} button handles
 
-  // PR2 state — activity column, peak-hold trace, peers strip
-  var _activityCanvas = null, _activityCtx = null;
-  var _lastIfaceRxb = null, _lastIfaceTxb = null;
-  var _pendingActivity = null; // 'tx' | 'rx' | null — flushed to newest painted row
-  var _activityRows = new Array(WF_ROWS);  // [0] = newest; values 'tx' | 'rx' | null
   var _peakHoldEnabled = false;
   var _peakHoldDb = null;      // per-bin max dB, aligned with spec.bins_hz
-  // Ring buffer of full-bin dB arrays per painted sweep, [0]=newest, capped
-  // at WF_ROWS.  Kept so zoom changes can repaint the waterfall at the new
-  // axis instead of wiping history.  Cleared on bin-grid / region change
-  // since indices would no longer align.
-  var _historyDb = [];
 
   // -- DOM setup -----------------------------------------------------------
   function _resolveDom() {
@@ -111,8 +98,6 @@
     _hoverEl = $('lora-spectrum-hover');
     _scaleEl = $('lora-spectrum-scale');
     _zoomResetEl = $('lora-spec-zoom-reset');
-    _activityCanvas = $('lora-spec-activity-col');
-    if (_activityCanvas) _activityCtx = _activityCanvas.getContext('2d');
 
     if (_wfCanvas) {
       _wfCanvas.width = WF_COLS;
@@ -135,6 +120,14 @@
     if (_zoomResetEl) _zoomResetEl.addEventListener('click', _onZoomChipClick);
 
     if (_toggle) _toggle.addEventListener('click', _onToggleClick);
+
+    // Region bootstrap: synchronous localStorage load + async config fetch.
+    // `_resolveRegion()` runs twice — once now (with user-or-default) and
+    // again when `/api/config` lands (which may promote 'default' → 'config').
+    _loadUserRegion();
+    _resolveRegion();
+    _fetchServerConfig();
+
     return true;
   }
 
@@ -144,64 +137,88 @@
     _body.classList.toggle('hidden');
     var chev = _toggle.querySelector('.chevron');
     if (chev) chev.innerHTML = _expanded ? '&#9662;' : '&#9656;';
-    if (!_expanded) {
-      // Collapsing — reset zoom so reopening gives a clean, oriented view.
-      _setZoom(null, /*silent=*/true);
-    }
+    // Collapse/expand preserves state — the waterfall canvas, peak-hold,
+    // zoom, and the shared history store all stay intact so reopening
+    // resumes where the user left off.  Full-band / zoom-chip is one
+    // click away if they want a fresh view.
     if (_expanded && _lastData) _renderAll(_lastData);
   }
 
-  // -- Region detection ---------------------------------------------------
-  function _pickRegionFromFreq(freqHz) {
-    if (freqHz == null || !isFinite(freqHz)) return null;
-    var mhz = freqHz / 1e6;
-    // Prefer ANZ over US when the freq clearly lands in the ANZ-only slice,
-    // but since 915–928 is inside both, default to US.  Users can always
-    // override via Meshtastic region.
-    for (var name in REGIONS) {
-      if (!Object.prototype.hasOwnProperty.call(REGIONS, name)) continue;
-      var r = REGIONS[name];
-      if (mhz >= r.lo && mhz <= r.hi) {
-        // When both US and ANZ qualify, prefer US unless the freq is in the
-        // exclusively-ANZ slice (none in practice — 915–928 is a proper
-        // subset of US).  So return the first match in enum iteration order.
-        return name;
-      }
-    }
-    return null;
+  // -- Region selection ---------------------------------------------------
+  // No auto-detection from live data — region comes from explicit sources
+  // only.  Priority: user override (localStorage) > server config > US.
+  function _loadUserRegion() {
+    try {
+      var v = window.localStorage ? window.localStorage.getItem(LS_KEY) : null;
+      if (v && REGIONS[v]) { _userRegion = v; return; }
+    } catch (e) { /* localStorage unavailable — fall through */ }
+    _userRegion = null;
   }
 
-  function _detectRegion(data) {
-    var name = null, source = 'default';
-    var md = data.meshtastic_device;
-    if (md && md.region && REGIONS[md.region]) {
-      name = md.region;
-      source = 'meshtastic';
+  function _saveUserRegion(name) {
+    try {
+      if (!window.localStorage) return;
+      if (name && REGIONS[name]) window.localStorage.setItem(LS_KEY, name);
+      else window.localStorage.removeItem(LS_KEY);
+    } catch (e) { /* quota or disabled — best-effort */ }
+  }
+
+  function _fetchServerConfig() {
+    fetch('/api/config', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (payload) {
+        var d = (payload && payload.data) ? payload.data : null;
+        var cfg = d && d.plugins && d.plugins.web_dashboard;
+        var cr = cfg && cfg.lora_region;
+        _configRegion = (cr && REGIONS[cr]) ? cr : null;
+        _resolveRegion();
+      })
+      .catch(function () { /* keep default */ });
+  }
+
+  // Recompute _region from current priority chain and re-render if a panel
+  // is already live.
+  function _resolveRegion() {
+    var name, source;
+    if (_userRegion && REGIONS[_userRegion]) {
+      name = _userRegion; source = 'user';
+    } else if (_configRegion && REGIONS[_configRegion]) {
+      name = _configRegion; source = 'config';
     } else {
-      var ifaces = data.interfaces || [];
-      for (var i = 0; i < ifaces.length; i++) {
-        if (ifaces[i].type !== 'RNodeInterface') continue;
-        var radio = ifaces[i].radio || {};
-        var f = radio.frequency;
-        var hit = _pickRegionFromFreq(f);
-        if (hit) { name = hit; source = 'rnode'; break; }
-      }
+      name = 'US'; source = 'default';
     }
-    if (!name) { name = 'US'; source = 'default'; }
     var regionChanged = (name !== _region);
+    var sourceChanged = (source !== _regionSource);
     _region = name;
     _regionInfo = REGIONS[name];
     _regionSource = source;
-
-    // Preset → configured MT channel (region-agnostic fallback)
-    _modemPreset = (md && md.modem_preset) ? md.modem_preset : null;
-    _mtChannelIdx = (name in DEFAULT_CHANNEL) ? DEFAULT_CHANNEL[name] : 0;
-
+    if (!_lastData) return;   // nothing to re-render yet
+    _metaStructSig = '';  // force meta rebuild so dropdown reflects state
     if (regionChanged) {
-      // Zoom bounds are in MHz against the old region; drop them.  Also
-      // flushes the activity ring + peak-hold (stale against the new band).
-      _setZoom(null, /*silent=*/true);
+      // Region change is a SOFT reset: the bin grid is unchanged (rtl_power
+      // still scans the same frequencies), we're just clipping to a
+      // different slice.  Drop zoom (its MHz bounds are relative to the old
+      // region) and repaint the waterfall from the shared history store
+      // against the new clip.  Peak-hold stays aligned (per-bin index is
+      // unchanged).  The non-silent _setZoom path re-renders first so the
+      // EMA dB scale converges on the new window.
+      _setZoom(null, /*silent=*/false);
+    } else if (sourceChanged) {
+      _renderAll(_lastData);
     }
+    if (_countEl) _countEl.textContent = _regionInfo.label;
+  }
+
+  function _onRegionSelectChange(ev) {
+    var val = ev.target.value;
+    if (val === '__auto__') {
+      _userRegion = null;
+      _saveUserRegion(null);
+    } else if (REGIONS[val]) {
+      _userRegion = val;
+      _saveUserRegion(val);
+    }
+    _resolveRegion();
   }
 
   function _detectRNode(data) {
@@ -309,20 +326,50 @@
     var diag = data.lora_diagnostics || {};
 
     var hasRNode = _ourFreqHz != null && _ourBwHz != null;
+    // Zoom-RNode is only useful when the RNode's carrier sits inside the
+    // currently-selected region — otherwise the computed window collapses
+    // to an invalid range (lo > hi) and clipping returns null.
+    var rnodeInRegion = hasRNode
+      && (_ourFreqHz / 1e6) >= _regionInfo.lo
+      && (_ourFreqHz / 1e6) <= _regionInfo.hi;
     var structSig = [
-      _regionInfo.label,
+      _region,
+      _regionSource,
       hasRNode ? '1' : '0',
+      rnodeInRegion ? '1' : '0',
       _zoom ? '1' : '0',
       _peakHoldEnabled ? '1' : '0',
     ].join('|');
 
     if (structSig !== _metaStructSig) {
       _metaStructSig = structSig;
+      var optsHtml = '<option value="__auto__"'
+        + (_regionSource !== 'user' ? ' selected' : '')
+        + '>Auto (' + esc(_regionSource === 'config' ? 'config' : 'default')
+        + ': ' + esc(REGIONS[_regionSource === 'config' && _configRegion ? _configRegion : 'US'].label)
+        + ')</option>';
+      for (var ri = 0; ri < REGION_ORDER.length; ri++) {
+        var rn = REGION_ORDER[ri];
+        optsHtml += '<option value="' + rn + '"'
+          + (_regionSource === 'user' && _userRegion === rn ? ' selected' : '')
+          + '>' + esc(REGIONS[rn].label) + '</option>';
+      }
       _metaEl.innerHTML = ''
-        + '<span class="lora-meta-region">' + esc(_regionInfo.label) + '</span>'
+        + '<label class="lora-meta-region-picker" title="LoRa region — used to clip the SDR sweep and draw the channel grid.  Picking a region overrides the server-side default; choose Auto to fall back to it.">'
+        +   '<span class="lora-meta-region-label">Region</span>'
+        +   '<select class="lora-meta-region-select" data-role="region-select">'
+        +     optsHtml
+        +   '</select>'
+        + '</label>'
         + '<span class="lora-zoom-presets">'
         +   '<button class="lora-zoom-preset" data-preset="rnode"'
-        +     (hasRNode ? '' : ' disabled') + '>Zoom RNode</button>'
+        +     (rnodeInRegion ? '' : ' disabled')
+        +     ' title="' + esc(
+              hasRNode && !rnodeInRegion
+                ? 'RNode carrier ' + (_ourFreqHz / 1e6).toFixed(3)
+                  + ' MHz is outside ' + _regionInfo.label
+                : 'Zoom to the RNode TX/RX window'
+            ) + '">Zoom RNode</button>'
         +   '<button class="lora-zoom-preset" data-preset="full"'
         +     (_zoom ? '' : ' disabled') + '>Full band</button>'
         + '</span>'
@@ -349,6 +396,8 @@
       }
       var phBtn = _metaEl.querySelector('.lora-peakhold-toggle');
       if (phBtn) phBtn.addEventListener('click', _onPeakHoldToggle);
+      _regionSelectEl = _metaEl.querySelector('[data-role="region-select"]');
+      if (_regionSelectEl) _regionSelectEl.addEventListener('change', _onRegionSelectChange);
 
       _metaRefs = {
         noise: _metaEl.querySelector('[data-role="noise"]'),
@@ -557,55 +606,10 @@
     }
   }
 
-  // -- History backfill ---------------------------------------------------
-  // One-shot fetch of the plugin's full rolling waterfall buffer, sliced to
-  // the current region/zoom clip.  Called once per page load (and re-armed
-  // on bin-grid change).  Paints oldest→newest so the oldest history ends
-  // up deepest in the waterfall, matching live behaviour.
-  function _fetchHistory(clip, expectedBinCount) {
-    if (_historyState !== 'pending') return;
-    if (!clip || !_wfCtx) return;
-    _historyState = 'fetching';
-    _fetchStartedAt = Date.now();
-    fetch('/api/spectrum/history', { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(function (payload) {
-        // If the main loop gave up waiting on us and started painting live
-        // rows, applying history now would invert temporal order.
-        if (_historyState === 'abandoned') return;
-        var d = (payload && payload.data) ? payload.data : null;
-        if (!d || !d.available || !d.rows || !d.rows.length) {
-          _historyState = 'failed';
-          return;
-        }
-        // Defensive: bin grid may have changed mid-fetch (config reload,
-        // scanner restart) — historical rows would no longer line up with
-        // the current axis.  Let WS tail fill in normally.
-        if (d.bin_count && expectedBinCount && d.bin_count !== expectedBinCount) {
-          _historyState = 'failed';
-          return;
-        }
-        for (var i = 0; i < d.rows.length; i++) {
-          var row = d.rows[i];
-          if (!row || !row.length) continue;
-          var sliced = row.slice(clip.loIdx, clip.hiIdx + 1);
-          SC.paintRowToCanvas(_wfCtx, _wfCanvas, sliced, WF_COLS, WF_ROWS,
-                              _scale.minDb, _scale.maxDb);
-          // Preserve the full-bin row so zoom changes can repaint without
-          // losing history.  Iterating oldest-first + unshifting puts the
-          // newest backfilled row at [0], matching the live-ingest convention.
-          _historyDb.unshift(row.slice());
-          if (_historyDb.length > WF_ROWS) _historyDb.length = WF_ROWS;
-        }
-        _lastSweepCount = d.sweep_count || 0;
-        _historyState = 'ready';
-      })
-      .catch(function () {
-        if (_historyState !== 'abandoned') _historyState = 'failed';
-      });
-  }
-
   // -- Waterfall ingest ---------------------------------------------------
+  // The shared store has already absorbed the new rows for us (app.js runs
+  // `historyStore.ingestTick()` before dispatching to panels), so we just
+  // paint the same tail rows into our canvas — sliced to the region clip.
   function _ingestNewSweeps(data, clip) {
     var spec = data.spectrum;
     var sc = spec.sweep_count || 0;
@@ -617,29 +621,17 @@
     for (var i = tail.length - toDraw; i < tail.length; i++) {
       var row = tail[i];
       if (!row || !row.length) continue;
-      // Slice to region
       var sliced = row.slice(clip.loIdx, clip.hiIdx + 1);
       SC.paintRowToCanvas(_wfCtx, _wfCanvas, sliced, WF_COLS, WF_ROWS,
                           _scale.minDb, _scale.maxDb);
-      // Preserve the full-bin row so we can repaint at a different zoom
-      // window later without losing waterfall history.
-      _historyDb.unshift(row.slice());
-      if (_historyDb.length > WF_ROWS) _historyDb.length = WF_ROWS;
-      // Activity is observed at WS tick granularity; attribute only to the
-      // newest painted row to avoid smearing a single event over multiple
-      // sweeps when the tick covers > 1 sweep.
-      var isNewest = (i === tail.length - 1);
-      _ingestActivityRow(isNewest ? _pendingActivity : null);
     }
-    _pendingActivity = null;
-    _renderActivityCol();
     _lastSweepCount = sc;
   }
 
   // -- Overlays (RNode box, MT grid, reg edges) ---------------------------
   function _renderOverlay(data, clip) {
     if (!_overlayEl) return;
-    var sig = [_region, _ourFreqHz, _ourBwHz, _modemPreset, _mtChannelIdx,
+    var sig = [_region, _ourFreqHz, _ourBwHz,
                clip ? clip.loMhz.toFixed(3) : '', clip ? clip.hiMhz.toFixed(3) : '',
                _zoom ? 'Z' : 'F'].join('|');
     if (sig === _lastOverlaySig) return;
@@ -725,10 +717,19 @@
     var db = (powers && powers[binIdx] != null && isFinite(powers[binIdx])) ? powers[binIdx] : null;
     var dbStr = (db != null) ? db.toFixed(1) + ' dB' : '—';
 
-    // Row 0 = newest sweep; each row down = one sweep_seconds older.
+    // Row 0 = newest sweep; older rows below.  Prefer the server-supplied
+    // per-row timestamp over rowIdx * sweep_seconds — the latter drifts on
+    // wide spans whose sweeps take longer than sweep_seconds, and lies
+    // outright across a scanner restart.  Display '—' when we hover over
+    // a blank pixel below the filled region, or when the backend didn't
+    // ship timestamps.
     var rowIdx = Math.floor(fracY * WF_ROWS);
-    var agoSec = rowIdx * (spec.sweep_seconds || 2);
-    var ageStr = rowIdx === 0 ? 'now' : (agoSec + 's ago');
+    var rowTs = SC.historyStore.rowTimestamps[rowIdx];
+    var agoSec = (rowTs != null) ? (Date.now() / 1000 - rowTs) : null;
+    var ageStr;
+    if (agoSec == null) ageStr = '—';
+    else if (rowIdx === 0 && agoSec < 2) ageStr = 'now';
+    else ageStr = SC.formatAge(agoSec);
 
     var headerLine = freqMhz.toFixed(3) + ' MHz · ' + dbStr + ' · ' + ageStr;
     var bandLine = '';
@@ -771,10 +772,10 @@
     _zoom = range;
     _lastOverlaySig = '';  // overlay bounds depend on zoom
     if (silent) {
-      // Hard reset path — called when the bin grid / region changed, so the
-      // dB history and per-view caches no longer align to the new axis.
-      _historyDb = [];
-      _resetActivity();
+      // Hard reset path — called on a generation bump (bin grid changed or
+      // WS hello backfill arrived), so peak-hold (per-bin index) no longer
+      // aligns to the new axis.  Dropping _lastRenderedSweep re-arms the
+      // bulk paint branch on the next tick.
       _peakHoldDb = null;
       _lastRenderedSweep = 0;
       if (_wfCtx) {
@@ -783,10 +784,10 @@
       }
       return;
     }
-    // User-initiated zoom — bins/time don't change, so activity rows,
-    // peak-hold, and dB history all remain valid.  Re-render first so
-    // `_scale` (EMA-smoothed) reflects the NEW visible window, then repaint
-    // the waterfall from history against that fresh scale; otherwise the
+    // User-initiated zoom — bins/time don't change, so peak-hold and the
+    // shared history store remain valid.  Re-render first so `_scale`
+    // (EMA-smoothed) reflects the NEW visible window, then repaint the
+    // waterfall from history against that fresh scale; otherwise the
     // historical rows would render with the pre-zoom min/max colour range.
     if (_lastData) {
       _renderAll(_lastData);
@@ -799,86 +800,23 @@
   // Uses the bulk paintHistoryToCanvas helper so we do ONE putImageData
   // instead of N drawImage-scrolls (a WF_ROWS-deep history is ~256 rows
   // and the old path triggered 256 full-canvas copies per zoom).
+  // Reads from the shared historyStore (`spectrumCommon.historyStore.rows`),
+  // which is newest-first — convert to oldest-first for the painter.
   function _repaintWaterfallFromHistory(clip) {
     if (!_wfCtx) return;
     _wfCtx.fillStyle = '#0a0d17';
     _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
-    if (!clip || !_historyDb.length) return;
-    var sliced = new Array(_historyDb.length);
-    for (var i = 0; i < _historyDb.length; i++) {
-      var full = _historyDb[i];
+    var rows = SC.historyStore.rows;
+    if (!clip || !rows || !rows.length) return;
+    var sliced = new Array(rows.length);
+    for (var i = 0; i < rows.length; i++) {
+      var full = rows[rows.length - 1 - i];
       sliced[i] = (full && full.length)
         ? full.slice(clip.loIdx, clip.hiIdx + 1)
         : null;
     }
     SC.paintHistoryToCanvas(_wfCtx, _wfCanvas, sliced, WF_COLS, WF_ROWS,
                             _scale.minDb, _scale.maxDb);
-  }
-
-  // -- Activity column (waterfall left edge) -------------------------------
-  function _resetActivity() {
-    for (var i = 0; i < _activityRows.length; i++) _activityRows[i] = null;
-    _lastIfaceRxb = null;
-    _lastIfaceTxb = null;
-    _pendingActivity = null;
-    _renderActivityCol();
-  }
-
-  function _renderActivityCol() {
-    if (!_activityCtx || !_activityCanvas) return;
-    var w = _activityCanvas.width, h = _activityCanvas.height;
-    _activityCtx.clearRect(0, 0, w, h);
-    for (var i = 0; i < _activityRows.length && i < h; i++) {
-      var v = _activityRows[i];
-      if (v === 'tx') _activityCtx.fillStyle = 'rgba(240, 173, 78, 0.95)';
-      else if (v === 'rx') _activityCtx.fillStyle = 'rgba(88, 166, 255, 0.85)';
-      else continue;
-      _activityCtx.fillRect(0, i, w, 1);
-    }
-  }
-
-  function _ingestActivityRow(mark) {
-    for (var i = _activityRows.length - 1; i > 0; i--) {
-      _activityRows[i] = _activityRows[i - 1];
-    }
-    _activityRows[0] = mark || null;
-  }
-
-  // Watches the RNodeInterface byte counters across WS ticks.  Positive
-  // txb delta → 'tx'; else positive rxb delta → 'rx'.  The value is
-  // attributed to the next painted waterfall row.
-  //
-  // `_pendingActivity` is sticky across ticks that see no delta: ticks
-  // come ~2 s apart but sweeps can be slower, so a TX that happens in a
-  // no-sweep tick would otherwise be wiped by the next idle tick before
-  // _ingestNewSweeps consumes it.  The consumer is responsible for
-  // clearing.  Priority: TX > RX > null.
-  function _observeIfaceTraffic(data) {
-    var ifaces = data.interfaces || [];
-    var rxb = null, txb = null;
-    for (var i = 0; i < ifaces.length; i++) {
-      if (ifaces[i].type !== 'RNodeInterface') continue;
-      rxb = ifaces[i].rxb;
-      txb = ifaces[i].txb;
-      break;
-    }
-    if (rxb == null && txb == null) {
-      // Iface gone — drop stale counters and any pending mark.
-      _pendingActivity = null;
-      _lastIfaceRxb = null;
-      _lastIfaceTxb = null;
-      return;
-    }
-    var dRx = (_lastIfaceRxb != null && rxb != null) ? (rxb - _lastIfaceRxb) : 0;
-    var dTx = (_lastIfaceTxb != null && txb != null) ? (txb - _lastIfaceTxb) : 0;
-    if (dRx < 0) dRx = 0;  // counter reset (iface restart)
-    if (dTx < 0) dTx = 0;
-    if (dTx > 0) _pendingActivity = 'tx';
-    else if (dRx > 0 && _pendingActivity !== 'tx') _pendingActivity = 'rx';
-    // else: leave _pendingActivity alone — may be 'tx' or 'rx' from an
-    // earlier tick, awaiting the next sweep paint.
-    _lastIfaceRxb = rxb;
-    _lastIfaceTxb = txb;
   }
 
   function _onDragStart(ev) {
@@ -934,6 +872,9 @@
     if (which === 'rnode') {
       if (_ourFreqHz == null || _ourBwHz == null) return;
       var fMhz = _ourFreqHz / 1e6;
+      // Bail if the RNode carrier sits outside the selected region — the
+      // window collapses to lo > hi and renders blank.
+      if (fMhz < _regionInfo.lo || fMhz > _regionInfo.hi) return;
       var bwMhz = _ourBwHz / 1e6;
       var pad = 5 * bwMhz;
       _setZoom([
@@ -962,19 +903,18 @@
   function _renderAll(data) {
     var spec = data.spectrum || {};
     var clip = _clip(spec, _zoom);
-    // Handle slice-change (axis change) — bin indices, dB range, and history
-    // all become stale under a new scanner config.
-    var binSig = spec.freq_start_hz + '|' + spec.freq_stop_hz + '|' + (spec.bins_hz ? spec.bins_hz.length : 0);
-    if (binSig !== _lastBinSig) {
-      _lastBinSig = binSig;
+
+    // Shared historyStore generation cursor — bumps on WS-hello backfill
+    // arrival and on bin-grid change.  Either event invalidates the per-bin
+    // peak-hold and the current waterfall canvas, so drop them and re-arm
+    // a bulk paint for the next sweep.  _setZoom(silent=true) does the
+    // canvas wipe + peak-hold clear + _lastRenderedSweep reset.
+    var gen = SC.historyStore.generation;
+    if (gen !== _lastStoreGen) {
+      _lastStoreGen = gen;
       _lastSweepCount = 0;
       _scale.initialized = false;
-      // Re-arm history backfill: previous rows used the old bin grid and
-      // no longer align to the current axis.
-      _historyState = 'pending';
-      _fetchStartedAt = 0;
-      // Drops zoom bounds (MHz against the old axis), history buffer,
-      // activity rows, peak-hold, and wipes the waterfall canvas.
+      _needsBulkPaint = true;
       _setZoom(null, /*silent=*/true);
       clip = _clip(spec, _zoom);
     }
@@ -983,9 +923,6 @@
     _renderOverlay(data, clip);
     _renderScale(data, clip);
     _renderZoomChip(clip);
-    // Track iface rx/tx deltas every tick so _pendingActivity is set before
-    // we paint sweep rows below.
-    _observeIfaceTraffic(data);
 
     // Always re-render the line plot so zoom changes (drag, preset buttons,
     // double-click reset) take effect immediately — not only on the next
@@ -998,17 +935,11 @@
     var sc = spec.sweep_count || 0;
     if (clip && sc > _lastRenderedSweep) {
       _lastRenderedSweep = sc;
-      // Kick the one-shot history fetch on first real sweep.
-      if (_historyState === 'pending') {
-        _fetchHistory(clip, spec.bins_hz ? spec.bins_hz.length : 0);
-      }
-      // If the fetch is taking too long, give up waiting and start painting
-      // live — otherwise sweeps older than the tail window get lost.
-      if (_historyState === 'fetching'
-          && Date.now() - _fetchStartedAt > _FETCH_ABANDON_MS) {
-        _historyState = 'abandoned';
-      }
-      if (_historyState !== 'pending' && _historyState !== 'fetching') {
+      if (_needsBulkPaint) {
+        _repaintWaterfallFromHistory(clip);
+        _needsBulkPaint = false;
+        _lastSweepCount = SC.historyStore.sweepCount;
+      } else {
         _ingestNewSweeps(data, clip);
       }
     }
@@ -1032,8 +963,8 @@
     }
 
     _lastData = data;
-    _detectRegion(data);
     _detectRNode(data);
+
     _renderAll(data);
 
     if (_countEl) {

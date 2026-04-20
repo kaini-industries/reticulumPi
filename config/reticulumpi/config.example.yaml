@@ -110,6 +110,10 @@ reticulumpi:
     #  max_sessions: 5
     #  metrics_interval: 5         # WebSocket push interval in seconds
     #  max_websocket_clients: 10
+    #  lora_region: "US"           # Default LoRa Spectrum panel region.
+    #                              # One of: US, EU_868, EU_433, CN, JP, ANZ.
+    #                              # Users can override per-browser via the
+    #                              # panel's region dropdown (localStorage).
     #  ssl:
     #    enabled: false
     #    cert_file: null
