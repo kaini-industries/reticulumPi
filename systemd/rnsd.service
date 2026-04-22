@@ -25,6 +25,13 @@ StartLimitIntervalSec=300
 # Give I2P interface time to connect to SAM API on restart
 ExecStartPre=/bin/sleep 3
 
+# Readiness gate: fail startup if the shared-instance socket never binds.
+# rnsd has been observed to wedge during interface init (main loop ticking
+# but @rns/default never appears), causing reticulumpi.service to
+# crash-loop silently. Failing here trips Restart=on-failure and recovers.
+ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do ss -xa 2>/dev/null | grep -q "@rns/default" && exit 0; sleep 1; done; exit 1'
+TimeoutStartSec=120
+
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict

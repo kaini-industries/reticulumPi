@@ -25,15 +25,20 @@
     headers['Accept'] = 'application/json';
     if (token) headers['Authorization'] = 'Bearer ' + token;
     if (opts.body) headers['Content-Type'] = 'application/json';
+    var timeoutMs = opts.timeout || 10000;
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function() { try { ctrl.abort(); } catch (e) {} }, timeoutMs) : null;
     return fetch(path, {
       method: opts.method || 'GET',
       headers: headers,
       credentials: 'same-origin',
-      body: opts.body ? JSON.stringify(opts.body) : undefined
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: ctrl ? ctrl.signal : undefined
     }).then(function(r) {
+      if (timer) clearTimeout(timer);
       if (r.status === 401) { window.location.href = '/login.html'; return null; }
       return r.json().catch(function() { return {ok: false, error: 'Invalid response'}; });
-    }).catch(function() { return null; });
+    }).catch(function() { if (timer) clearTimeout(timer); return null; });
   }
 
   function $(id) { return document.getElementById(id); }
@@ -1091,6 +1096,14 @@
           }
           return;
         }
+        if (msg.type === 'message' && msg.data) {
+          if (RPI.onMessagingEvent) RPI.onMessagingEvent(msg.data);
+          return;
+        }
+        if (msg.type === 'message_status' && msg.data) {
+          if (RPI.onMessagingStatus) RPI.onMessagingStatus(msg.data);
+          return;
+        }
         if (msg.type === 'update' && msg.data) {
           // Maintain the shared spectrum history ring BEFORE panel updates
           // run, so both panels read a consistent snapshot.
@@ -1135,6 +1148,7 @@
     };
 
     ws.onclose = function() {
+      if (RPI.onMessagingConnectionLost) RPI.onMessagingConnectionLost();
       scheduleReconnect();
     };
 

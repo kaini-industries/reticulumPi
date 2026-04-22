@@ -315,7 +315,6 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     return ws
 
 
-_last_msg_ts: dict[str, float] = {"ts": 0}
 _last_mesh_announce_ts: float = 0  # track last announce time for delta broadcasts
 _mesh_version: int = 0  # increments when mesh data changes
 
@@ -585,32 +584,26 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
-            # Collect recent messages from messaging hub (if available)
+            # Messaging state snapshot for the tick.  New messages and
+            # status changes are delivered via the per-event `message` /
+            # `message_status` WS envelopes (see `_on_message_event`),
+            # so the tick only carries slow-moving state (transports +
+            # unread counts) as a reconnect-safe backstop.
             messaging_data: dict = {}
             msg_hub = plugin.app.get_plugin("messaging_hub")
-            if msg_hub and hasattr(msg_hub, "get_messages"):
+            if msg_hub and hasattr(msg_hub, "get_transports"):
                 try:
-                    recent = msg_hub.get_messages(limit=10, since=_last_msg_ts.get("ts", 0))
-                    if recent:
-                        messaging_data["messages"] = recent
-                        _last_msg_ts["ts"] = max(m["timestamp"] for m in recent)
                     transports = msg_hub.get_transports()
                     if transports:
                         messaging_data["transports"] = transports
-                    if hasattr(msg_hub, "get_unread_counts"):
-                        unread = msg_hub.get_unread_counts()
-                        if unread:
-                            messaging_data["unread"] = unread
-                    if hasattr(msg_hub, "get_status_updates_since"):
-                        status_updates = msg_hub.get_status_updates_since(
-                            _last_msg_ts.get("status_ts", 0)
-                        )
-                        if status_updates:
-                            latest_ts = max(
-                                u["timestamp"] for u in status_updates
-                            )
-                            messaging_data["status_updates"] = status_updates
-                            _last_msg_ts["status_ts"] = latest_ts
+                    # Always send the unread map (even empty). If we skip
+                    # empty maps, clients that marked a conversation read
+                    # never observe the transition and keep a stale local
+                    # count until a new message arrives.
+                    if hasattr(msg_hub, "get_unread_counts_grouped"):
+                        messaging_data["unread"] = msg_hub.get_unread_counts_grouped()
+                    elif hasattr(msg_hub, "get_unread_counts"):
+                        messaging_data["unread"] = msg_hub.get_unread_counts()
                 except Exception:
                     pass
 
@@ -715,11 +708,36 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
     _ws_clients.clear()
 
 
+def _lookup_message_row(msg_id: Any) -> dict | None:
+    """Fetch a full message row by id from the messaging hub.
+
+    Used to enrich event-bus payloads (which only carry {id, transport,
+    ...}) into the shape the dashboard expects so clients can append
+    incrementally without an additional HTTP round-trip.
+    """
+    if _ws_plugin is None or msg_id is None:
+        return None
+    try:
+        msg_hub = _ws_plugin.app.get_plugin("messaging_hub")
+    except Exception:
+        return None
+    if not msg_hub or not hasattr(msg_hub, "get_message"):
+        return None
+    try:
+        return msg_hub.get_message(msg_id)
+    except Exception:
+        return None
+
+
 def _on_message_event(event_type: str, data: dict) -> None:
     """Event-bus callback (runs in any thread). Push to WS asynchronously."""
     if _ws_loop is None or not _ws_clients:
         return
-    payload = {"event": event_type, **data}
+    row = _lookup_message_row(data.get("id"))
+    # Fall back to the skeletal event payload if the row isn't yet
+    # readable — avoids dropping events during races, and the client
+    # dedupes by id regardless.
+    payload = row if row else {"event": event_type, **data}
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "message", payload)
     except RuntimeError:
@@ -731,7 +749,25 @@ def _on_status_event(event_type: str, data: dict) -> None:
     """Event-bus callback for MESSAGE_STATUS_CHANGED — same pattern."""
     if _ws_loop is None or not _ws_clients:
         return
-    payload = {"event": event_type, **data}
+    row = _lookup_message_row(data.get("id"))
+    payload = {
+        "id": data.get("id"),
+        "status": data.get("status"),
+        "timestamp": data.get("timestamp"),
+        "transport": data.get("transport"),
+    }
+    # Prefer the live row — it reflects the post-update state. If the
+    # lookup failed (plugin teardown, rare race), fall back to the
+    # contact_id/sub_transport that messaging_hub included on the event
+    # payload, so the client can still route the status update.
+    if row:
+        payload["contact_id"] = row.get("contact_id")
+        payload["sub_transport"] = row.get("sub_transport", "")
+    else:
+        if "contact_id" in data:
+            payload["contact_id"] = data.get("contact_id")
+        if "sub_transport" in data:
+            payload["sub_transport"] = data.get("sub_transport") or ""
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "message_status", payload)
     except RuntimeError:

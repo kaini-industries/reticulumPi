@@ -546,6 +546,8 @@ class TestMessagingHubPlugin:
                 {
                     "id": result["msg_id"],
                     "transport": "test",
+                    "sub_transport": "",
+                    "contact_id": "dest123",
                     "destination": "dest123",
                     "text": "Hello!",
                     "timestamp": pytest.approx(time.time(), abs=2),
@@ -755,6 +757,9 @@ class TestMessagingHubPlugin:
     def test_history_limit_prunes(self, hub_plugin):
         hub_plugin._history_limit = 5
         for i in range(10):
+            # Bypass the 30s prune throttle so every store triggers a prune
+            # and we can observe the history limit taking effect deterministically.
+            hub_plugin._last_prune_ts = 0.0
             hub_plugin._on_adapter_message({
                 "transport": "lxmf",
                 "text": f"msg {i}",
@@ -1418,22 +1423,10 @@ class TestHubDeliveryStatus:
                 "transport": "lxmf",
                 "status": "delivered",
                 "timestamp": pytest.approx(time.time(), abs=2),
+                "contact_id": "__unknown__",
+                "sub_transport": "",
             }),
         )
-
-    def test_status_updates_since(self, hub_plugin):
-        """get_status_updates_since returns recent delivery updates."""
-        msg_id = hub_plugin._store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
-        )
-        before = time.time() - 1
-        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
-
-        updates = hub_plugin.get_status_updates_since(before)
-        assert len(updates) == 1
-        assert updates[0]["id"] == msg_id
-        assert updates[0]["status"] == "delivered"
 
     def test_expire_stale_pending(self, hub_plugin):
         """expire_stale_pending marks old entries as timeout."""
@@ -1461,3 +1454,144 @@ class TestHubDeliveryStatus:
         # Verify the DB row was actually updated
         msg = hub_plugin._store.get_message(msg_id)
         assert msg["status"] == "timeout"
+
+
+class TestOutboundQueueEvents:
+    """Dashboard visibility for queued sends and drain-time status flips.
+
+    Gap being closed: a send that could not go out (adapter reports
+    not_connected) used to be silently written to the retry queue with
+    no event, so the dashboard had no bubble until a later full refresh.
+    Drain-time success then updated the row in the store but did not
+    publish MESSAGE_STATUS_CHANGED, so any client that DID have the row
+    saw it pinned at "queued" forever.
+    """
+
+    @staticmethod
+    def _queueable_adapter(transport: str = "test"):
+        """Return a mock adapter that reports unavailable at send time."""
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = transport
+        adapter.display_name = transport.title()
+        # is_available gate lets send_message through; send() returning
+        # not_connected is what actually triggers queueing.
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": False, "reason": "not_connected"}
+        adapter.get_contacts.return_value = []
+        return adapter
+
+    def test_queue_publishes_message_sent_with_row_id(self, hub_plugin):
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+
+        result = hub_plugin.send_message("test", "hi", "dest-x")
+
+        assert result["queued"] is True
+        msg_id = result["msg_id"]
+        hub_plugin.event_bus.publish.assert_any_call(
+            events.MESSAGE_SENT,
+            pytest.approx({
+                "id": msg_id,
+                "transport": "test",
+                "sub_transport": "",
+                "contact_id": "dest-x",
+                "destination": "dest-x",
+                "text": "hi",
+                "timestamp": pytest.approx(time.time(), abs=2),
+            }),
+        )
+
+    def test_queue_stores_row_with_queued_status(self, hub_plugin):
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+
+        result = hub_plugin.send_message("test", "hi", "dest-x")
+        stored = hub_plugin._store.get_message(result["msg_id"])
+
+        assert stored["status"] == "queued"
+        assert stored["direction"] == "sent"
+
+    def test_drain_success_publishes_status_changed(self, hub_plugin):
+        """The queued→sent transition must broadcast MESSAGE_STATUS_CHANGED.
+
+        Without this event the dashboard bubble appears as "queued" when
+        the row is first created, and never updates — the status change
+        would otherwise only land in the store.
+        """
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+
+        # First send queues.
+        result = hub_plugin.send_message("test", "hi", "dest-x")
+        msg_id = result["msg_id"]
+
+        # Transport comes back up and the retry succeeds.
+        adapter.send.return_value = {"sent": True}
+        hub_plugin.event_bus.publish.reset_mock()
+        sent, requeued, expired = hub_plugin._drain_outbound_queue("test")
+
+        assert (sent, requeued, expired) == (1, 0, 0)
+        hub_plugin.event_bus.publish.assert_any_call(
+            events.MESSAGE_STATUS_CHANGED,
+            pytest.approx({
+                "id": msg_id,
+                "transport": "test",
+                "status": "sent",
+                "timestamp": pytest.approx(time.time(), abs=2),
+                "contact_id": "dest-x",
+                "sub_transport": "",
+            }),
+        )
+
+    def test_drain_success_still_publishes_message_sent(self, hub_plugin):
+        """MESSAGE_SENT kept for pure-transmit subscribers — verify it still fires."""
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+        result = hub_plugin.send_message("test", "hi", "dest-x")
+        msg_id = result["msg_id"]
+
+        adapter.send.return_value = {"sent": True}
+        hub_plugin.event_bus.publish.reset_mock()
+        hub_plugin._drain_outbound_queue("test")
+
+        sent_calls = [
+            call for call in hub_plugin.event_bus.publish.call_args_list
+            if call.args[0] == events.MESSAGE_SENT
+            and call.args[1].get("id") == msg_id
+        ]
+        assert len(sent_calls) == 1
+
+    def test_drain_success_updates_store_status(self, hub_plugin):
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+        result = hub_plugin.send_message("test", "hi", "dest-x")
+        msg_id = result["msg_id"]
+
+        adapter.send.return_value = {"sent": True}
+        hub_plugin._drain_outbound_queue("test")
+
+        assert hub_plugin._store.get_message(msg_id)["status"] == "sent"
+
+    def test_drain_hard_failure_publishes_status_changed_failed(self, hub_plugin):
+        """Non-queueable error on retry → status "failed" broadcast (pre-existing path)."""
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+        result = hub_plugin.send_message("test", "hi", "dest-x")
+        msg_id = result["msg_id"]
+
+        adapter.send.return_value = {"sent": False, "reason": "invalid_dest"}
+        hub_plugin.event_bus.publish.reset_mock()
+        sent, requeued, expired = hub_plugin._drain_outbound_queue("test")
+
+        assert (sent, requeued, expired) == (0, 0, 1)
+        hub_plugin.event_bus.publish.assert_any_call(
+            events.MESSAGE_STATUS_CHANGED,
+            pytest.approx({
+                "id": msg_id,
+                "transport": "test",
+                "status": "failed",
+                "timestamp": pytest.approx(time.time(), abs=2),
+                "contact_id": "dest-x",
+                "sub_transport": "",
+            }),
+        )

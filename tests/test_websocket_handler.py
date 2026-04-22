@@ -20,7 +20,11 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _collect_interfaces,
     _enrich_transport_traffic,
     _extract_radio,
+    _lookup_message_row,
+    _on_message_event,
+    _on_status_event,
     _parse_rnode_config,
+    _push_to_clients,
     _start_broadcast_task,
     _stop_broadcast_task,
     _ws_clients,
@@ -962,16 +966,18 @@ class TestBroadcastDataCollection:
         _ws_clients.clear()
 
     def test_includes_messaging_data(self):
-        """Recent messages are included when messaging_hub is available."""
+        """Slow-moving messaging state (transports, unread) rides the tick.
+
+        Per-message rows are delivered via the dedicated `message` /
+        `message_status` WS envelopes and explicitly not included here —
+        keeping the tick small lets an active conversation avoid a full
+        thread refetch on every inbound packet.
+        """
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
         msg_hub = MagicMock()
-        msg_hub.get_messages.return_value = [
-            {"text": "hello", "timestamp": time.time()},
-        ]
         msg_hub.get_transports.return_value = ["lxmf"]
-        msg_hub.get_unread_counts.return_value = {}
-        msg_hub.get_status_updates_since.return_value = []
+        msg_hub.get_unread_counts_grouped.return_value = {"lxmf": {"abc": 2}}
 
         plugin = self._make_plugin({"messaging_hub": msg_hub})
         _ws_clients.clear()
@@ -990,7 +996,6 @@ class TestBroadcastDataCollection:
         app.__getitem__ = lambda self, key: plugin
 
         async def run():
-            wsh._last_msg_ts["ts"] = 0
             try:
                 await wsh._broadcast_metrics(app)
             except asyncio.CancelledError:
@@ -1000,8 +1005,10 @@ class TestBroadcastDataCollection:
 
         data = json.loads(messages[0])
         assert "messaging" in data["data"]
-        assert len(data["data"]["messaging"]["messages"]) == 1
+        assert "messages" not in data["data"]["messaging"]
         assert data["data"]["messaging"]["transports"] == ["lxmf"]
+        assert data["data"]["messaging"]["unread"] == {"lxmf": {"abc": 2}}
+        msg_hub.get_messages.assert_not_called()
 
         _ws_clients.clear()
 
@@ -1075,3 +1082,296 @@ class TestSetupWebsocketRoutes:
         app.router.add_get.assert_called_once_with("/ws/metrics", websocket_metrics)
         assert len(app.on_startup) == 1
         assert len(app.on_shutdown) == 1
+
+
+# ── _lookup_message_row tests ──────────────────────────────────────
+
+
+class TestLookupMessageRow:
+    """Enrichment path: event-bus payload id → full hub row."""
+
+    def test_returns_none_when_plugin_not_initialised(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        with patch.object(wsh, "_ws_plugin", None):
+            assert _lookup_message_row(42) is None
+
+    def test_returns_none_when_id_missing(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        with patch.object(wsh, "_ws_plugin", plugin):
+            assert _lookup_message_row(None) is None
+
+    def test_returns_none_when_hub_unavailable(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        plugin.app.get_plugin.return_value = None
+        with patch.object(wsh, "_ws_plugin", plugin):
+            assert _lookup_message_row(1) is None
+
+    def test_returns_none_when_hub_lacks_get_message(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        hub = MagicMock(spec=[])  # no attributes at all
+        plugin.app.get_plugin.return_value = hub
+        with patch.object(wsh, "_ws_plugin", plugin):
+            assert _lookup_message_row(1) is None
+
+    def test_returns_none_on_get_plugin_exception(self):
+        """Plugin lookup faults must not propagate to the event-bus caller."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        plugin.app.get_plugin.side_effect = RuntimeError("boom")
+        with patch.object(wsh, "_ws_plugin", plugin):
+            assert _lookup_message_row(1) is None
+
+    def test_returns_none_on_get_message_exception(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        hub = MagicMock()
+        hub.get_message.side_effect = RuntimeError("db down")
+        plugin.app.get_plugin.return_value = hub
+        with patch.object(wsh, "_ws_plugin", plugin):
+            assert _lookup_message_row(1) is None
+
+    def test_returns_row_on_success(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        hub = MagicMock()
+        row = {
+            "id": 7,
+            "contact_id": "abc",
+            "transport": "lxmf",
+            "direction": "inbound",
+            "text": "hi",
+        }
+        hub.get_message.return_value = row
+        plugin.app.get_plugin.return_value = hub
+        with patch.object(wsh, "_ws_plugin", plugin):
+            assert _lookup_message_row(7) == row
+        hub.get_message.assert_called_once_with(7)
+
+
+# ── _on_message_event tests ────────────────────────────────────────
+
+
+class TestOnMessageEvent:
+    """Event-bus callback → scheduled WS push."""
+
+    def test_noop_when_loop_missing(self):
+        """Pre-startup events (no running loop) must not crash the publisher."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        with patch.object(wsh, "_ws_loop", None):
+            _on_message_event("message_received", {"id": 1})  # no raise
+
+    def test_noop_when_no_clients(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        with patch.object(wsh, "_ws_loop", loop):
+            # _ws_clients already cleared by the autouse fixture.
+            _on_message_event("message_received", {"id": 1})
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_schedules_push_with_full_row_when_lookup_succeeds(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        row = {"id": 9, "contact_id": "peer", "direction": "inbound", "text": "hi"}
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop), patch.object(
+            wsh, "_lookup_message_row", return_value=row,
+        ):
+            _on_message_event("message_received", {"id": 9, "transport": "lxmf"})
+        loop.call_soon_threadsafe.assert_called_once()
+        args = loop.call_soon_threadsafe.call_args.args
+        assert args[0] is wsh._schedule_push
+        assert args[1] == "message"
+        assert args[2] == row
+
+    def test_schedules_fallback_payload_when_row_missing(self):
+        """When the DB doesn't yet have the row, fall back to the thin event dict."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop), patch.object(
+            wsh, "_lookup_message_row", return_value=None,
+        ):
+            _on_message_event("message_sent", {"id": 9, "transport": "lxmf"})
+        args = loop.call_soon_threadsafe.call_args.args
+        payload = args[2]
+        assert payload["event"] == "message_sent"
+        assert payload["id"] == 9
+        assert payload["transport"] == "lxmf"
+
+    def test_swallows_runtime_error_from_closed_loop(self):
+        """Shutdown race — loop closed between the check and the submission."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        loop.call_soon_threadsafe.side_effect = RuntimeError("loop closed")
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop), patch.object(
+            wsh, "_lookup_message_row", return_value=None,
+        ):
+            _on_message_event("message_received", {"id": 1})  # no raise
+
+
+# ── _on_status_event tests ─────────────────────────────────────────
+
+
+class TestOnStatusEvent:
+    """Status-change callback → minimal WS payload, enriched if row known."""
+
+    def test_noop_when_loop_missing(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        with patch.object(wsh, "_ws_loop", None):
+            _on_status_event("message_status_changed", {"id": 1, "status": "sent"})
+
+    def test_noop_when_no_clients(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_status_event("message_status_changed", {"id": 1, "status": "sent"})
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_enriches_payload_with_contact_id_when_row_found(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        row = {"id": 5, "contact_id": "peer-1", "sub_transport": "mqtt"}
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop), patch.object(
+            wsh, "_lookup_message_row", return_value=row,
+        ):
+            _on_status_event(
+                "message_status_changed",
+                {"id": 5, "status": "delivered", "timestamp": 1234.5,
+                 "transport": "meshtastic"},
+            )
+        args = loop.call_soon_threadsafe.call_args.args
+        assert args[1] == "message_status"
+        payload = args[2]
+        assert payload["id"] == 5
+        assert payload["status"] == "delivered"
+        assert payload["timestamp"] == 1234.5
+        assert payload["transport"] == "meshtastic"
+        assert payload["contact_id"] == "peer-1"
+        assert payload["sub_transport"] == "mqtt"
+
+    def test_falls_back_to_thin_payload_when_row_missing(self):
+        """Without the row, clients still get the id/status — just no routing hint."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop), patch.object(
+            wsh, "_lookup_message_row", return_value=None,
+        ):
+            _on_status_event(
+                "message_status_changed",
+                {"id": 3, "status": "failed"},
+            )
+        payload = loop.call_soon_threadsafe.call_args.args[2]
+        assert payload["id"] == 3
+        assert payload["status"] == "failed"
+        # No row → no routing fields.
+        assert "contact_id" not in payload
+        assert "sub_transport" not in payload
+
+    def test_swallows_runtime_error_from_closed_loop(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        loop.call_soon_threadsafe.side_effect = RuntimeError("loop closed")
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop), patch.object(
+            wsh, "_lookup_message_row", return_value=None,
+        ):
+            _on_status_event("message_status_changed", {"id": 1, "status": "x"})
+
+
+# ── _push_to_clients tests ─────────────────────────────────────────
+
+
+class TestPushToClients:
+    """Async fan-out: every client gets the same envelope; bad clients are dropped."""
+
+    def test_noop_when_no_clients(self):
+        async def run():
+            await _push_to_clients("message", {"id": 1})
+
+        asyncio.run(run())  # completes without error
+
+    def test_broadcasts_to_all_clients(self):
+        ws1 = MagicMock()
+        ws1.send_str = AsyncMock()
+        ws2 = MagicMock()
+        ws2.send_str = AsyncMock()
+        _ws_clients.add(ws1)
+        _ws_clients.add(ws2)
+
+        async def run():
+            await _push_to_clients("message", {"id": 1, "text": "hi"})
+
+        asyncio.run(run())
+
+        ws1.send_str.assert_awaited_once()
+        ws2.send_str.assert_awaited_once()
+        # Envelope shape.
+        payload = json.loads(ws1.send_str.call_args.args[0])
+        assert payload["type"] == "message"
+        assert payload["data"] == {"id": 1, "text": "hi"}
+        assert "timestamp" in payload
+
+    def test_drops_failed_clients_but_keeps_healthy_ones(self):
+        good = MagicMock()
+        good.send_str = AsyncMock()
+        bad = MagicMock()
+        bad.send_str = AsyncMock(side_effect=ConnectionResetError("peer gone"))
+        _ws_clients.add(good)
+        _ws_clients.add(bad)
+
+        async def run():
+            await _push_to_clients("message_status", {"id": 1, "status": "sent"})
+
+        asyncio.run(run())
+
+        assert good in _ws_clients
+        assert bad not in _ws_clients
+
+    def test_concurrent_send_isolates_slow_client(self):
+        """A single slow peer must not serialize delivery to other clients."""
+        order = []
+
+        async def slow(_msg):
+            await asyncio.sleep(0.05)
+            order.append("slow")
+
+        async def fast(_msg):
+            order.append("fast")
+
+        ws_slow = MagicMock()
+        ws_slow.send_str = slow
+        ws_fast = MagicMock()
+        ws_fast.send_str = fast
+        _ws_clients.add(ws_slow)
+        _ws_clients.add(ws_fast)
+
+        async def run():
+            await _push_to_clients("message", {"id": 1})
+
+        asyncio.run(run())
+
+        # With gather, the fast send completes before the slow one wakes up.
+        assert order == ["fast", "slow"]

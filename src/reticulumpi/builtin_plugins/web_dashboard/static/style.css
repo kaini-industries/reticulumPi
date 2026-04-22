@@ -1092,6 +1092,18 @@ body {
   align-self: center;
   margin: auto;
 }
+.msg-convs-error {
+  color: var(--warn, #d97706);
+  background: rgba(217,119,6,0.08);
+  border: 1px solid rgba(217,119,6,0.2);
+  font-size: 0.75rem;
+  padding: 0.4rem 0.6rem;
+  margin: 0.25rem 0.25rem 0.5rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+}
+.msg-convs-error:hover { background: rgba(217,119,6,0.14); }
 
 /* Message bubble */
 .msg-bubble {
@@ -1431,6 +1443,10 @@ body {
 .msg-status-sent { color: var(--green); font-size: 0.75rem; }
 .msg-status-pending { color: var(--text-muted); font-size: 0.8rem; letter-spacing: 1px; }
 .msg-status-failed { color: var(--red); font-size: 0.75rem; }
+/* Keep the .msg-status slot in the DOM (so delivery-status updates
+   can target it without re-rendering the bubble), but hide it when
+   empty so flex gap doesn't leave a trailing gutter. */
+.msg-status:empty { display: none; }
 
 /* Mobile: single pane toggle */
 @media (max-width: 768px) {

@@ -330,6 +330,8 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
 # Cache to avoid running rnpath too often
 _paths_cache: dict[str, Any] = {"data": None, "time": 0.0}
 _PATHS_CACHE_TTL = 15.0  # seconds
+_PATHS_STALE_TTL = 120.0  # seconds — serve stale rather than spawn parallel probes
+_paths_lock: Any = None  # lazily initialized asyncio.Lock (bound to running loop)
 
 
 async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -346,37 +348,67 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
     import json as _json
     import os
 
+    global _paths_lock
+    if _paths_lock is None:
+        _paths_lock = asyncio.Lock()
+
     now = time.time()
     if _paths_cache["data"] is not None and now - _paths_cache["time"] < _PATHS_CACHE_TTL:
         paths = _paths_cache["data"]
     else:
-        # Find rnpath binary in the same venv
-        import sys
-        venv_bin = os.path.dirname(sys.executable)
-        rnpath_bin = os.path.join(venv_bin, "rnpath")
-        if not os.path.isfile(rnpath_bin):
-            return _error("rnpath binary not found", 503)
+        # Serialize probes. If another request already refreshed while we
+        # waited, use the new cache value instead of launching a duplicate
+        # subprocess. This prevents the rnpath-subprocess stampede that
+        # starved the event loop when the RNode interface was slow.
+        async with _paths_lock:
+            now = time.time()
+            if _paths_cache["data"] is not None and now - _paths_cache["time"] < _PATHS_CACHE_TTL:
+                paths = _paths_cache["data"]
+            else:
+                import sys
+                venv_bin = os.path.dirname(sys.executable)
+                rnpath_bin = os.path.join(venv_bin, "rnpath")
+                if not os.path.isfile(rnpath_bin):
+                    return _error("rnpath binary not found", 503)
 
-        plugin = _get_plugin(request)
-        config_dir = getattr(plugin.app, "_reticulum_config_dir", None)
-        cmd = [rnpath_bin, "-t", "-j"]
-        if config_dir:
-            cmd.extend(["--config", config_dir])
+                plugin = _get_plugin(request)
+                config_dir = getattr(plugin.app, "_reticulum_config_dir", None)
+                cmd = [rnpath_bin, "-t", "-j"]
+                if config_dir:
+                    cmd.extend(["--config", config_dir])
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            paths = _json.loads(stdout)
-            _paths_cache["data"] = paths
-            _paths_cache["time"] = now
-        except asyncio.TimeoutError:
-            return _error("rnpath timed out", 504)
-        except Exception as exc:
-            return _error(f"rnpath failed: {exc}", 500)
+                proc = None
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+                    paths = _json.loads(stdout)
+                    _paths_cache["data"] = paths
+                    _paths_cache["time"] = now
+                except (asyncio.TimeoutError, Exception) as exc:
+                    # Reap the child so it doesn't linger and pile up. Bound
+                    # the wait so a stuck process can't hold _paths_lock and
+                    # deadlock every subsequent /api/paths request.
+                    if proc is not None and proc.returncode is None:
+                        try:
+                            proc.kill()
+                            await asyncio.wait_for(proc.wait(), timeout=2)
+                        except Exception:
+                            pass
+                    # Serve stale data (up to STALE_TTL) instead of 504 —
+                    # the UI stays responsive during transient rnpath stalls.
+                    if (
+                        _paths_cache["data"] is not None
+                        and now - _paths_cache["time"] < _PATHS_STALE_TTL
+                    ):
+                        paths = _paths_cache["data"]
+                    elif isinstance(exc, asyncio.TimeoutError):
+                        return _error("rnpath timed out", 504)
+                    else:
+                        return _error(f"rnpath failed: {exc}", 500)
 
     # Optional interface filter
     iface_filter = request.query.get("interface", "")

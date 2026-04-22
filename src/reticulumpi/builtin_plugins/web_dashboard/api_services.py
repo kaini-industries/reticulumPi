@@ -6,6 +6,7 @@ MeshCore gateway, sensors, alerts, emergency broadcasts, and file transfers.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections import deque
@@ -480,7 +481,20 @@ async def handle_send_message(
     rl_cfg = plugin.config.get("send_rate_limit") or {}
     max_sends = int(rl_cfg.get("max_per_window", 30))
     window_s = float(rl_cfg.get("window_seconds", 60))
-    rate_key = request.get("token") or f"local:{request.remote or 'unknown'}"
+    token = request.get("token")
+    if token:
+        rate_key = f"tok:{token}"
+    else:
+        # Multiple local tools (browser, CLI scripts, NomadNet helpers) all
+        # connect from 127.0.0.1 and would otherwise share a single bucket,
+        # so one chatty script could starve the rest. Mix in a short
+        # User-Agent fingerprint so distinct clients get distinct buckets.
+        # Not a security boundary — a malicious local caller can vary UA —
+        # but this is only reached when allow_localhost_send is opted in,
+        # which already trusts the host.
+        ua = request.headers.get("User-Agent", "")
+        ua_tag = hashlib.sha1(ua.encode("utf-8", "replace")).hexdigest()[:8] if ua else "none"
+        rate_key = f"local:{request.remote or 'unknown'}:{ua_tag}"
     ok, retry_after = _check_send_rate_limit(
         plugin, rate_key, max_sends, window_s,
     )
@@ -555,17 +569,34 @@ async def handle_contacts(
     query = request.query.get("q") or None
     sub_transport = request.query.get("sub_transport")
     contacts = hub.get_contacts(transport, query=query)
-    # The hub aggregates from adapters which don't know about sub_transport
-    # today, so filter client-side here on any sub_transport hint the
-    # contact carries.  Adapters that expose a sub_transport on contacts
-    # (e.g. Meshtastic MQTT vs serial peers) will work cleanly; the rest
-    # ignore the filter because their contacts have no sub_transport key.
+    # Adapters don't tag their contacts with sub_transport today, so we
+    # derive it from stored DM history: include a contact on a given
+    # sub_transport only if we've actually exchanged DMs with that peer
+    # on that sub_transport. Peers with no DM history yet pass through
+    # so users can still initiate a new chat from the panel.
+    #
+    # Contacts that DO carry an adapter-set ``sub_transport`` are honored
+    # strictly against the query, as before.
     if sub_transport is not None:
-        contacts = [
-            c for c in contacts
-            if not c.get("sub_transport")
-            or c.get("sub_transport") == sub_transport
-        ]
+        peer_subs: dict[str, set[str]] = {}
+        if transport and hasattr(hub, "get_peer_sub_transports"):
+            try:
+                peer_subs = hub.get_peer_sub_transports(transport)
+            except Exception:
+                peer_subs = {}
+
+        def _keep(c: dict) -> bool:
+            tagged = c.get("sub_transport")
+            if tagged:
+                return tagged == sub_transport
+            seen = peer_subs.get(c.get("id") or "")
+            if not seen:
+                # No DM history for this peer — allow in both panels so
+                # the user can still start a conversation.
+                return True
+            return sub_transport in seen
+
+        contacts = [c for c in contacts if _keep(c)]
     return _ok({"contacts": contacts})
 
 
@@ -604,9 +635,15 @@ async def handle_conversation_messages(
     if not hub or not hasattr(hub, "get_conversation_messages"):
         return _ok({"messages": []})
     contact_id = request.match_info["contact_id"]
-    limit = min(int(request.query.get("limit", "50")), 200)
+    try:
+        limit = min(int(request.query.get("limit", "50")), 200)
+    except (ValueError, TypeError):
+        return _error("limit must be an integer", 400)
     before_str = request.query.get("before")
-    before = float(before_str) if before_str else None
+    try:
+        before = float(before_str) if before_str else None
+    except (ValueError, TypeError):
+        return _error("before must be a numeric timestamp", 400)
     return _ok({
         "messages": hub.get_conversation_messages(
             contact_id, limit=limit, before=before,
@@ -625,7 +662,10 @@ async def handle_message_search(
     query = request.query.get("q", "").strip()
     if not query:
         return _ok({"messages": []})
-    limit = min(int(request.query.get("limit", "50")), 200)
+    try:
+        limit = min(int(request.query.get("limit", "50")), 200)
+    except (ValueError, TypeError):
+        return _error("limit must be an integer", 400)
     transport = request.query.get("transport") or None
     sub_transport = request.query.get("sub_transport")
     return _ok({"messages": hub.search_messages(
@@ -657,7 +697,7 @@ async def handle_mark_read(
     plugin = _get_plugin(request)
     hub = plugin.app.get_plugin("messaging_hub")
     if not hub or not hasattr(hub, "mark_read"):
-        return _ok({"updated": 0})
+        return _error("messaging_hub not available", 503)
     try:
         body = await request.json()
     except Exception:

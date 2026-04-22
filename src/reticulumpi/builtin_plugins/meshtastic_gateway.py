@@ -1526,7 +1526,12 @@ class MeshtasticGateway(PluginBase):
         Names are enriched from ``_node_name_cache`` which accumulates across
         probes, since NodeInfo packets arrive infrequently (default 3 h).
         """
-        raw_nodes = getattr(iface, "nodes", None) or {}
+        # Snapshot: the library mutates this dict from its own thread, so
+        # iterating live races ("dictionary changed size during iteration").
+        try:
+            raw_nodes = dict(getattr(iface, "nodes", None) or {})
+        except RuntimeError:
+            raw_nodes = {}
         # Determine own node number to filter self even if isSelf is absent
         my_node_num: int | None = None
         my_info = getattr(iface, "myInfo", None)
@@ -2132,7 +2137,13 @@ class MeshtasticGateway(PluginBase):
 
             # 1. MQTT interface nodes
             if self._connected and self._mesh_interface:
-                raw_nodes = getattr(self._mesh_interface, "nodes", None) or {}
+                # Snapshot: the library mutates this dict from its own thread
+                # outside our lock, so iterating live races ("dictionary changed
+                # size during iteration").
+                try:
+                    raw_nodes = dict(getattr(self._mesh_interface, "nodes", None) or {})
+                except RuntimeError:
+                    raw_nodes = {}
                 for node_id, node_data in raw_nodes.items():
                     user = node_data.get("user", {})
                     position = node_data.get("position", {})
@@ -2162,7 +2173,10 @@ class MeshtasticGateway(PluginBase):
             # 2. Serial listener nodes (LoRa-heard, may not be on MQTT)
             listener = self._serial_listener
             if listener is not None:
-                serial_nodes = getattr(listener, "nodes", None) or {}
+                try:
+                    serial_nodes = dict(getattr(listener, "nodes", None) or {})
+                except RuntimeError:
+                    serial_nodes = {}
                 for node_id, node_data in serial_nodes.items():
                     user = node_data.get("user", {})
                     position = node_data.get("position", {})

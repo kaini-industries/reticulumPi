@@ -491,10 +491,18 @@ class MessageStore:
             clauses.append("sub_transport = ?")
             params.append(sub_transport)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        # Group on every non-aggregate column so the per-group value is
+        # deterministic. ``transport``, ``sub_transport``, and ``msg_type``
+        # are functionally dependent on ``contact_id`` (baked into the
+        # contact_id itself for broadcasts; invariant per-peer for DMs),
+        # so adding them to GROUP BY doesn't fragment groups — it just
+        # tells SQLite we promise they're constant within a group.
+        # COALESCE keeps a NULL sub_transport (from pre-migration rows)
+        # from bucketing separately to the ``''`` default.
         sql = f"""
             SELECT contact_id,
                    transport,
-                   MAX(sub_transport) AS sub_transport,
+                   COALESCE(sub_transport, '') AS sub_transport,
                    msg_type,
                    MAX(timestamp) AS last_ts,
                    MAX(CASE
@@ -506,7 +514,7 @@ class MessageStore:
                        ELSE 0
                    END) AS unread_count
             FROM messages{where}
-            GROUP BY contact_id
+            GROUP BY contact_id, transport, COALESCE(sub_transport, ''), msg_type
             ORDER BY last_ts DESC
         """
         with self._lock:
@@ -625,6 +633,53 @@ class MessageStore:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return {r["contact_id"]: r["cnt"] for r in rows}
+
+    def get_unread_counts_grouped(self) -> dict[str, dict[str, int]]:
+        """Return ``{bucket_key: {contact_id: count}}`` for all transports.
+
+        ``bucket_key`` is ``transport`` when ``sub_transport`` is empty, else
+        ``transport:sub_transport`` — matches the per-panel key the web
+        dashboard computes from ``cfg.transport`` / ``cfg.subTransport``.
+        """
+        sql = (
+            "SELECT transport, COALESCE(sub_transport, '') AS sub, "
+            "contact_id, COUNT(*) AS cnt FROM messages "
+            "WHERE direction = 'received' AND read = 0 "
+            "GROUP BY transport, sub, contact_id"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql).fetchall()
+        grouped: dict[str, dict[str, int]] = {}
+        for r in rows:
+            key = f"{r['transport']}:{r['sub']}" if r["sub"] else r["transport"]
+            grouped.setdefault(key, {})[r["contact_id"]] = r["cnt"]
+        return grouped
+
+    def get_peer_sub_transports(self, transport: str) -> dict[str, set[str]]:
+        """Return ``{peer_id: {sub_transport, ...}}`` for DMs on *transport*.
+
+        Used by the contacts endpoint to filter by sub_transport when the
+        upstream adapter doesn't tag its contact list: a peer we've only
+        ever exchanged MQTT DMs with shouldn't appear in the LoRa panel.
+        Only considers ``direct`` messages — broadcasts don't define a
+        "peer" in the conversational sense.
+        """
+        sql = (
+            "SELECT DISTINCT "
+            "  CASE WHEN direction = 'sent' THEN to_id ELSE from_id END AS peer_id, "
+            "  COALESCE(sub_transport, '') AS sub "
+            "FROM messages "
+            "WHERE transport = ? AND msg_type = 'direct'"
+        )
+        out: dict[str, set[str]] = {}
+        with self._lock:
+            rows = self._conn.execute(sql, (transport,)).fetchall()
+        for r in rows:
+            peer = r["peer_id"]
+            if not peer or peer == "self":
+                continue
+            out.setdefault(peer, set()).add(r["sub"])
+        return out
 
     def close(self) -> None:
         """Close the database connection."""
@@ -1330,7 +1385,6 @@ class MessagingHubPlugin(PluginBase):
     def start(self) -> None:
         self._lock = threading.Lock()
         self._adapters: dict[str, TransportAdapter] = {}
-        self._recent_status_updates: list[dict[str, Any]] = []
 
         # Outbound retry queue. When a transport is disconnected, outbound
         # sends land here with status=queued in the store; we drain on the
@@ -1352,6 +1406,7 @@ class MessagingHubPlugin(PluginBase):
         self._history_limit = self.config.get(
             "message_history_limit", _DEFAULT_HISTORY_LIMIT
         )
+        self._last_prune_ts = 0.0
 
         # Register built-in LXMF adapter
         lxmf_cfg = self.config.get("lxmf", {})
@@ -1436,10 +1491,12 @@ class MessagingHubPlugin(PluginBase):
     def _on_adapter_message(self, msg: dict[str, Any]) -> None:
         """Callback from adapters when a message is received."""
         try:
+            msg_type = msg.get("msg_type", "direct")
+            sub_transport = msg.get("sub_transport", "")
             msg_id = self._store.store(
                 transport=msg["transport"],
                 direction="received",
-                msg_type=msg.get("msg_type", "direct"),
+                msg_type=msg_type,
                 text=msg["text"],
                 from_id=msg.get("from_id"),
                 from_name=msg.get("from_name"),
@@ -1447,17 +1504,28 @@ class MessagingHubPlugin(PluginBase):
                 to_name=msg.get("to_name"),
                 status="received",
                 metadata=msg.get("metadata"),
-                sub_transport=msg.get("sub_transport", ""),
+                sub_transport=sub_transport,
                 channel=msg.get("channel"),
             )
             self._maybe_prune()
+            # Include contact_id + sub_transport so the WS skeleton-fallback
+            # path (when the stored row isn't yet readable) still carries
+            # the fields panels use to route events to the right tab.
+            contact_id = MessageStore._compute_contact_id(
+                "received", msg_type, msg["transport"],
+                msg.get("from_id"), msg.get("to_id"),
+                sub_transport=sub_transport,
+                channel=msg.get("channel"),
+            )
             self.event_bus.publish(events.MESSAGE_RECEIVED, {
                 "id": msg_id,
                 "transport": msg["transport"],
+                "sub_transport": sub_transport,
+                "contact_id": contact_id,
                 "from_id": msg.get("from_id"),
                 "from_name": msg.get("from_name"),
                 "text": msg["text"][:100],
-                "msg_type": msg.get("msg_type", "direct"),
+                "msg_type": msg_type,
                 "timestamp": time.time(),
             })
         except Exception:
@@ -1525,10 +1593,12 @@ class MessagingHubPlugin(PluginBase):
         channel = kwargs.get("channel")
         if channel is None and kwargs.get("msg_type") == "broadcast":
             channel = 0
+        msg_type = kwargs.get("msg_type", "direct")
+        sub_transport = kwargs.get("sub_transport", "")
         msg_id = self._store.store(
             transport=transport,
             direction="sent",
-            msg_type=kwargs.get("msg_type", "direct"),
+            msg_type=msg_type,
             text=text,
             from_id="self",
             from_name=self.app.node_name,
@@ -1536,15 +1606,23 @@ class MessagingHubPlugin(PluginBase):
             to_name=to_name,
             status="sent" if result.get("sent") else "failed",
             metadata=kwargs.get("metadata"),
-            sub_transport=kwargs.get("sub_transport", ""),
+            sub_transport=sub_transport,
             channel=channel,
         )
         self._maybe_prune()
 
         if result.get("sent"):
+            contact_id = MessageStore._compute_contact_id(
+                "sent", msg_type, transport,
+                "self", destination,
+                sub_transport=sub_transport,
+                channel=channel,
+            )
             self.event_bus.publish(events.MESSAGE_SENT, {
                 "id": msg_id,
                 "transport": transport,
+                "sub_transport": sub_transport,
+                "contact_id": contact_id,
                 "destination": destination,
                 "text": text[:100],
                 "timestamp": time.time(),
@@ -1568,10 +1646,12 @@ class MessagingHubPlugin(PluginBase):
         channel = kwargs.get("channel")
         if channel is None and kwargs.get("msg_type") == "broadcast":
             channel = 0
+        msg_type = kwargs.get("msg_type", "direct")
+        sub_transport = kwargs.get("sub_transport", "")
         msg_id = self._store.store(
             transport=transport,
             direction="sent",
-            msg_type=kwargs.get("msg_type", "direct"),
+            msg_type=msg_type,
             text=text,
             from_id="self",
             from_name=self.app.node_name,
@@ -1579,7 +1659,7 @@ class MessagingHubPlugin(PluginBase):
             to_name=to_name,
             status="queued",
             metadata=kwargs.get("metadata"),
-            sub_transport=kwargs.get("sub_transport", ""),
+            sub_transport=sub_transport,
             channel=channel,
         )
         entry = {
@@ -1608,6 +1688,26 @@ class MessagingHubPlugin(PluginBase):
             "Queued outbound %s msg_id=%d for retry (dest=%s)",
             transport, msg_id, destination,
         )
+        # Reuse MESSAGE_SENT so the dashboard picks up the queued row and
+        # renders a bubble with status="queued" right away instead of
+        # waiting until the queue drains. The only subscriber is the WS
+        # handler, which enriches via `_lookup_message_row` and reads the
+        # status off the stored row — no consumers misinterpret this.
+        contact_id = MessageStore._compute_contact_id(
+            "sent", msg_type, transport,
+            "self", destination,
+            sub_transport=sub_transport,
+            channel=channel,
+        )
+        self.event_bus.publish(events.MESSAGE_SENT, {
+            "id": msg_id,
+            "transport": transport,
+            "sub_transport": sub_transport,
+            "contact_id": contact_id,
+            "destination": destination,
+            "text": text[:100],
+            "timestamp": time.time(),
+        })
         return {
             "sent": False,
             "queued": True,
@@ -1685,11 +1785,32 @@ class MessagingHubPlugin(PluginBase):
                 )
                 result = {"sent": False, "reason": "exception during retry"}
             if result.get("sent"):
-                # Update stored message status to "sent" and register tracking.
-                self._store.update_status(item["msg_id"], "sent")
+                # Route the queued→sent transition through the same helper
+                # used by "failed"/"expired" in this loop, so the dashboard
+                # receives MESSAGE_STATUS_CHANGED and flips the existing
+                # bubble in place. The MESSAGE_SENT publish below is kept
+                # for any pure-transmit subscribers; the WS client
+                # deduplicates by id so it arrives as a no-op there.
+                self._on_delivery_status_update(
+                    item["msg_id"], transport, "sent",
+                )
+                drain_kwargs = item.get("kwargs") or {}
+                drain_msg_type = drain_kwargs.get("msg_type", "direct")
+                drain_sub = drain_kwargs.get("sub_transport", "")
+                drain_channel = drain_kwargs.get("channel")
+                if drain_channel is None and drain_msg_type == "broadcast":
+                    drain_channel = 0
+                drain_contact_id = MessageStore._compute_contact_id(
+                    "sent", drain_msg_type, transport,
+                    "self", item["destination"],
+                    sub_transport=drain_sub,
+                    channel=drain_channel,
+                )
                 self.event_bus.publish(events.MESSAGE_SENT, {
                     "id": item["msg_id"],
                     "transport": transport,
+                    "sub_transport": drain_sub,
+                    "contact_id": drain_contact_id,
                     "destination": item["destination"],
                     "text": item["text"][:100],
                     "timestamp": time.time(),
@@ -1779,33 +1900,23 @@ class MessagingHubPlugin(PluginBase):
                     )
                     return
             self._store.update_status(msg_id, status)
-            ts = time.time()
-            self.event_bus.publish(events.MESSAGE_STATUS_CHANGED, {
+            # Enrich with contact_id / sub_transport so the WS handler can
+            # route the status update to the correct panel even when its
+            # live get_message() lookup races with shutdown/reload and
+            # returns None.
+            row = self._store.get_message(msg_id)
+            payload = {
                 "id": msg_id,
                 "transport": transport,
                 "status": status,
-                "timestamp": ts,
-            })
-            # Buffer for WebSocket push — keep last 50 updates
-            with self._lock:
-                self._recent_status_updates.append({
-                    "id": msg_id,
-                    "status": status,
-                    "transport": transport,
-                    "timestamp": ts,
-                })
-                if len(self._recent_status_updates) > 50:
-                    self._recent_status_updates = self._recent_status_updates[-50:]
+                "timestamp": time.time(),
+            }
+            if row:
+                payload["contact_id"] = row.get("contact_id")
+                payload["sub_transport"] = row.get("sub_transport", "") or ""
+            self.event_bus.publish(events.MESSAGE_STATUS_CHANGED, payload)
         except Exception:
             self.log.exception("Error updating delivery status for msg %d", msg_id)
-
-    def get_status_updates_since(self, since: float) -> list[dict[str, Any]]:
-        """Return delivery status updates newer than *since*."""
-        with self._lock:
-            return [
-                u for u in self._recent_status_updates
-                if u["timestamp"] > since
-            ]
 
     def expire_stale_pending(self, max_age: float = 300.0) -> int:
         """Mark pending messages older than *max_age* seconds as timed out.
@@ -1868,6 +1979,10 @@ class MessagingHubPlugin(PluginBase):
     def get_messages(self, **kwargs: Any) -> list[dict[str, Any]]:
         """Retrieve messages from the store with optional filters."""
         return self._store.get_messages(**kwargs)
+
+    def get_message(self, msg_id: int) -> dict[str, Any] | None:
+        """Retrieve a single message row by ID."""
+        return self._store.get_message(msg_id)
 
     def get_transports(self) -> list[dict[str, Any]]:
         """Return registered transports with availability status."""
@@ -1961,6 +2076,14 @@ class MessagingHubPlugin(PluginBase):
         """Return unread counts per contact."""
         return self._store.get_unread_counts(**kwargs)
 
+    def get_unread_counts_grouped(self) -> dict[str, dict[str, int]]:
+        """Return per-bucket unread counts keyed by transport[:sub_transport]."""
+        return self._store.get_unread_counts_grouped()
+
+    def get_peer_sub_transports(self, transport: str) -> dict[str, set[str]]:
+        """Return ``{peer_id: {sub_transport, ...}}`` for DMs on *transport*."""
+        return self._store.get_peer_sub_transports(transport)
+
     def get_status(self) -> dict[str, Any]:
         stats = self._store.get_stats()
         with self._lock:
@@ -1979,9 +2102,19 @@ class MessagingHubPlugin(PluginBase):
     # ── Internal ───────────────────────────────────────────────────
 
     def _maybe_prune(self) -> None:
-        """Prune old messages if history limit is set."""
-        if self._history_limit > 0:
-            try:
-                self._store.prune(self._history_limit)
-            except Exception:
-                self.log.debug("Error pruning messages", exc_info=True)
+        """Prune old messages if history limit is set.
+
+        Throttled to run at most once every 30s: prune() does a COUNT + DELETE
+        per (transport, sub_transport) bucket and was otherwise firing on every
+        single stored message during bursty traffic.
+        """
+        if self._history_limit <= 0:
+            return
+        now = time.time()
+        if now - self._last_prune_ts < 30.0:
+            return
+        self._last_prune_ts = now
+        try:
+            self._store.prune(self._history_limit)
+        except Exception:
+            self.log.debug("Error pruning messages", exc_info=True)

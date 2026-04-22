@@ -50,6 +50,13 @@
   }
   function _invalidateChannels() { _chCache = null; }
 
+  // ── Module-level panel registry ──────────────────────────────────
+  // Populated on each createMessagesPanel() call so the top-level WS
+  // dispatch (R.onMessagingEvent / R.onMessagingStatus) can fan a
+  // single server event out to all 4 panels; each panel filters by
+  // its own transport/sub_transport.
+  var _allPanels = [];
+
   function createMessagesPanel(cfg) {
     // ── Per-panel state ────────────────────────────────────────────
     var _conversations = [];
@@ -65,6 +72,39 @@
     var _available = false;
     var _destOptions = [];
     var _destSelection = null;
+
+    // Dedupe per-message event arrivals.  An incoming row may reach
+    // this panel both via a per-message WS push and (during rollout
+    // or reconnect) via a tick-replay; keep the latest 500 seen ids.
+    var _seenMsgIds = Object.create(null);
+    var _seenOrder = [];
+    function _markSeen(id) {
+      if (id === null || id === undefined) return false;
+      var key = String(id);
+      if (_seenMsgIds[key]) return true;
+      _seenMsgIds[key] = true;
+      _seenOrder.push(key);
+      if (_seenOrder.length > 500) {
+        delete _seenMsgIds[_seenOrder.shift()];
+      }
+      return false;
+    }
+
+    // Gate for `_refresh()` — when true, tab-switch refresh trusts
+    // in-memory state instead of round-tripping the server.  Flipped
+    // on after the first successful conversations fetch or WS event,
+    // cleared on WS disconnect.
+    var _hasFreshData = false;
+
+    // Load-older pagination.  When the user scrolls near the top of
+    // an active thread, we fetch the next page with `before=<oldest>`
+    // and prepend to the DOM without re-rendering the whole thread.
+    // `_olderLoading` debounces the fetch; `_olderExhausted` pins
+    // after a short-page response (<limit rows) so further scrolls
+    // don't keep asking the server.
+    var OLDER_PAGE = 50;
+    var _olderLoading = false;
+    var _olderExhausted = false;
 
     var id = function (suffix) { return cfg.rootId + '-' + suffix; };
 
@@ -200,6 +240,9 @@
                                       el.getAttribute('data-msgtype'));
         });
       }
+      if (_dom.chat) {
+        _dom.chat.addEventListener('scroll', _onChatScroll, {passive: true});
+      }
       if (_dom.destInput) {
         _dom.destInput.addEventListener('focus', function () {
           if (_dom.destInput) _dom.destInput.select();
@@ -251,28 +294,67 @@
       return '?' + parts.join('&');
     }
 
+    function _showConvsError(msg) {
+      if (!_dom.convs) return;
+      var banner = _dom.convs.querySelector('.msg-convs-error');
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.className = 'msg-convs-error';
+        banner.addEventListener('click', function () { _fetchConversations(); });
+        _dom.convs.insertBefore(banner, _dom.convs.firstChild);
+      }
+      banner.textContent = 'Couldn\u2019t refresh conversations — ' + msg + ' · click to retry';
+    }
+
+    function _clearConvsError() {
+      if (!_dom.convs) return;
+      var banner = _dom.convs.querySelector('.msg-convs-error');
+      if (banner) banner.remove();
+    }
+
     function _fetchConversations() {
       return api('/api/messages/conversations' + _qs()).then(function (r) {
-        if (!r || !r.ok) return;
+        if (!r) { _showConvsError('network error'); return; }
+        if (!r.ok) { _showConvsError(r.error || 'request failed'); return; }
+        _clearConvsError();
         _conversations = r.data.conversations || [];
+        _hasFreshData = true;
         _renderConversations();
       });
     }
 
     function _fetchThread(contactId, append) {
       if (!contactId) return;
-      var extra = ['limit=50'];
+      var extra = ['limit=' + OLDER_PAGE];
       if (append && _threadMessages.length > 0) {
         var oldest = _threadMessages[_threadMessages.length - 1];
         if (oldest && oldest.timestamp) extra.push('before=' + oldest.timestamp);
       }
       var url = '/api/messages/conversation/' + encodeURIComponent(contactId) +
                 '?' + extra.join('&');
+      if (append) _olderLoading = true;
       return api(url).then(function (r) {
+        if (append) _olderLoading = false;
         if (!r || !r.ok) return;
         var msgs = r.data.messages || [];
-        _threadMessages = append ? _threadMessages.concat(msgs) : msgs;
-        _renderThread();
+        // Seed dedupe set so a racing WS push (arriving after the HTTP
+        // response for the same row — e.g. on reconnect backfill) is
+        // skipped by _onMessage instead of producing a duplicate bubble.
+        for (var i = 0; i < msgs.length; i++) _markSeen(msgs[i].id);
+        if (append) {
+          _threadMessages = _threadMessages.concat(msgs);
+          if (msgs.length < OLDER_PAGE) _olderExhausted = true;
+          _prependOlderBubbles(msgs);
+        } else {
+          _threadMessages = msgs;
+          // A fresh fetch could also be short, but the initial limit
+          // is the single source of "did we get all of them" — keep
+          // the logic symmetrical.
+          _olderExhausted = (msgs.length < OLDER_PAGE);
+          _renderThread();
+        }
+      }, function () {
+        if (append) _olderLoading = false;
       });
     }
 
@@ -292,6 +374,18 @@
       });
     }
 
+    // Debounced server-truth reconciliation for unread counts.  Called
+    // after an optimistic local increment on an inbound message — coalesces
+    // bursts so a 20-message flurry triggers one fetch, not twenty.
+    var _unreadReconcileTimer = null;
+    function _scheduleUnreadReconcile() {
+      if (_unreadReconcileTimer) return;
+      _unreadReconcileTimer = setTimeout(function () {
+        _unreadReconcileTimer = null;
+        _fetchUnread();
+      }, 400);
+    }
+
     function _fetchChannels() {
       if (!cfg.supportsChannels) return;
       return _fetchChannelsShared().then(function (channels) {
@@ -304,6 +398,16 @@
     }
 
     function _refresh() {
+      // After the first WS-delivered event (or the bootstrap fetch in
+      // _init), the panel's in-memory state is authoritative; skipping
+      // the round-trip makes expanding a tab instant.  A WS disconnect
+      // clears the flag via _resetFreshness so the next expand refetches.
+      if (_hasFreshData && _expanded) {
+        _renderConversations();
+        _updateUnreadUI();
+        if (_activeContactId) _renderThread();
+        return;
+      }
       _fetchConversations();
       _fetchUnread();
       _fetchContacts();
@@ -311,9 +415,18 @@
       if (_activeContactId) _fetchThread(_activeContactId);
     }
 
+    function _resetFreshness() {
+      _hasFreshData = false;
+    }
+
     // ── Rendering ──────────────────────────────────────────────────
     function _renderConversations() {
       if (!_dom.convs) return;
+      // When a search is active, the convs pane shows search results.
+      // Skip re-rendering the conversation list on WS events / metrics
+      // ticks so the user's results aren't wiped from under them, which
+      // would also let the debounce cache no-op a retyped identical query.
+      if (_dom.search && _dom.search.value.trim()) return;
       // Pin one broadcast row per active Meshtastic channel (Primary,
       // private channels, etc.).  Panels without channel support fall
       // back to a single broadcast row using the legacy id shape.
@@ -392,28 +505,66 @@
         }
       }
 
-      var html = '';
+      // Keyed-diff render: reuse existing nodes by data-contact so the
+      // list doesn't flash on each update, CSS hover state is preserved,
+      // and focus/selection are stable when a new message bumps a row.
+      var existing = Object.create(null);
+      for (var ei = 0; ei < _dom.convs.children.length; ei++) {
+        var node = _dom.convs.children[ei];
+        var key = node.getAttribute('data-contact');
+        if (key) existing[key] = node;
+      }
       for (var j = 0; j < rows.length; j++) {
         var r = rows[j];
-        var active = r.contact_id === _activeContactId;
+        var isActive = r.contact_id === _activeContactId;
         var preview = (r.last_text || '').slice(0, 60);
         var timeStr = r.last_ts ? formatTimeAgo(r.last_ts) : '';
         var unread = _unreadCounts[r.contact_id] || r.unread_count || 0;
         var name = _displayName(r);
-        html += '<div class="msg-conv-item' + (active ? ' active' : '') + '"'
-             + ' data-contact="' + esc(r.contact_id) + '"'
-             + ' data-msgtype="' + esc(r.msg_type || 'direct') + '">'
-             + '<div class="msg-conv-body">'
-             + '<div class="msg-conv-top">'
-             + '<span class="msg-conv-name">' + esc(name) + '</span>'
-             + '<span class="msg-conv-time">' + esc(timeStr) + '</span>'
-             + '</div>'
-             + '<div class="msg-conv-preview">' + esc(preview) + '</div>'
-             + '</div>'
-             + (unread > 0 ? '<span class="msg-conv-unread">' + unread + '</span>' : '')
-             + '</div>';
+        var el = existing[r.contact_id];
+        if (el) {
+          delete existing[r.contact_id];
+          el.classList.toggle('active', isActive);
+          el.setAttribute('data-msgtype', r.msg_type || 'direct');
+          var nameEl = el.querySelector('.msg-conv-name');
+          if (nameEl && nameEl.textContent !== name) nameEl.textContent = name;
+          var timeEl = el.querySelector('.msg-conv-time');
+          if (timeEl && timeEl.textContent !== timeStr) timeEl.textContent = timeStr;
+          var prevEl = el.querySelector('.msg-conv-preview');
+          if (prevEl && prevEl.textContent !== preview) prevEl.textContent = preview;
+          var badge = el.querySelector('.msg-conv-unread');
+          if (unread > 0) {
+            if (!badge) {
+              badge = document.createElement('span');
+              badge.className = 'msg-conv-unread';
+              el.appendChild(badge);
+            }
+            var badgeText = String(unread);
+            if (badge.textContent !== badgeText) badge.textContent = badgeText;
+          } else if (badge) {
+            badge.remove();
+          }
+        } else {
+          el = document.createElement('div');
+          el.className = 'msg-conv-item' + (isActive ? ' active' : '');
+          el.setAttribute('data-contact', r.contact_id);
+          el.setAttribute('data-msgtype', r.msg_type || 'direct');
+          el.innerHTML =
+            '<div class="msg-conv-body">'
+            + '<div class="msg-conv-top">'
+            + '<span class="msg-conv-name">' + esc(name) + '</span>'
+            + '<span class="msg-conv-time">' + esc(timeStr) + '</span>'
+            + '</div>'
+            + '<div class="msg-conv-preview">' + esc(preview) + '</div>'
+            + '</div>'
+            + (unread > 0
+                ? '<span class="msg-conv-unread">' + unread + '</span>' : '');
+        }
+        // appendChild on an in-tree node moves it, so rows land in order.
+        _dom.convs.appendChild(el);
       }
-      _dom.convs.innerHTML = html;
+      // Drop rows that no longer match any conversation.
+      Object.keys(existing).forEach(function (k) { existing[k].remove(); });
     }
 
     function _displayName(conv) {
@@ -435,6 +586,35 @@
       return id;
     }
 
+    function _statusGlyph(status) {
+      if (status === 'sent')
+        return ' <span class="msg-status-sent">&#10003;</span>';
+      if (status === 'delivered')
+        return ' <span class="msg-status-sent">&#10003;&#10003;</span>';
+      if (status === 'pending')
+        return ' <span class="msg-status-pending">…</span>';
+      if (status === 'failed' || status === 'delivery_failed')
+        return ' <span class="msg-status-failed">&#10007;</span>';
+      return '';
+    }
+
+    function _bubbleHtml(m) {
+      var isSent = m.direction === 'sent';
+      var sender = isSent ? 'You' : (m.from_name || m.from_id || '?');
+      var time = m.timestamp ? formatTimeAgo(m.timestamp) : '';
+      var statusHtml = isSent && m.status ? _statusGlyph(m.status) : '';
+      var idAttr = (m.id !== null && m.id !== undefined)
+        ? ' data-msg-id="' + esc(String(m.id)) + '"' : '';
+      return '<div class="msg-bubble ' + (isSent ? 'sent' : 'received') + '"'
+           + idAttr + '>'
+           + '<div class="msg-meta"><span>' + esc(sender) + '</span>'
+           + '<span>' + esc(time) + '</span>'
+           + '<span class="msg-status">' + statusHtml + '</span>'
+           + '</div>'
+           + '<div class="msg-text">' + esc(m.text || '') + '</div>'
+           + '</div>';
+    }
+
     function _renderThread() {
       if (!_dom.chat) return;
       if (_threadMessages.length === 0) {
@@ -451,33 +631,78 @@
       var sorted = _threadMessages.slice().reverse();  // chronological
       var html = '';
       for (var i = 0; i < sorted.length; i++) {
-        var m = sorted[i];
-        var isSent = m.direction === 'sent';
-        var sender = isSent
-          ? 'You'
-          : (m.from_name || m.from_id || '?');
-        var time = m.timestamp ? formatTimeAgo(m.timestamp) : '';
-        var statusHtml = '';
-        if (isSent && m.status) {
-          if (m.status === 'sent')
-            statusHtml = ' <span class="msg-status-sent">&#10003;</span>';
-          else if (m.status === 'delivered')
-            statusHtml = ' <span class="msg-status-sent">&#10003;&#10003;</span>';
-          else if (m.status === 'pending')
-            statusHtml = ' <span class="msg-status-pending">…</span>';
-          else if (m.status === 'failed' || m.status === 'delivery_failed')
-            statusHtml = ' <span class="msg-status-failed">&#10007;</span>';
-        }
-        html += '<div class="msg-bubble ' + (isSent ? 'sent' : 'received') + '">'
-             + '<div class="msg-meta"><span>' + esc(sender) + '</span>'
-             + '<span>' + esc(time) + '</span>' + statusHtml + '</div>'
-             + '<div class="msg-text">' + esc(m.text || '') + '</div>'
-             + '</div>';
+        html += _bubbleHtml(sorted[i]);
       }
       var atBottom = (_dom.chat.scrollTop + _dom.chat.clientHeight
                       >= _dom.chat.scrollHeight - 40);
       _dom.chat.innerHTML = html;
       if (atBottom) _dom.chat.scrollTop = _dom.chat.scrollHeight;
+    }
+
+    function _appendBubbleToChat(row) {
+      if (!_dom.chat) return;
+      // Clear the "no messages" placeholder on first append.
+      var placeholder = _dom.chat.querySelector('.msg-empty-notice');
+      if (placeholder) placeholder.remove();
+      var atBottom = (_dom.chat.scrollTop + _dom.chat.clientHeight
+                      >= _dom.chat.scrollHeight - 40);
+      var tmp = document.createElement('div');
+      tmp.innerHTML = _bubbleHtml(row);
+      var bubble = tmp.firstChild;
+      if (bubble) _dom.chat.appendChild(bubble);
+      if (atBottom) _dom.chat.scrollTop = _dom.chat.scrollHeight;
+    }
+
+    function _prependOlderBubbles(msgs) {
+      // Called with a page of older messages (server returns them
+      // newest-first within the page).  Reverse so we can insert in
+      // chronological order at the top, and anchor the scroll position
+      // on the previously-topmost bubble so the viewport doesn't jump.
+      if (!_dom.chat || !msgs || msgs.length === 0) return;
+      var anchor = _dom.chat.firstChild;
+      var anchorOffset = anchor ? anchor.offsetTop : 0;
+      var frag = document.createDocumentFragment();
+      for (var i = msgs.length - 1; i >= 0; i--) {
+        var tmp = document.createElement('div');
+        tmp.innerHTML = _bubbleHtml(msgs[i]);
+        var bubble = tmp.firstChild;
+        if (bubble) frag.appendChild(bubble);
+      }
+      _dom.chat.insertBefore(frag, _dom.chat.firstChild);
+      // After prepend, the anchor's new offsetTop = (sum of inserted
+      // heights) + old offset.  Keep the same visible offset under it.
+      if (anchor) {
+        var newAnchorOffset = anchor.offsetTop;
+        _dom.chat.scrollTop += (newAnchorOffset - anchorOffset);
+      }
+    }
+
+    function _onChatScroll() {
+      if (!_dom.chat || !_activeContactId) return;
+      if (_olderLoading || _olderExhausted) return;
+      // Don't race the initial thread fetch — without this guard, a
+      // stray scroll event while the prior thread's DOM is still on
+      // screen fires _fetchThread(append=true) with an empty
+      // _threadMessages, which issues a bogus no-`before` refetch in
+      // parallel with the non-append initial fetch.
+      if (_threadMessages.length === 0) return;
+      // Trigger once the user is within ~1 viewport of the top — far
+      // enough to feel smooth, close enough not to thrash on long
+      // threads where scrollHeight >> clientHeight.
+      if (_dom.chat.scrollTop > 60) return;
+      _fetchThread(_activeContactId, true);
+    }
+
+    function _updateBubbleStatus(msgId, status) {
+      if (!_dom.chat || msgId === null || msgId === undefined) return;
+      var sel = '[data-msg-id="' + String(msgId).replace(/"/g, '\\"') + '"]';
+      var bubble = _dom.chat.querySelector(sel);
+      if (!bubble) return;
+      var statusEl = bubble.querySelector('.msg-status');
+      if (!statusEl) return;
+      // _statusGlyph returns a safe static-HTML glyph (entities only, no
+      // user data), so innerHTML here is not an XSS vector.
+      statusEl.innerHTML = _statusGlyph(status);
     }
 
     function _renderChannelSelect() {
@@ -674,7 +899,10 @@
         if (_unreadCounts.hasOwnProperty(k)) total += _unreadCounts[k];
       }
       _dom.unread.textContent = total > 0 ? total : '';
-      // Re-render badges inside sidebar rows
+      // Re-render badges inside sidebar rows. Use .remove() (not display:none)
+      // so the DOM state matches _renderConversations — otherwise the two
+      // code paths leave badges in different states depending on which ran
+      // last, which has produced subtle "ghost badge" bugs before.
       var items = _dom.convs ? _dom.convs.querySelectorAll('.msg-conv-item') : [];
       for (var i = 0; i < items.length; i++) {
         var cid = items[i].getAttribute('data-contact');
@@ -687,9 +915,8 @@
             items[i].appendChild(badge);
           }
           badge.textContent = n;
-          badge.style.display = '';
         } else if (badge) {
-          badge.style.display = 'none';
+          badge.remove();
         }
       }
     }
@@ -701,6 +928,10 @@
       _activeMsgType = msgType || 'direct';
       _newComposeOpen = false;
       _threadMessages = [];
+      // Fresh thread — reset pagination state so load-older can re-arm
+      // once this fetch completes.
+      _olderLoading = false;
+      _olderExhausted = false;
 
       var items = _dom.convs
         ? _dom.convs.querySelectorAll('.msg-conv-item') : [];
@@ -751,20 +982,62 @@
       if (layout) layout.classList.add('thread-active');
 
       _fetchThread(contactId);
-      if (_unreadCounts[contactId]) {
-        delete _unreadCounts[contactId];
-        _updateUnreadUI();
-        api('/api/messages/read', {
-          method: 'POST',
-          body: {contact_id: contactId},
-        });
+
+      // Collect every cid whose unread feeds this row. Broadcast rows
+      // merge aliased channel slots (same name + PSK), so clicking the
+      // canonical row must also clear the aliases or the badge re-sums
+      // from _conversations on the next render.
+      var contributors = [contactId];
+      var parsedCh = _parseBroadcastChannel(contactId);
+      if (typeof parsedCh === 'number' && _channels.length > 0) {
+        var canon = _canonicalize(_channels);
+        for (var aliasIdx in canon.aliasToCanonical) {
+          if (canon.aliasToCanonical.hasOwnProperty(aliasIdx)
+              && canon.aliasToCanonical[aliasIdx] === parsedCh) {
+            contributors.push(_broadcastCid(parseInt(aliasIdx, 10)));
+          }
+        }
       }
+
+      var anyCleared = false;
+      for (var ci = 0; ci < contributors.length; ci++) {
+        var cid = contributors[ci];
+        var convUnread = 0;
+        var convIdx = -1;
+        for (var k = 0; k < _conversations.length; k++) {
+          if (_conversations[k].contact_id === cid) {
+            convIdx = k;
+            convUnread = _conversations[k].unread_count || 0;
+            break;
+          }
+        }
+        var wasUnread = (_unreadCounts[cid] || 0) > 0 || convUnread > 0;
+        if (_unreadCounts[cid]) delete _unreadCounts[cid];
+        // Zero the server-cached count too. _renderConversations falls
+        // back to `r.unread_count` when _unreadCounts is missing the key,
+        // which otherwise re-shows a stale badge on the next tick.
+        if (convIdx >= 0) _conversations[convIdx].unread_count = 0;
+        if (wasUnread) {
+          anyCleared = true;
+          api('/api/messages/read', {
+            method: 'POST',
+            body: {contact_id: cid},
+          });
+        }
+      }
+      if (anyCleared) _updateUnreadUI();
     }
 
     function _goBack() {
       var layout = _dom.body && _dom.body.querySelector('.msg-layout');
       if (layout) layout.classList.remove('thread-active');
       if (_dom.deleteBtn) _dom.deleteBtn.classList.add('hidden');
+      // Clear the active contact so _onMessage doesn't keep treating the
+      // (now hidden) thread as "open" — without this, inbound messages
+      // for the previously-viewed peer get auto-marked-read and their
+      // bubbles are appended into an invisible chat pane.
+      _activeContactId = null;
+      _activeMsgType = null;
     }
 
     function _onDeleteConversation() {
@@ -906,13 +1179,13 @@
           _autoGrow(_dom.text);
           _updateByteCount();
           _setFeedback(r.data.truncated ? 'Sent (truncated)' : 'Sent', 'ok');
-          _fetchConversations();
+          // No refetch here: the backend's MESSAGE_SENT event will
+          // arrive via WS and _onMessage will append the bubble +
+          // upsert the conversation row without an HTTP round-trip.
           if (_newComposeOpen) {
             _newComposeOpen = false;
             if (_dom.newCompose) _dom.newCompose.classList.add('hidden');
             _renderChannelSelect();
-          } else if (_activeContactId) {
-            _fetchThread(_activeContactId);
           }
         })
         .finally(function () {
@@ -976,13 +1249,28 @@
     }
 
     // ── Search ─────────────────────────────────────────────────────
+    var _lastSearchQuery = null;   // tracks last query that hit the server
     function _onSearch() {
       if (!_dom.search) return;
       var q = _dom.search.value.trim();
-      if (!q) { _fetchConversations(); return; }
+      if (!q) {
+        if (_lastSearchQuery !== null) {
+          _lastSearchQuery = null;
+          // Cleared — re-render from in-memory conversations instead of
+          // re-fetching; they're kept fresh by the per-message WS events.
+          if (_hasFreshData) _renderConversations();
+          else _fetchConversations();
+        }
+        return;
+      }
+      if (q === _lastSearchQuery) return;  // debounced input sent the same query
+      _lastSearchQuery = q;
       var extra = ['q=' + encodeURIComponent(q), 'limit=30'];
       api('/api/messages/search' + _qs(extra)).then(function (r) {
         if (!r || !r.ok) return;
+        // Stale result check: user typed further and _lastSearchQuery
+        // has already moved on — drop this render to avoid flicker.
+        if (_lastSearchQuery !== q) return;
         _renderSearchResults(r.data.messages || [], q);
       });
     }
@@ -1020,25 +1308,15 @@
     }
 
     // ── WebSocket update entry ─────────────────────────────────────
+    // Metrics tick (type: "update") now carries only the slow-moving
+    // messaging state (transports + unread totals).  Per-message deltas
+    // arrive via the dedicated `message` / `message_status` envelopes
+    // dispatched to onMessage / onStatus below, which append in place
+    // instead of triggering a full thread refetch.
     function update(wsPayload) {
       if (!wsPayload) return;
       if (!_resolveDom()) return;
 
-      // Only react to messages relevant to this panel
-      var relevant = false;
-      if (wsPayload.messages && wsPayload.messages.length) {
-        for (var i = 0; i < wsPayload.messages.length; i++) {
-          var m = wsPayload.messages[i];
-          if (m.transport !== cfg.transport) continue;
-          if (cfg.subTransport !== null && cfg.subTransport !== undefined) {
-            if ((m.sub_transport || '') !== cfg.subTransport) continue;
-          }
-          relevant = true;
-          break;
-        }
-      }
-
-      // Transport availability hint for section visibility
       if (wsPayload.transports) {
         var avail = wsPayload.transports.some(function (t) {
           return t.name === cfg.transport;
@@ -1050,15 +1328,147 @@
           }
         }
       }
-
-      if (relevant && _expanded) {
-        _fetchConversations();
-        if (_activeContactId) _fetchThread(_activeContactId);
-      }
-      // Unread counts filtered server-side — refresh on any broadcast tick
+      // Unread dict is the authoritative across-session badge source;
+      // re-render counts without round-tripping the per-panel endpoint.
+      // The server sends a nested map keyed by transport[:sub_transport];
+      // pick the bucket for this panel so sibling panels don't contaminate
+      // our badge totals.
       if (wsPayload.unread) {
-        _fetchUnread();
+        var bucketKey = cfg.subTransport
+          ? cfg.transport + ':' + cfg.subTransport
+          : cfg.transport;
+        var bucket = wsPayload.unread[bucketKey];
+        if (bucket && typeof bucket === 'object') {
+          _unreadCounts = bucket;
+        } else if (
+          !wsPayload.unread.hasOwnProperty(bucketKey)
+          && _isFlatUnreadMap(wsPayload.unread)
+        ) {
+          // Backwards compat: older server sends a flat {cid: count}.
+          _unreadCounts = wsPayload.unread;
+        } else {
+          _unreadCounts = {};
+        }
+        _updateUnreadUI();
+        _renderConversations();
       }
+    }
+
+    function _isFlatUnreadMap(obj) {
+      for (var k in obj) {
+        if (obj.hasOwnProperty(k)) return typeof obj[k] === 'number';
+      }
+      return false;
+    }
+
+    // ── Per-message WebSocket events ───────────────────────────────
+    function _matchesPanel(row) {
+      if (!row || row.transport !== cfg.transport) return false;
+      if (cfg.subTransport !== null && cfg.subTransport !== undefined) {
+        if ((row.sub_transport || '') !== cfg.subTransport) return false;
+      }
+      return true;
+    }
+
+    function _upsertConversation(row) {
+      if (!row || !row.contact_id) return;
+      var cid = row.contact_id;
+      var idx = -1;
+      for (var i = 0; i < _conversations.length; i++) {
+        if (_conversations[i].contact_id === cid) { idx = i; break; }
+      }
+      if (idx < 0) {
+        _conversations.unshift({
+          contact_id: cid,
+          contact_name: (row.direction === 'sent'
+            ? (row.to_name || row.to_id || '')
+            : (row.from_name || row.from_id || '')),
+          transport: row.transport,
+          sub_transport: row.sub_transport || '',
+          msg_type: row.msg_type || 'direct',
+          last_text: row.text || '',
+          last_ts: row.timestamp,
+          unread_count: 0,
+        });
+        return;
+      }
+      var entry = _conversations[idx];
+      var bumped = !entry.last_ts || row.timestamp >= entry.last_ts;
+      if (bumped) {
+        entry.last_text = row.text || '';
+        entry.last_ts = row.timestamp;
+      }
+      if (!entry.contact_name) {
+        entry.contact_name = (row.direction === 'sent'
+          ? (row.to_name || row.to_id || '')
+          : (row.from_name || row.from_id || ''));
+      }
+      // Float to top so the list order matches the server's last_ts-desc
+      // sort without a refetch.  Skip when the incoming row is older
+      // than what we already had (happens on out-of-order delivery).
+      if (bumped && idx > 0) {
+        _conversations.splice(idx, 1);
+        _conversations.unshift(entry);
+      }
+    }
+
+    function _onMessage(row) {
+      if (!_matchesPanel(row)) return;
+      if (_markSeen(row.id)) return;
+      if (!_resolveDom()) return;
+      _hasFreshData = true;
+
+      var isReceived = row.direction === 'received';
+      var activeMatch = _activeContactId && row.contact_id === _activeContactId;
+
+      if (activeMatch && _expanded) {
+        // Thread messages are stored newest-first in this panel.
+        _threadMessages.unshift(row);
+        _appendBubbleToChat(row);
+        if (isReceived) {
+          // Always POST /read, not just when the local unread map
+          // already has this cid.  The backend increments stored
+          // unread on receive, but our local dict won't reflect it
+          // until the next metrics tick — without this POST the
+          // conversation flashes a stale badge on the next tick.
+          if (_unreadCounts[row.contact_id]) {
+            delete _unreadCounts[row.contact_id];
+            _updateUnreadUI();
+          }
+          api('/api/messages/read', {
+            method: 'POST',
+            body: {contact_id: row.contact_id},
+          });
+        }
+      } else if (isReceived) {
+        // Optimistic local bump for instant badge feedback, then reconcile
+        // against the server's authoritative count shortly after.  Without
+        // the reconcile we can race the next metrics tick and inflate the
+        // badge when the tick arrives pre-push and our increment applies
+        // on top of an already-current count.
+        _unreadCounts[row.contact_id] =
+          (_unreadCounts[row.contact_id] || 0) + 1;
+        _updateUnreadUI();
+        _scheduleUnreadReconcile();
+      }
+
+      _upsertConversation(row);
+      _renderConversations();
+    }
+
+    function _onStatus(row) {
+      if (!_matchesPanel(row)) return;
+      if (!_resolveDom()) return;
+      if (row.id === null || row.id === undefined) return;
+      var changed = false;
+      for (var i = 0; i < _threadMessages.length; i++) {
+        if (String(_threadMessages[i].id) === String(row.id)) {
+          _threadMessages[i].status = row.status;
+          changed = true;
+          break;
+        }
+      }
+      if (changed) _updateBubbleStatus(row.id, row.status);
     }
 
     function _renderTransportAddress(addr) {
@@ -1124,10 +1534,39 @@
     _init();
 
     // Public surface
-    return {update: update};
+    var panelApi = {
+      update: update,
+      onMessage: _onMessage,
+      onStatus: _onStatus,
+      resetFreshness: _resetFreshness,
+    };
+    _allPanels.push(panelApi);
+    return panelApi;
   }
 
   R.createMessagesPanel = createMessagesPanel;
+
+  // Fan out a single per-message WS envelope to every registered
+  // panel; each panel filters by its own transport/sub_transport and
+  // no-ops if the row isn't relevant.
+  R.onMessagingEvent = function (row) {
+    for (var i = 0; i < _allPanels.length; i++) {
+      try { _allPanels[i].onMessage(row); } catch (e) { /* keep other panels alive */ }
+    }
+  };
+  R.onMessagingStatus = function (row) {
+    for (var i = 0; i < _allPanels.length; i++) {
+      try { _allPanels[i].onStatus(row); } catch (e) { /* keep other panels alive */ }
+    }
+  };
+  // Called from app.js on ws.onclose so that the next _refresh() on
+  // each panel falls back to a real fetch instead of trusting stale
+  // in-memory state.
+  R.onMessagingConnectionLost = function () {
+    for (var i = 0; i < _allPanels.length; i++) {
+      try { _allPanels[i].resetFreshness(); } catch (e) { /* ignore */ }
+    }
+  };
 
   // ── Shared channel-management dialog ───────────────────────────
   // Only one dialog instance is needed on the page; both Meshtastic
