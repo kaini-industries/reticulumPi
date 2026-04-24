@@ -21,6 +21,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _enrich_transport_traffic,
     _extract_radio,
     _lookup_message_row,
+    _on_alert_event,
     _on_message_event,
     _on_status_event,
     _parse_rnode_config,
@@ -514,19 +515,18 @@ class TestWebsocketAuth:
 
         ws_mock.close.assert_called_once()
 
-    def test_accepts_query_token(self):
-        """Valid query param token is accepted."""
+    def test_rejects_query_token(self):
+        """Query param tokens are no longer accepted (security hardening)."""
         request = _make_ws_request(token="valid_token", auth_valid=True)
 
         ws_mock = MagicMock()
         ws_mock.prepare = AsyncMock()
-        # Simulate empty message loop
-        ws_mock.__aiter__ = lambda self: _empty_async_iter()
+        ws_mock.close = AsyncMock()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
             result = asyncio.run(websocket_metrics(request))
 
-        ws_mock.close.assert_not_called()
+        ws_mock.close.assert_called_once()
 
     def test_accepts_cookie_token(self):
         """Falls back to cookie session token."""
@@ -545,7 +545,7 @@ class TestWebsocketAuth:
 
     def test_rejects_when_max_clients_reached(self):
         """Closes with 4002 when max clients exceeded."""
-        request = _make_ws_request(token="valid", auth_valid=True, max_clients=2)
+        request = _make_ws_request(cookie_token="valid", auth_valid=True, max_clients=2)
 
         ws_mock = MagicMock()
         ws_mock.prepare = AsyncMock()
@@ -570,7 +570,7 @@ class TestWebsocketAuth:
 
     def test_client_added_and_removed(self):
         """Client is tracked in _ws_clients during connection and removed after."""
-        request = _make_ws_request(token="valid", auth_valid=True)
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
         _ws_clients.clear()
 
         ws_mock = MagicMock()
@@ -585,7 +585,7 @@ class TestWebsocketAuth:
 
     def test_heartbeat_configured(self):
         """Authenticated WebSocket gets 60s heartbeat."""
-        request = _make_ws_request(token="valid", auth_valid=True)
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
         _ws_clients.clear()
 
         ws_instances = []
@@ -1299,6 +1299,50 @@ class TestOnStatusEvent:
             wsh, "_lookup_message_row", return_value=None,
         ):
             _on_status_event("message_status_changed", {"id": 1, "status": "x"})
+
+
+# ── _on_alert_event tests ──────────────────────────────────────────
+
+
+class TestOnAlertEvent:
+    """ALERT_TRIGGERED callback → scheduled WS push."""
+
+    def test_noop_when_loop_missing(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        with patch.object(wsh, "_ws_loop", None):
+            _on_alert_event("alert.triggered", {"message": "CPU high"})
+
+    def test_noop_when_no_clients(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_alert_event("alert.triggered", {"message": "CPU high"})
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_schedules_push_with_alert_type(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        _ws_clients.add(MagicMock())
+        data = {"message": "CPU > 90%", "rule_key": "rule:cpu:>:90", "time": 12345.0}
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_alert_event("alert.triggered", data)
+        loop.call_soon_threadsafe.assert_called_once()
+        args = loop.call_soon_threadsafe.call_args.args
+        assert args[0] is wsh._schedule_push
+        assert args[1] == "alert"
+        assert args[2] == data
+
+    def test_swallows_runtime_error_on_closed_loop(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        loop.call_soon_threadsafe.side_effect = RuntimeError("loop closed")
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_alert_event("alert.triggered", {"message": "test"})
 
 
 # ── _push_to_clients tests ─────────────────────────────────────────

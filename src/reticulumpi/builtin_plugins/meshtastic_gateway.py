@@ -24,11 +24,8 @@ import RNS
 import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi import events
+from reticulumpi.mtu import MESHTASTIC_MTU, truncate_bytes, truncate_for_mtu
 from reticulumpi.plugin_base import PluginBase
-
-# Meshtastic payload limit (bytes). Matches mesh_pb2.Constants.DATA_PAYLOAD_LEN
-# (233). Messages longer than this are truncated before sendText.
-MESHTASTIC_MTU = 233
 
 # Meshtastic hop_limit is a 3-bit field; 7 is the protocol maximum.
 MESHTASTIC_HOP_LIMIT = 7
@@ -1844,7 +1841,7 @@ class MeshtasticGateway(PluginBase):
             # Meshtastic packets are already capped at MTU on the wire;
             # pass the full text so subscribers (responder command parsing,
             # messaging_hub persistence) see what the sender actually typed.
-            "text": _truncate_bytes(text, MESHTASTIC_MTU),
+            "text": truncate_bytes(text, MESHTASTIC_MTU),
             "forwarded_to": len(self._recipient_hashes),
             "source": source_tag,  # "LoRa" or "MQTT"
             "channel": channel_idx,
@@ -1921,7 +1918,7 @@ class MeshtasticGateway(PluginBase):
                 # Build formatted message with MTU handling
                 prefix = self.config.get("lxmf_prefix", DEFAULT_LXMF_PREFIX)
                 header = f"{prefix} {sender_hash}:\n"
-                formatted = _truncate_for_mtu(header, content, MESHTASTIC_MTU)
+                formatted = truncate_for_mtu(header, content, MESHTASTIC_MTU)
                 channel = self.config.get("meshtastic_channel", 0)
 
                 # Capture interface reference — sendText runs outside lock
@@ -2552,7 +2549,7 @@ class MeshtasticGateway(PluginBase):
                 if can_ack:
                     # Serial interface supports wantAck + onResponse
                     iface.sendText(
-                        _truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
+                        truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                         destinationId=destination_id,
                         wantAck=True,
                         onResponse=self._make_ack_handler(on_ack),
@@ -2560,13 +2557,13 @@ class MeshtasticGateway(PluginBase):
                     )
                 else:
                     iface.sendText(
-                        _truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
+                        truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                         destinationId=destination_id,
                         hopLimit=MESHTASTIC_HOP_LIMIT,
                     )
             else:
                 iface.sendText(
-                    _truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
+                    truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                     hopLimit=MESHTASTIC_HOP_LIMIT,
                 )
         except Exception as exc:
@@ -2672,42 +2669,3 @@ def _derive_short_name(long_name: str) -> str:
     return (initials + padding)[:4]
 
 
-def _truncate_bytes(text: str, max_bytes: int) -> str:
-    """Truncate *text* so its UTF-8 encoding fits within *max_bytes*.
-
-    Never splits a multi-byte character. Returns *text* unchanged if it
-    already fits.
-    """
-    encoded = text.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return text
-    return encoded[:max_bytes].decode("utf-8", errors="ignore")
-
-
-def _truncate_for_mtu(header: str, body: str, mtu: int) -> str:
-    """Build header + body string, truncating body to fit within *mtu* bytes.
-
-    Truncation is UTF-8 safe — it never splits a multi-byte character.
-    """
-    header_bytes = len(header.encode("utf-8"))
-    max_body_bytes = mtu - header_bytes
-    if max_body_bytes <= 0:
-        # Header alone exceeds MTU — just return header (will be truncated by radio)
-        return header
-
-    body_encoded = body.encode("utf-8")
-    if len(body_encoded) <= max_body_bytes:
-        return header + body
-
-    # Truncate with "..." indicator
-    ellipsis = " ..."
-    target = max_body_bytes - len(ellipsis.encode("utf-8"))
-    if target <= 0:
-        return header + ellipsis
-
-    # Remove characters from the end until it fits
-    truncated = body
-    while len(truncated.encode("utf-8")) > target:
-        truncated = truncated[:-1]
-
-    return header + truncated + ellipsis

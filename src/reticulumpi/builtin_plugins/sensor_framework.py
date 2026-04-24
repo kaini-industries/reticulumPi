@@ -196,10 +196,8 @@ class CommandDriver(SensorDriver):
 
     The command should print a single numeric value to stdout.
 
-    By default the command string is split with :func:`shlex.split` and
-    executed **without a shell** to prevent shell injection.  If the command
-    needs shell features (pipes, redirection, subshells), set ``shell: true``
-    in the sensor config to opt in explicitly.
+    The command string is split with :func:`shlex.split` and executed
+    without a shell to prevent shell injection.
     """
 
     driver_name = "command"
@@ -208,30 +206,27 @@ class CommandDriver(SensorDriver):
         super().__init__(sensor_config)
         self._command_str = sensor_config.get("command", "")
         self._name = sensor_config.get("reading_name", "value")
-        self._use_shell: bool = bool(sensor_config.get("shell", False))
-        # Pre-parse only when not using shell mode
+        if sensor_config.get("shell"):
+            import logging
+            logging.getLogger(__name__).warning(
+                "Sensor '%s': 'shell: true' is no longer supported and will "
+                "be ignored. Use the default argv mode instead.",
+                sensor_config.get("name", "?"),
+            )
         self._command_argv: list[str] = []
-        if self._command_str and not self._use_shell:
+        if self._command_str:
             import shlex
             self._command_argv = shlex.split(self._command_str)
 
     def read(self) -> dict[str, Any]:
-        if not self._command_str:
-            return {"error": "no command configured"}
-        if not self._use_shell and not self._command_argv:
+        if not self._command_argv:
             return {"error": "no command configured"}
         try:
             import subprocess
-            if self._use_shell:
-                result = subprocess.run(
-                    self._command_str, shell=True,
-                    capture_output=True, text=True, timeout=10,
-                )
-            else:
-                result = subprocess.run(
-                    self._command_argv,
-                    capture_output=True, text=True, timeout=10,
-                )
+            result = subprocess.run(
+                self._command_argv,
+                capture_output=True, text=True, timeout=10,
+            )
             if result.returncode != 0:
                 return {"error": f"command failed: {result.stderr.strip()[:100]}"}
             return {self._name: float(result.stdout.strip())}

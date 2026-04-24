@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check src/ tests/
+      - run: ruff check src/ tests/ plugins/
 
   test:
     name: Test (Python ${{ matrix.python-version }})

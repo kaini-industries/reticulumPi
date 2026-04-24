@@ -110,23 +110,12 @@ class WebDashboardPlugin(PluginBase):
                     "  Save this password! It will not be shown again.\n"
                     "  To reset: delete ~/.config/reticulumpi/dashboard_secret\n"
                     "  Or set RETICULUMPI_DASHBOARD_PASSWORD env var.\n"
+                    "  Retrieve from journal: journalctl -u reticulumpi | grep password\n"
                     "============================================================"
                 )
                 self.log.warning(banner)
                 # Also print to stdout for interactive use / systemd journal
                 print(banner, flush=True)
-                # Write to a temp file so users can retrieve it after start
-                try:
-                    pw_file = "/tmp/reticulumpi-initial-password"
-                    with open(pw_file, "w") as f:
-                        f.write(generated_password + "\n")
-                    os.chmod(pw_file, 0o600)
-                    self.log.info(
-                        "Initial password also written to %s (delete after use)",
-                        pw_file,
-                    )
-                except OSError:
-                    pass  # Best-effort — /tmp may not be writable under PrivateTmp
         elif plaintext_password and not password_hash:
             self.log.warning(
                 "Using plaintext password in config. Generate a hash with "
@@ -178,6 +167,8 @@ class WebDashboardPlugin(PluginBase):
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
         self._join_threads(timeout=10)
+        if hasattr(self, "_auth") and hasattr(self._auth.sessions, "close"):
+            self._auth.sessions.close()
 
     def get_status(self) -> dict[str, Any]:
         ssl_config = self.config.get("ssl", {})

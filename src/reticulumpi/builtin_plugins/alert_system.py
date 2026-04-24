@@ -76,7 +76,7 @@ class AlertSystemPlugin(PluginBase):
             self._setup_lxmf()
 
         # Subscribe to event bus
-        self.event_bus.subscribe(events.PLUGIN_CRASHED, self._on_plugin_crashed)
+        self.event_bus.subscribe_offloaded(events.PLUGIN_CRASHED, self._on_plugin_crashed)
 
         # Start check loop
         self._start_thread(self._check_loop, "alert-system")

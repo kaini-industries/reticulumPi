@@ -9,6 +9,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from typing import Any
 
@@ -57,10 +58,10 @@ def load_or_create_password_hash(secret_dir: str) -> tuple[str, str | None]:
     password = secrets.token_urlsafe(16)
     password_hash = hash_password(password)
 
-    # Write hash to file (restrictive permissions)
-    with open(secret_path, "w") as f:
+    # Write hash atomically with restrictive permissions from the start
+    fd = os.open(secret_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(password_hash + "\n")
-    os.chmod(secret_path, 0o600)
 
     log.info("Saved new dashboard password hash to %s", secret_path)
     return password_hash, password
@@ -162,6 +163,7 @@ class SqliteSessionStore:
 
     def __init__(self, db_path: str):
         self._db_path = db_path
+        self._lock = threading.Lock()
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -174,40 +176,53 @@ class SqliteSessionStore:
         self._conn.commit()
 
     def __getitem__(self, token: str) -> dict[str, Any]:
-        row = self._conn.execute(
-            "SELECT data FROM sessions WHERE token = ?", (token,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM sessions WHERE token = ?", (token,)
+            ).fetchone()
         if row is None:
             raise KeyError(token)
         return json.loads(row[0])
 
     def __setitem__(self, token: str, value: dict[str, Any]) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO sessions (token, data) VALUES (?, ?)",
-            (token, json.dumps(value)),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO sessions (token, data) VALUES (?, ?)",
+                (token, json.dumps(value)),
+            )
+            self._conn.commit()
 
     def __delitem__(self, token: str) -> None:
-        cursor = self._conn.execute(
-            "DELETE FROM sessions WHERE token = ?", (token,)
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM sessions WHERE token = ?", (token,)
+            )
+            self._conn.commit()
         if cursor.rowcount == 0:
             raise KeyError(token)
 
     def __contains__(self, token: object) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM sessions WHERE token = ?", (token,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM sessions WHERE token = ?", (token,)
+            ).fetchone()
         return row is not None
 
+    def close(self) -> None:
+        """Close the underlying database connection."""
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+
     def __len__(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
         return row[0] if row else 0
 
     def __iter__(self):
-        rows = self._conn.execute("SELECT token FROM sessions").fetchall()
+        with self._lock:
+            rows = self._conn.execute("SELECT token FROM sessions").fetchall()
         return iter(r[0] for r in rows)
 
     def get(self, token: str, default: Any = None) -> Any:
@@ -217,21 +232,24 @@ class SqliteSessionStore:
             return default
 
     def pop(self, token: str, *args: Any) -> Any:
-        try:
-            value = self[token]
-            del self[token]
-            return value
-        except KeyError:
-            if args:
-                return args[0]
-            raise
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM sessions WHERE token = ?", (token,)
+            ).fetchone()
+            if row is None:
+                if args:
+                    return args[0]
+                raise KeyError(token)
+            self._conn.execute(
+                "DELETE FROM sessions WHERE token = ?", (token,)
+            )
+            self._conn.commit()
+        return json.loads(row[0])
 
     def items(self):
-        rows = self._conn.execute("SELECT token, data FROM sessions").fetchall()
+        with self._lock:
+            rows = self._conn.execute("SELECT token, data FROM sessions").fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
-
-    def close(self) -> None:
-        self._conn.close()
 
 
 class AuthManager:

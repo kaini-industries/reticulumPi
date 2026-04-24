@@ -354,6 +354,27 @@ reticulumpi:
     #  max_reconnect_attempts: 10     # 0 = unlimited
     #  advert_interval: 900           # Seconds between advertisements (min 60)
 
+    # MeshCore Observer — companion observer for letsmesh.net analyzer.
+    # Captures every RF packet the radio hears and publishes to the
+    # analyzer MQTT broker for mesh coverage and reliability mapping.
+    # Requires: pip install reticulumpi[meshcore]
+    # Note: can use its own radio OR share meshcore_gateway's device.
+    #meshcore_observer:
+    #  enabled: false
+    #  use_gateway_device: false      # true = share meshcore_gateway's device
+    #  connection_type: serial        # serial or tcp (ignored when shared)
+    #  serial_port: /dev/ttyUSB1     # Separate port from meshcore_gateway
+    #  serial_baud: 115200
+    #  iata: "XXX"                    # 3-letter IATA location code (nearest airport)
+    #  mqtt_broker: mqtt-us-v1.letsmesh.net
+    #  mqtt_port: 443
+    #  mqtt_transport: websockets
+    #  publish_debug: false
+    #  health_check_interval: 30
+    #  reconnect_delay: 10
+    #  max_reconnect_attempts: 10
+    #  packet_queue_size: 1000
+
     # Messaging Hub — unified message store and chat UI.
     # Stores all messages in SQLite, bridges LXMF, Meshtastic, and MeshCore.
     # Provides transport-agnostic send/receive from the web dashboard.
@@ -370,6 +391,67 @@ reticulumpi:
     #    enabled: true               # Bridges to meshtastic_gateway plugin
     #  meshcore:
     #    enabled: true               # Bridges to meshcore_gateway plugin
+
+    # Mesh Bridge — bidirectional relay between Meshtastic and MeshCore.
+    # Subscribes to inbound messages on both networks and forwards broadcasts
+    # (and optionally DMs) to the opposite mesh with an origin tag.
+    # Requires: meshtastic_gateway AND meshcore_gateway enabled.
+    # Strongly recommended: messaging_hub enabled (bridged messages then
+    # appear in the dashboard and are persisted to SQLite).
+    #mesh_bridge:
+    #  enabled: false
+    #
+    #  # Broadcast channel pairs (default pair relays Meshtastic Primary ↔ MeshCore ch0)
+    #  channel_pairs:
+    #    - meshtastic: 0
+    #      meshcore: 0
+    #      enabled: true
+    #      direction: both            # both | mesh_to_core | core_to_mesh
+    #      # allow_regex: null        # if set, only matching messages relay
+    #      # deny_regex: null         # if set, matching messages are dropped
+    #
+    #  # Origin tags (kept short — Meshtastic MTU is 233 bytes)
+    #  tag_mesh: "[via Mesh]"
+    #  tag_core: "[via Core]"
+    #
+    #  # Loop prevention
+    #  loop_detect_regex: '^\[via (Mesh|Core)\]\s'
+    #  dedup_ttl_seconds: 60
+    #  dedup_max_entries: 256
+    #
+    #  # MTU (override only if hardware differs)
+    #  meshtastic_mtu: 233
+    #  meshcore_mtu: 240
+    #
+    #  # DM bridging — off by default.  Requires explicit identity pairs to
+    #  # prevent unintended cross-network leakage of private messages.
+    #  bridge_dms: false
+    #  dm_pairs: []
+    #  # dm_pairs:
+    #  #   - meshtastic: "!abcd1234"
+    #  #     meshcore: "3c5a1f8e9012"
+    #
+    #  # Content filters — block auto-generated chatter that's annoying
+    #  # when relayed across networks.  Both default to true.
+    #  filter_position_shares: true   # drops "X has shared their position/location"
+    #  filter_tapbacks: true          # drops short emoji/symbol-only reactions
+    #
+    #  # Observability
+    #  log_dropped: true              # log every dropped message with reason
+    #
+    #  # Runtime safety — circuit breaker auto-pauses if traffic spikes.
+    #  # Set auto_pause_threshold to 0 to disable.  Resume is manual (dashboard
+    #  # toggle, API call, or `reticulumpi --mesh-bridge resume`) to prevent
+    #  # a flapping mesh from silently re-enabling.
+    #  auto_pause_threshold: 20       # messages relayed in 60s to trip
+    #  default_running: true          # initial runtime state on first boot
+    #
+    #  # Startup grace — drop all inbound events for the first N seconds
+    #  # after the plugin starts.  This prevents re-broadcasting messages
+    #  # queued in the MeshCore device buffer (drained on reconnect) or
+    #  # backlogged MQTT broadcasts from before the service restart.
+    #  # Set to 0 to disable (not recommended on a live mesh).
+    #  startup_grace_seconds: 30
 
     # Meshtastic Responder — auto-replies to Meshtastic DMs with commands.
     # Requires: meshtastic_gateway enabled.

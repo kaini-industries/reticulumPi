@@ -684,7 +684,7 @@ class TestAPIEndpoints:
             # Logout
             resp = await client.post(
                 "/api/auth/logout",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {token}", "X-Requested-With": "XMLHttpRequest"},
             )
             assert resp.status == 200
 
@@ -793,3 +793,40 @@ class TestGetStatus:
         assert status["web_url"] == "http://127.0.0.1:8080"
         assert "uptime" in status
         assert status["active_sessions"] == 0
+
+
+class TestTmpPasswordFile:
+    def test_first_run_does_not_write_tmp_file(self, tmp_path):
+        """The /tmp password file should NOT be created on first run."""
+        import os
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import (
+            load_or_create_password_hash,
+        )
+
+        pw_file = "/tmp/reticulumpi-initial-password"
+        if os.path.exists(pw_file):
+            os.unlink(pw_file)
+
+        load_or_create_password_hash(str(tmp_path))
+
+        from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+        from reticulumpi.event_bus import EventBus
+
+        app = MagicMock()
+        app.event_bus = EventBus()
+        app.identity = MagicMock()
+        app.identity.hash = b"\x01" * 16
+        app.node_name = "TestNode"
+        app.plugins = {}
+        app.get_status.return_value = {"version": "test"}
+
+        config = {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 18080,
+            "secret_dir": str(tmp_path / "fresh"),
+        }
+
+        WebDashboardPlugin(app, config)
+        assert not os.path.exists(pw_file)

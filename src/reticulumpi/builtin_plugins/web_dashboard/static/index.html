@@ -249,6 +249,30 @@
       </div>
     </div>
 
+    <!-- Mesh Bridge (Meshtastic ↔ MeshCore) -->
+    <div class="section" id="mesh-bridge-section" style="display:none;">
+      <div class="section-header">
+        <span>Mesh Bridge</span>
+        <span class="mesh-bridge-status-pill" id="mesh-bridge-status-pill">—</span>
+      </div>
+      <div class="section-body">
+        <div class="mesh-bridge-content">
+          <div id="mesh-bridge-auto-pause-banner" class="mesh-bridge-banner hidden">
+            <span id="mesh-bridge-auto-pause-reason">Paused automatically</span>
+            <button id="mesh-bridge-resume-btn" class="rt-btn">Resume</button>
+          </div>
+          <div class="mesh-bridge-controls">
+            <label class="rt-switch">
+              <input type="checkbox" id="mesh-bridge-toggle">
+              <span class="rt-switch-slider"></span>
+            </label>
+            <span id="mesh-bridge-toggle-label">Relaying</span>
+          </div>
+          <div class="mesh-bridge-stats" id="mesh-bridge-stats"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══════════ Reticulum Network ═══════════ -->
     <div class="service-group service-group-rns">
       <span class="service-group-name">Reticulum Network</span>
@@ -623,6 +647,7 @@
       </div>
       <div class="meshcore-overview" id="meshcore-overview"></div>
       <div id="meshcore-device-info"></div>
+      <div id="meshcore-observer-info"></div>
       <div class="table-scroll">
         <table class="data-table">
           <thead>
@@ -878,6 +903,7 @@
   <script src="/static/messages_meshtastic_mqtt.js?v=1"></script>
   <script src="/static/messages_meshtastic_lora.js?v=1"></script>
   <script src="/static/messages_meshcore.js?v=1"></script>
+  <script src="/static/mesh_bridge_panel.js?v=1"></script>
   <script src="/static/mesh.js?v=23"></script>
   <script src="/static/lora.js?v=23"></script>
   <script src="/static/routing.js?v=23"></script>

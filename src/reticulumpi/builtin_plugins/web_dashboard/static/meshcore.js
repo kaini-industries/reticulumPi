@@ -311,9 +311,67 @@
     renderContacts();
   }
 
+  /* ── Observer status card ─────────────────────────────────────────── */
+
+  function updateMeshCoreObserver(obs) {
+    var container = $('meshcore-observer-info');
+    if (!container) return;
+
+    if (!obs || obs.available === false || !obs.active) {
+      container.innerHTML = '';
+      return;
+    }
+
+    var mqttOk = obs.mqtt_connected;
+    var statusCls = mqttOk ? 'status-active' : 'status-failed';
+    var statusText = mqttOk ? 'MQTT Connected' : 'MQTT Disconnected';
+
+    var html = '<div class="lora-radio-card">';
+    html += '<div class="lora-radio-header">'
+      + '<span class="lora-radio-name">LetsMesh Observer'
+      + ' <span class="mc-observer-tag">' + esc(obs.iata || '---') + '</span>'
+      + '</span>'
+      + '<span class="lora-radio-status">'
+      + '<span class="status-dot ' + statusCls + '"></span> ' + statusText
+      + '</span>'
+      + '</div>';
+
+    html += '<div class="lora-radio-params">';
+    html += '<div class="lora-param">'
+      + '<span class="lora-param-label">Captured</span>'
+      + '<span class="lora-param-value">' + (obs.packets_captured || 0) + '</span>'
+      + '</div>';
+    html += '<div class="lora-param">'
+      + '<span class="lora-param-label">Published</span>'
+      + '<span class="lora-param-value">' + (obs.packets_published || 0) + '</span>'
+      + '</div>';
+    if (obs.packets_failed > 0) {
+      html += '<div class="lora-param">'
+        + '<span class="lora-param-label">Failed</span>'
+        + '<span class="lora-param-value">' + obs.packets_failed + '</span>'
+        + '</div>';
+    }
+    if (obs.signing_mode && obs.signing_mode !== 'unknown') {
+      html += '<div class="lora-param">'
+        + '<span class="lora-param-label">Signing</span>'
+        + '<span class="lora-param-value">' + esc(obs.signing_mode) + '</span>'
+        + '</div>';
+    }
+    if (obs.last_packet_time) {
+      html += '<div class="lora-param">'
+        + '<span class="lora-param-label">Last Packet</span>'
+        + '<span class="lora-param-value">' + formatTimeAgo(obs.last_packet_time) + '</span>'
+        + '</div>';
+    }
+    html += '</div></div>';
+
+    container.innerHTML = html;
+  }
+
   /* ── Expose to RPI namespace ─────────────────────────────────────── */
   R.updateMeshCore = updateMeshCore;
   R.updateMeshCoreDevice = updateMeshCoreDevice;
+  R.updateMeshCoreObserver = updateMeshCoreObserver;
   R.onMeshCoreSort = onMeshCoreSort;
   R.meshcoreShowMore = meshcoreShowMore;
 

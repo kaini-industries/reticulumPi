@@ -5,6 +5,13 @@ All notable changes to ReticulumPi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Mesh Bridge plugin** (`mesh_bridge`) — bidirectional relay between Meshtastic and MeshCore mesh networks. Subscribes to `MESHTASTIC_MESSAGE_RECEIVED` and `MESHCORE_MESSAGE_RECEIVED` events, re-sends broadcasts (and optionally DMs) on the opposite network via `messaging_hub.send_message()`. Features: origin tag prefix (`[via Mesh]` / `[via Core]`), two-layer loop prevention (regex + 60s dedup cache with opposite-side pre-seeding), MTU-aware truncation, per-pair allow/deny regex filters, and optional DM bridging with explicit identity pairs.
+- **Mesh Bridge runtime pause/resume** — operator can pause/resume relaying without restarting the service via (1) dashboard toggle card, (2) `POST /api/mesh_bridge/running` endpoint, or (3) `reticulumpi --mesh-bridge {status,pause,resume}` CLI. Runtime state persists to `~/.local/share/reticulumpi/mesh_bridge_state.json` across restarts. Rate-based circuit breaker auto-pauses if traffic exceeds a configurable threshold (default 20 relays/60s).
+- `GET /api/mesh_bridge/status` and `POST /api/mesh_bridge/running` API endpoints.
+
 ## [0.2.0] - 2026-04-05
 
 ### Added

@@ -94,7 +94,7 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
 
         # Allow localhost requests for internal services (NomadNet pages, scripts)
         if (
-            plugin.config.get("allow_localhost_api", True)
+            plugin.config.get("allow_localhost_api", False)
             and request.remote in ("127.0.0.1", "::1")
         ):
             return await handler(request)
@@ -102,6 +102,14 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
         # Extract token from Authorization header or cookie
         token = _extract_token(request)
         if token and plugin._auth.validate_token(token):
+            # CSRF defense-in-depth: state-changing requests from browsers
+            # must include a custom header that cross-origin forms cannot set.
+            if request.method in ("POST", "PUT", "DELETE"):
+                if not request.headers.get("X-Requested-With"):
+                    raise aiohttp.web.HTTPForbidden(
+                        text='{"ok": false, "error": "Missing X-Requested-With header", "code": 403}',
+                        content_type="application/json",
+                    )
             request["token"] = token
             return await handler(request)
 

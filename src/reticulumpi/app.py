@@ -59,7 +59,9 @@ class ReticulumPiApp:
 
         self._load_plugins()
 
-        for name, plugin in list(self.plugins.items()):
+        start_order = self._topo_sort_plugins()
+        for name in start_order:
+            plugin = self.plugins[name]
             try:
                 self._start_plugin_with_timeout(name, plugin, self.PLUGIN_START_TIMEOUT)
                 log.info("Started plugin: %s", name)
@@ -78,6 +80,7 @@ class ReticulumPiApp:
                     log.debug("Cleanup after failed start of %s also failed", name)
                 del self.plugins[name]
 
+        self.plugins = {n: self.plugins[n] for n in start_order if n in self.plugins}
         self._print_startup_report()
         self._install_signal_handlers()
         log.info("ReticulumPi is running. Press Ctrl+C to stop.")
@@ -176,7 +179,7 @@ class ReticulumPiApp:
             RNS.Transport.exit_handler()
             log.info("Reticulum transport cleaned up")
         except Exception:
-            log.debug("Reticulum transport cleanup skipped", exc_info=True)
+            log.warning("Reticulum transport cleanup failed", exc_info=True)
         self.reticulum = None
 
     def get_plugin(self, name: str) -> PluginBase | None:
@@ -236,7 +239,14 @@ class ReticulumPiApp:
 
         Raises KeyError if the plugin is not currently running.
         """
+        self.event_bus.publish(events.PLUGIN_STOPPING, {"name": name})
         with self._plugins_lock:
+            for other_name, other_plugin in self.plugins.items():
+                if name in getattr(other_plugin, "plugin_dependencies", []):
+                    log.warning(
+                        "Disabling '%s' which is a dependency of running plugin '%s'",
+                        name, other_name,
+                    )
             plugin = self.plugins.pop(name, None)
             if plugin is None:
                 raise KeyError(f"Plugin '{name}' is not running")
@@ -283,6 +293,36 @@ class ReticulumPiApp:
                 reason = f"instantiation failed: {exc}"
                 self._failed_plugins.append((plugin_name, reason))
                 log.exception("Failed to instantiate plugin: %s", plugin_name)
+
+        for name, instance in self.plugins.items():
+            for dep in getattr(instance, "plugin_dependencies", []):
+                if dep not in self.plugins:
+                    log.warning(
+                        "Plugin '%s' depends on '%s' which is not enabled",
+                        name, dep,
+                    )
+
+    def _topo_sort_plugins(self) -> list[str]:
+        """Return plugin names in dependency order (dependees first).
+
+        Falls back to current dict order if there are cycles.
+        """
+        remaining = set(self.plugins)
+        order: list[str] = []
+        visited: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in visited or name not in remaining:
+                return
+            visited.add(name)
+            for dep in getattr(self.plugins[name], "plugin_dependencies", []):
+                if dep in remaining:
+                    visit(dep)
+            order.append(name)
+
+        for name in list(self.plugins):
+            visit(name)
+        return order
 
     def _print_startup_report(self) -> None:
         """Log a human-readable summary of the running system."""

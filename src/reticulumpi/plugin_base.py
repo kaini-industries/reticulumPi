@@ -22,6 +22,7 @@ class PluginBase(ABC):
     plugin_name: str = "unnamed"
     plugin_version: str = "0.0.0"
     plugin_description: str = "No description"
+    plugin_dependencies: list[str] = []
 
     def __init__(self, app: "ReticulumPiApp", plugin_config: dict[str, Any]):
         self.app = app

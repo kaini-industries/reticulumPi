@@ -548,8 +548,11 @@ class TestMessagingHubPlugin:
                     "transport": "test",
                     "sub_transport": "",
                     "contact_id": "dest123",
+                    "direction": "sent",
+                    "status": "sent",
                     "destination": "dest123",
                     "text": "Hello!",
+                    "msg_type": "direct",
                     "timestamp": pytest.approx(time.time(), abs=2),
                 }
             ),
@@ -966,6 +969,185 @@ class TestLXMFAdapter:
             assert call_args["transport"] == "lxmf"
             assert call_args["text"] == "Test message"
             assert call_args["from_id"] == (b"\xaa" * 16).hex()
+
+
+class TestLXMFNameResolution:
+    """LXMFAdapter should look up announced display names via network_map."""
+
+    def _build_adapter(self, mock_app, tmp_path):
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.config = {"lxmf": {"storage_path": str(tmp_path / "lxmf")}}
+        hub.log = MagicMock()
+
+        mock_identity = MagicMock()
+        mock_identity.hash = b"\x02" * 16
+
+        patches = [
+            patch("LXMF.LXMRouter"),
+            patch("RNS.Identity", return_value=mock_identity),
+            patch.object(_RNS.Transport, "register_announce_handler"),
+        ]
+        for p in patches:
+            p.start()
+
+        mock_router = MagicMock()
+        mock_dest = MagicMock()
+        mock_dest.hash = b"\x02" * 16
+        mock_router.register_delivery_identity.return_value = mock_dest
+        __import__("LXMF").LXMRouter.return_value = mock_router
+
+        adapter = LXMFAdapter(hub)
+        adapter.start()
+        return adapter, hub, patches
+
+    def _teardown(self, patches):
+        for p in patches:
+            p.stop()
+
+    def test_inbound_uses_network_map_name(self, mock_app, tmp_path):
+        adapter, hub, patches = self._build_adapter(mock_app, tmp_path)
+        try:
+            nm = MagicMock()
+            nm.get_node_name.return_value = "Alice"
+            mock_app.get_plugin.return_value = nm
+
+            cb = MagicMock()
+            adapter.on_message_received(cb)
+
+            fake_msg = MagicMock()
+            fake_msg.source_hash = b"\xaa" * 16
+            fake_msg.content_as_string.return_value = "hi"
+            adapter._on_lxmf_message(fake_msg)
+
+            payload = cb.call_args[0][0]
+            assert payload["from_name"] == "Alice"
+            nm.get_node_name.assert_called_once_with((b"\xaa" * 16).hex())
+        finally:
+            self._teardown(patches)
+
+    def test_inbound_falls_back_to_pretty_hash_when_plugin_absent(
+        self, mock_app, tmp_path
+    ):
+        adapter, hub, patches = self._build_adapter(mock_app, tmp_path)
+        try:
+            mock_app.get_plugin.return_value = None
+
+            cb = MagicMock()
+            adapter.on_message_received(cb)
+
+            fake_msg = MagicMock()
+            fake_msg.source_hash = b"\xaa" * 16
+            fake_msg.content_as_string.return_value = "hi"
+            adapter._on_lxmf_message(fake_msg)
+
+            payload = cb.call_args[0][0]
+            assert payload["from_name"] == _RNS.prettyhexrep(b"\xaa" * 16)
+        finally:
+            self._teardown(patches)
+
+    def test_inbound_falls_back_when_plugin_returns_none(
+        self, mock_app, tmp_path
+    ):
+        adapter, hub, patches = self._build_adapter(mock_app, tmp_path)
+        try:
+            nm = MagicMock()
+            nm.get_node_name.return_value = None
+            mock_app.get_plugin.return_value = nm
+
+            cb = MagicMock()
+            adapter.on_message_received(cb)
+
+            fake_msg = MagicMock()
+            fake_msg.source_hash = b"\xbb" * 16
+            fake_msg.content_as_string.return_value = "hi"
+            adapter._on_lxmf_message(fake_msg)
+
+            payload = cb.call_args[0][0]
+            assert payload["from_name"] == _RNS.prettyhexrep(b"\xbb" * 16)
+        finally:
+            self._teardown(patches)
+
+    def test_inbound_falls_back_when_plugin_raises(self, mock_app, tmp_path):
+        adapter, hub, patches = self._build_adapter(mock_app, tmp_path)
+        try:
+            nm = MagicMock()
+            nm.get_node_name.side_effect = RuntimeError("boom")
+            mock_app.get_plugin.return_value = nm
+
+            cb = MagicMock()
+            adapter.on_message_received(cb)
+
+            fake_msg = MagicMock()
+            fake_msg.source_hash = b"\xcc" * 16
+            fake_msg.content_as_string.return_value = "hi"
+            adapter._on_lxmf_message(fake_msg)
+
+            payload = cb.call_args[0][0]
+            assert payload["from_name"] == _RNS.prettyhexrep(b"\xcc" * 16)
+        finally:
+            self._teardown(patches)
+
+    def test_finalize_send_lxmf_uses_network_map_for_to_name(
+        self, hub_plugin
+    ):
+        """Outbound LXMF without contact match should resolve to_name via network_map."""
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "lxmf"
+        adapter.display_name = "LXMF"
+        adapter.is_available.return_value = True
+        adapter.get_contacts.return_value = []
+        adapter.send.return_value = {"sent": True}
+        hub_plugin.register_adapter(adapter)
+
+        nm = MagicMock()
+        nm.get_node_name.return_value = "Bob"
+        hub_plugin.app.get_plugin = MagicMock(return_value=nm)
+
+        hub_plugin.send_message("lxmf", "hi", "deadbeef" * 4)
+
+        stored = hub_plugin.get_messages()[-1]
+        assert stored["to_name"] == "Bob"
+        nm.get_node_name.assert_called_once_with("deadbeef" * 4)
+
+    def test_finalize_send_non_lxmf_does_not_consult_network_map(
+        self, hub_plugin
+    ):
+        """Regression guard: Meshtastic/MeshCore paths must not hit network_map."""
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "meshtastic"
+        adapter.display_name = "Meshtastic"
+        adapter.is_available.return_value = True
+        adapter.get_contacts.return_value = []
+        adapter.send.return_value = {"sent": True}
+        hub_plugin.register_adapter(adapter)
+
+        nm = MagicMock()
+        hub_plugin.app.get_plugin = MagicMock(return_value=nm)
+
+        hub_plugin.send_message("meshtastic", "hi", "!abcd1234")
+
+        nm.get_node_name.assert_not_called()
+
+    def test_finalize_send_contact_match_skips_network_map(self, hub_plugin):
+        """If contacts provide a name, network_map should not be consulted."""
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "lxmf"
+        adapter.is_available.return_value = True
+        adapter.get_contacts.return_value = [
+            {"id": "deadbeef" * 4, "name": "Charlie"},
+        ]
+        adapter.send.return_value = {"sent": True}
+        hub_plugin.register_adapter(adapter)
+
+        nm = MagicMock()
+        hub_plugin.app.get_plugin = MagicMock(return_value=nm)
+
+        hub_plugin.send_message("lxmf", "hi", "deadbeef" * 4)
+
+        stored = hub_plugin.get_messages()[-1]
+        assert stored["to_name"] == "Charlie"
+        nm.get_node_name.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1495,8 +1677,11 @@ class TestOutboundQueueEvents:
                 "transport": "test",
                 "sub_transport": "",
                 "contact_id": "dest-x",
+                "direction": "sent",
+                "status": "queued",
                 "destination": "dest-x",
                 "text": "hi",
+                "msg_type": "direct",
                 "timestamp": pytest.approx(time.time(), abs=2),
             }),
         )

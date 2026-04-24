@@ -792,6 +792,23 @@ class MeshCoreGateway(PluginBase):
 
     # ── Public query methods ────────────────────────────────────────
 
+    def get_device_handle(self) -> Any:
+        """Return the live MeshCore client (or None) for peer plugins.
+
+        The returned handle is owned by this plugin; callers may read state
+        and subscribe to events but MUST NOT disconnect it or stop its loop.
+        """
+        with self._lock:
+            return self._mc
+
+    def get_async_loop(self) -> Any:
+        """Return the asyncio loop driving the MeshCore client (or None).
+
+        Callers may schedule coroutines on the loop but MUST NOT stop it —
+        the loop is owned by this plugin.
+        """
+        return self._loop
+
     def get_status(self) -> dict[str, Any]:
         """Return current gateway status for monitoring and API."""
         with self._lock:

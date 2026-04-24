@@ -859,54 +859,6 @@ class TestRateLimiting:
 
 
 # ---------------------------------------------------------------------------
-# TestMtuHandling
-# ---------------------------------------------------------------------------
-
-
-class TestMtuHandling:
-    def test_short_message_not_truncated(self):
-        from reticulumpi.builtin_plugins.meshtastic_gateway import _truncate_for_mtu
-
-        result = _truncate_for_mtu("[LXMF] sender:\n", "Hi", 237)
-        assert result == "[LXMF] sender:\nHi"
-        assert " ..." not in result
-
-    def test_exact_boundary_not_truncated(self):
-        from reticulumpi.builtin_plugins.meshtastic_gateway import _truncate_for_mtu
-
-        header = "H:"
-        body = "x" * (237 - len(header.encode("utf-8")))
-        result = _truncate_for_mtu(header, body, 237)
-        assert len(result.encode("utf-8")) == 237
-        assert " ..." not in result
-
-    def test_long_message_truncated_with_ellipsis(self):
-        from reticulumpi.builtin_plugins.meshtastic_gateway import _truncate_for_mtu
-
-        header = "H:\n"
-        body = "A" * 300
-        result = _truncate_for_mtu(header, body, 237)
-        assert len(result.encode("utf-8")) <= 237
-        assert result.endswith(" ...")
-
-    def test_truncation_respects_utf8(self):
-        from reticulumpi.builtin_plugins.meshtastic_gateway import _truncate_for_mtu
-
-        header = "H:"
-        body = "\u00e9" * 200  # 2 bytes each in UTF-8
-        result = _truncate_for_mtu(header, body, 237)
-        result.encode("utf-8")  # Should not raise
-        assert len(result.encode("utf-8")) <= 237
-
-    def test_header_exceeds_mtu(self):
-        from reticulumpi.builtin_plugins.meshtastic_gateway import _truncate_for_mtu
-
-        header = "X" * 250
-        result = _truncate_for_mtu(header, "body", 237)
-        assert result == header
-
-
-# ---------------------------------------------------------------------------
 # TestForwardToLxmf
 # ---------------------------------------------------------------------------
 

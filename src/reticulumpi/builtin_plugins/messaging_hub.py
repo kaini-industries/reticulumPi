@@ -49,6 +49,7 @@ class TransportAdapter:
 
     transport_name: str = ""
     display_name: str = ""
+    max_message_bytes: int | None = None
 
     def __init__(self) -> None:
         self._hub_callback: Any = None
@@ -767,22 +768,20 @@ class LXMFAdapter(TransportAdapter):
 
         # LXMRouter.__init__ registers a SIGINT handler which only works
         # on the main thread.  When plugin startup runs in a worker thread
-        # (for timeout enforcement), this raises ValueError.  Work around
-        # it by temporarily making signal.signal a no-op on failure.
+        # (for timeout enforcement), this raises ValueError.  Suppress it
+        # by patching the module-level attribute that LXMRouter reads.
         import signal
+        import threading
 
-        _orig_signal = signal.signal
-        def _safe_signal(signum, handler):
+        if threading.current_thread() is not threading.main_thread():
+            _orig_signal = signal.signal
+            signal.signal = lambda *_a, **_kw: None
             try:
-                return _orig_signal(signum, handler)
-            except ValueError:
-                return None
-
-        signal.signal = _safe_signal
-        try:
+                self._router = LXMF.LXMRouter(storagepath=storage_path)
+            finally:
+                signal.signal = _orig_signal
+        else:
             self._router = LXMF.LXMRouter(storagepath=storage_path)
-        finally:
-            signal.signal = _orig_signal
         display_name = cfg.get("display_name") or f"{self._hub.app.node_name} Messages"
         self._destination = self._router.register_delivery_identity(
             self._identity, display_name=display_name,
@@ -935,6 +934,16 @@ class LXMFAdapter(TransportAdapter):
             return self._destination.hash.hex()
         return None
 
+    def _resolve_lxmf_name(self, dest_hash_hex: str) -> str | None:
+        """Look up an LXMF peer's announced display name via network_map."""
+        try:
+            nm = self._hub.app.get_plugin("network_map")
+            if nm and hasattr(nm, "get_node_name"):
+                return nm.get_node_name(dest_hash_hex)
+        except Exception:
+            pass
+        return None
+
     def _on_lxmf_message(self, message: Any) -> None:
         """Handle an incoming LXMF message and notify the hub."""
         if not self._hub_callback:
@@ -949,7 +958,7 @@ class LXMFAdapter(TransportAdapter):
             self._hub_callback({
                 "transport": "lxmf",
                 "from_id": sender_hash,
-                "from_name": sender_pretty,
+                "from_name": self._resolve_lxmf_name(sender_hash) or sender_pretty,
                 "to_id": self.address,
                 "to_name": None,
                 "text": content,
@@ -1003,6 +1012,7 @@ class MeshtasticAdapter(TransportAdapter):
 
     transport_name = "meshtastic"
     display_name = "Meshtastic"
+    max_message_bytes = 233
 
     def __init__(self, hub: "MessagingHubPlugin") -> None:
         super().__init__()
@@ -1027,7 +1037,7 @@ class MeshtasticAdapter(TransportAdapter):
             return {str(k): v for k, v in self._pending_delivery.items()}
 
     def start(self) -> None:
-        self._hub.event_bus.subscribe(
+        self._hub.event_bus.subscribe_offloaded(
             events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event
         )
 
@@ -1253,7 +1263,7 @@ class MeshCoreAdapter(TransportAdapter):
             return dict(self._pending_delivery)
 
     def start(self) -> None:
-        self._hub.event_bus.subscribe(
+        self._hub.event_bus.subscribe_offloaded(
             events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event
         )
         self._hub.event_bus.subscribe(
@@ -1522,9 +1532,11 @@ class MessagingHubPlugin(PluginBase):
                 "transport": msg["transport"],
                 "sub_transport": sub_transport,
                 "contact_id": contact_id,
+                "direction": "received",
+                "status": "received",
                 "from_id": msg.get("from_id"),
                 "from_name": msg.get("from_name"),
-                "text": msg["text"][:100],
+                "text": msg["text"],
                 "msg_type": msg_type,
                 "timestamp": time.time(),
             })
@@ -1586,6 +1598,13 @@ class MessagingHubPlugin(PluginBase):
                 if c.get("id") == destination:
                     to_name = c.get("name")
                     break
+        if not to_name and transport == "lxmf":
+            nm = self.app.get_plugin("network_map")
+            if nm and hasattr(nm, "get_node_name"):
+                try:
+                    to_name = nm.get_node_name(destination)
+                except Exception:
+                    to_name = None
 
         # Broadcast without an explicit channel lands on 0 (Primary),
         # matching the gateway's radio-side default, so the stored
@@ -1623,8 +1642,11 @@ class MessagingHubPlugin(PluginBase):
                 "transport": transport,
                 "sub_transport": sub_transport,
                 "contact_id": contact_id,
+                "direction": "sent",
+                "status": "sent",
                 "destination": destination,
-                "text": text[:100],
+                "text": text,
+                "msg_type": msg_type,
                 "timestamp": time.time(),
             })
             # Register for delivery tracking if the adapter supports it
@@ -1704,8 +1726,11 @@ class MessagingHubPlugin(PluginBase):
             "transport": transport,
             "sub_transport": sub_transport,
             "contact_id": contact_id,
+            "direction": "sent",
+            "status": "queued",
             "destination": destination,
-            "text": text[:100],
+            "text": text,
+            "msg_type": msg_type,
             "timestamp": time.time(),
         })
         return {
@@ -1811,8 +1836,11 @@ class MessagingHubPlugin(PluginBase):
                     "transport": transport,
                     "sub_transport": drain_sub,
                     "contact_id": drain_contact_id,
+                    "direction": "sent",
+                    "status": "sent",
                     "destination": item["destination"],
-                    "text": item["text"][:100],
+                    "text": item["text"],
+                    "msg_type": drain_msg_type,
                     "timestamp": time.time(),
                 })
                 self._register_delivery_tracking(adapter, item["msg_id"], result)
@@ -1995,7 +2023,8 @@ class MessagingHubPlugin(PluginBase):
                 "display": a.display_name,
                 "available": a.is_available(),
             }
-            # Include LXMF address if available
+            if a.max_message_bytes is not None:
+                info["max_message_bytes"] = a.max_message_bytes
             if hasattr(a, "address") and a.address:
                 info["address"] = a.address
             result.append(info)

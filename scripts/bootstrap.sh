@@ -344,10 +344,11 @@ fi
 
 # 7. Install systemd services (template paths to match INSTALL_DIR)
 echo "[7/7] Installing systemd services..."
-sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/reticulumpi.service" \
+ESCAPED_DIR=$(printf '%s\n' "$INSTALL_DIR" | sed 's/[&|\\]/\\&/g')
+sed "s|/opt/reticulumpi|$ESCAPED_DIR|g" "$INSTALL_DIR/systemd/reticulumpi.service" \
     | sudo tee /etc/systemd/system/reticulumpi.service >/dev/null
 if [ "$WITH_NOMADNET" = true ] || [ "$WITH_MESHCHAT" = true ]; then
-    sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/rnsd.service" \
+    sed "s|/opt/reticulumpi|$ESCAPED_DIR|g" "$INSTALL_DIR/systemd/rnsd.service" \
         | sudo tee /etc/systemd/system/rnsd.service >/dev/null
     sudo systemctl daemon-reload
     sudo systemctl enable rnsd.service

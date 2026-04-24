@@ -5,7 +5,7 @@
   /* ── Shared namespace ─────────────────────────────────────────────── */
   var RPI = window.RPI = {};
 
-  var token = sessionStorage.getItem('token') || '';
+  var token = '';
   var ws = null;
   var reconnectDelay = 1000;
   var maxReconnect = 30000;
@@ -23,6 +23,7 @@
     opts = opts || {};
     var headers = opts.headers || {};
     headers['Accept'] = 'application/json';
+    headers['X-Requested-With'] = 'XMLHttpRequest';
     if (token) headers['Authorization'] = 'Bearer ' + token;
     if (opts.body) headers['Content-Type'] = 'application/json';
     var timeoutMs = opts.timeout || 10000;
@@ -1022,6 +1023,9 @@
     api('/api/meshcore/device').then(function(r) {
       if (r && r.ok && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(r.data);
     });
+    api('/api/meshcore_observer/status').then(function(r) {
+      if (r && r.ok && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(r.data);
+    });
 
     // ── Priority 3: Secondary panels ─────────────────────────────────
 
@@ -1071,8 +1075,6 @@
 
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var url = proto + '//' + location.host + '/ws/metrics';
-    if (token) url += '?token=' + encodeURIComponent(token);
-
     try { ws = new WebSocket(url); } catch(e) { startPolling(); return; }
 
     ws.onopen = function() {
@@ -1133,6 +1135,8 @@
           if (msg.data.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(msg.data.meshcore_status, msg.data.meshcore_contacts);
           if (msg.data.meshcore_contacts && RPI.updateMapMeshCore) RPI.updateMapMeshCore(msg.data.meshcore_contacts);
           if (msg.data.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(msg.data.meshcore_device);
+          if (msg.data.meshcore_observer && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(msg.data.meshcore_observer);
+          if (msg.data.mesh_bridge && RPI.updateMeshBridge) RPI.updateMeshBridge(msg.data.mesh_bridge);
           if (msg.data.messaging) {
             if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(msg.data.messaging);
             if (RPI.updateMessagingMqtt) RPI.updateMessagingMqtt(msg.data.messaging);
@@ -1185,7 +1189,6 @@
 
   $('logout-btn').addEventListener('click', function() {
     api('/api/auth/logout', {method: 'POST'}).finally(function() {
-      sessionStorage.removeItem('token');
       window.location.href = '/login.html';
     });
   });

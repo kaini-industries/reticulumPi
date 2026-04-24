@@ -1,7 +1,6 @@
 """Tests for the NetworkMap plugin."""
 
 import sqlite3
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -178,4 +177,173 @@ def test_get_status(mock_transport, mock_app, plugin_config):
     status = plugin.get_status()
     assert status["active"] is True
     assert status["known_nodes"] == 0
+
+
+@patch("RNS.Transport")
+def test_get_node_name_hit(mock_transport, mock_app, plugin_config):
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    dest_hash = b"\xaa" * 16
+    with plugin._nodes_lock:
+        plugin._known_nodes[dest_hash] = {"app_data_str": "Alice"}
+
+    assert plugin.get_node_name(dest_hash.hex()) == "Alice"
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_get_node_name_accepts_angle_wrapped_hex(mock_transport, mock_app, plugin_config):
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    dest_hash = b"\xbb" * 16
+    with plugin._nodes_lock:
+        plugin._known_nodes[dest_hash] = {"app_data_str": "Bob"}
+
+    assert plugin.get_node_name(f"<{dest_hash.hex()}>") == "Bob"
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_get_node_name_miss(mock_transport, mock_app, plugin_config):
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    assert plugin.get_node_name("cc" * 16) is None
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_get_node_name_malformed_hex(mock_transport, mock_app, plugin_config):
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    assert plugin.get_node_name("not-hex") is None
+    assert plugin.get_node_name(None) is None
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_get_node_name_empty_app_data(mock_transport, mock_app, plugin_config):
+    """A known node with no announced name should return None, not ''."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    dest_hash = b"\xdd" * 16
+    with plugin._nodes_lock:
+        plugin._known_nodes[dest_hash] = {"app_data_str": ""}
+
+    assert plugin.get_node_name(dest_hash.hex()) is None
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_record_announce_parses_lxmf_v050_list_format(mock_transport, mock_app, plugin_config):
+    """LXMF 0.5+ packs announces as msgpack list [display_name_bytes, stamp_cost]."""
+    import RNS.vendor.umsgpack as umsgpack
+
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    mock_transport.hops_to.return_value = 1
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    dest_hash = b"\x11" * 16
+    app_data = umsgpack.packb([b"Meshchat User", 8])
+    plugin.record_announce(dest_hash, MagicMock(), app_data, "lxmf.delivery")
+    _drain_announce_queue(plugin)
+
+    assert plugin._known_nodes[dest_hash]["app_data_str"] == "Meshchat User"
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_record_announce_lxmf_list_with_none_name(mock_transport, mock_app, plugin_config):
+    """LXMF announce with no display_name set packs [None, stamp_cost] — must not crash."""
+    import RNS.vendor.umsgpack as umsgpack
+
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    mock_transport.hops_to.return_value = 1
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    dest_hash = b"\x22" * 16
+    app_data = umsgpack.packb([None, None])
+    plugin.record_announce(dest_hash, MagicMock(), app_data, "lxmf.delivery")
+    _drain_announce_queue(plugin)
+
+    assert plugin._known_nodes[dest_hash]["app_data_str"] == ""
+    plugin.stop()
+
+
+# ---------------------------------------------------------------------------
+# SQL defensive hardening
+# ---------------------------------------------------------------------------
+
+
+@patch("RNS.Transport")
+def test_paginated_rejects_invalid_sort_order(mock_transport, mock_app, plugin_config):
+    """Bogus order value falls back to 'desc'."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    mock_transport.hops_to.return_value = 1
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    dest_hash = b"\x33" * 16
+    plugin.record_announce(dest_hash, MagicMock(), b"test", "test.app")
+    _drain_announce_queue(plugin)
+    plugin._flush_pending_upserts()
+
+    result = plugin.get_known_nodes_paginated(order="DROP TABLE")
+    assert result["total"] == 1
+    assert len(result["nodes"]) == 1
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_paginated_search_escapes_like_wildcards(mock_transport, mock_app, plugin_config):
+    """Search term containing '%' should not match everything."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    mock_transport.hops_to.return_value = 1
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    dest1 = b"\x44" * 16
+    dest2 = b"\x55" * 16
+    plugin.record_announce(dest1, MagicMock(), b"alpha", "test.app")
+    plugin.record_announce(dest2, MagicMock(), b"beta", "test.app")
+    _drain_announce_queue(plugin)
+    plugin._flush_pending_upserts()
+
+    result = plugin.get_known_nodes_paginated(search="%")
+    assert result["total"] == 0
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_paginated_sort_col_falls_back_on_unknown(mock_transport, mock_app, plugin_config):
+    """Unknown sort column defaults to 'last_seen'."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    mock_transport.hops_to.return_value = 1
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    dest_hash = b"\x66" * 16
+    plugin.record_announce(dest_hash, MagicMock(), b"test", "test.app")
+    _drain_announce_queue(plugin)
+    plugin._flush_pending_upserts()
+
+    result = plugin.get_known_nodes_paginated(sort="nonexistent_column")
+    assert result["total"] == 1
+    assert len(result["nodes"]) == 1
     plugin.stop()

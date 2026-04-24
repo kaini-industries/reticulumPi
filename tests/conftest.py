@@ -60,6 +60,7 @@ def mock_app(mock_rns_reticulum, mock_rns_identity):
     app.identity = mock_rns_identity
     app.node_name = "TestNode"
     app.plugins = {}
+    app.event_bus = MagicMock()
     return app
 
 

@@ -234,3 +234,161 @@ def test_get_status(mock_dest, mock_transport, mock_app, plugin_config):
     assert status["active_links"] == 0
     assert status["allowed_identities"] == 1
     plugin.stop()
+
+
+# ---------------------------------------------------------------------------
+# Plugin enable/disable Link handlers
+# ---------------------------------------------------------------------------
+
+
+class TestPluginEnableDisableHandlers:
+    @patch("RNS.Transport")
+    @patch("RNS.Destination")
+    def test_handle_plugin_enable_success(
+        self, mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+    ):
+        from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+        import RNS.vendor.umsgpack as umsgpack
+
+        plugin = RemoteControlPlugin(mock_app, plugin_config)
+        plugin.start()
+
+        payload = umsgpack.packb({"name": "sample"})
+        result = plugin._handle_plugin_enable(
+            "/plugin/enable", payload, None, None, authorized_identity, None
+        )
+        data = umsgpack.unpackb(result)
+        assert data["ok"] is True
+        assert data["message"] == "Plugin 'sample' enabled"
+        mock_app.enable_plugin.assert_called_once_with("sample")
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    @patch("RNS.Destination")
+    def test_handle_plugin_enable_rejects_non_bytes_data(
+        self, mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+    ):
+        from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+        import RNS.vendor.umsgpack as umsgpack
+
+        plugin = RemoteControlPlugin(mock_app, plugin_config)
+        plugin.start()
+
+        result = plugin._handle_plugin_enable(
+            "/plugin/enable", None, None, None, authorized_identity, None
+        )
+        data = umsgpack.unpackb(result)
+        assert data["ok"] is False
+        assert "missing plugin name" in data.get("error", "")
+        mock_app.enable_plugin.assert_not_called()
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    @patch("RNS.Destination")
+    def test_handle_plugin_enable_rejects_malformed_msgpack(
+        self, mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+    ):
+        from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+        import RNS.vendor.umsgpack as umsgpack
+
+        plugin = RemoteControlPlugin(mock_app, plugin_config)
+        plugin.start()
+
+        # 0xc1 is the msgpack "reserved/never used" code — umsgpack raises.
+        result = plugin._handle_plugin_enable(
+            "/plugin/enable",
+            b"\xc1",
+            None,
+            None,
+            authorized_identity,
+            None,
+        )
+        data = umsgpack.unpackb(result)
+        assert data["ok"] is False
+        assert "invalid request" in data.get("error", "")
+        mock_app.enable_plugin.assert_not_called()
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    @patch("RNS.Destination")
+    def test_handle_plugin_enable_propagates_app_errors(
+        self, mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+    ):
+        from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+        import RNS.vendor.umsgpack as umsgpack
+
+        mock_app.enable_plugin.side_effect = RuntimeError("already running")
+        plugin = RemoteControlPlugin(mock_app, plugin_config)
+        plugin.start()
+
+        payload = umsgpack.packb({"name": "sample"})
+        result = plugin._handle_plugin_enable(
+            "/plugin/enable", payload, None, None, authorized_identity, None
+        )
+        data = umsgpack.unpackb(result)
+        assert data["ok"] is False
+        assert "already running" in data.get("error", "")
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    @patch("RNS.Destination")
+    def test_handle_plugin_enable_requires_auth(
+        self, mock_dest, mock_transport, mock_app, plugin_config, unauthorized_identity
+    ):
+        from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+        import RNS.vendor.umsgpack as umsgpack
+
+        plugin = RemoteControlPlugin(mock_app, plugin_config)
+        plugin.start()
+
+        payload = umsgpack.packb({"name": "sample"})
+        result = plugin._handle_plugin_enable(
+            "/plugin/enable", payload, None, None, unauthorized_identity, None
+        )
+        data = umsgpack.unpackb(result)
+        assert data["ok"] is False
+        assert "unauthorized" in data.get("error", "")
+        mock_app.enable_plugin.assert_not_called()
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    @patch("RNS.Destination")
+    def test_handle_plugin_disable_success(
+        self, mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+    ):
+        from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+        import RNS.vendor.umsgpack as umsgpack
+
+        plugin = RemoteControlPlugin(mock_app, plugin_config)
+        plugin.start()
+
+        payload = umsgpack.packb({"name": "sample"})
+        result = plugin._handle_plugin_disable(
+            "/plugin/disable", payload, None, None, authorized_identity, None
+        )
+        data = umsgpack.unpackb(result)
+        assert data["ok"] is True
+        assert data["message"] == "Plugin 'sample' disabled"
+        mock_app.disable_plugin.assert_called_once_with("sample")
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    @patch("RNS.Destination")
+    def test_handle_plugin_disable_propagates_app_errors(
+        self, mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+    ):
+        from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+        import RNS.vendor.umsgpack as umsgpack
+
+        mock_app.disable_plugin.side_effect = KeyError("'not running'")
+        plugin = RemoteControlPlugin(mock_app, plugin_config)
+        plugin.start()
+
+        payload = umsgpack.packb({"name": "sample"})
+        result = plugin._handle_plugin_disable(
+            "/plugin/disable", payload, None, None, authorized_identity, None
+        )
+        data = umsgpack.unpackb(result)
+        assert data["ok"] is False
+        assert "not running" in data.get("error", "")
+        plugin.stop()

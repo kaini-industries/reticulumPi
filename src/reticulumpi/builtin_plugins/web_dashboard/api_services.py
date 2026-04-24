@@ -91,27 +91,19 @@ async def handle_lora_announce_mode(
     try:
         body = await request.json()
     except Exception:
-        return aiohttp.web.json_response(
-            {"ok": False, "error": "Invalid JSON body"}, status=400
-        )
+        return _error("Invalid JSON body", 400)
 
     mode = body.get("mode", "")
     if not mode:
-        return aiohttp.web.json_response(
-            {"ok": False, "error": "Missing 'mode' field"}, status=400
-        )
+        return _error("Missing 'mode' field", 400)
 
     try:
         result = lora.set_announce_mode(mode)
         return _ok(result)
     except ValueError as exc:
-        return aiohttp.web.json_response(
-            {"ok": False, "error": str(exc)}, status=400
-        )
+        return _error(str(exc), 400)
     except RuntimeError as exc:
-        return aiohttp.web.json_response(
-            {"ok": False, "error": str(exc)}, status=500
-        )
+        return _error(str(exc), 500)
 
 
 # ── Sensors, alerts, emergency, files ────────────────────────────────
@@ -408,6 +400,52 @@ async def handle_meshcore_device(
     return _ok(gw.get_device_info())
 
 
+# ── MeshCore Observer ────────────────────────────────────────────────
+
+
+async def handle_meshcore_observer_status(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/meshcore_observer/status — MeshCore observer status and packet stats."""
+    plugin = _get_plugin(request)
+    obs = plugin.app.get_plugin("meshcore_observer")
+    if not obs or not hasattr(obs, "get_status"):
+        return _ok({"available": False, "message": "meshcore_observer plugin not enabled"})
+    return _ok({"available": True, **obs.get_status()})
+
+
+# ── Mesh Bridge ──────────────────────────────────────────────────────
+
+
+async def handle_mesh_bridge_status(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/mesh_bridge/status — Bridge runtime state and counters."""
+    plugin = _get_plugin(request)
+    bridge = plugin.app.get_plugin("mesh_bridge")
+    if not bridge or not hasattr(bridge, "get_status"):
+        return _ok({"available": False, "message": "mesh_bridge plugin not enabled"})
+    return _ok({"available": True, **bridge.get_status()})
+
+
+async def handle_mesh_bridge_running(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/mesh_bridge/running — Pause or resume the bridge."""
+    plugin = _get_plugin(request)
+    bridge = plugin.app.get_plugin("mesh_bridge")
+    if not bridge or not hasattr(bridge, "set_running"):
+        return _error("mesh_bridge plugin not available", 503)
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+    running = body.get("running")
+    if not isinstance(running, bool):
+        return _error("'running' field must be a boolean", 400)
+    return _ok(bridge.set_running(running, reason="manual" if not running else None))
+
+
 # ── Messaging Hub ────────────────────────────────────────────────────
 
 
@@ -683,9 +721,7 @@ async def handle_delete_conversation(
         return _error("messaging_hub not available", 503)
     contact_id = request.match_info["contact_id"]
     if not contact_id:
-        return aiohttp.web.json_response(
-            {"ok": False, "error": "contact_id required"}, status=400,
-        )
+        return _error("contact_id required", 400)
     deleted = hub.delete_conversation(contact_id)
     return _ok({"deleted": deleted})
 
@@ -701,14 +737,10 @@ async def handle_mark_read(
     try:
         body = await request.json()
     except Exception:
-        return aiohttp.web.json_response(
-            {"ok": False, "error": "Invalid JSON"}, status=400,
-        )
+        return _error("Invalid JSON", 400)
     contact_id = body.get("contact_id", "")
     if not contact_id:
-        return aiohttp.web.json_response(
-            {"ok": False, "error": "contact_id required"}, status=400,
-        )
+        return _error("contact_id required", 400)
     updated = hub.mark_read(contact_id)
     return _ok({"updated": updated})
 
@@ -825,6 +857,11 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/meshcore/status", handle_meshcore_status)
     app.router.add_get("/api/meshcore/contacts", handle_meshcore_contacts)
     app.router.add_get("/api/meshcore/device", handle_meshcore_device)
+    # MeshCore Observer
+    app.router.add_get("/api/meshcore_observer/status", handle_meshcore_observer_status)
+    # Mesh Bridge
+    app.router.add_get("/api/mesh_bridge/status", handle_mesh_bridge_status)
+    app.router.add_post("/api/mesh_bridge/running", handle_mesh_bridge_running)
     # Messaging
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_post("/api/messages/send", handle_send_message)

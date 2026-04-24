@@ -144,6 +144,19 @@ class NetworkMapPlugin(PluginBase):
             })
         return sorted(nodes, key=lambda n: n.get("last_seen", 0), reverse=True)
 
+    def get_node_name(self, destination_hash: str) -> str | None:
+        """Return the announced display name for a node, or None if unknown."""
+        try:
+            dh = bytes.fromhex(destination_hash.strip().strip("<>"))
+        except (ValueError, AttributeError):
+            return None
+        with self._nodes_lock:
+            info = self._known_nodes.get(dh)
+        if not info:
+            return None
+        name = info.get("app_data_str")
+        return name if name else None
+
     def get_known_nodes_paginated(
         self,
         page: int = 1,
@@ -171,7 +184,9 @@ class NetworkMapPlugin(PluginBase):
             "score": "score",
         }
         sort_col = allowed_sorts.get(sort, "last_seen")
-        sort_dir = "ASC" if order == "asc" else "DESC"
+        if order not in ("asc", "desc"):
+            order = "desc"
+        sort_dir = order.upper()
 
         try:
             with sqlite3.connect(self._db_path) as conn:
@@ -191,7 +206,7 @@ class NetworkMapPlugin(PluginBase):
                     view_default_sort = "hops ASC, last_seen DESC"
                 elif view == "recent":
                     conditions.append(
-                        f"last_seen > (strftime('%s','now') - 3600)"
+                        "last_seen > (strftime('%s','now') - 3600)"
                     )
                     view_default_sort = "last_seen DESC"
                 elif view == "lxmf":
@@ -203,9 +218,12 @@ class NetworkMapPlugin(PluginBase):
 
                 if search:
                     conditions.append(
-                        "(destination_hash LIKE ? OR app_data_str LIKE ? OR app_name LIKE ?)"
+                        "(destination_hash LIKE ? ESCAPE '\\'"
+                        " OR app_data_str LIKE ? ESCAPE '\\'"
+                        " OR app_name LIKE ? ESCAPE '\\')"
                     )
-                    like = f"%{search}%"
+                    escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    like = f"%{escaped}%"
                     params.extend([like, like, like])
                 if app_filter:
                     conditions.append("app_name = ?")
@@ -443,7 +461,8 @@ class NetworkMapPlugin(PluginBase):
                 (destination_hash, identity, app_data, aspect, from_wildcard)
             )
         except queue.Full:
-            pass  # Drop announce rather than block the RNS thread
+            self.log.warning("Announce queue full — dropped announce from %s",
+                             RNS.prettyhexrep(destination_hash))
 
     def _process_announce(
         self,
@@ -474,6 +493,16 @@ class NetworkMapPlugin(PluginBase):
                         or unpacked.get("display_name")
                         or ""
                     )
+                elif isinstance(unpacked, list) and unpacked:
+                    # LXMF 0.5+ format: [display_name_bytes, stamp_cost]
+                    dn = unpacked[0]
+                    if isinstance(dn, bytes):
+                        try:
+                            app_data_str = dn.decode("utf-8")
+                        except UnicodeDecodeError:
+                            pass
+                    elif isinstance(dn, str):
+                        app_data_str = dn
                 elif isinstance(unpacked, str):
                     app_data_str = unpacked
             except Exception:

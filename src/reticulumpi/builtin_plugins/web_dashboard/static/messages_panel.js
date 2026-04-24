@@ -70,6 +70,7 @@
     var _expanded = false;
     var _dom = null;       // resolved DOM refs, cached on first data arrival
     var _available = false;
+    var _maxBytes = null;
     var _destOptions = [];
     var _destSelection = null;
 
@@ -1232,10 +1233,11 @@
       if (!_dom.byteCount || !_dom.text) return;
       var text = _dom.text.value;
       var bytes = new TextEncoder().encode(text).length;
-      if (cfg.transport === 'meshtastic') {
-        _dom.byteCount.textContent = bytes + '/237';
+      if (_maxBytes) {
+        var warn = Math.floor(_maxBytes * 0.85);
+        _dom.byteCount.textContent = bytes + '/' + _maxBytes;
         _dom.byteCount.className = 'msg-byte-count'
-          + (bytes > 237 ? ' over' : bytes > 200 ? ' near' : '');
+          + (bytes > _maxBytes ? ' over' : bytes > warn ? ' near' : '');
       } else {
         _dom.byteCount.textContent = '';
       }
@@ -1511,6 +1513,7 @@
           if (list[i].name === cfg.transport) { entry = list[i]; break; }
         }
         _available = !!entry;
+        _maxBytes = (entry && entry.max_message_bytes) || null;
         if (_dom.section) _dom.section.style.display = _available ? '' : 'none';
         if (entry && entry.address) _renderTransportAddress(entry.address);
       });

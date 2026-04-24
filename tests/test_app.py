@@ -327,3 +327,280 @@ def test_list_plugins_prints_discovered(tmp_path, plugin_dir, capsys):
     captured = capsys.readouterr()
     assert "sample" in captured.out
     assert "0.1.0" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Hot-reload: enable_plugin / disable_plugin at runtime
+# ---------------------------------------------------------------------------
+
+
+def _make_hot_reload_app(tmp_path, plugin_dir_path, plugins_yaml="{}"):
+    """Build a ReticulumPiApp with *plugin_dir_path* on its search path.
+
+    *plugins_yaml* is inlined into the ``plugins:`` mapping so tests can
+    seed per-plugin config without touching AppConfig internals.
+    """
+    config_file = tmp_path / "hot_reload_cfg.yaml"
+    config_file.write_text(
+        "reticulumpi:\n"
+        "  log_level: 4\n"
+        "  identity_path: {identity}\n"
+        "  plugin_paths:\n"
+        "    - {pdir}\n"
+        "  plugins: {plugins}\n".format(
+            identity=str(tmp_path / "identity"),
+            pdir=plugin_dir_path,
+            plugins=plugins_yaml,
+        )
+    )
+    return ReticulumPiApp(config_path=str(config_file))
+
+
+class TestHotReload:
+    def test_enable_plugin_hot_loads_and_starts(self, tmp_path, plugin_dir):
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        app.enable_plugin("sample")
+        assert "sample" in app.plugins
+        assert app.plugins["sample"]._active is True
+
+    def test_enable_plugin_publishes_plugin_started_event(self, tmp_path, plugin_dir):
+        from reticulumpi import events
+
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        received: list[dict] = []
+        app.event_bus.subscribe(
+            events.PLUGIN_STARTED, lambda _evt, data: received.append(data)
+        )
+        app.enable_plugin("sample")
+        assert received == [{"name": "sample"}]
+
+    def test_enable_plugin_raises_runtime_error_if_already_running(
+        self, tmp_path, plugin_dir
+    ):
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        app.enable_plugin("sample")
+        with pytest.raises(RuntimeError, match="already running"):
+            app.enable_plugin("sample")
+
+    def test_enable_plugin_raises_key_error_if_not_discoverable(
+        self, tmp_path, plugin_dir
+    ):
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        with pytest.raises(KeyError, match="not found"):
+            app.enable_plugin("no_such_plugin")
+
+    def test_enable_plugin_calls_stop_if_start_fails(self, tmp_path):
+        flag = tmp_path / "stop_called"
+        (tmp_path / "bad_start_plugin.py").write_text(
+            "from reticulumpi.plugin_base import PluginBase\n"
+            "class BadStart(PluginBase):\n"
+            "    plugin_name = 'bad_start_hr'\n"
+            "    plugin_version = '0.1.0'\n"
+            "    def start(self):\n"
+            "        raise RuntimeError('boom')\n"
+            "    def stop(self):\n"
+            f"        open({str(flag)!r}, 'w').write('1')\n"
+        )
+        app = _make_hot_reload_app(tmp_path, str(tmp_path))
+        with pytest.raises(RuntimeError, match="boom"):
+            app.enable_plugin("bad_start_hr")
+        assert "bad_start_hr" not in app.plugins
+        assert flag.exists(), "stop() should be called for cleanup on failed start"
+
+    def test_enable_plugin_uses_config_from_yaml(self, tmp_path, plugin_dir):
+        plugins_yaml = "\n    sample:\n      greeting: hi"
+        app = _make_hot_reload_app(tmp_path, plugin_dir, plugins_yaml=plugins_yaml)
+        app.enable_plugin("sample")
+        assert app.plugins["sample"].config.get("greeting") == "hi"
+
+    def test_disable_plugin_stops_and_removes(self, tmp_path, plugin_dir):
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        app.enable_plugin("sample")
+        plugin = app.plugins["sample"]
+        app.disable_plugin("sample")
+        assert "sample" not in app.plugins
+        assert plugin._active is False
+
+    def test_disable_plugin_publishes_plugin_stopped_event(self, tmp_path, plugin_dir):
+        from reticulumpi import events
+
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        app.enable_plugin("sample")
+        received: list[dict] = []
+        app.event_bus.subscribe(
+            events.PLUGIN_STOPPED, lambda _evt, data: received.append(data)
+        )
+        app.disable_plugin("sample")
+        assert received == [{"name": "sample"}]
+
+    def test_disable_plugin_raises_key_error_if_not_running(self, tmp_path, plugin_dir):
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        with pytest.raises(KeyError, match="not running"):
+            app.disable_plugin("sample")
+
+    def test_disable_plugin_swallows_stop_exceptions(self, tmp_path):
+        from reticulumpi import events
+
+        (tmp_path / "angry_plugin.py").write_text(
+            "from reticulumpi.plugin_base import PluginBase\n"
+            "class Angry(PluginBase):\n"
+            "    plugin_name = 'angry_hr'\n"
+            "    plugin_version = '0.1.0'\n"
+            "    def start(self):\n"
+            "        self._active = True\n"
+            "    def stop(self):\n"
+            "        raise RuntimeError('cannot stop')\n"
+        )
+        app = _make_hot_reload_app(tmp_path, str(tmp_path))
+        app.enable_plugin("angry_hr")
+        received: list[dict] = []
+        app.event_bus.subscribe(
+            events.PLUGIN_STOPPED, lambda _evt, data: received.append(data)
+        )
+        app.disable_plugin("angry_hr")  # Must not raise
+        assert "angry_hr" not in app.plugins
+        assert received == [{"name": "angry_hr"}]
+
+    def test_concurrent_enable_and_disable_is_safe(self, tmp_path, plugin_dir):
+        import threading
+
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        barrier = threading.Barrier(2)
+        errors: list[tuple[str, Exception]] = []
+        iterations = 20
+
+        def enable_loop():
+            barrier.wait()
+            for _ in range(iterations):
+                try:
+                    app.enable_plugin("sample")
+                except (RuntimeError, KeyError):
+                    pass  # Expected when already running or raced
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors.append(("enable", exc))
+
+        def disable_loop():
+            barrier.wait()
+            for _ in range(iterations):
+                try:
+                    app.disable_plugin("sample")
+                except KeyError:
+                    pass  # Expected when not running or raced
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors.append(("disable", exc))
+
+        t1 = threading.Thread(target=enable_loop)
+        t2 = threading.Thread(target=disable_loop)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+        assert not t1.is_alive() and not t2.is_alive(), "Threads deadlocked"
+        assert not errors, f"Unexpected errors under concurrency: {errors}"
+
+    def test_disable_plugin_publishes_plugin_stopping_before_pop(
+        self, tmp_path, plugin_dir,
+    ):
+        from reticulumpi import events
+
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        app.enable_plugin("sample")
+        still_in_registry: list[bool] = []
+        app.event_bus.subscribe(
+            events.PLUGIN_STOPPING,
+            lambda _evt, data: still_in_registry.append(
+                data["name"] in app.plugins,
+            ),
+        )
+        app.disable_plugin("sample")
+        assert still_in_registry == [True]
+
+    def test_disable_plugin_warns_about_dependents(
+        self, tmp_path, caplog,
+    ):
+        dep_plugin = tmp_path / "dep_plugin.py"
+        dep_plugin.write_text(
+            "from reticulumpi.plugin_base import PluginBase\n"
+            "class DepPlugin(PluginBase):\n"
+            "    plugin_name = 'dep'\n"
+            "    plugin_dependencies = ['base_plugin']\n"
+            "    def start(self): self._active = True\n"
+            "    def stop(self): self._active = False\n"
+        )
+        base_plugin = tmp_path / "base_plugin.py"
+        base_plugin.write_text(
+            "from reticulumpi.plugin_base import PluginBase\n"
+            "class BasePlugin(PluginBase):\n"
+            "    plugin_name = 'base_plugin'\n"
+            "    def start(self): self._active = True\n"
+            "    def stop(self): self._active = False\n"
+        )
+        app = _make_hot_reload_app(tmp_path, str(tmp_path))
+        app.enable_plugin("base_plugin")
+        app.enable_plugin("dep")
+        with caplog.at_level("WARNING"):
+            app.disable_plugin("base_plugin")
+        assert "dependency of running plugin 'dep'" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Plugin dependency ordering
+# ---------------------------------------------------------------------------
+
+
+class TestPluginDependencyOrdering:
+    def test_topo_sort_respects_dependencies(self, tmp_path):
+        (tmp_path / "alpha_plugin.py").write_text(
+            "from reticulumpi.plugin_base import PluginBase\n"
+            "class Alpha(PluginBase):\n"
+            "    plugin_name = 'alpha'\n"
+            "    plugin_dependencies = ['beta']\n"
+            "    def start(self): self._active = True\n"
+            "    def stop(self): self._active = False\n"
+        )
+        (tmp_path / "beta_plugin.py").write_text(
+            "from reticulumpi.plugin_base import PluginBase\n"
+            "class Beta(PluginBase):\n"
+            "    plugin_name = 'beta'\n"
+            "    def start(self): self._active = True\n"
+            "    def stop(self): self._active = False\n"
+        )
+        app = _make_hot_reload_app(tmp_path, str(tmp_path))
+        app.enable_plugin("alpha")
+        app.enable_plugin("beta")
+        order = app._topo_sort_plugins()
+        assert order.index("beta") < order.index("alpha")
+
+    def test_topo_sort_handles_no_dependencies(self, tmp_path, plugin_dir):
+        app = _make_hot_reload_app(tmp_path, plugin_dir)
+        app.enable_plugin("sample")
+        order = app._topo_sort_plugins()
+        assert "sample" in order
+
+    def test_missing_dependency_logs_warning(self, tmp_path, caplog):
+        (tmp_path / "lonely_plugin.py").write_text(
+            "from reticulumpi.plugin_base import PluginBase\n"
+            "class Lonely(PluginBase):\n"
+            "    plugin_name = 'lonely'\n"
+            "    plugin_dependencies = ['nonexistent']\n"
+            "    def start(self): self._active = True\n"
+            "    def stop(self): self._active = False\n"
+        )
+        config_file = tmp_path / "dep_cfg.yaml"
+        config_file.write_text(
+            "reticulumpi:\n"
+            "  log_level: 4\n"
+            "  identity_path: {identity}\n"
+            "  plugin_paths:\n"
+            "    - {pdir}\n"
+            "  plugins:\n"
+            "    lonely:\n"
+            "      enabled: true\n".format(
+                identity=str(tmp_path / "identity"),
+                pdir=str(tmp_path),
+            )
+        )
+        app = ReticulumPiApp(config_path=str(config_file))
+        with caplog.at_level("WARNING"):
+            app._load_plugins()
+        assert "depends on 'nonexistent' which is not enabled" in caplog.text

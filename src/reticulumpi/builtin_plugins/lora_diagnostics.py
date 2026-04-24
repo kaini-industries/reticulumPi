@@ -262,7 +262,10 @@ class LoRaDiagnosticsPlugin(PluginBase):
             "LoRa announce mode set to '%s' — restarting rnsd", mode
         )
 
-        # Restart rnsd — reticulumpi will auto-recover via Restart=always
+        self.event_bus.publish(events.RNSD_RESTARTING, {
+            "reason": f"announce_mode_change:{mode}",
+        })
+
         try:
             subprocess.run(
                 ["sudo", "systemctl", "restart", "rnsd"],
@@ -276,11 +279,31 @@ class LoRaDiagnosticsPlugin(PluginBase):
             self.log.error("rnsd restart failed: %s", exc.stderr.decode())
             raise RuntimeError(f"rnsd restart failed: {exc.stderr.decode()}")
 
+        self._wait_for_rnsd(timeout=10)
+        self.event_bus.publish(events.RNSD_RECOVERED, {
+            "reason": f"announce_mode_change:{mode}",
+        })
+
         return {
             "mode": mode,
             "description": preset["description"],
             "rnsd_restarted": True,
         }
+
+    def _wait_for_rnsd(self, timeout: float = 10) -> None:
+        """Poll until rnsd is responsive or timeout."""
+        import subprocess as _sp
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                result = _sp.run(["rnstatus"], capture_output=True, timeout=5)
+                if result.returncode == 0:
+                    return
+            except Exception:
+                pass
+            time.sleep(1)
+        self.log.warning("rnsd did not become responsive within %ds", timeout)
 
     def _detect_announce_mode(self) -> str:
         """Read current rnsd config to determine active announce mode."""

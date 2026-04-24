@@ -103,7 +103,18 @@ def main() -> None:
         default=30.0,
         help="Timeout in seconds for remote operations (default: 30)",
     )
+    parser.add_argument(
+        "--mesh-bridge",
+        choices=["status", "pause", "resume"],
+        default=None,
+        help="Control the Meshtastic↔MeshCore bridge via the local dashboard API. "
+             "Requires RETICULUMPI_DASHBOARD_PASSWORD env var or prompts for it.",
+    )
     args = parser.parse_args()
+
+    if args.mesh_bridge:
+        _run_mesh_bridge_cli(args.mesh_bridge, args.config)
+        sys.exit(0)
 
     if args.hash_password:
         import getpass
@@ -247,6 +258,90 @@ def main() -> None:
         app.shutdown()
     except Exception:
         logging.exception("Fatal error in ReticulumPi")
+        sys.exit(1)
+
+
+def _run_mesh_bridge_cli(action: str, config_path: str | None) -> None:
+    """Call the dashboard API to control the mesh_bridge plugin.
+
+    Reads dashboard host/port from the config file and authenticates via
+    the RETICULUMPI_DASHBOARD_PASSWORD env var (or prompts).
+    """
+    import getpass
+    import json as _json
+    import os
+    import urllib.error
+    import urllib.request
+
+    if config_path is None:
+        default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
+        if os.path.isfile(default_path):
+            config_path = default_path
+
+    # Always connect to localhost — this is a local operator tool, so the
+    # host field from config (which may be an external bind address like
+    # 0.0.0.0 or 192.168.x.x) is ignored.  This prevents sending the
+    # dashboard password over the network in plaintext when SSL is off.
+    port = 8080
+    scheme = "http"
+    if config_path and os.path.isfile(config_path):
+        try:
+            import yaml
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            wd = (cfg.get("plugins", {}) or {}).get("web_dashboard", {}) or {}
+            port = int(wd.get("port", port))
+            if (wd.get("ssl") or {}).get("enabled"):
+                scheme = "https"
+        except Exception:
+            pass
+
+    base = f"{scheme}://127.0.0.1:{port}"
+
+    password = os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD")
+    if not password:
+        password = getpass.getpass("Dashboard password: ")
+    if not password:
+        print("Error: password required", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        login_req = urllib.request.Request(
+            f"{base}/api/auth/login",
+            data=_json.dumps({"password": password}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(login_req, timeout=10) as resp:
+            login_body = _json.loads(resp.read())
+        token = (login_body.get("data") or {}).get("token")
+        if not token:
+            print("Error: login failed", file=sys.stderr)
+            sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Error: cannot reach dashboard at {base}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if action == "status":
+        url = f"{base}/api/mesh_bridge/status"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"},
+        )
+    else:
+        url = f"{base}/api/mesh_bridge/running"
+        body = _json.dumps({"running": action == "resume"}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        print(f"Error: HTTP {exc.code}: {exc.read().decode('utf-8')}", file=sys.stderr)
         sys.exit(1)
 
 

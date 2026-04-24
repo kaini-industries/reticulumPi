@@ -16,7 +16,10 @@ import aiohttp.web
 if TYPE_CHECKING:
     pass
 
-SENSITIVE_KEYS = frozenset({"password", "password_hash"})
+SENSITIVE_KEYS = frozenset({
+    "password", "password_hash", "token", "secret", "api_key",
+    "private_key", "credentials", "auth_token",
+})
 
 # API version — bump when making breaking changes to response schemas.
 # Included in all API responses via the Api-Version header so clients
@@ -376,11 +379,25 @@ async def handle_plugin_detail(request: aiohttp.web.Request) -> aiohttp.web.Resp
     })
 
 
+_last_restart_time: float = 0.0
+_RESTART_COOLDOWN = 60.0
+
+
 async def handle_services_restart(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     """POST /api/services/restart — restart rnsd + reticulumpi."""
     import asyncio
+
+    global _last_restart_time
+
+    if not request.get("token"):
+        return _error("Authentication required", 401)
+
+    now = time.monotonic()
+    if now - _last_restart_time < _RESTART_COOLDOWN:
+        return _error("Service restart already in progress", 429)
+    _last_restart_time = now
 
     async def _do_restart() -> None:
         await asyncio.sleep(2)  # let HTTP response flush
@@ -392,7 +409,6 @@ async def handle_services_restart(
         await asyncio.create_subprocess_exec(
             "sudo", "systemctl", "restart", "reticulumpi",
         )
-        # reticulumpi kills us — no await needed
 
     asyncio.create_task(_do_restart())
     return _ok({"message": "Restarting services..."})

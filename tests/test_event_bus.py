@@ -102,3 +102,85 @@ def test_thread_safety():
         t.join()
 
     assert len(results) == 300
+
+
+# ---------------------------------------------------------------------------
+# subscribe_offloaded tests
+# ---------------------------------------------------------------------------
+
+
+def test_subscribe_offloaded_calls_callback():
+    bus = EventBus()
+    called = threading.Event()
+
+    def cb(evt, data):
+        called.set()
+
+    bus.subscribe_offloaded("test.event", cb)
+    bus.publish("test.event", {"x": 1})
+    assert called.wait(timeout=5), "Offloaded callback was not called"
+
+
+def test_subscribe_offloaded_does_not_block_publisher():
+    import time
+
+    bus = EventBus()
+    started = threading.Event()
+
+    def slow_cb(evt, data):
+        started.set()
+        time.sleep(2)
+
+    bus.subscribe_offloaded("test.event", slow_cb)
+    t0 = time.monotonic()
+    bus.publish("test.event", {})
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0, f"publish() blocked for {elapsed:.2f}s"
+    started.wait(timeout=5)
+
+
+def test_subscribe_offloaded_logs_exceptions(caplog):
+    import logging
+
+    bus = EventBus()
+    done = threading.Event()
+
+    def bad_cb(evt, data):
+        try:
+            raise RuntimeError("boom")
+        finally:
+            done.set()
+
+    bus.subscribe_offloaded("test.event", bad_cb)
+    with caplog.at_level(logging.ERROR, logger="reticulumpi.event_bus"):
+        bus.publish("test.event", {})
+        done.wait(timeout=5)
+        # Give the executor a moment to flush the log
+        import time
+        time.sleep(0.1)
+    assert "boom" in caplog.text
+
+
+def test_unsubscribe_offloaded_callback():
+    bus = EventBus()
+    cb = MagicMock()
+    bus.subscribe_offloaded("test.event", cb)
+    bus.unsubscribe("test.event", cb)
+    bus.publish("test.event", {})
+    import time
+    time.sleep(0.2)
+    cb.assert_not_called()
+
+
+def test_unsubscribe_all_offloaded_callback():
+    bus = EventBus()
+    cb = MagicMock()
+    bus.subscribe_offloaded("evt.a", cb)
+    bus.subscribe_offloaded("evt.b", cb)
+    removed = bus.unsubscribe_all(cb)
+    assert removed == 2
+    bus.publish("evt.a", {})
+    bus.publish("evt.b", {})
+    import time
+    time.sleep(0.2)
+    cb.assert_not_called()

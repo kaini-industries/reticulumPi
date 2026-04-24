@@ -21,6 +21,11 @@ log = logging.getLogger(__name__)
 _rnode_config_cache: dict[str, dict] | None = None
 _rnode_config_mtime: float = 0
 
+# All _ws_* globals are only mutated from the asyncio event loop that
+# owns the aiohttp server.  Cross-thread callers (event-bus callbacks)
+# schedule work via loop.call_soon_threadsafe(), never touching these
+# directly.  No additional locking is needed.
+
 _RETICULUM_CONFIG_PATHS = [
     os.path.expanduser("~reticulumpi/.reticulum/config"),
     os.path.expanduser("~/.reticulum/config"),
@@ -259,11 +264,8 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     plugin = request.app["plugin"]
     max_clients = plugin.config.get("max_websocket_clients", 10)
 
-    # Authenticate via query param or expect token in first message
-    token = request.query.get("token")
-    if not token:
-        # Check cookie as fallback
-        token = request.cookies.get("session")
+    # Authenticate via cookie or Authorization header
+    token = request.cookies.get("session")
 
     if not token or not plugin._auth.validate_token(token):
         ws = aiohttp.web.WebSocketResponse()
@@ -505,6 +507,22 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 except Exception:
                     pass
 
+            meshcore_obs_status: dict = {}
+            meshcore_obs = plugin.app.get_plugin("meshcore_observer")
+            if meshcore_obs and hasattr(meshcore_obs, "get_status"):
+                try:
+                    meshcore_obs_status = {"available": True, **meshcore_obs.get_status()}
+                except Exception:
+                    pass
+
+            mesh_bridge_data: dict = {}
+            mesh_bridge = plugin.app.get_plugin("mesh_bridge")
+            if mesh_bridge and hasattr(mesh_bridge, "get_status"):
+                try:
+                    mesh_bridge_data = mesh_bridge.get_status()
+                except Exception:
+                    pass
+
             # Collect space tracker snapshot (if plugin enabled).  Live
             # position deltas are published via the plugin's own event bus
             # message; here we only surface the lightweight snapshot.
@@ -629,6 +647,8 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 data["meshcore_device"] = meshcore_device_data
             if meshcore_contacts:
                 data["meshcore_contacts"] = meshcore_contacts
+            if meshcore_obs_status:
+                data["meshcore_observer"] = meshcore_obs_status
             if messaging_data:
                 data["messaging"] = messaging_data
             if mesh_data:
@@ -641,6 +661,8 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 data["lora_diagnostics"] = lora_diag_data
             if gps_data:
                 data["gps"] = gps_data
+            if mesh_bridge_data:
+                data["mesh_bridge"] = mesh_bridge_data
 
             message = json.dumps({
                 "type": "update",
@@ -680,6 +702,7 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.MESSAGE_RECEIVED, _on_message_event)
         event_bus.subscribe(_events.MESSAGE_SENT, _on_message_event)
         event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
+        event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
     except Exception:
         log.exception("Failed to subscribe WS handler to messaging events")
 
@@ -691,6 +714,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus = _ws_plugin.app.event_bus
             event_bus.unsubscribe_all(_on_message_event)
             event_bus.unsubscribe_all(_on_status_event)
+            event_bus.unsubscribe_all(_on_alert_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _broadcast_task:
@@ -770,6 +794,16 @@ def _on_status_event(event_type: str, data: dict) -> None:
             payload["sub_transport"] = data.get("sub_transport") or ""
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "message_status", payload)
+    except RuntimeError:
+        pass
+
+
+def _on_alert_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for ALERT_TRIGGERED — push to WS clients."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "alert", data)
     except RuntimeError:
         pass
 

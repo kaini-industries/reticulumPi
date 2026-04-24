@@ -62,6 +62,8 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
 
     sort = request.query.get("sort", "last_seen")
     order = request.query.get("order", "desc")
+    if order not in ("asc", "desc"):
+        order = "desc"
     search = request.query.get("search", "")
     app_filter = request.query.get("app", "")
     view = request.query.get("view", "")

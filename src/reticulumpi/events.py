@@ -6,6 +6,7 @@ from __future__ import annotations
 PLUGIN_STARTED = "plugin.started"
 PLUGIN_STOPPED = "plugin.stopped"
 PLUGIN_CRASHED = "plugin.crashed"
+PLUGIN_STOPPING = "plugin.stopping"
 
 # System metrics
 METRICS_UPDATED = "metrics.updated"
@@ -39,6 +40,7 @@ FALLBACK_DEACTIVATED = "transport.fallback_deactivated"
 # Connectivity monitoring
 RNSD_DOWN = "connectivity.rnsd_down"
 RNSD_RECOVERED = "connectivity.rnsd_recovered"
+RNSD_RESTARTING = "connectivity.rnsd_restarting"
 INTERFACE_OFFLINE = "connectivity.interface_offline"
 I2P_NO_PEERS = "connectivity.i2p_no_peers"
 
@@ -115,6 +117,14 @@ MESHTASTIC_MESSAGE_ACKED = "meshtastic.message_acked"
 
 # MeshCore message ack
 MESHCORE_MESSAGE_ACKED = "meshcore.message_acked"
+
+# MeshCore observer
+MESHCORE_OBSERVER_DEVICE_CONNECTED = "meshcore_observer.device_connected"
+MESHCORE_OBSERVER_DEVICE_DISCONNECTED = "meshcore_observer.device_disconnected"
+MESHCORE_OBSERVER_CONNECT_FAILED = "meshcore_observer.connect_failed"
+MESHCORE_OBSERVER_MQTT_CONNECTED = "meshcore_observer.mqtt_connected"
+MESHCORE_OBSERVER_MQTT_DISCONNECTED = "meshcore_observer.mqtt_disconnected"
+MESHCORE_OBSERVER_PACKET_CAPTURED = "meshcore_observer.packet_captured"
 
 # Space tracker — satellites, launches, space weather
 SPACE_TLE_UPDATED = "space.tle.updated"
