@@ -136,3 +136,9 @@ SPACE_WEATHER_UPDATED = "space.weather.updated"
 # Spectrum scanner — RTL-SDR sweep-based waterfall / spectrum
 SPECTRUM_SWEEP = "spectrum.sweep"         # one complete sweep ready
 SPECTRUM_STATUS = "spectrum.status"       # status change (running/error/unavailable)
+
+# ADS-B radar — aircraft tracking via dump1090
+ADSB_AIRCRAFT_DETECTED = "adsb.aircraft_detected"
+ADSB_AIRCRAFT_LOST = "adsb.aircraft_lost"
+ADSB_EMERGENCY_SQUAWK = "adsb.emergency_squawk"
+ADSB_STATUS = "adsb.status"

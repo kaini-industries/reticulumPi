@@ -830,6 +830,25 @@ async def handle_gps_satellites(
     )
 
 
+# ── ADS-B radar ──────────────────────────────────────────────────────
+
+
+async def handle_adsb_snapshot(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/adsb — current aircraft snapshot."""
+    plugin = _get_plugin(request)
+    adsb = plugin.app.get_plugin("adsb_radar")
+    if not adsb or not hasattr(adsb, "get_snapshot"):
+        return _ok({"available": False, "message": "adsb_radar plugin not enabled"})
+    try:
+        snap = adsb.get_snapshot()
+    except Exception:
+        return _error("Failed to gather adsb_radar snapshot", 500)
+    snap["available"] = True
+    return _ok(snap)
+
+
 def setup_service_routes(app: aiohttp.web.Application) -> None:
     """Register plugin service API routes."""
     # LoRa
@@ -884,3 +903,5 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/gps", handle_gps_snapshot)
     app.router.add_get("/api/gps/status", handle_gps_status)
     app.router.add_get("/api/gps/satellites", handle_gps_satellites)
+    # ADS-B radar
+    app.router.add_get("/api/adsb", handle_adsb_snapshot)

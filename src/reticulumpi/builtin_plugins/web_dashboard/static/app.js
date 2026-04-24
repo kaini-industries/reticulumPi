@@ -1147,6 +1147,7 @@
           if (msg.data.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(msg.data.spectrum);
           if (msg.data.spectrum && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
           if (msg.data.gps && RPI.updateGps) RPI.updateGps(msg.data.gps);
+          if (msg.data.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(msg.data.adsb);
         }
       } catch(e) { /* ignore parse errors */ }
     };

@@ -843,6 +843,35 @@
       </div>
     </div>
 
+    <!-- ADS-B Radar (aircraft tracker via RTL-SDR + dump1090) -->
+    <div class="section" id="adsb-section" style="display:none">
+      <div class="section-header collapsible" id="adsb-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> ADS-B Radar</span>
+        <span class="count" id="adsb-count"></span>
+      </div>
+      <div class="section-body hidden" id="adsb-body">
+        <div class="adsb-stats" id="adsb-stats"></div>
+        <div id="adsb-map-container" class="adsb-map" style="height:400px; width:100%;"></div>
+        <div class="adsb-table-wrap">
+          <table class="data-table" id="adsb-table">
+            <thead>
+              <tr>
+                <th data-sort="callsign" class="sortable">Callsign<span class="sort-arrow"></span></th>
+                <th data-sort="icao" class="sortable">ICAO<span class="sort-arrow"></span></th>
+                <th data-sort="altitude" class="sortable sort-desc">Alt (ft)<span class="sort-arrow"></span></th>
+                <th data-sort="ground_speed" class="sortable">Speed (kts)<span class="sort-arrow"></span></th>
+                <th data-sort="track" class="sortable">Track<span class="sort-arrow"></span></th>
+                <th data-sort="squawk" class="sortable">Squawk<span class="sort-arrow"></span></th>
+                <th data-sort="distance_nm" class="sortable">Dist (nm)<span class="sort-arrow"></span></th>
+                <th data-sort="last_seen" class="sortable">Last Seen<span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="adsb-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Plugins (collapsed by default) -->
     <div class="section" id="plugins-section">
       <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
@@ -916,5 +945,6 @@
   <script src="/static/spectrum_common.js?v=1"></script>
   <script src="/static/spectrum.js?v=9"></script>
   <script src="/static/lora_spectrum.js?v=17"></script>
+  <script src="/static/adsb.js?v=1"></script>
 </body>
 </html>

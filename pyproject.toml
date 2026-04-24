@@ -46,6 +46,9 @@ gps = [
     "pyserial>=3.5,<4.0",
     "pynmea2>=1.19,<2.0",
 ]
+adsb = [
+    "pyModeS>=2.0",
+]
 dev = [
     "pytest>=7.4,<9.0",
     "pytest-cov",

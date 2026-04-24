@@ -664,6 +664,15 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             if mesh_bridge_data:
                 data["mesh_bridge"] = mesh_bridge_data
 
+            adsb_plugin = plugin.app.get_plugin("adsb_radar")
+            if adsb_plugin and hasattr(adsb_plugin, "get_snapshot"):
+                try:
+                    adsb_data = adsb_plugin.get_snapshot()
+                    if adsb_data:
+                        data["adsb"] = adsb_data
+                except Exception:
+                    log.debug("adsb_radar snapshot failed", exc_info=True)
+
             message = json.dumps({
                 "type": "update",
                 "data": data,
