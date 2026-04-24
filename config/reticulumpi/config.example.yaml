@@ -559,6 +559,29 @@ reticulumpi:
     #  device_index: 0                  # RTL-SDR device index (-d) for multi-dongle setups
     #  max_restarts: 5                  # Subprocess crash-restart cap (per plugin session)
 
+    # --- ADS-B radar ----------------------------------------------------------
+    # Tracks nearby aircraft via an RTL-SDR dongle + dump1090.  Launches
+    # dump1090 as a subprocess, connects to its SBS BaseStation TCP port, and
+    # pushes live aircraft state to the web dashboard (map + table).
+    # Requires: dump1090 (any fork: dump1090-mutability, dump1090-fa, readsb),
+    #           plus an RTL-SDR dongle.  Optional: pip install reticulumpi[adsb]
+    #           for pyModeS aircraft-category enrichment.
+    # IMPORTANT: RTL-SDR devices are exclusive — if spectrum_scanner is also
+    # enabled, adsb_radar must use a DIFFERENT device_index (i.e. a second
+    # dongle).
+    #adsb_radar:
+    #  enabled: false
+    #  dump1090_bin: dump1090              # Binary name or path
+    #  device_index: 1                    # Use device 1 to avoid conflict with spectrum_scanner
+    #  gain: max                          # Tuner gain (dB or "max")
+    #  ppm: 0                             # Frequency correction (ppm)
+    #  enable_bias_tee: false             # Enable bias-T power (for active antennas)
+    #  sbs_port: 30003                    # SBS BaseStation TCP port
+    #  stale_timeout: 300                 # Remove aircraft after N seconds without a message
+    #  max_restarts: 5                    # Subprocess crash-restart cap
+    #  receiver_lat: null                 # Receiver position for distance calc (or use GPS plugin)
+    #  receiver_lon: null
+
     # --- GPS telemetry --------------------------------------------------------
     # Reads NMEA 0183 from a USB GPS receiver (e.g. GlobalSat BU-353N) and
     # exposes position / altitude / speed / satellite state. Drives the
