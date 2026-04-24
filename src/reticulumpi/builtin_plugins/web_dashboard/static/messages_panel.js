@@ -933,6 +933,9 @@
       // once this fetch completes.
       _olderLoading = false;
       _olderExhausted = false;
+      if (_dom.chat) {
+        _dom.chat.innerHTML = '<div class="msg-loading">Loading\u2026</div>';
+      }
 
       var items = _dom.convs
         ? _dom.convs.querySelectorAll('.msg-conv-item') : [];

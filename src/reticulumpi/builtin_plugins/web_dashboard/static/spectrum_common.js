@@ -96,17 +96,17 @@
   // hues wide apart on the wheel so adjacent bands stay distinguishable
   // against the dark background.
   var CATEGORIES = {
-    ham:          { color: '#4aa3df', name: 'Amateur Radio' },
-    broadcast:    { color: '#e74c3c', name: 'Broadcast (FM / TV)' },
-    aviation:     { color: '#f39c12', name: 'Aviation' },
-    navigation:   { color: '#f1c40f', name: 'Navigation (GPS / VOR)' },
-    satellite:    { color: '#9b59b6', name: 'Satellite L-band' },
-    cellular:     { color: '#d35400', name: 'Cellular' },
-    ism:          { color: '#2ecc71', name: 'ISM / Unlicensed' },
-    publicsafety: { color: '#16a085', name: 'Public Safety / Business' },
-    weather:      { color: '#5dade2', name: 'Weather' },
-    military:     { color: '#8e44ad', name: 'Military' },
-    gap:          { color: '#555555', name: 'Tuner gap' },
+    ham:          { color: '#00e5ff', name: 'Amateur Radio' },
+    broadcast:    { color: '#ff1744', name: 'Broadcast (FM / TV)' },
+    aviation:     { color: '#ffb627', name: 'Aviation' },
+    navigation:   { color: '#ffe14d', name: 'Navigation (GPS / VOR)' },
+    satellite:    { color: '#bf5af2', name: 'Satellite L-band' },
+    cellular:     { color: '#ff6d00', name: 'Cellular' },
+    ism:          { color: '#00ff9f', name: 'ISM / Unlicensed' },
+    publicsafety: { color: '#00bfa5', name: 'Public Safety / Business' },
+    weather:      { color: '#40c4ff', name: 'Weather' },
+    military:     { color: '#9c27b0', name: 'Military' },
+    gap:          { color: '#2a2f42', name: 'Tuner gap' },
   };
 
   // Frequency allocations in MHz, ordered ascending.  Scope: ITU Region 2

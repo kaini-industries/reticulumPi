@@ -77,7 +77,7 @@
       _wfCanvas.height = WF_ROWS;
       _wfCtx = _wfCanvas.getContext('2d');
       // Paint a dim background so the section doesn't flash white pre-data.
-      _wfCtx.fillStyle = '#0a0d17';
+      _wfCtx.fillStyle = '#050810';
       _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
       _wfCanvas.addEventListener('mousemove', _onHover);
       _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
@@ -191,11 +191,11 @@
       var gy = vbH - 1 - ((db - _minDb) / (_maxDb - _minDb)) * (vbH - 2);
       _lineEl.appendChild(SC.svg('line', {
         x1: 0, y1: gy, x2: vbW, y2: gy,
-        stroke: '#1a2233', 'stroke-width': 0.5,
+        stroke: '#0f1525', 'stroke-width': 0.5,
       }));
       _lineEl.appendChild(SC.svg('text', {
         x: 4, y: gy - 2,
-        fill: '#4a5570', 'font-size': 9,
+        fill: '#3a4565', 'font-size': 9,
       }, db.toFixed(0)));
     }
 
@@ -203,7 +203,7 @@
     _lineEl.appendChild(SC.svg('polyline', {
       points: polyStr,
       fill: 'none',
-      stroke: '#58a6ff',
+      stroke: '#00e5ff',
       'stroke-width': 1.2,
       'vector-effect': 'non-scaling-stroke',
     }));
@@ -237,7 +237,7 @@
       }
       _lineEl.appendChild(SC.svg('text', {
         x: fx, y: vbH - 2,
-        fill: '#4a5570', 'font-size': 9,
+        fill: '#3a4565', 'font-size': 9,
         'text-anchor': t === 0 ? 'start' : (t === tickCount ? 'end' : 'middle'),
       }, fmhz.toFixed(1)));
     }
@@ -533,7 +533,7 @@
       _lastBandSignature = '';  // force band ribbon rebuild at new axis
       _needsBulkPaint = true;
       if (_wfCtx) {
-        _wfCtx.fillStyle = '#0a0d17';
+        _wfCtx.fillStyle = '#050810';
         _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
       }
     }

@@ -108,17 +108,45 @@
 
   // --- Rendering ---
 
+  var _prevMetricValues = {};
+
+  function flashCard(card) {
+    if (!card) return;
+    card.classList.remove('flash');
+    void card.offsetWidth;
+    card.classList.add('flash');
+  }
+
   function setMetric(id, value, unit, warnAt, critAt) {
     var el = $(id);
     if (!el) return;
+    var card = el.closest('.metric-card');
+    var ringId = id.replace('m-', 'ring-');
+    var ring = $(ringId);
+
     if (value == null || value === undefined) {
       el.innerHTML = '--<span class="unit">' + unit + '</span>';
       el.className = 'value';
+      if (card) card.className = 'metric-card';
+      if (ring) ring.style.setProperty('--pct', '0');
       return;
     }
     var display = (typeof value === 'number') ? value.toFixed(1) : value;
     el.innerHTML = esc(String(display)) + '<span class="unit">' + unit + '</span>';
-    el.className = 'value ' + metricClass(value, warnAt, critAt);
+    var cls = metricClass(value, warnAt, critAt);
+    el.className = 'value ' + cls;
+    if (card) card.className = 'metric-card ' + cls;
+
+    if (ring) {
+      var pct = Math.min(100, Math.max(0, value));
+      ring.style.setProperty('--pct', pct);
+    }
+
+    var prevVal = _prevMetricValues[id];
+    _prevMetricValues[id] = display;
+    if (prevVal !== undefined && prevVal !== display && card) {
+      flashCard(card);
+    }
   }
 
   function formatTimeAgo(timestamp) {
@@ -157,6 +185,56 @@
 
   // --- Metrics ---
 
+  var _metricHistory = { cpu: [], temp: [], mem: [], disk: [] };
+  var _METRIC_HISTORY_MAX = 30;
+
+  function pushMetricHistory(key, value) {
+    if (value == null) return;
+    var arr = _metricHistory[key];
+    arr.push(value);
+    if (arr.length > _METRIC_HISTORY_MAX) arr.shift();
+  }
+
+  function renderMetricSparkline(containerId, values) {
+    var el = $(containerId);
+    if (!el || !values || values.length < 2) { if (el) el.innerHTML = ''; return; }
+    var min = Infinity, max = -Infinity;
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] < min) min = values[i];
+      if (values[i] > max) max = values[i];
+    }
+    var range = max - min || 1;
+    var w = 160, h = 24, pad = 2;
+    var points = [];
+    for (var j = 0; j < values.length; j++) {
+      var x = (j / (values.length - 1)) * w;
+      var y = h - pad - ((values[j] - min) / range) * (h - pad * 2);
+      points.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    var polyline = points.join(' ');
+    var area = polyline + ' ' + w + ',' + h + ' 0,' + h;
+    el.innerHTML = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">'
+      + '<polygon class="spark-area" points="' + area + '"/>'
+      + '<polyline class="spark-line" points="' + polyline + '"/>'
+      + '</svg>';
+  }
+
+  function updateHeaderHealth(metrics) {
+    var header = document.querySelector('.header');
+    if (!header) return;
+    var vals = [
+      metricClass(metrics.cpu_percent, 70, 90),
+      metricClass(metrics.cpu_temp, 65, 80),
+      metricClass(metrics.memory_percent, 70, 90),
+      metricClass(metrics.disk_percent, 80, 95)
+    ];
+    var color;
+    if (vals.indexOf('metric-crit') >= 0) color = 'var(--red)';
+    else if (vals.indexOf('metric-warn') >= 0) color = 'var(--yellow)';
+    else color = 'var(--green)';
+    header.style.setProperty('--health-color', color);
+  }
+
   function updateMetrics(metrics) {
     if (!metrics) return;
     markUpdated('metrics-grid');
@@ -164,6 +242,17 @@
     setMetric('m-temp', metrics.cpu_temp, '\u00B0C', 65, 80);
     setMetric('m-mem', metrics.memory_percent, '%', 70, 90);
     setMetric('m-disk', metrics.disk_percent, '%', 80, 95);
+
+    pushMetricHistory('cpu', metrics.cpu_percent);
+    pushMetricHistory('temp', metrics.cpu_temp);
+    pushMetricHistory('mem', metrics.memory_percent);
+    pushMetricHistory('disk', metrics.disk_percent);
+    renderMetricSparkline('spark-cpu', _metricHistory.cpu);
+    renderMetricSparkline('spark-temp', _metricHistory.temp);
+    renderMetricSparkline('spark-mem', _metricHistory.mem);
+    renderMetricSparkline('spark-disk', _metricHistory.disk);
+
+    updateHeaderHealth(metrics);
   }
 
   // --- Plugins ---
@@ -896,10 +985,21 @@
   function setConnStatus(state) {
     var el = $('conn-status');
     if (!el) return;
+    var label = el.querySelector('.conn-label');
     el.className = 'conn-status';
-    if (state === 'live') { el.classList.add('conn-live'); el.textContent = 'live'; el.title = 'WebSocket connected \u2014 updates every 5s'; }
-    else if (state === 'polling') { el.classList.add('conn-poll'); el.textContent = 'polling (10s)'; el.title = 'WebSocket down \u2014 polling every 10s'; }
-    else { el.classList.add('conn-off'); el.textContent = 'disconnected'; el.title = 'No connection to dashboard server'; }
+    if (state === 'live') {
+      el.classList.add('conn-live');
+      if (label) label.textContent = 'live';
+      el.title = 'WebSocket connected \u2014 updates every 5s';
+    } else if (state === 'polling') {
+      el.classList.add('conn-poll');
+      if (label) label.textContent = 'polling (10s)';
+      el.title = 'WebSocket down \u2014 polling every 10s';
+    } else {
+      el.classList.add('conn-off');
+      if (label) label.textContent = 'disconnected';
+      el.title = 'No connection to dashboard server';
+    }
   }
 
   // --- Config ---

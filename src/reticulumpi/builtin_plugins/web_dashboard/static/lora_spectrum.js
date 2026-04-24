@@ -103,7 +103,7 @@
       _wfCanvas.width = WF_COLS;
       _wfCanvas.height = WF_ROWS;
       _wfCtx = _wfCanvas.getContext('2d');
-      _wfCtx.fillStyle = '#0a0d17';
+      _wfCtx.fillStyle = '#050810';
       _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
       _wfCanvas.addEventListener('mousemove', _onHover);
       _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
@@ -511,10 +511,10 @@
     for (var db = first; db <= _scale.maxDb; db += step) {
       var gy = vbH - 1 - ((db - _scale.minDb) / (_scale.maxDb - _scale.minDb)) * (vbH - 2);
       _lineEl.appendChild(SC.svg('line', {
-        x1: 0, y1: gy, x2: vbW, y2: gy, stroke: '#1a2233', 'stroke-width': 0.5,
+        x1: 0, y1: gy, x2: vbW, y2: gy, stroke: '#0f1525', 'stroke-width': 0.5,
       }));
       _lineEl.appendChild(SC.svg('text', {
-        x: 4, y: gy - 2, fill: '#4a5570', 'font-size': 9,
+        x: 4, y: gy - 2, fill: '#3a4565', 'font-size': 9,
       }, db.toFixed(0)));
     }
 
@@ -535,7 +535,7 @@
         _lineEl.appendChild(SC.svg('polyline', {
           points: pkPts.join(' '),
           fill: 'none',
-          stroke: 'rgba(240, 200, 80, 0.65)',
+          stroke: 'rgba(255, 182, 39, 0.65)',
           'stroke-width': 0.9,
           'stroke-dasharray': '2,2',
           'vector-effect': 'non-scaling-stroke',
@@ -556,8 +556,8 @@
           x: (bk * barW).toFixed(2), y: by.toFixed(2),
           width: Math.max(0.5, barW - 0.5).toFixed(2),
           height: bh.toFixed(2),
-          fill: 'rgba(88, 166, 255, 0.55)',
-          stroke: '#58a6ff',
+          fill: 'rgba(0, 229, 255, 0.55)',
+          stroke: '#00e5ff',
           'stroke-width': 0.8,
         }));
       }
@@ -574,7 +574,7 @@
       }
       _lineEl.appendChild(SC.svg('polyline', {
         points: pts.join(' '),
-        fill: 'none', stroke: '#58a6ff', 'stroke-width': 1.2,
+        fill: 'none', stroke: '#00e5ff', 'stroke-width': 1.2,
         'vector-effect': 'non-scaling-stroke',
       }));
     }
@@ -586,7 +586,7 @@
       var fx = frac * vbW;
       var fmhz = clip.loMhz + frac * (clip.hiMhz - clip.loMhz);
       _lineEl.appendChild(SC.svg('text', {
-        x: fx, y: vbH - 2, fill: '#4a5570', 'font-size': 9,
+        x: fx, y: vbH - 2, fill: '#3a4565', 'font-size': 9,
         'text-anchor': t === 0 ? 'start' : (t === tickCount ? 'end' : 'middle'),
       }, fmhz.toFixed(3)));
     }
@@ -598,8 +598,8 @@
       var rx = a * vbW, rw = (b - a) * vbW;
       _lineEl.appendChild(SC.svg('rect', {
         x: rx.toFixed(1), y: 0, width: Math.max(1, rw).toFixed(1), height: vbH,
-        fill: 'rgba(88, 166, 255, 0.15)',
-        stroke: '#58a6ff',
+        fill: 'rgba(0, 229, 255, 0.15)',
+        stroke: '#00e5ff',
         'stroke-width': 1,
         'stroke-dasharray': '3,2',
       }));
@@ -779,7 +779,7 @@
       _peakHoldDb = null;
       _lastRenderedSweep = 0;
       if (_wfCtx) {
-        _wfCtx.fillStyle = '#0a0d17';
+        _wfCtx.fillStyle = '#050810';
         _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
       }
       return;
@@ -804,7 +804,7 @@
   // which is newest-first — convert to oldest-first for the painter.
   function _repaintWaterfallFromHistory(clip) {
     if (!_wfCtx) return;
-    _wfCtx.fillStyle = '#0a0d17';
+    _wfCtx.fillStyle = '#050810';
     _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
     var rows = SC.historyStore.rows;
     if (!clip || !rows || !rows.length) return;
