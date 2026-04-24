@@ -204,6 +204,10 @@ class MessageStore:
             "ON messages(contact_id)"
         )
         self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_contact_ts "
+            "ON messages(contact_id, timestamp DESC)"
+        )
+        self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_read "
             "ON messages(read) WHERE read = 0"
         )
@@ -513,33 +517,30 @@ class MessageStore:
                    SUM(CASE
                        WHEN direction = 'received' AND read = 0 THEN 1
                        ELSE 0
-                   END) AS unread_count
+                   END) AS unread_count,
+                   (SELECT m2.text FROM messages m2
+                    WHERE m2.contact_id = messages.contact_id
+                    ORDER BY m2.timestamp DESC LIMIT 1
+                   ) AS last_text
             FROM messages{where}
             GROUP BY contact_id, transport, COALESCE(sub_transport, ''), msg_type
             ORDER BY last_ts DESC
         """
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-            # Fetch last message text per conversation in a second pass
-            result = []
-            for r in rows:
-                cid = r["contact_id"]
-                last_row = self._conn.execute(
-                    "SELECT text FROM messages WHERE contact_id = ? "
-                    "ORDER BY timestamp DESC LIMIT 1",
-                    (cid,),
-                ).fetchone()
-                result.append({
-                    "contact_id": cid,
-                    "contact_name": r["contact_name"],
-                    "transport": r["transport"],
-                    "sub_transport": r["sub_transport"] or "",
-                    "msg_type": r["msg_type"],
-                    "last_ts": r["last_ts"],
-                    "last_text": last_row["text"] if last_row else None,
-                    "unread_count": r["unread_count"],
-                })
-        return result
+        return [
+            {
+                "contact_id": r["contact_id"],
+                "contact_name": r["contact_name"],
+                "transport": r["transport"],
+                "sub_transport": r["sub_transport"] or "",
+                "msg_type": r["msg_type"],
+                "last_ts": r["last_ts"],
+                "last_text": r["last_text"],
+                "unread_count": r["unread_count"],
+            }
+            for r in rows
+        ]
 
     def get_conversation_messages(
         self,

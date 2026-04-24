@@ -633,8 +633,8 @@
       if (!_observerMarker) {
         _observerMarker = L.circleMarker([observer.lat, observer.lon], {
           radius: 7,
-          color: '#ff5a1f',
-          fillColor: '#ff8c42',
+          color: '#ff2d7b',
+          fillColor: '#ff2d7b',
           fillOpacity: 0.9,
           weight: 2
         }).addTo(_map).bindPopup('Observer');
@@ -649,7 +649,7 @@
       if (o.lat == null || o.lon == null) continue;
       seen[o.name] = true;
       var overhead = (o.el != null && o.el >= 10);
-      var color = overhead ? '#7ee787' : '#6aa9ff';
+      var color = overhead ? '#00ff9f' : '#00e5ff';
       var radius = overhead ? 5 : 3;
       var existing = _satMarkers[o.name];
       if (existing) {
@@ -713,10 +713,10 @@
       } else {
         var c = L.circle([o.lat, o.lon], {
           radius: radiusM,
-          color: '#58a6ff',
+          color: '#ff2d7b',
           weight: 1,
           opacity: 0.35,
-          fillColor: '#58a6ff',
+          fillColor: '#ff2d7b',
           fillOpacity: 0.07,
           interactive: false
         });
@@ -767,7 +767,7 @@
     function flushSegment() {
       if (seg.length >= 2) {
         L.polyline(seg, {
-          color: '#8b949e',
+          color: '#3a4565',
           weight: 1,
           opacity: 0.55,
           dashArray: '4 4',

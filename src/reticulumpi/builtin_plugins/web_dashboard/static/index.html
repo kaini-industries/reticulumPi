@@ -4,20 +4,39 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=34">
+  <link rel="stylesheet" href="/static/style.css?v=36">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
   <div class="dashboard">
     <!-- Header -->
     <div class="header">
+      <svg class="header-mesh" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <line class="mesh-edge" x1="100" y1="30" x2="55" y2="12"/>
+        <line class="mesh-edge" x1="100" y1="30" x2="145" y2="15"/>
+        <line class="mesh-edge" x1="100" y1="30" x2="60" y2="48"/>
+        <line class="mesh-edge" x1="100" y1="30" x2="150" y2="45"/>
+        <line class="mesh-edge" x1="55" y1="12" x2="20" y2="25"/>
+        <line class="mesh-edge" x1="145" y1="15" x2="180" y2="28"/>
+        <line class="mesh-edge" x1="60" y1="48" x2="25" y2="42"/>
+        <line class="mesh-edge" x1="150" y1="45" x2="185" y2="40"/>
+        <circle class="mesh-node" cx="55" cy="12" r="3"/>
+        <circle class="mesh-node" cx="145" cy="15" r="3"/>
+        <circle class="mesh-node" cx="60" cy="48" r="3"/>
+        <circle class="mesh-node" cx="150" cy="45" r="3"/>
+        <circle class="mesh-node mesh-node-far" cx="20" cy="25" r="2"/>
+        <circle class="mesh-node mesh-node-far" cx="180" cy="28" r="2"/>
+        <circle class="mesh-node mesh-node-far" cx="25" cy="42" r="2"/>
+        <circle class="mesh-node mesh-node-far" cx="185" cy="40" r="2"/>
+        <circle class="mesh-node mesh-node-self" cx="100" cy="30" r="4.5"/>
+      </svg>
       <div>
         <h1 id="node-name">ReticulumPi</h1>
         <div class="node-info">
           <span class="badge badge-version" id="version"></span>
           <span class="badge badge-hash" id="identity-hash"></span>
           <span class="uptime" id="uptime"></span>
-          <span class="conn-status conn-wait" id="conn-status" title="Connection status">waiting…</span>
+          <span class="conn-status conn-wait" id="conn-status" title="Connection status"><span class="conn-dot"></span><span class="conn-label">waiting…</span></span>
         </div>
       </div>
       <button id="logout-btn">Logout</button>
@@ -32,19 +51,35 @@
     <div class="metrics-grid" id="metrics-grid">
       <div class="metric-card">
         <div class="label">CPU</div>
-        <div class="value" id="m-cpu">--<span class="unit">%</span></div>
+        <div class="metric-body">
+          <div class="metric-ring" id="ring-cpu" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="value" id="m-cpu">--<span class="unit">%</span></div>
+        </div>
+        <div class="metric-spark" id="spark-cpu"></div>
       </div>
       <div class="metric-card">
         <div class="label">Temperature</div>
-        <div class="value" id="m-temp">--<span class="unit">&deg;C</span></div>
+        <div class="metric-body">
+          <div class="metric-ring" id="ring-temp" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="value" id="m-temp">--<span class="unit">&deg;C</span></div>
+        </div>
+        <div class="metric-spark" id="spark-temp"></div>
       </div>
       <div class="metric-card">
         <div class="label">Memory</div>
-        <div class="value" id="m-mem">--<span class="unit">%</span></div>
+        <div class="metric-body">
+          <div class="metric-ring" id="ring-mem" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="value" id="m-mem">--<span class="unit">%</span></div>
+        </div>
+        <div class="metric-spark" id="spark-mem"></div>
       </div>
       <div class="metric-card">
         <div class="label">Disk</div>
-        <div class="value" id="m-disk">--<span class="unit">%</span></div>
+        <div class="metric-body">
+          <div class="metric-ring" id="ring-disk" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="value" id="m-disk">--<span class="unit">%</span></div>
+        </div>
+        <div class="metric-spark" id="spark-disk"></div>
       </div>
     </div>
 
