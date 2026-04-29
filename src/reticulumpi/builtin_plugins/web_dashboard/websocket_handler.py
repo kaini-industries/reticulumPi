@@ -254,6 +254,7 @@ def setup_websocket_routes(app: aiohttp.web.Application) -> None:
 
 
 _ws_clients: set[aiohttp.web.WebSocketResponse] = set()
+_ws_last_activity: dict[aiohttp.web.WebSocketResponse, float] = {}
 _broadcast_task: asyncio.Task | None = None
 # Loop + plugin refs captured at startup so cross-thread event-bus
 # callbacks can push straight into the WS broadcast path without polling.
@@ -388,16 +389,19 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         log.debug("Failed to send initial data snapshot", exc_info=True)
 
     _ws_clients.add(ws)
+    _ws_last_activity[ws] = time.time()
     log.debug("WebSocket client connected (%d total)", len(_ws_clients))
 
     try:
         async for msg in ws:
+            _ws_last_activity[ws] = time.time()
             if msg.type == aiohttp.WSMsgType.ERROR:
                 log.debug("WebSocket error: %s", ws.exception())
                 break
             # We don't expect client messages, but handle ping/pong gracefully
     finally:
         _ws_clients.discard(ws)
+        _ws_last_activity.pop(ws, None)
         log.info(
             "WebSocket disconnected (code=%s, %d remaining)",
             ws.close_code,
@@ -866,9 +870,33 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                     return False
 
             results = await asyncio.gather(*(_send(ws) for ws in clients))
+            now = time.time()
             for ws, ok in zip(clients, results):
                 if not ok:
                     _ws_clients.discard(ws)
+                    _ws_last_activity.pop(ws, None)
+                else:
+                    _ws_last_activity[ws] = now
+
+            # Reap stale connections every ~60s (12 cycles at 5s default)
+            if _cycle_count % 12 == 0:
+                stale_timeout = plugin.config.get("ws_stale_timeout", 180)
+                stale = [
+                    ws for ws, last in _ws_last_activity.items()
+                    if now - last > stale_timeout
+                ]
+                for ws in stale:
+                    _ws_clients.discard(ws)
+                    _ws_last_activity.pop(ws, None)
+                    try:
+                        await ws.close(
+                            code=aiohttp.WSCloseCode.GOING_AWAY,
+                            message=b"Connection stale",
+                        )
+                    except Exception:
+                        pass
+                if stale:
+                    log.info("Reaped %d stale WebSocket client(s)", len(stale))
 
             # Periodic health log (~every 60s at default interval).
             if _cycle_count % 30 == 0:
@@ -938,6 +966,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
     for ws in list(_ws_clients):
         await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
     _ws_clients.clear()
+    _ws_last_activity.clear()
 
 
 def _lookup_message_row(msg_id: Any) -> dict | None:

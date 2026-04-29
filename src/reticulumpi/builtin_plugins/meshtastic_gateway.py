@@ -850,6 +850,7 @@ class MeshtasticGateway(PluginBase):
         # channels" every time the probe stalls or the USB device hiccups.
         self._cached_channels: list[dict[str, Any]] = []
         self._channels_cache_time: float = 0.0  # monotonic; 0 = never populated
+        self._cache_ttl: float = float(self.config.get("cache_ttl", 600))
 
         # Packet dedup — same message can arrive via both MQTT and serial,
         # and MQTT bridges can replay packets many minutes apart. Keep a
@@ -2676,8 +2677,12 @@ class MeshtasticGateway(PluginBase):
                     )
                 return []
 
-        # MQTT mode — return cached probe data
+        # MQTT mode — return cached probe data, clearing if stale
         with self._lock:
+            if self._cached_lora_neighbors and self._device_info_cache_time > 0:
+                age = time.monotonic() - self._device_info_cache_time
+                if age > self._cache_ttl:
+                    self._cached_lora_neighbors = []
             return list(self._cached_lora_neighbors)
 
     # ── Channel management (serial mode only) ──────────────────────
@@ -2763,6 +2768,11 @@ class MeshtasticGateway(PluginBase):
                 )
                 # fall through to cached value
         with self._lock:
+            if self._cached_channels and self._channels_cache_time > 0:
+                age = time.monotonic() - self._channels_cache_time
+                if age > self._cache_ttl:
+                    self._cached_channels = []
+                    self._channels_cache_time = 0.0
             return list(self._cached_channels)
 
     @property

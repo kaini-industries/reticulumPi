@@ -70,6 +70,8 @@ class EmergencyBroadcastPlugin(PluginBase):
         self._messages_received = 0
         self._messages_rebroadcast = 0
 
+        self._start_thread(self._periodic_prune_loop, "emergency-prune")
+
         # Create destination for emergency broadcasts
         self.destination = RNS.Destination(
             self.identity,
@@ -268,6 +270,14 @@ class EmergencyBroadcastPlugin(PluginBase):
             to_remove = len(self._seen_ids) - self._max_seen
             for k, _ in by_age[:to_remove]:
                 del self._seen_ids[k]
+
+    def _periodic_prune_loop(self) -> None:
+        while self._active:
+            self._sleep_while_active(600.0)
+            if not self._active:
+                break
+            with self._lock:
+                self._prune_seen_ids(time.time())
 
     def _store_message(self, msg: dict[str, Any]) -> None:
         """Store a message in the local buffer."""

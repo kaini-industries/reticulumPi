@@ -111,6 +111,7 @@ class AdsbRadarPlugin(PluginBase):
         self._sbs_port = int(cfg.get("sbs_port", 30003))
         self._stale_timeout = float(cfg.get("stale_timeout", 300))
         self._max_restarts = int(cfg.get("max_restarts", 5))
+        self._max_aircraft = int(cfg.get("max_aircraft", 500))
 
         self._receiver_lat: float | None = None
         self._receiver_lon: float | None = None
@@ -391,6 +392,12 @@ class AdsbRadarPlugin(PluginBase):
                 self._aircraft[icao] = ac
                 self._aircraft_seen_total += 1
                 new_aircraft = True
+                if len(self._aircraft) > self._max_aircraft:
+                    oldest_icao = min(
+                        self._aircraft,
+                        key=lambda k: self._aircraft[k].last_seen,
+                    )
+                    del self._aircraft[oldest_icao]
 
             ac.last_seen = now
             ac.message_count += 1

@@ -56,7 +56,7 @@ class AnnounceDispatcher:
         breaker_threshold: int = _DEFAULT_BREAKER_THRESHOLD,
         breaker_cooldown: float = _DEFAULT_BREAKER_COOLDOWN,
     ) -> None:
-        self._subscriptions: list[_Subscription] = []
+        self._subscriptions: dict[str, _Subscription] = {}
         self._lock = threading.Lock()
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         self._active = False
@@ -99,12 +99,12 @@ class AnnounceDispatcher:
         sub_id = uuid.uuid4().hex[:12]
         sub = _Subscription(sub_id, aspect_filter, callback)
         with self._lock:
-            self._subscriptions.append(sub)
+            self._subscriptions[sub_id] = sub
         return sub_id
 
     def unsubscribe(self, sub_id: str) -> None:
         with self._lock:
-            self._subscriptions = [s for s in self._subscriptions if s.id != sub_id]
+            self._subscriptions.pop(sub_id, None)
 
     def _enqueue(
         self,
@@ -131,7 +131,7 @@ class AnnounceDispatcher:
             now = time.monotonic()
 
             with self._lock:
-                subs = list(self._subscriptions)
+                subs = list(self._subscriptions.values())
 
             matched_aspects: dict[str, bool] = {}
             for sub in subs:
