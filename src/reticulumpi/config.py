@@ -20,6 +20,7 @@ VALID_KEYS = {
     "log_format",
     "plugin_paths",
     "plugins",
+    "thread_budget",
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -29,6 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "log_level": 4,
     "plugin_paths": [],
     "plugins": {},
+    "thread_budget": 40,
 }
 
 
@@ -122,6 +124,11 @@ class AppConfig:
         # Default to hostname so each node gets a unique name out of the box.
         hostname = socket.gethostname()
         return f"ReticulumPi-{hostname}"
+
+    @property
+    def thread_budget(self) -> int:
+        val = self._data.get("thread_budget", 40)
+        return int(val) if isinstance(val, (int, float)) else 40
 
     @property
     def plugins(self) -> dict[str, dict[str, Any]]:

@@ -1,6 +1,6 @@
 /* ReticulumPi Dashboard — shared single-transport Messages panel factory.
  *
- * Each transport (LXMF, Meshtastic MQTT, Meshtastic LoRa, MeshCore) gets its
+ * Each transport (LXMF, Meshtastic MQTT, Meshtastic, MeshCore) gets its
  * own <section> on the dashboard.  A thin wrapper calls
  * `RPI.createMessagesPanel(config)` with transport-specific settings; this
  * factory owns all DOM rendering, state, API calls, and WebSocket handling
@@ -49,6 +49,27 @@
     return _chInflight;
   }
   function _invalidateChannels() { _chCache = null; }
+
+  var _trCache = null;
+  var _trInflight = null;
+  var TR_CACHE_MS = 5000;
+  function _fetchTransportsShared() {
+    if (_trCache && Date.now() - _trCache.ts < TR_CACHE_MS) {
+      return Promise.resolve(_trCache.data);
+    }
+    if (_trInflight) return _trInflight;
+    _trInflight = api('/api/messages/transports').then(function (r) {
+      _trInflight = null;
+      if (!r || !r.ok) return [];
+      var data = r.data.transports || [];
+      _trCache = {data: data, ts: Date.now()};
+      return data;
+    }, function () {
+      _trInflight = null;
+      return [];
+    });
+    return _trInflight;
+  }
 
   // ── Module-level panel registry ──────────────────────────────────
   // Populated on each createMessagesPanel() call so the top-level WS
@@ -336,6 +357,7 @@
       if (append) _olderLoading = true;
       return api(url).then(function (r) {
         if (append) _olderLoading = false;
+        if (contactId !== _activeContactId) return;
         if (!r || !r.ok) return;
         var msgs = r.data.messages || [];
         // Seed dedupe set so a racing WS push (arriving after the HTTP
@@ -404,6 +426,7 @@
       // the round-trip makes expanding a tab instant.  A WS disconnect
       // clears the flag via _resetFreshness so the next expand refetches.
       if (_hasFreshData && _expanded) {
+        if (cfg.supportsChannels && _channels.length === 0) _fetchChannels();
         _renderConversations();
         _updateUnreadUI();
         if (_activeContactId) _renderThread();
@@ -434,7 +457,9 @@
       var pinnedRows = [];
       var seen = {};
       var canon = _canonicalize(_channels);
-      if (cfg.supportsChannels && canon.canonical.length > 0) {
+      if (!cfg.broadcastLabel) {
+        // No broadcast support — skip pinned broadcast rows entirely.
+      } else if (cfg.supportsChannels && canon.canonical.length > 0) {
         for (var k = 0; k < canon.canonical.length; k++) {
           var ch = canon.canonical[k];
           var cid = _broadcastCid(ch.index);
@@ -591,12 +616,48 @@
       if (status === 'sent')
         return ' <span class="msg-status-sent">&#10003;</span>';
       if (status === 'delivered')
-        return ' <span class="msg-status-sent">&#10003;&#10003;</span>';
+        return ' <span class="msg-status-delivered">&#10003;&#10003;</span>';
+      if (status === 'queued')
+        return ' <span class="msg-status-queued">&#9203;</span>';
       if (status === 'pending')
-        return ' <span class="msg-status-pending">…</span>';
+        return ' <span class="msg-status-pending">&hellip;</span>';
+      if (status === 'propagated')
+        return ' <span class="msg-status-propagated">&#10003;</span>';
+      if (status === 'timeout')
+        return ' <span class="msg-status-timeout">&#10003;?</span>';
+      if (status === 'expired')
+        return ' <span class="msg-status-expired">&#10007;</span>';
       if (status === 'failed' || status === 'delivery_failed')
         return ' <span class="msg-status-failed">&#10007;</span>';
       return '';
+    }
+
+    function _hopsLabel(m) {
+      var pl = m.metadata && m.metadata.path_len;
+      if (pl === null || pl === undefined) return '';
+      if (pl === 0) return 'direct';
+      if (pl === 255) return 'flood';
+      return pl + (pl === 1 ? ' hop' : ' hops');
+    }
+
+    function _reactionsHtml(m) {
+      var reactions = m.metadata && m.metadata.reactions;
+      if (!reactions || !reactions.length) return '';
+      var counts = {};
+      var order = [];
+      for (var i = 0; i < reactions.length; i++) {
+        var e = reactions[i].emoji;
+        if (!counts[e]) { counts[e] = 0; order.push(e); }
+        counts[e]++;
+      }
+      var html = '<div class="msg-reactions">';
+      for (var j = 0; j < order.length; j++) {
+        var em = order[j];
+        html += '<span class="msg-reaction-badge">'
+             + esc(em) + (counts[em] > 1 ? ' ' + counts[em] : '')
+             + '</span>';
+      }
+      return html + '</div>';
     }
 
     function _bubbleHtml(m) {
@@ -604,15 +665,20 @@
       var sender = isSent ? 'You' : (m.from_name || m.from_id || '?');
       var time = m.timestamp ? formatTimeAgo(m.timestamp) : '';
       var statusHtml = isSent && m.status ? _statusGlyph(m.status) : '';
+      var hops = !isSent ? _hopsLabel(m) : '';
+      var hopsHtml = hops
+        ? '<span class="msg-hops">' + esc(hops) + '</span>' : '';
       var idAttr = (m.id !== null && m.id !== undefined)
         ? ' data-msg-id="' + esc(String(m.id)) + '"' : '';
       return '<div class="msg-bubble ' + (isSent ? 'sent' : 'received') + '"'
            + idAttr + '>'
            + '<div class="msg-meta"><span>' + esc(sender) + '</span>'
            + '<span>' + esc(time) + '</span>'
+           + hopsHtml
            + '<span class="msg-status">' + statusHtml + '</span>'
            + '</div>'
            + '<div class="msg-text">' + esc(m.text || '') + '</div>'
+           + _reactionsHtml(m)
            + '</div>';
     }
 
@@ -733,7 +799,9 @@
       var bcLabel = cfg.broadcastLabel || 'Broadcast';
       var canonical = _canonicalize(_channels).canonical;
       _destOptions = [];
-      if (cfg.supportsChannels && canonical.length > 0) {
+      if (!cfg.broadcastLabel) {
+        // No broadcast support — omit broadcast destinations.
+      } else if (cfg.supportsChannels && canonical.length > 0) {
         for (var k = 0; k < canonical.length; k++) {
           var ch = canonical[k];
           _destOptions.push({
@@ -1476,6 +1544,29 @@
       if (changed) _updateBubbleStatus(row.id, row.status);
     }
 
+    function _onReaction(data) {
+      if (!_matchesPanel(data)) return;
+      if (!_resolveDom()) return;
+      if (data.id === null || data.id === undefined) return;
+      for (var i = 0; i < _threadMessages.length; i++) {
+        if (String(_threadMessages[i].id) === String(data.id)) {
+          if (!_threadMessages[i].metadata) _threadMessages[i].metadata = {};
+          _threadMessages[i].metadata.reactions = data.reactions || [];
+          break;
+        }
+      }
+      if (!_dom.chat) return;
+      var sel = '[data-msg-id="' + String(data.id).replace(/"/g, '\\"') + '"]';
+      var bubble = _dom.chat.querySelector(sel);
+      if (!bubble) return;
+      var existing = bubble.querySelector('.msg-reactions');
+      if (existing) existing.remove();
+      var tmp = document.createElement('div');
+      tmp.innerHTML = _reactionsHtml({metadata: {reactions: data.reactions || []}});
+      var newEl = tmp.firstChild;
+      if (newEl) bubble.appendChild(newEl);
+    }
+
     function _renderTransportAddress(addr) {
       if (!_dom || !_dom.toggle || !addr) return;
       var el = _dom.toggle.querySelector('.msg-transport-address');
@@ -1508,9 +1599,7 @@
         setTimeout(_init, 100);
         return;
       }
-      api('/api/messages/transports').then(function (r) {
-        if (!r || !r.ok) return;
-        var list = r.data.transports || [];
+      _fetchTransportsShared().then(function (list) {
         var entry = null;
         for (var i = 0; i < list.length; i++) {
           if (list[i].name === cfg.transport) { entry = list[i]; break; }
@@ -1520,14 +1609,10 @@
         if (_dom.section) _dom.section.style.display = _available ? '' : 'none';
         if (entry && entry.address) _renderTransportAddress(entry.address);
       });
-      // First pass so counts appear before the user expands.
-      // Pre-fetch channels too: without them, the conversation render
-      // can't merge per-channel broadcast rows onto canonical pinned
-      // ones, so the first paint after expand flickers as channels
-      // arrive late.  The shared fetcher coalesces the LoRa+MQTT calls.
+      // Fetch unread counts so badges appear on collapsed headers.
+      // Conversations and channels are deferred to first expand via
+      // _refresh() which fetches when _hasFreshData is false.
       _fetchUnread();
-      _fetchConversations();
-      if (cfg.supportsChannels) _fetchChannels();
     }
 
     // Register for cross-panel channel refresh so join/delete from the
@@ -1544,6 +1629,7 @@
       update: update,
       onMessage: _onMessage,
       onStatus: _onStatus,
+      onReaction: _onReaction,
       resetFreshness: _resetFreshness,
     };
     _allPanels.push(panelApi);
@@ -1563,6 +1649,11 @@
   R.onMessagingStatus = function (row) {
     for (var i = 0; i < _allPanels.length; i++) {
       try { _allPanels[i].onStatus(row); } catch (e) { /* keep other panels alive */ }
+    }
+  };
+  R.onMessagingReaction = function (data) {
+    for (var i = 0; i < _allPanels.length; i++) {
+      try { _allPanels[i].onReaction(data); } catch (e) { /* keep other panels alive */ }
     }
   };
   // Called from app.js on ws.onclose so that the next _refresh() on

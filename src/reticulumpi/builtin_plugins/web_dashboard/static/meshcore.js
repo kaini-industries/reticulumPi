@@ -195,6 +195,7 @@
   function updateMeshCore(status, contacts) {
     var section = $('meshcore-section');
     if (!section) return;
+    if (R.markUpdated) R.markUpdated('meshcore-section');
 
     // Plugin not available
     if (!status || status.available === false) {

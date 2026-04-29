@@ -281,7 +281,7 @@ class ConnectivityMonitorPlugin(PluginBase):
             except Exception:
                 self.log.debug("Error in connectivity monitor loop", exc_info=True)
 
-            self._sleep_while_active(self._check_interval)
+            self._jittered_sleep(self._check_interval)
 
     def _run_diagnostics(self) -> None:
         """Run a full diagnostics cycle."""

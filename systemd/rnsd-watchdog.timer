@@ -1,0 +1,9 @@
+[Unit]
+Description=Monitor rnsd socket health
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+
+[Install]
+WantedBy=timers.target

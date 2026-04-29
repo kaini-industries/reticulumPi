@@ -16,6 +16,8 @@
   var configIfaces = {};    // {name: {enabled, type, properties}} from config file
   var pendingRestart = false;
   var lastLiveIfaces = [];  // last live interfaces from RNS
+  var _wsFirstTick = false;
+  var _wsReadyCallbacks = [];
 
   // --- Helpers ---
 
@@ -40,6 +42,18 @@
       if (r.status === 401) { window.location.href = '/login.html'; return null; }
       return r.json().catch(function() { return {ok: false, error: 'Invalid response'}; });
     }).catch(function() { if (timer) clearTimeout(timer); return null; });
+  }
+
+  function apiRetry(path, opts, maxRetries) {
+    maxRetries = maxRetries || 2;
+    return api(path, opts).then(function(r) {
+      if (r !== null || maxRetries <= 0) return r;
+      return new Promise(function(resolve) {
+        setTimeout(function() {
+          resolve(apiRetry(path, opts, maxRetries - 1));
+        }, 500);
+      });
+    });
   }
 
   function $(id) { return document.getElementById(id); }
@@ -91,6 +105,8 @@
 
   function markUpdated(sectionId) {
     _sectionUpdated[sectionId] = Date.now() / 1000;
+    var sec = document.getElementById(sectionId);
+    if (sec) sec.classList.remove('awaiting-data');
   }
 
   function _refreshFreshness() {
@@ -167,6 +183,11 @@
       + '</div>';
   }
 
+  function onWsReady(fn) {
+    if (_wsFirstTick) { fn(); return; }
+    _wsReadyCallbacks.push(fn);
+  }
+
   /* ── Expose shared utilities for sub-modules ─────────────────────── */
   RPI.api = api;
   RPI.$ = $;
@@ -179,6 +200,7 @@
   RPI.setMetric = setMetric;
   RPI.formatTimeAgo = formatTimeAgo;
   RPI._di = _di;
+  RPI.onWsReady = onWsReady;
 
   // Shared mutable object used by both mesh.js and lora.js
   RPI._reachScores = {};
@@ -1038,87 +1060,91 @@
     });
   }
 
-  function fetchAll() {
-    // ── Priority 1: Core panels (metrics, mesh, interfaces) ──────────
+  // ── Tiered fetch: Critical (above-fold), Secondary (WS-covered
+  //    fallback), WsUncovered (always needed), Deferred (on expand) ──
 
-    api('/api/metrics').then(function(r) {
+  function fetchCritical() {
+    apiRetry('/api/metrics').then(function(r) {
       if (r && r.ok) updateMetrics(r.data);
     });
 
-    // Mesh nodes (server-side paginated) + summary
-    if (RPI.fetchMeshNodes) RPI.fetchMeshNodes();
-    if (RPI.fetchMeshSummary) RPI.fetchMeshSummary();
-
-    // Peer telemetry
-    api('/api/mesh/telemetry').then(function(r) {
-      if (!r || !r.ok) return;
-      if (RPI.cacheMeshPeers) RPI.cacheMeshPeers(r.data.peers);
-      if (RPI.updatePeerTelemetry) RPI.updatePeerTelemetry(r.data.peers);
-    });
-
-    // Interfaces + LoRa diagnostics — fetch in parallel, merge when both arrive
     var _ifaceResult = null, _loraResult = null;
     function mergeIfaceLora() {
       if (_ifaceResult === null || _loraResult === null) return;
       if (RPI.updateLoraRadio) RPI.updateLoraRadio(_ifaceResult, _loraResult);
     }
-    api('/api/interfaces').then(function(r) {
+    apiRetry('/api/interfaces').then(function(r) {
       if (!r || !r.ok) return;
       updateInterfaces(r.data.interfaces);
       if (RPI.updateLoraSignal) RPI.updateLoraSignal(r.data.interfaces);
       _ifaceResult = r.data.interfaces;
       mergeIfaceLora();
     });
-    api('/api/lora').then(function(r) {
+    apiRetry('/api/lora').then(function(r) {
       _loraResult = (r && r.ok) ? r.data : {};
       mergeIfaceLora();
     });
 
-    api('/api/plugins').then(function(r) {
+    apiRetry('/api/plugins').then(function(r) {
       if (r && r.ok) updatePlugins(r.data.plugins, r.data.failed_plugins);
     });
 
-    // ── Priority 2: Radios (Meshtastic, MeshCore) ────────────────────
-
-    // Meshtastic — fetch status + nodes in parallel, merge when both arrive
+    // Map + visible-section data — fetch immediately alongside metrics
     var _mshStatus = null, _mshNodes = null;
     function mergeMeshtastic() {
       if (_mshStatus === null || _mshNodes === null) return;
       if (RPI.updateMeshtastic) RPI.updateMeshtastic(_mshStatus, _mshNodes);
       if (RPI.updateMap) RPI.updateMap(_mshNodes);
     }
-    api('/api/meshtastic/status').then(function(r) {
+    apiRetry('/api/meshtastic/status').then(function(r) {
       _mshStatus = (r && r.ok) ? r.data : {};
       mergeMeshtastic();
     });
-    api('/api/meshtastic/nodes').then(function(r) {
+    apiRetry('/api/meshtastic/nodes').then(function(r) {
       _mshNodes = (r && r.ok) ? r.data.nodes : [];
       mergeMeshtastic();
     });
-    api('/api/meshtastic/device').then(function(r) {
+    apiRetry('/api/meshtastic/device').then(function(r) {
       if (r && r.ok && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(r.data);
     });
-    api('/api/meshtastic/lora_neighbors').then(function(r) {
+    apiRetry('/api/meshtastic/lora_neighbors').then(function(r) {
       if (r && r.ok) {
         if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(r.data.neighbors);
         if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(r.data.neighbors);
       }
     });
 
-    // MeshCore — fetch status + contacts in parallel, merge when both arrive
     var _mcStatus = null, _mcContacts = null;
     function mergeMeshCore() {
       if (_mcStatus === null || _mcContacts === null) return;
       if (RPI.updateMeshCore) RPI.updateMeshCore(_mcStatus, _mcContacts);
     }
-    api('/api/meshcore/status').then(function(r) {
+    apiRetry('/api/meshcore/status').then(function(r) {
       _mcStatus = (r && r.ok) ? r.data : {};
       mergeMeshCore();
     });
-    api('/api/meshcore/contacts').then(function(r) {
+    apiRetry('/api/meshcore/contacts').then(function(r) {
       _mcContacts = (r && r.ok) ? r.data.contacts : [];
       mergeMeshCore();
       if (RPI.updateMapMeshCore) RPI.updateMapMeshCore(_mcContacts);
+    });
+
+    apiRetry('/api/gps').then(function(r) {
+      if (r && r.ok && RPI.updateGps) RPI.updateGps(r.data);
+      if (r && r.ok && r.data.last_fix && RPI.updateMapGps) RPI.updateMapGps(r.data.last_fix);
+    });
+
+    apiRetry('/api/adsb').then(function(r) {
+      if (r && r.ok && RPI.adsb && RPI.adsb.update) RPI.adsb.update(r.data);
+    });
+  }
+
+  function fetchSecondary() {
+    api('/api/mesh/telemetry').then(function(r) {
+      if (!r || !r.ok) return;
+      if (RPI.cacheMeshPeers) RPI.cacheMeshPeers(r.data.peers);
+      if (RPI.updatePeerTelemetry) RPI.updatePeerTelemetry(r.data.peers);
+      if (RPI.updateMapReticulum) RPI.updateMapReticulum(r.data.peers);
     });
     api('/api/meshcore/device').then(function(r) {
       if (r && r.ok && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(r.data);
@@ -1126,29 +1152,6 @@
     api('/api/meshcore_observer/status').then(function(r) {
       if (r && r.ok && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(r.data);
     });
-
-    // ── Priority 3: Secondary panels ─────────────────────────────────
-
-    api('/api/alerts').then(function(r) {
-      if (r && r.ok) updateAlerts(r.data);
-    });
-
-    api('/api/sensors').then(function(r) {
-      if (!r || !r.ok) return;
-      updateSensors(r.data.sensors);
-      var sensorNames = Object.keys(r.data.sensors || {});
-      if (sensorNames.length > 0) fetchSensorHistory(sensorNames);
-    });
-
-    api('/api/emergency').then(function(r) {
-      if (r && r.ok) updateEmergency(r.data);
-    });
-
-    api('/api/files').then(function(r) {
-      if (r && r.ok) updateSharedFiles(r.data.files);
-    });
-
-    // Transport + connectivity + routing
     api('/api/transport').then(function(r) {
       if (r && r.ok) updateTransport(r.data);
     });
@@ -1158,14 +1161,12 @@
     api('/api/routing?per_page=0').then(function(r) {
       if (r && r.ok && RPI.updateRoutingSummary) RPI.updateRoutingSummary(r.data.summary);
     });
+  }
 
-    // LoRa nodes panel
+  function fetchWsUncovered() {
+    if (RPI.fetchMeshNodes) RPI.fetchMeshNodes();
+    if (RPI.fetchMeshSummary) RPI.fetchMeshSummary();
     if (RPI.fetchLoraReachability) RPI.fetchLoraReachability();
-
-    // GPS telemetry
-    api('/api/gps').then(function(r) {
-      if (r && r.ok && RPI.updateGps) RPI.updateGps(r.data);
-    });
   }
 
   // --- WebSocket ---
@@ -1190,28 +1191,52 @@
       try {
         var msg = JSON.parse(ev.data);
         if (msg.type === 'spectrum_history' && msg.data) {
-          // Server pushes this once per WS connect as the initial waterfall
-          // backfill.  Panels see the generation bump on their next update()
-          // tick and bulk-paint from the store.
           if (RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
             RPI.spectrumCommon.historyStore.loadHistory(msg.data);
           }
           return;
         }
+        if (msg.type === 'link_tester_history' && msg.data) {
+          if (RPI.linkTesterHistoryLoad) RPI.linkTesterHistoryLoad(msg.data);
+          return;
+        }
+        if (msg.type === 'lora_scanner_history' && msg.data) {
+          if (RPI.spectrumCommon && RPI.spectrumCommon.loraHistoryStore) {
+            RPI.spectrumCommon.loraHistoryStore.loadHistory(msg.data);
+          }
+          if (msg.data.channel_power_history && RPI.loraSpectrum && RPI.loraSpectrum.loadChannelHistory) {
+            RPI.loraSpectrum.loadChannelHistory(msg.data.channel_power_history);
+          }
+          return;
+        }
         if (msg.type === 'message' && msg.data) {
           if (RPI.onMessagingEvent) RPI.onMessagingEvent(msg.data);
+          if (RPI.onMqttFeedMessage) RPI.onMqttFeedMessage(msg.data);
           return;
         }
         if (msg.type === 'message_status' && msg.data) {
           if (RPI.onMessagingStatus) RPI.onMessagingStatus(msg.data);
           return;
         }
+        if (msg.type === 'reaction' && msg.data) {
+          if (RPI.onMessagingReaction) RPI.onMessagingReaction(msg.data);
+          return;
+        }
         if (msg.type === 'update' && msg.data) {
+          if (!_wsFirstTick) {
+            _wsFirstTick = true;
+            for (var _wi = 0; _wi < _wsReadyCallbacks.length; _wi++) _wsReadyCallbacks[_wi]();
+            _wsReadyCallbacks = [];
+          }
           // Maintain the shared spectrum history ring BEFORE panel updates
           // run, so both panels read a consistent snapshot.
           if (msg.data.spectrum
               && RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
             RPI.spectrumCommon.historyStore.ingestTick(msg.data.spectrum);
+          }
+          if (msg.data.lora_scanner
+              && RPI.spectrumCommon && RPI.spectrumCommon.loraHistoryStore) {
+            RPI.spectrumCommon.loraHistoryStore.ingestTick(msg.data.lora_scanner);
           }
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
           if (msg.data.interfaces) {
@@ -1220,6 +1245,7 @@
           }
           if (msg.data.mesh) {
             if (msg.data.mesh.peers && RPI.cacheMeshPeers) RPI.cacheMeshPeers(msg.data.mesh.peers);
+            if (msg.data.mesh.peers && RPI.updateMapReticulum) RPI.updateMapReticulum(msg.data.mesh.peers);
             if (RPI.updateMeshFromWS) RPI.updateMeshFromWS(msg.data.mesh);
           }
           if (msg.data.sensors) updateSensors(msg.data.sensors);
@@ -1228,6 +1254,10 @@
           if (msg.data.connectivity) updateConnectivity(msg.data.connectivity);
           if (msg.data.routing && RPI.updateRoutingSummary) RPI.updateRoutingSummary(msg.data.routing);
           if (msg.data.meshtastic_device && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(msg.data.meshtastic_device);
+          if (msg.data.meshtastic_nodes) {
+            if (RPI.updateMeshtastic) RPI.updateMeshtastic(msg.data.meshtastic_status || {}, msg.data.meshtastic_nodes);
+            if (RPI.updateMap) RPI.updateMap(msg.data.meshtastic_nodes);
+          }
           if (msg.data.meshtastic_lora_neighbors) {
             if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(msg.data.meshtastic_lora_neighbors);
             if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(msg.data.meshtastic_lora_neighbors);
@@ -1239,20 +1269,24 @@
           if (msg.data.mesh_bridge && RPI.updateMeshBridge) RPI.updateMeshBridge(msg.data.mesh_bridge);
           if (msg.data.messaging) {
             if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(msg.data.messaging);
-            if (RPI.updateMessagingMqtt) RPI.updateMessagingMqtt(msg.data.messaging);
+            if (RPI.updateMqttFeed) RPI.updateMqttFeed(msg.data.messaging);
             if (RPI.updateMessagingLora) RPI.updateMessagingLora(msg.data.messaging);
             if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(msg.data.messaging);
           }
           if (msg.data.space && RPI.space && RPI.space.update) RPI.space.update(msg.data.space);
           if (msg.data.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(msg.data.spectrum);
-          if (msg.data.spectrum && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
+          if ((msg.data.spectrum || msg.data.lora_scanner) && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
           if (msg.data.gps && RPI.updateGps) RPI.updateGps(msg.data.gps);
+          if (msg.data.gps && msg.data.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(msg.data.gps.last_fix);
           if (msg.data.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(msg.data.adsb);
+          if (msg.data.ntp && RPI.updateNtp) RPI.updateNtp(msg.data.ntp);
+          if (msg.data.link_tester && RPI.updateLinkTester) RPI.updateLinkTester(msg.data.link_tester);
         }
       } catch(e) { /* ignore parse errors */ }
     };
 
     ws.onclose = function() {
+      _wsFirstTick = false;
       if (RPI.onMessagingConnectionLost) RPI.onMessagingConnectionLost();
       scheduleReconnect();
     };
@@ -1278,7 +1312,9 @@
     setConnStatus('polling');
     if (pollTimer) return;
     pollTimer = setInterval(function() {
-      fetchAll();
+      fetchCritical();
+      fetchSecondary();
+      fetchWsUncovered();
     }, 10000);
   }
 
@@ -1294,7 +1330,11 @@
     });
   });
 
-  // Collapsible section toggles
+  // Collapsible section toggles with deferred-fetch on first expand
+  var _sectionFirstExpand = {};
+  function registerDeferredSection(name, fn) { _sectionFirstExpand[name] = fn; }
+  RPI.registerDeferredSection = registerDeferredSection;
+
   ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency'].forEach(function(name) {
     var toggle = $(name + '-toggle');
     var body = $(name + '-body');
@@ -1303,6 +1343,10 @@
         if (body.classList.contains('hidden')) {
           body.classList.remove('hidden');
           toggle.classList.add('open');
+          if (_sectionFirstExpand[name]) {
+            _sectionFirstExpand[name]();
+            delete _sectionFirstExpand[name];
+          }
         } else {
           body.classList.add('hidden');
           toggle.classList.remove('open');
@@ -1564,15 +1608,50 @@
   });
   fetchInterfacesConfig();
 
+  // Register deferred fetches for collapsed sections
+  registerDeferredSection('alerts', function() {
+    api('/api/alerts').then(function(r) { if (r && r.ok) updateAlerts(r.data); });
+  });
+  registerDeferredSection('sensors', function() {
+    if (_lastSensorData) return;
+    api('/api/sensors').then(function(r) {
+      if (!r || !r.ok) return;
+      updateSensors(r.data.sensors);
+      var names = Object.keys(r.data.sensors || {});
+      if (names.length > 0) fetchSensorHistory(names);
+    });
+  });
+  registerDeferredSection('emergency', function() {
+    api('/api/emergency').then(function(r) { if (r && r.ok) updateEmergency(r.data); });
+  });
+  registerDeferredSection('files', function() {
+    api('/api/files').then(function(r) { if (r && r.ok) updateSharedFiles(r.data.files); });
+  });
+
   // If we reached this page, the cookie is valid.
   fetchNode();
-  fetchAll();
+  fetchCritical();
   connectWS();
 
-  // Refresh plugins and interfaces periodically
-  setInterval(fetchAll, 30000);
+  // Always fetch secondary data once (meshtastic status/nodes, mesh
+  // telemetry, etc. are not pushed via WS).  Delay slightly so the
+  // critical tier and WS connection start first.
+  setTimeout(fetchSecondary, 500);
 
-  // Refresh LoRa reachability scores every 60s
-  setInterval(function() { if (RPI.fetchLoraReachability) RPI.fetchLoraReachability(); }, 60000);
+  // WS-uncovered data: fetch after first WS tick, or after 3s fallback
+  var _wsUncoveredTimer = setTimeout(fetchWsUncovered, 3000);
+  onWsReady(function() {
+    clearTimeout(_wsUncoveredTimer);
+    fetchWsUncovered();
+  });
+
+  // Periodic refresh: only poll WS-uncovered data when WS is live
+  setInterval(function() {
+    if (!_wsFirstTick) {
+      fetchCritical();
+      fetchSecondary();
+    }
+    fetchWsUncovered();
+  }, 30000);
 
 })();

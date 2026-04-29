@@ -57,7 +57,7 @@ class TestValidateConfig:
     def test_defaults(self):
         p = _make_plugin()
         assert p._dump1090_bin == "dump1090"
-        assert p._device_index == 0
+        assert p._device_index == "0"
         assert p._gain == "max"
         assert p._ppm == 0
         assert p._enable_bias_tee is False
@@ -79,7 +79,7 @@ class TestValidateConfig:
             "receiver_lon": -74.0060,
         })
         assert p._dump1090_bin == "/opt/dump1090-fa/dump1090-fa"
-        assert p._device_index == 1
+        assert p._device_index == "1"
         assert p._gain == "40"
         assert p._ppm == -3
         assert p._enable_bias_tee is True

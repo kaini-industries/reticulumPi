@@ -360,6 +360,52 @@ class MessageStore:
             )
             self._conn.commit()
 
+    def add_reaction(
+        self,
+        packet_id: int,
+        emoji: str,
+        from_id: str,
+        from_name: str | None = None,
+    ) -> int | None:
+        """Append an emoji reaction to the message matching *packet_id*.
+
+        Looks up the target message by ``metadata.packet_id`` (stored on
+        Meshtastic text messages).  Returns the DB row id of the updated
+        message, or ``None`` if no match was found.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, metadata FROM messages "
+                "WHERE json_extract(metadata, '$.packet_id') = ? "
+                "AND transport = 'meshtastic' "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (packet_id,),
+            ).fetchone()
+            if not row:
+                return None
+            msg_id = row[0]
+            raw_meta = row[1]
+            try:
+                meta = json.loads(raw_meta) if raw_meta else {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            reactions = meta.get("reactions", [])
+            if any(r["emoji"] == emoji and r["from_id"] == from_id for r in reactions):
+                return msg_id
+            reactions.append({
+                "emoji": emoji,
+                "from_id": from_id,
+                "from_name": from_name or from_id,
+                "timestamp": time.time(),
+            })
+            meta["reactions"] = reactions
+            self._conn.execute(
+                "UPDATE messages SET metadata = ? WHERE id = ?",
+                (json.dumps(meta), msg_id),
+            )
+            self._conn.commit()
+            return msg_id
+
     def get_status(self, msg_id: int) -> str | None:
         """Return the current delivery status for *msg_id*, or None."""
         with self._lock:
@@ -705,21 +751,6 @@ class MessageStore:
 # ═══════════════════════════════════════════════════════════════════
 
 
-class _LXMFPropagationHandler:
-    """RNS announce handler that auto-selects the nearest LXMF propagation node."""
-
-    def __init__(self, adapter: "LXMFAdapter") -> None:
-        self.aspect_filter = "lxmf.propagation"
-        self._adapter = adapter
-
-    def received_announce(
-        self, destination_hash: bytes, announced_identity: Any, app_data: bytes
-    ) -> None:
-        self._adapter._handle_propagation_announce(
-            destination_hash, announced_identity, app_data
-        )
-
-
 # ═══════════════════════════════════════════════════════════════════
 # LXMF Transport Adapter
 # ═══════════════════════════════════════════════════════════════════
@@ -735,18 +766,27 @@ class LXMFAdapter(TransportAdapter):
     transport_name = "lxmf"
     display_name = "LXMF"
 
+    _MAX_PROP_NODES = 3
+    _PROP_STALE_S = 3600  # 1 hour
+    _IDENTITY_CACHE_TTL = 300.0  # 5 minutes
+
     def __init__(self, hub: "MessagingHubPlugin") -> None:
         super().__init__()
         self._hub = hub
         self._router: Any = None
         self._destination: Any = None
         self._identity: Any = None
-        self._propagation_handler: _LXMFPropagationHandler | None = None
-        self._best_propagation_hops: int = 0
+        self._announce_sub: str | None = None
+        # Propagation node fallback list: sorted by (hops, -last_seen)
+        self._propagation_nodes: list[dict[str, Any]] = []
+        self._current_prop_node: bytes | None = None
+        self._prop_lock = threading.Lock()
         # Track outbound messages awaiting delivery confirmation:
         # {lxm_hash_hex: {"msg_id": int, "timestamp": float}}
         self._pending_delivery: dict[str, dict[str, Any]] = {}
         self._pending_lock = threading.Lock()
+        # Identity recall cache: dest_hash_hex -> (identity, timestamp)
+        self._identity_cache: dict[str, tuple[Any, float]] = {}
 
     def start(self) -> None:
         import LXMF
@@ -790,9 +830,9 @@ class LXMFAdapter(TransportAdapter):
         self._router.register_delivery_callback(self._on_lxmf_message)
 
         # Auto-select nearest propagation node for store-and-forward
-        self._best_propagation_hops = RNS.Transport.PATHFINDER_M + 1
-        self._propagation_handler = _LXMFPropagationHandler(self)
-        RNS.Transport.register_announce_handler(self._propagation_handler)
+        self._announce_sub = self._hub.announce_dispatcher.subscribe(
+            "lxmf.propagation", self._handle_propagation_announce,
+        )
 
         self._hub.log.info(
             "LXMF messaging active at %s",
@@ -800,8 +840,8 @@ class LXMFAdapter(TransportAdapter):
         )
 
     def stop(self) -> None:
-        if self._propagation_handler:
-            RNS.Transport.deregister_announce_handler(self._propagation_handler)
+        if self._announce_sub:
+            self._hub.announce_dispatcher.unsubscribe(self._announce_sub)
         if self._router:
             self._router.register_delivery_callback(None)
 
@@ -825,7 +865,7 @@ class LXMFAdapter(TransportAdapter):
             except Exception:
                 pass
 
-        dest_identity = RNS.Identity.recall(dest_hash)
+        dest_identity = self._recall_identity(dest_hash)
         if dest_identity is None:
             RNS.Transport.request_path(dest_hash)
             return {"sent": False, "reason": "Path not found, requested"}
@@ -917,6 +957,17 @@ class LXMFAdapter(TransportAdapter):
             self._hub._on_delivery_status_update(
                 entry["msg_id"], "lxmf", "delivery_failed",
             )
+
+            # Invalidate identity cache for this destination
+            try:
+                if hasattr(message, "destination_hash") and message.destination_hash:
+                    with self._pending_lock:
+                        self._identity_cache.pop(message.destination_hash.hex(), None)
+            except Exception:
+                pass
+
+            # Check if propagation node needs failover
+            self._check_propagation_failover()
         except Exception:
             self._hub.log.exception("Error in LXMF failed callback")
 
@@ -972,7 +1023,7 @@ class LXMFAdapter(TransportAdapter):
     def _handle_propagation_announce(
         self, destination_hash: bytes, announced_identity: Any, app_data: bytes
     ) -> None:
-        """Auto-select the nearest active propagation node."""
+        """Maintain a ranked list of propagation nodes and select the best."""
         try:
             if not app_data:
                 return
@@ -986,16 +1037,103 @@ class LXMFAdapter(TransportAdapter):
                 return
 
             hops = RNS.Transport.hops_to(destination_hash)
-            if hops < self._best_propagation_hops:
-                self._best_propagation_hops = hops
-                self._router.set_outbound_propagation_node(destination_hash)
+            now = time.time()
+
+            with self._prop_lock:
+                existing = None
+                for entry in self._propagation_nodes:
+                    if entry["hash"] == destination_hash:
+                        existing = entry
+                        break
+                if existing:
+                    existing["hops"] = hops
+                    existing["last_seen"] = now
+                    existing["failures"] = 0
+                else:
+                    self._propagation_nodes.append({
+                        "hash": destination_hash,
+                        "hops": hops,
+                        "last_seen": now,
+                        "failures": 0,
+                    })
+
+                # Prune stale entries
+                self._propagation_nodes = [
+                    e for e in self._propagation_nodes
+                    if now - e["last_seen"] < self._PROP_STALE_S
+                ]
+                # Sort by hops, then freshness
+                self._propagation_nodes.sort(
+                    key=lambda e: (e["hops"], -e["last_seen"])
+                )
+                self._propagation_nodes = self._propagation_nodes[:self._MAX_PROP_NODES]
+
+                best = self._select_best_prop_node()
+
+            if best and best != self._current_prop_node:
+                self._current_prop_node = best
+                self._router.set_outbound_propagation_node(best)
                 self._hub.log.info(
-                    "Auto-selected propagation node %s (%d hops)",
-                    RNS.prettyhexrep(destination_hash),
+                    "Selected propagation node %s (%d hops, %d candidates)",
+                    RNS.prettyhexrep(best),
                     hops,
+                    len(self._propagation_nodes),
                 )
         except Exception:
             self._hub.log.exception("Error handling propagation node announce")
+
+    def _select_best_prop_node(self) -> bytes | None:
+        """Pick best propagation node (fewest hops, <3 failures). Caller holds lock."""
+        for entry in self._propagation_nodes:
+            if entry["failures"] < 3:
+                return entry["hash"]
+        if self._propagation_nodes:
+            return min(self._propagation_nodes, key=lambda e: e["failures"])["hash"]
+        return None
+
+    def _check_propagation_failover(self) -> None:
+        """Increment failure count on current prop node; failover if needed."""
+        with self._prop_lock:
+            if not self._current_prop_node or not self._propagation_nodes:
+                return
+            for entry in self._propagation_nodes:
+                if entry["hash"] == self._current_prop_node:
+                    entry["failures"] += 1
+                    break
+            new_best = self._select_best_prop_node()
+        if new_best and new_best != self._current_prop_node:
+            self._current_prop_node = new_best
+            self._router.set_outbound_propagation_node(new_best)
+            self._hub.log.warning(
+                "Propagation node failover to %s",
+                RNS.prettyhexrep(new_best),
+            )
+
+    def _recall_identity(self, dest_hash: bytes) -> Any:
+        """Recall an identity, using a short-lived cache to avoid redundant lookups."""
+        dest_hex = dest_hash.hex()
+        now = time.time()
+        with self._pending_lock:
+            cached = self._identity_cache.get(dest_hex)
+            if cached is not None:
+                identity, cached_at = cached
+                if now - cached_at < self._IDENTITY_CACHE_TTL:
+                    return identity
+                del self._identity_cache[dest_hex]
+
+        identity = RNS.Identity.recall(dest_hash)
+
+        if identity is not None:
+            with self._pending_lock:
+                self._identity_cache[dest_hex] = (identity, now)
+                # Lazy prune when cache grows large
+                if len(self._identity_cache) > 500:
+                    cutoff = now - self._IDENTITY_CACHE_TTL
+                    self._identity_cache = {
+                        k: v for k, v in self._identity_cache.items()
+                        if v[1] > cutoff
+                    }
+        return identity
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1041,10 +1179,35 @@ class MeshtasticAdapter(TransportAdapter):
         self._hub.event_bus.subscribe_offloaded(
             events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event
         )
+        self._hub.event_bus.subscribe_offloaded(
+            events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event
+        )
 
     def stop(self) -> None:
         self._hub.event_bus.unsubscribe(
             events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event
+        )
+        self._hub.event_bus.unsubscribe(
+            events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event
+        )
+
+    def _on_reaction_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Event bus callback for Meshtastic emoji reactions."""
+        packet_id = data.get("reply_to_packet_id")
+        if not packet_id:
+            return
+        emoji = data.get("emoji", "")
+        from_id = data.get("from_id", "")
+        from_name = data.get("from_name") or self._resolve_node_name(from_id) or from_id
+        source = (data.get("source") or "").lower()
+        if source not in ("lora", "mqtt"):
+            source = "lora"
+        self._hub.handle_reaction(
+            packet_id=packet_id,
+            emoji=emoji,
+            from_id=from_id,
+            from_name=from_name,
+            sub_transport=source,
         )
 
     def _on_mesh_event(self, event_type: str, data: dict[str, Any]) -> None:
@@ -1544,6 +1707,42 @@ class MessagingHubPlugin(PluginBase):
         except Exception:
             self.log.exception("Error storing inbound message")
 
+    # ── Reactions ──────────────────────────────────────────────────
+
+    def handle_reaction(
+        self,
+        packet_id: int,
+        emoji: str,
+        from_id: str,
+        from_name: str,
+        sub_transport: str = "",
+    ) -> None:
+        """Store an emoji reaction and push it to connected clients."""
+        try:
+            msg_id = self._store.add_reaction(
+                packet_id, emoji, from_id, from_name,
+            )
+            if msg_id is None:
+                self.log.debug(
+                    "Reaction from %s (target packet %d) — no matching message",
+                    from_id, packet_id,
+                )
+                return
+            row = self._store.get_message(msg_id)
+            self.event_bus.publish(events.MESSAGE_REACTION_RECEIVED, {
+                "id": msg_id,
+                "transport": row.get("transport", "meshtastic") if row else "meshtastic",
+                "sub_transport": row.get("sub_transport", sub_transport) if row else sub_transport,
+                "contact_id": row.get("contact_id") if row else None,
+                "emoji": emoji,
+                "from_id": from_id,
+                "from_name": from_name,
+                "reactions": (row.get("metadata") or {}).get("reactions", [])
+                    if row else [],
+            })
+        except Exception:
+            self.log.exception("Error storing reaction")
+
     # ── Outbound ───────────────────────────────────────────────────
 
     def send_message(
@@ -1615,6 +1814,9 @@ class MessagingHubPlugin(PluginBase):
             channel = 0
         msg_type = kwargs.get("msg_type", "direct")
         sub_transport = kwargs.get("sub_transport", "")
+        meta = dict(kwargs.get("metadata") or {})
+        if result.get("packet_id") is not None:
+            meta["packet_id"] = result["packet_id"]
         msg_id = self._store.store(
             transport=transport,
             direction="sent",
@@ -1625,7 +1827,7 @@ class MessagingHubPlugin(PluginBase):
             to_id=destination,
             to_name=to_name,
             status="sent" if result.get("sent") else "failed",
-            metadata=kwargs.get("metadata"),
+            metadata=meta or None,
             sub_transport=sub_transport,
             channel=channel,
         )

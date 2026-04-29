@@ -304,80 +304,83 @@
   // generation bumps on load / reset / bin-grid change — panels diff against
   // their last-seen generation to decide when to wipe canvas and bulk-paint.
   var MAX_HIST_ROWS = 256;
-  var historyStore = {
-    rows: [],
-    rowTimestamps: [],
-    sweepCount: 0,
-    binCount: 0,
-    generation: 0,
 
-    loadHistory: function (payload) {
-      this.rows = [];
-      this.rowTimestamps = [];
-      this.sweepCount = 0;
-      this.binCount = 0;
-      if (payload && payload.available && payload.rows && payload.rows.length) {
-        var times = payload.row_timestamps || [];
-        for (var i = 0; i < payload.rows.length; i++) {
-          var row = payload.rows[i];
-          if (!row || !row.length) continue;
-          this.rows.unshift(row.slice());
-          // Push the matching timestamp (server ships rows oldest-first, so
-          // times[i] aligns with rows[i]).  Fall back to null when absent.
-          var ts = (i < times.length) ? times[i] : null;
-          this.rowTimestamps.unshift((ts != null) ? ts : null);
-        }
-        if (this.rows.length > MAX_HIST_ROWS) this.rows.length = MAX_HIST_ROWS;
-        if (this.rowTimestamps.length > MAX_HIST_ROWS) {
-          this.rowTimestamps.length = MAX_HIST_ROWS;
-        }
-        this.sweepCount = payload.sweep_count || 0;
-        this.binCount = payload.bin_count
-          || (this.rows[0] ? this.rows[0].length : 0);
-      }
-      this.generation += 1;
-    },
+  function createHistoryStore() {
+    return {
+      rows: [],
+      rowTimestamps: [],
+      sweepCount: 0,
+      binCount: 0,
+      generation: 0,
 
-    ingestTick: function (spec) {
-      if (!spec) return;
-      var binCount = spec.bins_hz ? spec.bins_hz.length : 0;
-      if (binCount > 0 && binCount !== this.binCount) {
-        // Grid change — rows from before no longer align to the new axis.
+      loadHistory: function (payload) {
         this.rows = [];
         this.rowTimestamps = [];
-        this.binCount = binCount;
         this.sweepCount = 0;
-        this.generation += 1;
-      }
-      var sc = spec.sweep_count || 0;
-      if (sc <= this.sweepCount) return;
-      var tail = spec.waterfall_tail || [];
-      var tailTimes = spec.waterfall_tail_times || [];
-      if (!tail.length) { this.sweepCount = sc; return; }
-      var delta = sc - this.sweepCount;
-      var toDraw = delta < tail.length ? delta : tail.length;
-      for (var i = tail.length - toDraw; i < tail.length; i++) {
-        var row = tail[i];
-        if (!row || !row.length) continue;
-        this.rows.unshift(row.slice());
-        var ts = (i < tailTimes.length) ? tailTimes[i] : null;
-        this.rowTimestamps.unshift((ts != null) ? ts : null);
-        if (this.rows.length > MAX_HIST_ROWS) this.rows.length = MAX_HIST_ROWS;
-        if (this.rowTimestamps.length > MAX_HIST_ROWS) {
-          this.rowTimestamps.length = MAX_HIST_ROWS;
+        this.binCount = 0;
+        if (payload && payload.available && payload.rows && payload.rows.length) {
+          var times = payload.row_timestamps || [];
+          for (var i = 0; i < payload.rows.length; i++) {
+            var row = payload.rows[i];
+            if (!row || !row.length) continue;
+            this.rows.unshift(row.slice());
+            var ts = (i < times.length) ? times[i] : null;
+            this.rowTimestamps.unshift((ts != null) ? ts : null);
+          }
+          if (this.rows.length > MAX_HIST_ROWS) this.rows.length = MAX_HIST_ROWS;
+          if (this.rowTimestamps.length > MAX_HIST_ROWS) {
+            this.rowTimestamps.length = MAX_HIST_ROWS;
+          }
+          this.sweepCount = payload.sweep_count || 0;
+          this.binCount = payload.bin_count
+            || (this.rows[0] ? this.rows[0].length : 0);
         }
-      }
-      this.sweepCount = sc;
-    },
+        this.generation += 1;
+      },
 
-    reset: function () {
-      this.rows = [];
-      this.rowTimestamps = [];
-      this.sweepCount = 0;
-      this.binCount = 0;
-      this.generation += 1;
-    },
-  };
+      ingestTick: function (spec) {
+        if (!spec) return;
+        var binCount = spec.bins_hz ? spec.bins_hz.length : 0;
+        if (binCount > 0 && binCount !== this.binCount) {
+          this.rows = [];
+          this.rowTimestamps = [];
+          this.binCount = binCount;
+          this.sweepCount = 0;
+          this.generation += 1;
+        }
+        var sc = spec.sweep_count || 0;
+        if (sc <= this.sweepCount) return;
+        var tail = spec.waterfall_tail || [];
+        var tailTimes = spec.waterfall_tail_times || [];
+        if (!tail.length) { this.sweepCount = sc; return; }
+        var delta = sc - this.sweepCount;
+        var toDraw = delta < tail.length ? delta : tail.length;
+        for (var i = tail.length - toDraw; i < tail.length; i++) {
+          var row = tail[i];
+          if (!row || !row.length) continue;
+          this.rows.unshift(row.slice());
+          var ts = (i < tailTimes.length) ? tailTimes[i] : null;
+          this.rowTimestamps.unshift((ts != null) ? ts : null);
+          if (this.rows.length > MAX_HIST_ROWS) this.rows.length = MAX_HIST_ROWS;
+          if (this.rowTimestamps.length > MAX_HIST_ROWS) {
+            this.rowTimestamps.length = MAX_HIST_ROWS;
+          }
+        }
+        this.sweepCount = sc;
+      },
+
+      reset: function () {
+        this.rows = [];
+        this.rowTimestamps = [];
+        this.sweepCount = 0;
+        this.binCount = 0;
+        this.generation += 1;
+      },
+    };
+  }
+
+  var historyStore = createHistoryStore();
+  var loraHistoryStore = createHistoryStore();
 
   R.spectrumCommon = {
     RAMP: RAMP,
@@ -396,5 +399,6 @@
     paintRowToCanvas: paintRowToCanvas,
     paintHistoryToCanvas: paintHistoryToCanvas,
     historyStore: historyStore,
+    loraHistoryStore: loraHistoryStore,
   };
 })();

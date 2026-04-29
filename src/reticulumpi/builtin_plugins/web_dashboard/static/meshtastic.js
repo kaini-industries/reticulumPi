@@ -13,6 +13,7 @@
   var _mshPageSize = 25;
   var _mshVisible = 25;
   var _mshConnected = false;
+  var _fwWatchdog = null;
 
   function sortMeshtasticNodes(nodes, key, asc) {
     return nodes.slice().sort(function(a, b) {
@@ -170,6 +171,7 @@
   function updateMeshtastic(status, nodes) {
     var section = $('meshtastic-section');
     if (!section) return;
+    if (R.markUpdated) R.markUpdated('meshtastic-section');
 
     // Show unavailable state if plugin is not available
     if (!status || status.available === false) {
@@ -185,9 +187,16 @@
     var badge = $('meshtastic-status');
     var connected = status.connected;
     _mshConnected = connected;
+    _fwWatchdog = status.firmware_watchdog || null;
+    var hangDetected = _fwWatchdog && _fwWatchdog.hang_detected;
     if (badge) {
-      badge.textContent = connected ? 'connected' : 'disconnected';
-      badge.className = 'count ' + (connected ? 'status-ok' : 'status-err');
+      if (hangDetected) {
+        badge.textContent = 'firmware hang';
+        badge.className = 'count status-warn';
+      } else {
+        badge.textContent = connected ? 'connected' : 'disconnected';
+        badge.className = 'count ' + (connected ? 'status-ok' : 'status-err');
+      }
     }
 
     // Overview stats
@@ -409,8 +418,121 @@
       html += '</div>';
     }
 
+    // Firmware watchdog health bar
+    if (_fwWatchdog && _fwWatchdog.enabled) {
+      html += buildFirmwareWatchdogHTML(_fwWatchdog);
+    }
+
+    html += '<div class="lora-radio-actions">'
+      + '<button class="msh-reboot-btn"'
+      + (_rebootInProgress ? ' disabled' : '')
+      + '>' + (_rebootInProgress ? 'Rebooting…' : 'Reboot Device') + '</button>'
+      + '</div>';
+
     html += '</div>';
     container.innerHTML = html;
+
+    var rebootBtn = container.querySelector('.msh-reboot-btn');
+    if (rebootBtn) {
+      rebootBtn.addEventListener('click', function() { RPI.rebootMeshtasticDevice(); });
+    }
+  }
+
+  function buildFirmwareWatchdogHTML(wd) {
+    var silence = wd.silence_seconds;
+    var timeout = wd.silence_timeout || 300;
+    var hangDetected = wd.hang_detected;
+    var pct = silence != null ? Math.min(100, (silence / timeout) * 100) : 0;
+
+    // Determine health state
+    var state, stateLabel;
+    if (hangDetected) {
+      state = 'crit';
+      stateLabel = 'Hang Detected';
+    } else if (pct > 75) {
+      state = 'warn';
+      stateLabel = 'Degraded';
+    } else {
+      state = 'ok';
+      stateLabel = 'Healthy';
+    }
+
+    var h = '<div class="fw-watchdog">';
+    h += '<div class="fw-watchdog-header">'
+      + '<span class="fw-watchdog-title">Firmware Health</span>'
+      + '<span class="fw-watchdog-badge fw-' + state + '">' + stateLabel + '</span>'
+      + '</div>';
+
+    // Silence progress bar
+    var silenceText = silence != null ? formatSilence(silence) : '--';
+    h += '<div class="fw-silence-row">'
+      + '<span class="fw-silence-label">Silence</span>'
+      + '<div class="fw-bar-track">'
+      + '<div class="fw-bar-fill fw-' + state + '" style="width:' + pct.toFixed(1) + '%"></div>'
+      + '</div>'
+      + '<span class="fw-silence-value">' + silenceText + ' / ' + formatSilence(timeout) + '</span>'
+      + '</div>';
+
+    // Stats row
+    var stats = [];
+    if (wd.total_hangs > 0) {
+      stats.push({label: 'Hangs', value: '' + wd.total_hangs, cls: 'metric-crit'});
+    }
+    if (wd.total_resets > 0) {
+      stats.push({label: 'Resets', value: '' + wd.total_resets, cls: 'metric-warn'});
+    }
+    if (wd.resets_last_hour > 0) {
+      stats.push({
+        label: 'Resets/hr',
+        value: wd.resets_last_hour + '/' + (wd.max_resets_per_hour || '∞'),
+        cls: wd.resets_last_hour >= (wd.max_resets_per_hour || 999) ? 'metric-crit' : 'metric-warn'
+      });
+    }
+    if (!wd.auto_reset) {
+      stats.push({label: 'Auto-Reset', value: 'Off', cls: ''});
+    }
+
+    if (stats.length > 0) {
+      h += '<div class="fw-stats">';
+      for (var i = 0; i < stats.length; i++) {
+        h += '<span class="fw-stat">'
+          + '<span class="fw-stat-label">' + stats[i].label + '</span> '
+          + '<span class="fw-stat-value ' + stats[i].cls + '">' + stats[i].value + '</span>'
+          + '</span>';
+      }
+      h += '</div>';
+    }
+
+    h += '</div>';
+    return h;
+  }
+
+  function formatSilence(secs) {
+    if (secs == null) return '--';
+    if (secs < 60) return secs + 's';
+    var m = Math.floor(secs / 60);
+    var s = secs % 60;
+    return m + 'm' + (s > 0 ? s + 's' : '');
+  }
+
+  /* ── Device reboot ─────────────────────────────────────────────── */
+
+  var _rebootInProgress = false;
+
+  function rebootMeshtasticDevice() {
+    if (_rebootInProgress) return;
+    if (!confirm('Reboot the Meshtastic device? The radio will be offline briefly.')) return;
+    _rebootInProgress = true;
+    var btn = document.querySelector('.msh-reboot-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Rebooting…'; }
+    api('/api/meshtastic/device/reset', {method: 'POST', timeout: 15000}).then(function(r) {
+      _rebootInProgress = false;
+      if (btn) { btn.disabled = false; btn.textContent = 'Reboot Device'; }
+      if (!r || !r.ok) {
+        var reason = (r && r.error) ? r.error : 'Reset failed';
+        alert('Device reset failed: ' + reason);
+      }
+    });
   }
 
   /* ── LoRa Neighbors ────────────────────────────────────────────── */
@@ -599,5 +721,6 @@
   R.updateLoraNeighbors = updateLoraNeighbors;
   R.onLoraSort = onLoraSort;
   R.loraNeighborsShowMore = loraNeighborsShowMore;
+  R.rebootMeshtasticDevice = rebootMeshtasticDevice;
 
 })();

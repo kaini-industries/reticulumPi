@@ -175,12 +175,12 @@ class MeshChatServer(PluginBase):
             return
         try:
             self._process.terminate()
-            self._process.wait(timeout=10)
+            self._process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.log.warning("MeshChat did not stop gracefully, sending SIGKILL")
             self._process.kill()
             try:
-                self._process.wait(timeout=5)
+                self._process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self.log.warning("MeshChat process did not exit after SIGKILL")
         except Exception:

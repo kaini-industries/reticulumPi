@@ -4,34 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=36">
+  <link rel="stylesheet" href="/static/style.css?v=40">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
   <div class="dashboard">
     <!-- Header -->
     <div class="header">
-      <svg class="header-mesh" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <line class="mesh-edge" x1="100" y1="30" x2="55" y2="12"/>
-        <line class="mesh-edge" x1="100" y1="30" x2="145" y2="15"/>
-        <line class="mesh-edge" x1="100" y1="30" x2="60" y2="48"/>
-        <line class="mesh-edge" x1="100" y1="30" x2="150" y2="45"/>
-        <line class="mesh-edge" x1="55" y1="12" x2="20" y2="25"/>
-        <line class="mesh-edge" x1="145" y1="15" x2="180" y2="28"/>
-        <line class="mesh-edge" x1="60" y1="48" x2="25" y2="42"/>
-        <line class="mesh-edge" x1="150" y1="45" x2="185" y2="40"/>
-        <circle class="mesh-node" cx="55" cy="12" r="3"/>
-        <circle class="mesh-node" cx="145" cy="15" r="3"/>
-        <circle class="mesh-node" cx="60" cy="48" r="3"/>
-        <circle class="mesh-node" cx="150" cy="45" r="3"/>
-        <circle class="mesh-node mesh-node-far" cx="20" cy="25" r="2"/>
-        <circle class="mesh-node mesh-node-far" cx="180" cy="28" r="2"/>
-        <circle class="mesh-node mesh-node-far" cx="25" cy="42" r="2"/>
-        <circle class="mesh-node mesh-node-far" cx="185" cy="40" r="2"/>
-        <circle class="mesh-node mesh-node-self" cx="100" cy="30" r="4.5"/>
-      </svg>
       <div>
-        <h1 id="node-name">ReticulumPi</h1>
+        <h1 id="node-name"></h1>
         <div class="node-info">
           <span class="badge badge-version" id="version"></span>
           <span class="badge badge-hash" id="identity-hash"></span>
@@ -48,7 +29,7 @@
     </div>
 
     <!-- System metrics -->
-    <div class="metrics-grid" id="metrics-grid">
+    <div class="metrics-grid awaiting-data" id="metrics-grid">
       <div class="metric-card">
         <div class="label">CPU</div>
         <div class="metric-body">
@@ -136,60 +117,10 @@
       </div>
     </div>
 
-    <!-- Meshtastic MQTT Messages -->
-    <div class="section" id="msg-mqtt-section">
-      <div class="section-header collapsible" id="msg-mqtt-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> Meshtastic MQTT</span>
-        <span class="count" id="msg-mqtt-count"></span>
-        <span class="msg-unread-total" id="msg-mqtt-unread-total"></span>
-      </div>
-      <div class="section-body hidden" id="msg-mqtt-body">
-        <div class="msg-layout">
-          <div class="msg-sidebar">
-            <div class="msg-sidebar-toolbar">
-              <input type="text" id="msg-mqtt-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
-              <button class="msg-channels-btn" id="msg-mqtt-ch-manage-btn" title="Manage channels">Channels</button>
-              <button class="msg-new-btn" id="msg-mqtt-new-btn" title="New message">+</button>
-            </div>
-            <div class="msg-conversations" id="msg-mqtt-conversations"></div>
-          </div>
-          <div class="msg-thread">
-            <div class="msg-thread-header">
-              <button class="msg-back-btn" id="msg-mqtt-back-btn">&larr;</button>
-              <span class="msg-thread-name" id="msg-mqtt-thread-name">Select a conversation</span>
-              <button class="msg-delete-btn hidden" id="msg-mqtt-delete-btn" title="Delete conversation">&#128465;</button>
-            </div>
-            <div class="msg-chat" id="msg-mqtt-chat"></div>
-            <div class="msg-compose hidden" id="msg-mqtt-compose">
-              <div class="msg-compose-row">
-                <textarea id="msg-mqtt-text" class="rt-input" rows="1" placeholder="Type a message..." autocomplete="off"></textarea>
-                <button id="msg-mqtt-send-btn" class="msg-send-btn" disabled>Send</button>
-              </div>
-              <div class="msg-compose-meta">
-                <span class="msg-channel-wrap" id="msg-mqtt-channel-wrap" style="display:none">
-                  <select id="msg-mqtt-channel-select" class="rt-select rt-select-sm"></select>
-                </span>
-                <span class="msg-byte-count" id="msg-mqtt-byte-count"></span>
-                <span class="msg-feedback" id="msg-mqtt-feedback"></span>
-              </div>
-            </div>
-            <div class="msg-new-compose hidden" id="msg-mqtt-new-compose">
-              <div class="msg-compose-row">
-                <div class="msg-dest-combo" id="msg-mqtt-dest-combo">
-                  <input type="text" class="rt-input msg-dest-input" id="msg-mqtt-dest-input" autocomplete="off" spellcheck="false" placeholder="Select destination…" />
-                  <div class="msg-dest-list" id="msg-mqtt-dest-list"></div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Meshtastic LoRa Messages -->
+    <!-- Meshtastic Messages -->
     <div class="section" id="msg-lora-section">
       <div class="section-header collapsible" id="msg-lora-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> Meshtastic LoRa</span>
+        <span><span class="chevron">&#9656;</span> Meshtastic</span>
         <span class="count" id="msg-lora-count"></span>
         <span class="msg-unread-total" id="msg-lora-unread-total"></span>
       </div>
@@ -314,7 +245,7 @@
     </div>
 
     <!-- Network Interfaces -->
-    <div class="section svc-reticulum" id="interfaces-section">
+    <div class="section svc-reticulum awaiting-data" id="interfaces-section">
       <div class="section-header">
         <span>Network Interfaces <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="iface-count"></span><span class="freshness"></span>
@@ -334,7 +265,7 @@
     </div>
 
     <!-- Connectivity Health -->
-    <div class="section svc-reticulum" id="connectivity-section">
+    <div class="section svc-reticulum awaiting-data" id="connectivity-section">
       <div class="section-header">
         <span>Connectivity Health <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="connectivity-status"></span><span class="freshness"></span>
@@ -352,7 +283,7 @@
     </div>
 
     <!-- Routing -->
-    <div class="section svc-reticulum" id="routing-section">
+    <div class="section svc-reticulum awaiting-data" id="routing-section">
       <div class="section-header">
         <span>Routing <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="routing-status"></span><span class="freshness"></span>
@@ -437,7 +368,7 @@
     </div>
 
     <!-- Transport Health -->
-    <div class="section svc-reticulum" id="transport-section">
+    <div class="section svc-reticulum awaiting-data" id="transport-section">
       <div class="section-header">
         <span>Transport Hubs <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="transport-count"></span><span class="freshness"></span>
@@ -454,7 +385,7 @@
     </div>
 
     <!-- LoRa Nodes -->
-    <div class="section svc-reticulum" id="lora-section">
+    <div class="section svc-reticulum awaiting-data" id="lora-section">
       <div class="section-header">
         <span>LoRa Nodes <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="lora-count"></span><span class="freshness"></span>
@@ -480,7 +411,7 @@
     </div>
 
     <!-- Mesh Network -->
-    <div class="section svc-reticulum" id="mesh-section">
+    <div class="section svc-reticulum awaiting-data" id="mesh-section">
       <div class="section-header">
         <span>Mesh Network <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="mesh-count"></span><span class="freshness"></span>
@@ -625,7 +556,7 @@
     </div>
 
     <!-- Meshtastic Gateway -->
-    <div class="section svc-meshtastic" id="meshtastic-section">
+    <div class="section svc-meshtastic awaiting-data" id="meshtastic-section">
       <div class="section-header">
         <span>Meshtastic Gateway <span class="svc-tag svc-tag-msh">MSH</span></span>
         <span class="count" id="meshtastic-status"></span>
@@ -669,13 +600,28 @@
       <button id="meshtastic-show-more" class="show-more-btn" style="display:none">Show all</button>
     </div>
 
+    <!-- MQTT Feed (read-only activity log) -->
+    <div class="section svc-meshtastic" id="mqtt-feed-section" style="display:none">
+      <div class="section-header collapsible" id="mqtt-feed-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> MQTT Feed <span class="svc-tag svc-tag-msh">MSH</span></span>
+        <span class="count" id="mqtt-feed-count"></span>
+      </div>
+      <div class="section-body hidden" id="mqtt-feed-body">
+        <div class="mqtt-feed-stats" id="mqtt-feed-stats"></div>
+        <div class="mqtt-feed-filters">
+          <input type="text" id="mqtt-feed-search" class="rt-input" placeholder="Filter by sender or text...">
+        </div>
+        <div class="mqtt-feed-list" id="mqtt-feed-list"></div>
+      </div>
+    </div>
+
     <!-- ═══════════ MeshCore ═══════════ -->
     <div class="service-group service-group-mc">
       <span class="service-group-name">MeshCore</span>
     </div>
 
     <!-- MeshCore Gateway -->
-    <div class="section svc-meshcore" id="meshcore-section">
+    <div class="section svc-meshcore awaiting-data" id="meshcore-section">
       <div class="section-header">
         <span>MeshCore Gateway <span class="svc-tag svc-tag-mc">MC</span></span>
         <span class="count" id="meshcore-status"></span>
@@ -700,13 +646,43 @@
       <button id="meshcore-show-more" class="show-more-btn" style="display:none">Show all</button>
     </div>
 
+    <!-- ═══════════ Infrastructure ═══════════ -->
+    <div class="service-group service-group-infra">
+      <span class="service-group-name">Infrastructure</span>
+    </div>
+
+    <!-- NTP / Time Sync -->
+    <div class="section svc-ntp awaiting-data" id="ntp-section" style="display:none">
+      <div class="section-header">
+        <span>Time Sync <span class="svc-tag svc-tag-ntp">NTP</span></span>
+        <span class="count" id="ntp-status"></span>
+      </div>
+      <div class="metrics-grid" id="ntp-metrics">
+        <div class="metric-card"><div class="label">Sync</div><div class="value" id="m-ntp-sync">--</div></div>
+        <div class="metric-card"><div class="label">Stratum</div><div class="value" id="m-ntp-stratum">--</div></div>
+        <div class="metric-card"><div class="label">Offset</div><div class="value" id="m-ntp-offset">--<span class="unit"> ms</span></div></div>
+        <div class="metric-card"><div class="label">Ref</div><div class="value" id="m-ntp-refid">--</div></div>
+      </div>
+      <details class="section-details">
+        <summary>Chrony Sources</summary>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr><th>St</th><th>Name</th><th>Stratum</th><th>Poll</th><th>Reach</th><th>Last Rx</th><th>Offset</th></tr>
+            </thead>
+            <tbody id="ntp-sources-table"></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+
     <!-- ═══════════ GPS ═══════════ -->
     <div class="service-group service-group-gps">
       <span class="service-group-name">GPS</span>
     </div>
 
     <!-- GPS Telemetry -->
-    <div class="section svc-gps" id="gps-section" style="display:none">
+    <div class="section svc-gps awaiting-data" id="gps-section" style="display:none">
       <div class="section-header">
         <span>GPS Telemetry <span class="svc-tag svc-tag-gps">GPS</span></span>
         <span class="count" id="gps-status"></span>
@@ -738,14 +714,16 @@
     </div>
 
     <!-- Node Map -->
-    <div class="section" id="map-section">
+    <div class="section awaiting-data" id="map-section">
       <div class="section-header">
         <span>Node Map</span>
         <span class="count" id="map-count"></span>
       </div>
       <div class="map-controls">
-        <button class="mesh-tab active" id="map-show-all" title="Show all nodes with position">All Nodes</button>
-        <button class="mesh-tab" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
+        <button class="mesh-tab" id="map-show-all" title="Show all nodes with position">All Nodes</button>
+        <button class="mesh-tab active" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
+        <button class="mesh-tab" id="map-show-rns" title="Show Reticulum mesh peers only">Reticulum Peers</button>
+        <button class="mesh-tab" id="map-center-gps" title="Center on GPS location">My Location</button>
         <span class="map-stats" id="map-stats"></span>
       </div>
       <div id="map-container" style="height: 450px; width: 100%;"></div>
@@ -851,8 +829,9 @@
           <canvas id="spectrum-waterfall" class="spectrum-waterfall" width="800" height="256"></canvas>
           <div class="spectrum-overlay" id="spectrum-overlay"></div>
           <div class="spectrum-hover" id="spectrum-hover"></div>
+          <div class="spectrum-zoom-reset" id="spectrum-zoom-reset" style="display:none">Full band</div>
         </div>
-        <div class="spectrum-legend-toggle" id="spectrum-legend-toggle" title="Show / hide band legend"><span class="chevron">&#9656;</span> Band legend</div>
+        <div class="spectrum-controls-row"><div class="spectrum-legend-toggle" id="spectrum-legend-toggle" title="Show / hide band legend"><span class="chevron">&#9656;</span> Band legend</div><button class="spectrum-peakhold-toggle" id="spectrum-peakhold-toggle" title="Toggle peak hold trace">Peak hold</button></div>
         <div class="spectrum-legend hidden" id="spectrum-legend"></div>
         <div class="spectrum-scale" id="spectrum-scale"></div>
       </div>
@@ -866,6 +845,17 @@
       </div>
       <div class="section-body hidden" id="lora-spectrum-body">
         <div class="lora-spectrum-meta" id="lora-spectrum-meta"></div>
+        <div class="lora-channel-grid-wrap" id="lora-channel-grid-wrap" style="display:none">
+          <div class="lora-channel-grid-section">
+            <div class="lora-channel-grid-label">Uplink 125 kHz (ch 0–63)</div>
+            <div class="lora-channel-grid" id="lora-channel-grid-up"></div>
+          </div>
+          <div class="lora-channel-grid-section">
+            <div class="lora-channel-grid-label">Downlink 500 kHz (ch 64–71)</div>
+            <div class="lora-channel-grid" id="lora-channel-grid-dn"></div>
+          </div>
+          <div class="lora-channel-detail" id="lora-channel-detail" style="display:none"></div>
+        </div>
         <div class="lora-spectrum-plot-wrap">
           <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
           <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
@@ -875,6 +865,13 @@
           <div class="lora-spec-zoom-reset" id="lora-spec-zoom-reset" style="display:none">Reset zoom</div>
         </div>
         <div class="lora-spectrum-scale" id="lora-spectrum-scale"></div>
+        <div class="lora-stats-panel" id="lora-stats-panel" style="display:none">
+          <div class="lora-stats-row">
+            <div class="lora-nf-trend" id="lora-nf-trend"></div>
+            <div class="lora-ch-util" id="lora-ch-util"></div>
+          </div>
+          <div class="lora-ch-timeline" id="lora-ch-timeline" style="display:none"></div>
+        </div>
       </div>
     </div>
 
@@ -902,6 +899,42 @@
               </tr>
             </thead>
             <tbody id="adsb-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- LoRa Link Tester -->
+    <div class="section" id="link-tester-section" style="display:none">
+      <div class="section-header collapsible" id="link-tester-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> LoRa Link Tester</span>
+        <span class="link-tester-pill" id="link-tester-pill">--</span>
+      </div>
+      <div class="section-body hidden" id="link-tester-body">
+        <div class="lt-controls">
+          <label class="lt-label">Target
+            <input type="text" id="link-tester-target" class="lt-input" placeholder="!abcd1234" spellcheck="false">
+          </label>
+          <label class="lt-label">Count
+            <input type="number" id="link-tester-count" class="lt-input lt-input-sm" value="20" min="1" max="1000">
+          </label>
+          <button id="link-tester-start-btn" class="lt-btn lt-btn-start">Start</button>
+          <button id="link-tester-stop-btn" class="lt-btn lt-btn-stop" disabled>Stop</button>
+          <button id="link-tester-clear-btn" class="lt-btn">Clear</button>
+        </div>
+        <div id="link-tester-summary" class="lt-summary">No data yet</div>
+        <div class="lt-chart-wrap">
+          <div class="lt-chart-label">Round-Trip Time</div>
+          <svg id="link-tester-rtt-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart"></svg>
+        </div>
+        <div class="lt-chart-wrap">
+          <div class="lt-chart-label">Signal Quality</div>
+          <svg id="link-tester-signal-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart"></svg>
+        </div>
+        <div class="lt-log-wrap">
+          <table class="data-table lt-log">
+            <thead><tr><th>#</th><th>Time</th><th>RTT</th><th>RSSI</th><th>SNR</th><th>Status</th></tr></thead>
+            <tbody id="link-tester-log-body"></tbody>
           </table>
         </div>
       </div>
@@ -961,25 +994,27 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=26"></script>
-  <script src="/static/messages_panel.js?v=5"></script>
+  <script src="/static/app.js?v=31"></script>
+  <script src="/static/messages_panel.js?v=6"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
-  <script src="/static/messages_meshtastic_mqtt.js?v=1"></script>
+  <script src="/static/mqtt_feed.js?v=1"></script>
   <script src="/static/messages_meshtastic_lora.js?v=1"></script>
   <script src="/static/messages_meshcore.js?v=1"></script>
   <script src="/static/mesh_bridge_panel.js?v=1"></script>
   <script src="/static/mesh.js?v=23"></script>
   <script src="/static/lora.js?v=23"></script>
   <script src="/static/routing.js?v=23"></script>
-  <script src="/static/meshtastic.js?v=23"></script>
-  <script src="/static/meshcore.js?v=2"></script>
+  <script src="/static/meshtastic.js?v=25"></script>
+  <script src="/static/meshcore.js?v=3"></script>
   <script src="/static/vendor/leaflet.js"></script>
-  <script src="/static/map.js?v=1"></script>
+  <script src="/static/map.js?v=5"></script>
   <script src="/static/gps.js?v=3"></script>
   <script src="/static/space.js?v=2"></script>
   <script src="/static/spectrum_common.js?v=1"></script>
   <script src="/static/spectrum.js?v=9"></script>
   <script src="/static/lora_spectrum.js?v=17"></script>
   <script src="/static/adsb.js?v=1"></script>
+  <script src="/static/ntp.js?v=1"></script>
+  <script src="/static/link_tester.js?v=1"></script>
 </body>
 </html>

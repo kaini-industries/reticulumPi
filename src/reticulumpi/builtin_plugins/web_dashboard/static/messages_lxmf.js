@@ -10,7 +10,6 @@
     transport: 'lxmf',
     subTransport: null,
     supportsChannels: false,
-    broadcastLabel: 'Broadcast (LXMF)',
   });
 
   R.updateMessagingLxmf = panel.update;

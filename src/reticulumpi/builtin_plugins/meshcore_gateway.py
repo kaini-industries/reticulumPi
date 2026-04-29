@@ -629,12 +629,21 @@ class MeshCoreGateway(PluginBase):
                 self._msgs_received += 1
                 self._last_msg_time = time.time()
 
+            path_len = payload.get("path_len")
+            if path_len is None and from_key:
+                cached = self._contact_cache.get(from_key)
+                if cached:
+                    opl = cached.get("out_path_len")
+                    if opl is not None and opl >= 0:
+                        path_len = opl
+
             self.event_bus.publish(events.MESHCORE_MESSAGE_RECEIVED, {
                 "from_key": from_key,
                 "from_name": from_name,
                 "text": text[:500],
                 "msg_type": msg_type,
                 "channel": channel,
+                "path_len": path_len,
             })
 
         except Exception:

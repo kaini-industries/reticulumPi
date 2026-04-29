@@ -334,6 +334,7 @@ class TestMessageHandling:
                 "text": "Hello from MeshCore!",
                 "msg_type": "direct",
                 "channel": None,
+                "path_len": None,
             },
         )
 
@@ -359,6 +360,7 @@ class TestMessageHandling:
                 "text": "Hello channel!",
                 "msg_type": "broadcast",
                 "channel": 0,
+                "path_len": None,
             },
         )
 

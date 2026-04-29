@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -258,6 +260,41 @@ _broadcast_task: asyncio.Task | None = None
 _ws_loop: asyncio.AbstractEventLoop | None = None
 _ws_plugin: Any | None = None
 
+# Dedicated single-worker executor for broadcast data collection.
+# Prevents overlapping collections from saturating the default pool.
+_broadcast_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_collection_running = threading.Event()
+
+_BROADCAST_PLUGIN_NAMES: tuple[str, ...] = (
+    "system_monitor", "network_map", "mesh_telemetry", "alert_system",
+    "sensor_framework", "emergency_broadcast", "transport_monitor",
+    "connectivity_monitor", "path_warmer", "transport_health",
+    "meshtastic_gateway", "meshcore_gateway", "meshcore_observer",
+    "mesh_bridge", "space_tracker", "spectrum_scanner", "lora_scanner",
+    "lora_diagnostics", "gps_telemetry", "messaging_hub",
+    "ntp_server", "adsb_radar", "lora_link_tester",
+)
+
+_plugin_refs: dict[str, Any] = {}
+
+
+def _rebuild_plugin_refs(app_get_plugin: Any) -> None:
+    """Resolve all broadcast plugin references and cache them."""
+    global _plugin_refs
+    refs: dict[str, Any] = {}
+    for name in _BROADCAST_PLUGIN_NAMES:
+        try:
+            refs[name] = app_get_plugin(name)
+        except Exception:
+            refs[name] = None
+    _plugin_refs = refs
+
+
+def _on_plugin_lifecycle(_event_type: str, _data: dict[str, Any]) -> None:
+    """Invalidate plugin ref cache when a plugin starts/stops/crashes."""
+    if _ws_plugin is not None:
+        _rebuild_plugin_refs(_ws_plugin.app.get_plugin)
+
 
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Handle WebSocket connections for live metrics streaming."""
@@ -301,6 +338,55 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         except Exception:
             log.debug("Failed to send spectrum history hello", exc_info=True)
 
+    lora_scanner = plugin.app.get_plugin("lora_scanner")
+    if lora_scanner and hasattr(lora_scanner, "get_history"):
+        try:
+            lora_hist = lora_scanner.get_history()
+        except Exception:
+            lora_hist = {"available": False, "rows": []}
+        try:
+            await ws.send_str(json.dumps({
+                "type": "lora_scanner_history",
+                "data": lora_hist,
+            }))
+        except Exception:
+            log.debug("Failed to send lora_scanner history hello", exc_info=True)
+
+    link_tester = plugin.app.get_plugin("lora_link_tester")
+    if link_tester and hasattr(link_tester, "get_history"):
+        try:
+            lt_hist = link_tester.get_history()
+        except Exception:
+            lt_hist = {"available": False}
+        try:
+            await ws.send_str(json.dumps({
+                "type": "link_tester_history",
+                "data": lt_hist,
+            }))
+        except Exception:
+            log.debug("Failed to send link_tester history hello", exc_info=True)
+
+    # Send a full data snapshot so every panel populates immediately
+    # instead of waiting up to 5s for the next broadcast cycle.
+    loop = asyncio.get_running_loop()
+    try:
+        data, _, _ = await loop.run_in_executor(
+            None,
+            _collect_broadcast_data,
+            plugin,
+            0,
+            _last_mesh_announce_ts,
+            _mesh_version,
+            _plugin_refs,
+        )
+        await ws.send_str(json.dumps({
+            "type": "update",
+            "data": data,
+            "timestamp": time.time(),
+        }))
+    except Exception:
+        log.debug("Failed to send initial data snapshot", exc_info=True)
+
     _ws_clients.add(ws)
     log.debug("WebSocket client connected (%d total)", len(_ws_clients))
 
@@ -312,13 +398,413 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             # We don't expect client messages, but handle ping/pong gracefully
     finally:
         _ws_clients.discard(ws)
-        log.debug("WebSocket client disconnected (%d remaining)", len(_ws_clients))
+        log.info(
+            "WebSocket disconnected (code=%s, %d remaining)",
+            ws.close_code,
+            len(_ws_clients),
+        )
 
     return ws
 
 
 _last_mesh_announce_ts: float = 0  # track last announce time for delta broadcasts
 _mesh_version: int = 0  # increments when mesh data changes
+
+# Slow-plugin threshold for per-plugin timing warnings (seconds).
+_SLOW_PLUGIN_THRESHOLD = 0.2
+
+
+def _collect_broadcast_data(
+    plugin: Any,
+    cycle_count: int,
+    last_mesh_announce_ts: float,
+    mesh_version: int,
+    plugin_refs: dict[str, Any],
+) -> tuple[dict[str, Any], float, int]:
+    """Collect all plugin data synchronously.  Runs in a thread executor.
+
+    Plugins are collected in priority order.  A time budget (75% of the
+    configured metrics_interval) ensures that expensive plugins at the
+    tail don't stall the broadcast loop and starve the event-loop of
+    CPU time for heartbeat processing.
+    """
+    refs = plugin_refs
+    budget = plugin.config.get("metrics_interval", 5) * 0.75
+    t0 = time.monotonic()
+    skipped: list[str] = []
+
+    def _over_budget() -> bool:
+        return (time.monotonic() - t0) >= budget
+
+    def _timed(label: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        """Call *fn* and warn if it exceeds the slow-plugin threshold."""
+        t = time.monotonic()
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            return None
+        finally:
+            elapsed = time.monotonic() - t
+            if elapsed > _SLOW_PLUGIN_THRESHOLD:
+                log.warning("Slow broadcast plugin %s: %.0fms", label, elapsed * 1000)
+
+    # ── Critical tier (always collected) ─────────────────────────────
+
+    monitor = refs.get("system_monitor")
+    metrics = {}
+    if monitor and hasattr(monitor, "latest_metrics"):
+        try:
+            metrics = monitor.latest_metrics
+        except Exception:
+            pass
+
+    plugin_statuses = {}
+    for name, p in plugin.app.plugins.items():
+        try:
+            plugin_statuses[name] = {"active": p.get_status().get("active", False)}
+        except Exception:
+            plugin_statuses[name] = {"active": False}
+
+    interfaces = _collect_interfaces(plugin.app.reticulum)
+
+    connectivity_data: dict = {}
+    conn_mon = refs.get("connectivity_monitor")
+    if conn_mon and hasattr(conn_mon, "get_health"):
+        connectivity_data = _timed("connectivity_monitor", conn_mon.get_health) or {}
+
+    routing_data: dict = {}
+    if connectivity_data:
+        routing_data = connectivity_data.get("routing", {})
+
+    transport_data: dict = {}
+    transport_mon = refs.get("transport_monitor")
+    if transport_mon and hasattr(transport_mon, "get_hub_health"):
+        transport_data = _timed("transport_monitor", transport_mon.get_hub_health) or {}
+        if transport_data:
+            try:
+                _enrich_transport_traffic(transport_data, interfaces)
+            except Exception:
+                pass
+
+    # ── Standard tier (collected if time remains) ────────────────────
+
+    mesh_data: dict = {}
+    if not _over_budget():
+        network_map = refs.get("network_map")
+        if network_map:
+            try:
+                if hasattr(network_map, "get_node_count"):
+                    mesh_data["known_nodes"] = network_map.get_node_count()
+                elif hasattr(network_map, "get_known_nodes"):
+                    mesh_data["known_nodes"] = len(network_map.get_known_nodes())
+
+                if hasattr(network_map, "get_recent_announces"):
+                    recent = _timed(
+                        "network_map.recent",
+                        network_map.get_recent_announces,
+                        since=last_mesh_announce_ts,
+                        limit=20,
+                    )
+                    if recent:
+                        mesh_data["recent_announces"] = recent
+                        mesh_version += 1
+                        last_mesh_announce_ts = max(
+                            n.get("last_seen", 0) for n in recent
+                        )
+                mesh_data["version"] = mesh_version
+
+                if cycle_count % 3 == 0 and hasattr(network_map, "get_mesh_summary"):
+                    mesh_data["summary"] = _timed(
+                        "network_map.summary", network_map.get_mesh_summary,
+                    )
+            except Exception:
+                pass
+    else:
+        skipped.append("network_map")
+
+    if not _over_budget():
+        telemetry = refs.get("mesh_telemetry")
+        if telemetry and hasattr(telemetry, "get_peer_metrics"):
+            peers = _timed("mesh_telemetry", telemetry.get_peer_metrics)
+            if peers is not None:
+                mesh_data["peers"] = peers
+                mesh_data["peer_count"] = len(peers)
+    else:
+        skipped.append("mesh_telemetry")
+
+    alert_sys = refs.get("alert_system")
+    if alert_sys:
+        try:
+            alert_status = alert_sys.get_status()
+            mesh_data["alerts_sent"] = alert_status.get("alerts_sent", 0)
+            mesh_data["last_alert"] = alert_status.get("last_alert")
+        except Exception:
+            pass
+
+    emergency_data: dict = {}
+    emergency = refs.get("emergency_broadcast")
+    if emergency and hasattr(emergency, "get_status"):
+        try:
+            emergency_data = emergency.get_status()
+        except Exception:
+            pass
+
+    path_warming_data: dict = {}
+    warmer = refs.get("path_warmer")
+    if warmer and hasattr(warmer, "get_warming_stats"):
+        try:
+            path_warming_data = warmer.get_warming_stats()
+        except Exception:
+            pass
+
+    transport_health_data: dict = {}
+    th = refs.get("transport_health")
+    if th and hasattr(th, "get_transport_summary"):
+        try:
+            transport_health_data = th.get_transport_summary()
+        except Exception:
+            pass
+
+    meshtastic_device_data: dict = {}
+    meshtastic_status: dict = {}
+    meshtastic_nodes: list = []
+    meshtastic_lora_neighbors: list = []
+    if not _over_budget():
+        meshtastic_gw = refs.get("meshtastic_gateway")
+        if meshtastic_gw:
+            if hasattr(meshtastic_gw, "get_device_info"):
+                meshtastic_device_data = _timed(
+                    "meshtastic.device", meshtastic_gw.get_device_info,
+                ) or {}
+            if hasattr(meshtastic_gw, "get_status"):
+                meshtastic_status = _timed(
+                    "meshtastic.status", meshtastic_gw.get_status,
+                ) or {}
+            if hasattr(meshtastic_gw, "get_meshtastic_nodes"):
+                meshtastic_nodes = _timed(
+                    "meshtastic.nodes", meshtastic_gw.get_meshtastic_nodes,
+                ) or []
+            if hasattr(meshtastic_gw, "get_lora_neighbors"):
+                meshtastic_lora_neighbors = _timed(
+                    "meshtastic.neighbors", meshtastic_gw.get_lora_neighbors,
+                ) or []
+    else:
+        skipped.append("meshtastic_gateway")
+
+    meshcore_device_data: dict = {}
+    meshcore_contacts: list = []
+    meshcore_status: dict = {}
+    if not _over_budget():
+        meshcore_gw = refs.get("meshcore_gateway")
+        if meshcore_gw:
+            if hasattr(meshcore_gw, "get_device_info"):
+                meshcore_device_data = _timed(
+                    "meshcore.device", meshcore_gw.get_device_info,
+                ) or {}
+            if hasattr(meshcore_gw, "get_contacts"):
+                meshcore_contacts = _timed(
+                    "meshcore.contacts", meshcore_gw.get_contacts,
+                ) or []
+            if hasattr(meshcore_gw, "get_status"):
+                meshcore_status = _timed(
+                    "meshcore.status", meshcore_gw.get_status,
+                ) or {}
+    else:
+        skipped.append("meshcore_gateway")
+
+    meshcore_obs_status: dict = {}
+    meshcore_obs = refs.get("meshcore_observer")
+    if meshcore_obs and hasattr(meshcore_obs, "get_status"):
+        try:
+            meshcore_obs_status = {"available": True, **meshcore_obs.get_status()}
+        except Exception:
+            pass
+
+    mesh_bridge_data: dict = {}
+    mesh_bridge = refs.get("mesh_bridge")
+    if mesh_bridge and hasattr(mesh_bridge, "get_status"):
+        try:
+            mesh_bridge_data = mesh_bridge.get_status()
+        except Exception:
+            pass
+
+    messaging_data: dict = {}
+    if not _over_budget():
+        msg_hub = refs.get("messaging_hub")
+        if msg_hub and hasattr(msg_hub, "get_transports"):
+            try:
+                transports = msg_hub.get_transports()
+                if transports:
+                    messaging_data["transports"] = transports
+                if hasattr(msg_hub, "get_unread_counts_grouped"):
+                    messaging_data["unread"] = msg_hub.get_unread_counts_grouped()
+                elif hasattr(msg_hub, "get_unread_counts"):
+                    messaging_data["unread"] = msg_hub.get_unread_counts()
+            except Exception:
+                pass
+    else:
+        skipped.append("messaging_hub")
+
+    # ── Expensive tier (collected last, skippable) ───────────────────
+
+    space_data: dict = {}
+    if not _over_budget():
+        space_tracker = refs.get("space_tracker")
+        if space_tracker and hasattr(space_tracker, "get_snapshot"):
+            snap = _timed("space_tracker", space_tracker.get_snapshot)
+            if snap:
+                space_data = {
+                    "tle_groups": snap.get("tle_groups", {}),
+                    "launches": (snap.get("launches") or [])[:5],
+                    "weather": snap.get("weather"),
+                    "observer": snap.get("observer"),
+                    "passes": (snap.get("passes") or [])[:10],
+                    "passes_computed_at": snap.get("passes_computed_at"),
+                }
+                positions = snap.get("positions") or {}
+                objects = positions.get("objects") or []
+                if objects:
+                    if snap.get("observer"):
+                        objects = sorted(
+                            objects,
+                            key=lambda o: o.get("el", -999),
+                            reverse=True,
+                        )
+                    space_data["positions"] = {
+                        "fetched_at": positions.get("fetched_at"),
+                        "count": positions.get("count", len(objects)),
+                        "objects": objects[:60],
+                    }
+    else:
+        skipped.append("space_tracker")
+
+    spectrum_data: dict = {}
+    if not _over_budget():
+        scanner = refs.get("spectrum_scanner")
+        if scanner and hasattr(scanner, "get_snapshot"):
+            spectrum_data = _timed("spectrum_scanner", scanner.get_snapshot) or {}
+    else:
+        skipped.append("spectrum_scanner")
+
+    lora_scanner_data: dict = {}
+    if not _over_budget():
+        lora_scanner = refs.get("lora_scanner")
+        if lora_scanner and hasattr(lora_scanner, "get_snapshot"):
+            lora_scanner_data = _timed("lora_scanner", lora_scanner.get_snapshot) or {}
+    else:
+        skipped.append("lora_scanner")
+
+    lora_diag_data: dict = {}
+    lora_diag = refs.get("lora_diagnostics")
+    if lora_diag and hasattr(lora_diag, "get_diagnostics"):
+        try:
+            d = lora_diag.get_diagnostics()
+            li = d.get("lora_interface", {}) or {}
+            lora_diag_data = {
+                "channel_load_short": li.get("channel_load_short"),
+                "channel_load_long":  li.get("channel_load_long"),
+                "airtime_short":      li.get("airtime_short"),
+                "airtime_long":       li.get("airtime_long"),
+                "announce_queue":     li.get("announce_queue"),
+                "online":             li.get("online"),
+            }
+        except Exception:
+            pass
+
+    gps_data: dict = {}
+    if not _over_budget():
+        gps = refs.get("gps_telemetry")
+        if gps and hasattr(gps, "get_snapshot"):
+            gps_data = _timed("gps_telemetry", gps.get_snapshot) or {}
+    else:
+        skipped.append("gps_telemetry")
+
+    sensor_data: dict = {}
+    if not _over_budget():
+        sensor_fw = refs.get("sensor_framework")
+        if sensor_fw and hasattr(sensor_fw, "get_latest_readings"):
+            sensor_data = _timed("sensor_framework", sensor_fw.get_latest_readings) or {}
+    else:
+        skipped.append("sensor_framework")
+
+    # ── Assemble response ────────────────────────────────────────────
+
+    data: dict[str, Any] = {
+        "metrics": metrics,
+        "plugins": plugin_statuses,
+        "interfaces": interfaces,
+        "sensors": sensor_data,
+        "emergency": emergency_data,
+        "transport": transport_data,
+        "connectivity": connectivity_data,
+        "routing": routing_data,
+        "path_warming": path_warming_data,
+        "transport_health": transport_health_data,
+    }
+    if meshtastic_device_data:
+        data["meshtastic_device"] = meshtastic_device_data
+    if meshtastic_status:
+        data["meshtastic_status"] = meshtastic_status
+    if meshtastic_nodes:
+        data["meshtastic_nodes"] = meshtastic_nodes
+    if meshtastic_lora_neighbors:
+        data["meshtastic_lora_neighbors"] = meshtastic_lora_neighbors
+    if meshcore_status:
+        data["meshcore_status"] = meshcore_status
+    if meshcore_device_data:
+        data["meshcore_device"] = meshcore_device_data
+    if meshcore_contacts:
+        data["meshcore_contacts"] = meshcore_contacts
+    if meshcore_obs_status:
+        data["meshcore_observer"] = meshcore_obs_status
+    if messaging_data:
+        data["messaging"] = messaging_data
+    if mesh_data:
+        data["mesh"] = mesh_data
+    if space_data:
+        data["space"] = space_data
+    if spectrum_data:
+        data["spectrum"] = spectrum_data
+    if lora_scanner_data:
+        data["lora_scanner"] = lora_scanner_data
+    if lora_diag_data:
+        data["lora_diagnostics"] = lora_diag_data
+    if gps_data:
+        data["gps"] = gps_data
+    if mesh_bridge_data:
+        data["mesh_bridge"] = mesh_bridge_data
+
+    if not _over_budget():
+        ntp_srv = refs.get("ntp_server")
+        if ntp_srv and hasattr(ntp_srv, "get_snapshot"):
+            ntp_data = _timed("ntp_server", ntp_srv.get_snapshot)
+            if ntp_data:
+                data["ntp"] = ntp_data
+    else:
+        skipped.append("ntp_server")
+
+    if not _over_budget():
+        adsb_plugin = refs.get("adsb_radar")
+        if adsb_plugin and hasattr(adsb_plugin, "get_snapshot"):
+            adsb_data = _timed("adsb_radar", adsb_plugin.get_snapshot)
+            if adsb_data:
+                data["adsb"] = adsb_data
+    else:
+        skipped.append("adsb_radar")
+
+    if not _over_budget():
+        lt_plugin = refs.get("lora_link_tester")
+        if lt_plugin and hasattr(lt_plugin, "get_snapshot"):
+            lt_data = _timed("lora_link_tester", lt_plugin.get_snapshot)
+            if lt_data:
+                data["link_tester"] = lt_data
+    else:
+        skipped.append("lora_link_tester")
+
+    if skipped:
+        log.info("Broadcast budget exceeded — skipped: %s", ", ".join(skipped))
+
+    return data, last_mesh_announce_ts, mesh_version
 
 
 async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
@@ -328,6 +814,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
     _cycle_count = 0
+    loop = asyncio.get_running_loop()
 
     while True:
         try:
@@ -338,340 +825,29 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             if not _ws_clients:
                 continue
 
-            # Collect metrics
-            monitor = plugin.app.get_plugin("system_monitor")
-            metrics = {}
-            if monitor and hasattr(monitor, "latest_metrics"):
-                try:
-                    metrics = monitor.latest_metrics
-                except Exception:
-                    pass
+            # Skip this cycle if the previous collection hasn't finished.
+            if _collection_running.is_set():
+                log.debug("Skipping broadcast cycle — previous collection still running")
+                continue
 
-            # Collect plugin statuses
-            plugin_statuses = {}
-            for name, p in plugin.app.plugins.items():
-                try:
-                    plugin_statuses[name] = {"active": p.get_status().get("active", False)}
-                except Exception:
-                    plugin_statuses[name] = {"active": False}
+            _collection_running.set()
+            t_collect = time.monotonic()
+            try:
+                data, _last_mesh_announce_ts, _mesh_version = (
+                    await loop.run_in_executor(
+                        _broadcast_executor,
+                        _collect_broadcast_data,
+                        plugin,
+                        _cycle_count,
+                        _last_mesh_announce_ts,
+                        _mesh_version,
+                        _plugin_refs,
+                    )
+                )
+            finally:
+                _collection_running.clear()
 
-            # Collect interface traffic data
-            interfaces = _collect_interfaces(plugin.app.reticulum)
-
-            # Collect mesh data as SUMMARY + DELTAS (not full node list)
-            # This reduces broadcast size from ~100KB to ~1KB per cycle
-            mesh_data: dict = {}
-            network_map = plugin.app.get_plugin("network_map")
-            if network_map:
-                try:
-                    if hasattr(network_map, "get_node_count"):
-                        mesh_data["known_nodes"] = network_map.get_node_count()
-                    elif hasattr(network_map, "get_known_nodes"):
-                        mesh_data["known_nodes"] = len(network_map.get_known_nodes())
-
-                    # Send only recent announces (delta) instead of full list
-                    if hasattr(network_map, "get_recent_announces"):
-                        recent = network_map.get_recent_announces(
-                            since=_last_mesh_announce_ts, limit=20,
-                        )
-                        if recent:
-                            mesh_data["recent_announces"] = recent
-                            _mesh_version += 1
-                            _last_mesh_announce_ts = max(
-                                n.get("last_seen", 0) for n in recent
-                            )
-                    mesh_data["version"] = _mesh_version
-
-                    # Include summary stats every 3rd cycle (~15s) for live dashboard
-                    if _cycle_count % 3 == 0 and hasattr(network_map, "get_mesh_summary"):
-                        mesh_data["summary"] = network_map.get_mesh_summary()
-                except Exception:
-                    pass
-
-            telemetry = plugin.app.get_plugin("mesh_telemetry")
-            if telemetry and hasattr(telemetry, "get_peer_metrics"):
-                try:
-                    peers = telemetry.get_peer_metrics()
-                    mesh_data["peers"] = peers
-                    mesh_data["peer_count"] = len(peers)
-                except Exception:
-                    pass
-
-            alert_sys = plugin.app.get_plugin("alert_system")
-            if alert_sys:
-                try:
-                    alert_status = alert_sys.get_status()
-                    mesh_data["alerts_sent"] = alert_status.get("alerts_sent", 0)
-                    mesh_data["last_alert"] = alert_status.get("last_alert")
-                except Exception:
-                    pass
-
-            # Collect sensor data (if plugin available)
-            sensor_data: dict = {}
-            sensor_fw = plugin.app.get_plugin("sensor_framework")
-            if sensor_fw and hasattr(sensor_fw, "get_latest_readings"):
-                try:
-                    sensor_data = sensor_fw.get_latest_readings()
-                except Exception:
-                    pass
-
-            # Collect emergency data (if plugin available)
-            emergency_data: dict = {}
-            emergency = plugin.app.get_plugin("emergency_broadcast")
-            if emergency and hasattr(emergency, "get_status"):
-                try:
-                    emergency_data = emergency.get_status()
-                except Exception:
-                    pass
-
-            transport_data: dict = {}
-            transport_mon = plugin.app.get_plugin("transport_monitor")
-            if transport_mon and hasattr(transport_mon, "get_hub_health"):
-                try:
-                    transport_data = transport_mon.get_hub_health()
-                    _enrich_transport_traffic(transport_data, interfaces)
-                except Exception:
-                    pass
-
-            # Collect connectivity diagnostics (if plugin available)
-            connectivity_data: dict = {}
-            conn_mon = plugin.app.get_plugin("connectivity_monitor")
-            if conn_mon and hasattr(conn_mon, "get_health"):
-                try:
-                    connectivity_data = conn_mon.get_health()
-                except Exception:
-                    pass
-
-            # Extract routing summary from connectivity data (no extra RPC)
-            routing_data: dict = {}
-            if connectivity_data:
-                routing_data = connectivity_data.get("routing", {})
-
-            # Collect path warming stats (if plugin available)
-            path_warming_data: dict = {}
-            warmer = plugin.app.get_plugin("path_warmer")
-            if warmer and hasattr(warmer, "get_warming_stats"):
-                try:
-                    path_warming_data = warmer.get_warming_stats()
-                except Exception:
-                    pass
-
-            # Collect transport health summary (if plugin available)
-            transport_health_data: dict = {}
-            th = plugin.app.get_plugin("transport_health")
-            if th and hasattr(th, "get_transport_summary"):
-                try:
-                    transport_health_data = th.get_transport_summary()
-                except Exception:
-                    pass
-
-            # Collect Meshtastic device info (if gateway plugin available)
-            meshtastic_device_data: dict = {}
-            meshtastic_gw = plugin.app.get_plugin("meshtastic_gateway")
-            if meshtastic_gw and hasattr(meshtastic_gw, "get_device_info"):
-                try:
-                    meshtastic_device_data = meshtastic_gw.get_device_info()
-                except Exception:
-                    pass
-
-            # Collect LoRa neighbors (if gateway plugin available)
-            meshtastic_lora_neighbors: list = []
-            if meshtastic_gw and hasattr(meshtastic_gw, "get_lora_neighbors"):
-                try:
-                    meshtastic_lora_neighbors = meshtastic_gw.get_lora_neighbors()
-                except Exception:
-                    pass
-
-            # Collect MeshCore device info (if gateway plugin available)
-            meshcore_device_data: dict = {}
-            meshcore_gw = plugin.app.get_plugin("meshcore_gateway")
-            if meshcore_gw and hasattr(meshcore_gw, "get_device_info"):
-                try:
-                    meshcore_device_data = meshcore_gw.get_device_info()
-                except Exception:
-                    pass
-
-            # Collect MeshCore contacts (if gateway plugin available)
-            meshcore_contacts: list = []
-            if meshcore_gw and hasattr(meshcore_gw, "get_contacts"):
-                try:
-                    meshcore_contacts = meshcore_gw.get_contacts()
-                except Exception:
-                    pass
-
-            # Collect MeshCore status (if gateway plugin available)
-            meshcore_status: dict = {}
-            if meshcore_gw and hasattr(meshcore_gw, "get_status"):
-                try:
-                    meshcore_status = meshcore_gw.get_status()
-                except Exception:
-                    pass
-
-            meshcore_obs_status: dict = {}
-            meshcore_obs = plugin.app.get_plugin("meshcore_observer")
-            if meshcore_obs and hasattr(meshcore_obs, "get_status"):
-                try:
-                    meshcore_obs_status = {"available": True, **meshcore_obs.get_status()}
-                except Exception:
-                    pass
-
-            mesh_bridge_data: dict = {}
-            mesh_bridge = plugin.app.get_plugin("mesh_bridge")
-            if mesh_bridge and hasattr(mesh_bridge, "get_status"):
-                try:
-                    mesh_bridge_data = mesh_bridge.get_status()
-                except Exception:
-                    pass
-
-            # Collect space tracker snapshot (if plugin enabled).  Live
-            # position deltas are published via the plugin's own event bus
-            # message; here we only surface the lightweight snapshot.
-            space_data: dict = {}
-            space_tracker = plugin.app.get_plugin("space_tracker")
-            if space_tracker and hasattr(space_tracker, "get_snapshot"):
-                try:
-                    snap = space_tracker.get_snapshot()
-                    space_data = {
-                        "tle_groups": snap.get("tle_groups", {}),
-                        "launches": (snap.get("launches") or [])[:5],
-                        "weather": snap.get("weather"),
-                        "observer": snap.get("observer"),
-                        "passes": (snap.get("passes") or [])[:10],
-                        "passes_computed_at": snap.get("passes_computed_at"),
-                    }
-                    # Propagated positions: trim to top N (by elevation if
-                    # observer, otherwise as-is) to keep broadcast size bounded.
-                    positions = snap.get("positions") or {}
-                    objects = positions.get("objects") or []
-                    if objects:
-                        if snap.get("observer"):
-                            objects = sorted(
-                                objects,
-                                key=lambda o: o.get("el", -999),
-                                reverse=True,
-                            )
-                        space_data["positions"] = {
-                            "fetched_at": positions.get("fetched_at"),
-                            "count": positions.get("count", len(objects)),
-                            "objects": objects[:60],
-                        }
-                except Exception:
-                    pass
-
-            # Collect spectrum scanner snapshot (if plugin enabled).  The
-            # plugin hands us a pruned, wire-ready dict; we attach it
-            # verbatim.  Snapshot includes a rolling waterfall buffer
-            # (capped by the plugin's config), so size is bounded.
-            spectrum_data: dict = {}
-            scanner = plugin.app.get_plugin("spectrum_scanner")
-            if scanner and hasattr(scanner, "get_snapshot"):
-                try:
-                    spectrum_data = scanner.get_snapshot()
-                except Exception:
-                    pass
-
-            # Collect RNode PHY channel-load / airtime from lora_diagnostics.
-            # Surfaces RNode's own view of how busy the channel is, so the
-            # LoRa Spectrum panel can show it next to the SDR-derived bars.
-            # channel_load_* / announce_queue / online populate at runtime
-            # after the first monitor tick; before that they're absent and
-            # .get(...) returns None, which the frontend handles.
-            lora_diag_data: dict = {}
-            lora_diag = plugin.app.get_plugin("lora_diagnostics")
-            if lora_diag and hasattr(lora_diag, "get_diagnostics"):
-                try:
-                    d = lora_diag.get_diagnostics()
-                    li = d.get("lora_interface", {}) or {}
-                    lora_diag_data = {
-                        "channel_load_short": li.get("channel_load_short"),
-                        "channel_load_long":  li.get("channel_load_long"),
-                        "airtime_short":      li.get("airtime_short"),
-                        "airtime_long":       li.get("airtime_long"),
-                        "announce_queue":     li.get("announce_queue"),
-                        "online":             li.get("online"),
-                    }
-                except Exception:
-                    pass
-
-            # Collect GPS telemetry snapshot (if plugin enabled).
-            gps_data: dict = {}
-            gps = plugin.app.get_plugin("gps_telemetry")
-            if gps and hasattr(gps, "get_snapshot"):
-                try:
-                    gps_data = gps.get_snapshot()
-                except Exception:
-                    pass
-
-            # Messaging state snapshot for the tick.  New messages and
-            # status changes are delivered via the per-event `message` /
-            # `message_status` WS envelopes (see `_on_message_event`),
-            # so the tick only carries slow-moving state (transports +
-            # unread counts) as a reconnect-safe backstop.
-            messaging_data: dict = {}
-            msg_hub = plugin.app.get_plugin("messaging_hub")
-            if msg_hub and hasattr(msg_hub, "get_transports"):
-                try:
-                    transports = msg_hub.get_transports()
-                    if transports:
-                        messaging_data["transports"] = transports
-                    # Always send the unread map (even empty). If we skip
-                    # empty maps, clients that marked a conversation read
-                    # never observe the transition and keep a stale local
-                    # count until a new message arrives.
-                    if hasattr(msg_hub, "get_unread_counts_grouped"):
-                        messaging_data["unread"] = msg_hub.get_unread_counts_grouped()
-                    elif hasattr(msg_hub, "get_unread_counts"):
-                        messaging_data["unread"] = msg_hub.get_unread_counts()
-                except Exception:
-                    pass
-
-            data: dict[str, Any] = {
-                "metrics": metrics,
-                "plugins": plugin_statuses,
-                "interfaces": interfaces,
-                "sensors": sensor_data,
-                "emergency": emergency_data,
-                "transport": transport_data,
-                "connectivity": connectivity_data,
-                "routing": routing_data,
-                "path_warming": path_warming_data,
-                "transport_health": transport_health_data,
-            }
-            if meshtastic_device_data:
-                data["meshtastic_device"] = meshtastic_device_data
-            if meshtastic_lora_neighbors:
-                data["meshtastic_lora_neighbors"] = meshtastic_lora_neighbors
-            if meshcore_status:
-                data["meshcore_status"] = meshcore_status
-            if meshcore_device_data:
-                data["meshcore_device"] = meshcore_device_data
-            if meshcore_contacts:
-                data["meshcore_contacts"] = meshcore_contacts
-            if meshcore_obs_status:
-                data["meshcore_observer"] = meshcore_obs_status
-            if messaging_data:
-                data["messaging"] = messaging_data
-            if mesh_data:
-                data["mesh"] = mesh_data
-            if space_data:
-                data["space"] = space_data
-            if spectrum_data:
-                data["spectrum"] = spectrum_data
-            if lora_diag_data:
-                data["lora_diagnostics"] = lora_diag_data
-            if gps_data:
-                data["gps"] = gps_data
-            if mesh_bridge_data:
-                data["mesh_bridge"] = mesh_bridge_data
-
-            adsb_plugin = plugin.app.get_plugin("adsb_radar")
-            if adsb_plugin and hasattr(adsb_plugin, "get_snapshot"):
-                try:
-                    adsb_data = adsb_plugin.get_snapshot()
-                    if adsb_data:
-                        data["adsb"] = adsb_data
-                except Exception:
-                    log.debug("adsb_radar snapshot failed", exc_info=True)
+            collect_elapsed = time.monotonic() - t_collect
 
             message = json.dumps({
                 "type": "update",
@@ -679,16 +855,29 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 "timestamp": time.time(),
             })
 
-            # Broadcast to all clients, remove dead ones
-            dead: list[aiohttp.web.WebSocketResponse] = []
-            for ws in list(_ws_clients):
+            # Fan out to all clients concurrently (mirrors _push_to_clients).
+            clients = list(_ws_clients)
+
+            async def _send(ws: aiohttp.web.WebSocketResponse) -> bool:
                 try:
                     await ws.send_str(message)
+                    return True
                 except Exception:
-                    dead.append(ws)
+                    return False
 
-            for ws in dead:
-                _ws_clients.discard(ws)
+            results = await asyncio.gather(*(_send(ws) for ws in clients))
+            for ws, ok in zip(clients, results):
+                if not ok:
+                    _ws_clients.discard(ws)
+
+            # Periodic health log (~every 60s at default interval).
+            if _cycle_count % 30 == 0:
+                log.info(
+                    "WS broadcast: collect=%.0fms payload=%dB clients=%d",
+                    collect_elapsed * 1000,
+                    len(message),
+                    len(clients),
+                )
 
         except asyncio.CancelledError:
             break
@@ -698,32 +887,39 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
 
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _ws_loop, _ws_plugin
+    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor
     _ws_loop = asyncio.get_running_loop()
     _ws_plugin = app["plugin"]
+    _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="ws-broadcast",
+    )
+    _rebuild_plugin_refs(_ws_plugin.app.get_plugin)
     _broadcast_task = asyncio.create_task(_broadcast_metrics(app))
-    # Subscribe to messaging events so inbound messages and delivery status
-    # changes reach the dashboard in <100 ms instead of waiting for the
-    # next metrics poll (up to 5 s).
     try:
         from reticulumpi import events as _events
         event_bus = _ws_plugin.app.event_bus
         event_bus.subscribe(_events.MESSAGE_RECEIVED, _on_message_event)
         event_bus.subscribe(_events.MESSAGE_SENT, _on_message_event)
         event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
+        event_bus.subscribe(_events.MESSAGE_REACTION_RECEIVED, _on_reaction_event)
         event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
+        event_bus.subscribe(_events.PLUGIN_STARTED, _on_plugin_lifecycle)
+        event_bus.subscribe(_events.PLUGIN_STOPPED, _on_plugin_lifecycle)
+        event_bus.subscribe(_events.PLUGIN_CRASHED, _on_plugin_lifecycle)
     except Exception:
-        log.exception("Failed to subscribe WS handler to messaging events")
+        log.exception("Failed to subscribe WS handler to events")
 
 
 async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _ws_loop, _ws_plugin
+    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor
     try:
         if _ws_plugin is not None:
             event_bus = _ws_plugin.app.event_bus
             event_bus.unsubscribe_all(_on_message_event)
             event_bus.unsubscribe_all(_on_status_event)
+            event_bus.unsubscribe_all(_on_reaction_event)
             event_bus.unsubscribe_all(_on_alert_event)
+            event_bus.unsubscribe_all(_on_plugin_lifecycle)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _broadcast_task:
@@ -735,6 +931,9 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
         _broadcast_task = None
     _ws_loop = None
     _ws_plugin = None
+    if _broadcast_executor is not None:
+        _broadcast_executor.shutdown(wait=False)
+        _broadcast_executor = None
     # Close all WebSocket connections
     for ws in list(_ws_clients):
         await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
@@ -803,6 +1002,16 @@ def _on_status_event(event_type: str, data: dict) -> None:
             payload["sub_transport"] = data.get("sub_transport") or ""
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "message_status", payload)
+    except RuntimeError:
+        pass
+
+
+def _on_reaction_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for MESSAGE_REACTION_RECEIVED — push to WS clients."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "reaction", data)
     except RuntimeError:
         pass
 

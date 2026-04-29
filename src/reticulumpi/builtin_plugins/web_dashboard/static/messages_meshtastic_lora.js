@@ -1,4 +1,4 @@
-/* ReticulumPi Dashboard — Meshtastic LoRa messages panel wrapper. */
+/* ReticulumPi Dashboard — Meshtastic messages panel wrapper. */
 (function () {
   'use strict';
   var R = window.RPI;
@@ -6,11 +6,11 @@
 
   var panel = R.createMessagesPanel({
     rootId: 'msg-lora',
-    sectionTitle: 'Meshtastic LoRa',
+    sectionTitle: 'Meshtastic',
     transport: 'meshtastic',
     subTransport: 'lora',
     supportsChannels: true,
-    broadcastLabel: 'Broadcast (LoRa)',
+    broadcastLabel: 'Broadcast',
   });
 
   R.updateMessagingLora = panel.update;

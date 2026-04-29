@@ -337,6 +337,17 @@ reticulumpi:
     #  health_check_interval: 15       # Seconds between health checks
     #  reconnect_delay: 10             # Seconds between reconnect attempts
     #  max_reconnect_attempts: 10      # 0 = unlimited
+    #  # Firmware watchdog — detects hung firmware where the USB serial
+    #  # port stays open but the MCU is frozen.  Activates whenever a
+    #  # physical device is connected (device_probe_port or serial mode).
+    #  firmware_watchdog:
+    #    enabled: true                 # Enable firmware hang detection
+    #    silence_timeout: 300          # Seconds with no device data before probing
+    #    probe_timeout: 15             # Seconds to wait for probe response
+    #    probe_interval: 0             # Seconds between proactive probes (0=only on silence)
+    #    auto_reset: true              # Attempt device reset on confirmed hang
+    #    usb_power_cycle: false        # USB bus reset if soft reboot fails
+    #    max_resets_per_hour: 3        # Circuit breaker (0=unlimited)
 
     # MeshCore Gateway — bridges MeshCore LoRa mesh with ReticulumPi.
     # Connects to a MeshCore companion radio over USB serial.
@@ -556,8 +567,29 @@ reticulumpi:
     #  gain_db: 40.0                    # Tuner gain (dB); null = auto
     #  ppm: 0                           # Tuner frequency correction (ppm)
     #  waterfall_rows: 128              # In-memory rolling history depth (8-2048)
-    #  device_index: 0                  # RTL-SDR device index (-d) for multi-dongle setups
+    #  device_index: 0                  # RTL-SDR device index or serial number string (e.g. "07143901")
     #  max_restarts: 5                  # Subprocess crash-restart cap (per plugin session)
+
+    # --- LoRa spectrum scanner ------------------------------------------------
+    # Dedicated RTL-SDR scanner for the LoRa/ISM band.  Runs a second
+    # rtl_power instance on a separate dongle with fine bin resolution
+    # (12.5 kHz) for resolving individual LoRa channels.  The dashboard's
+    # LoRa Spectrum panel prefers this feed over the wideband scanner.
+    # Requires a SECOND RTL-SDR device — cannot share with spectrum_scanner.
+    #lora_scanner:
+    #  enabled: false
+    #  freq_start_mhz: 902.0              # US LoRa band lower edge
+    #  freq_stop_mhz: 928.0               # US LoRa band upper edge
+    #  bin_khz: 12.5                      # Fine bins for LoRa channel resolution
+    #  sweep_seconds: 1                   # Float 0.1-60; sub-second needs rtl_power_fftw
+    #  gain_db: 34.0
+    #  ppm: 0
+    #  waterfall_rows: 256
+    #  device_index: 0                    # Device index or serial number (e.g. "14342860")
+    #  power_command: rtl_power            # Use rtl_power_fftw for faster sweeps (compile from source)
+    #  lora_region: US915                  # Channel plan for analysis (US915 supported)
+    #  threshold_db: 6                     # Signal detection threshold above noise floor
+    #  max_restarts: 5
 
     # --- ADS-B radar ----------------------------------------------------------
     # Tracks nearby aircraft via an RTL-SDR dongle + dump1090.  Launches
@@ -572,7 +604,7 @@ reticulumpi:
     #adsb_radar:
     #  enabled: false
     #  dump1090_bin: dump1090              # Binary name or path
-    #  device_index: 1                    # Use device 1 to avoid conflict with spectrum_scanner
+    #  device_index: 1                    # Device index or serial number (e.g. "14342860"); use serial for stable binding
     #  gain: max                          # Tuner gain (dB or "max")
     #  ppm: 0                             # Frequency correction (ppm)
     #  enable_bias_tee: false             # Enable bias-T power (for active antennas)
@@ -582,17 +614,69 @@ reticulumpi:
     #  receiver_lat: null                 # Receiver position for distance calc (or use GPS plugin)
     #  receiver_lon: null
 
+    # --- NTP server -----------------------------------------------------------
+    # GPS-disciplined time synchronization via chrony. Monitors chrony sync
+    # status and optionally configures GPS as a reference clock via gpsd shared
+    # memory. Useful off-grid where internet NTP is unavailable.
+    # Requires: chrony installed, chronyc on PATH.
+    # For GPS discipline: gpsd running, GPS receiver connected.
+    #ntp_server:
+    #  enabled: false
+    #  check_interval: 30                  # Seconds between chrony status checks
+    #  manage_chrony_config: true           # Write/manage GPS refclock config snippet
+    #  chrony_conf_dir: /etc/chrony/conf.d  # Directory for chrony config snippets
+    #  sudo_chronyc: true                  # Use sudo for chronyc commands
+    #  gps_refclock:
+    #    enabled: true                     # Configure GPS as chrony refclock
+    #    shm_segment: 0                    # gpsd SHM segment (0 = coarse time)
+    #    pps_device: null                  # PPS device (e.g. /dev/pps0); null to disable
+    #    precision: 1e-1                   # SHM precision (seconds)
+    #    pps_precision: 1e-9               # PPS precision (seconds)
+    #    offset: 0.0                       # Time offset correction (seconds)
+    #    delay: 0.2                        # Network delay estimate (seconds)
+    #  alert_on_sync_loss: true            # Publish alert when sync is lost
+    #  sync_loss_threshold: 300            # Seconds without sync before alerting
+
+    # --- LoRa link tester -----------------------------------------------------
+    # Measures RF link quality to a remote Meshtastic device using a dedicated
+    # test radio (separate from any meshtastic_gateway device).  Sends numbered
+    # probe packets and records RTT, RSSI, SNR, and packet loss.  Results are
+    # streamed to the web dashboard for real-time charting.
+    # Requires: pip install reticulumpi[meshtastic]
+    # Hardware: any Meshtastic-firmware LoRa device (e.g. RAK 4631) on USB.
+    # The remote end needs no special firmware — stock Meshtastic ACKs suffice.
+    #lora_link_tester:
+    #  enabled: false
+    #  serial_port: /dev/ttyACM1           # Dedicated test radio (NOT the gateway radio)
+    #  target_node_id: "!abcd1234"         # Default target node (optional, set via dashboard)
+    #  channel_index: 0                    # Meshtastic channel slot (0-7)
+    #  probe_interval: 30                  # Seconds between probes (min 10)
+    #  probe_count: 20                     # Probes per test run (0 = unlimited until stopped)
+    #  probe_timeout: 30                   # Seconds to wait for ACK before declaring loss
+    #  max_history: 500                    # Rolling result buffer size
+    #  hop_limit: null                     # null = device default (3)
+    #  reconnect_delay: 10                 # Base backoff on device loss (seconds)
+    #  max_reconnect_attempts: 5           # Give up after N failures (0 = retry forever)
+
     # --- GPS telemetry --------------------------------------------------------
     # Reads NMEA 0183 from a USB GPS receiver (e.g. GlobalSat BU-353N) and
     # exposes position / altitude / speed / satellite state. Drives the
     # dashboard GPS panel and provides observer coordinates to space_tracker
     # (set observer.latitude/longitude to null in space_tracker to use GPS).
     # Requires: pip install reticulumpi[gps]
+    #
+    # Source modes:
+    #   serial — read NMEA directly from USB serial device (default)
+    #   gpsd   — read NMEA via gpsd TCP socket (allows sharing the GPS with
+    #            chrony/ntp_server for GPS-disciplined time sync)
     #gps_telemetry:
     #  enabled: false
+    #  source: serial                   # serial | gpsd
     #  serial_port: /dev/ttyUSB0        # Serial device (use a stable by-id/udev symlink where possible)
     #  baudrate: 4800                   # BU-353N default is 4800; many other pucks use 9600
-    #  read_timeout: 2.0                # Serial read timeout (seconds)
+    #  gpsd_host: localhost             # gpsd TCP host (source: gpsd only)
+    #  gpsd_port: 2947                  # gpsd TCP port (source: gpsd only)
+    #  read_timeout: 2.0                # Serial/TCP read timeout (seconds)
     #  reconnect_delay: 5               # Base backoff on device loss (seconds; exponential up to 300s)
     #  max_reconnect_attempts: 0        # 0 = retry forever
     #  fix_stale_seconds: 30            # Mark fix as lost if no RMC within this window

@@ -27,19 +27,36 @@ class GpsTelemetry(PluginBase):
     # ── Configuration validation ────────────────────────────────────────
 
     def validate_config(self) -> None:
+        source = self.config.get("source", "serial")
+        if source not in ("serial", "gpsd"):
+            raise ValueError("source must be 'serial' or 'gpsd'")
+
         try:
-            import serial  # noqa: F401
             import pynmea2  # noqa: F401
         except ImportError as exc:
-            raise ValueError(
-                "pyserial and pynmea2 required. "
-                "Install with: pip install reticulumpi[gps] "
-                f"({exc})"
-            )
+            raise ValueError(f"pynmea2 required ({exc})")
+
+        if source == "serial":
+            try:
+                import serial  # noqa: F401
+            except ImportError as exc:
+                raise ValueError(
+                    "pyserial required for serial source. "
+                    "Install with: pip install reticulumpi[gps] "
+                    f"({exc})"
+                )
 
         port = self.config.get("serial_port", "/dev/ttyUSB0")
-        if not isinstance(port, str) or not port:
+        if source == "serial" and (not isinstance(port, str) or not port):
             raise ValueError("serial_port must be a non-empty string")
+
+        if source == "gpsd":
+            host = self.config.get("gpsd_host", "localhost")
+            if not isinstance(host, str) or not host:
+                raise ValueError("gpsd_host must be a non-empty string")
+            gport = self.config.get("gpsd_port", 2947)
+            if not isinstance(gport, int) or gport <= 0:
+                raise ValueError("gpsd_port must be a positive integer")
 
         baud = self.config.get("baudrate", 4800)
         if not isinstance(baud, int) or baud <= 0:
@@ -68,6 +85,7 @@ class GpsTelemetry(PluginBase):
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
+        self._source: str = self.config.get("source", "serial")
         self._serial_port: str = self.config.get("serial_port", "/dev/ttyUSB0")
         self._baudrate: int = self.config.get("baudrate", 4800)
         self._read_timeout: float = float(self.config.get("read_timeout", 2.0))
@@ -77,6 +95,8 @@ class GpsTelemetry(PluginBase):
         self._stale_check_interval: float = float(
             self.config.get("stale_check_interval", 5)
         )
+        self._gpsd_host: str = self.config.get("gpsd_host", "localhost")
+        self._gpsd_port: int = self.config.get("gpsd_port", 2947)
 
         self._lock = threading.Lock()
         self.last_fix: dict[str, Any] | None = None
@@ -100,11 +120,22 @@ class GpsTelemetry(PluginBase):
         self._start_time = time.time()
 
         self._active = True
-        self._start_thread(self._read_loop, name="gps-reader")
+        if self._source == "gpsd":
+            self._start_thread(self._gpsd_read_loop, name="gps-gpsd-reader")
+        else:
+            self._start_thread(self._read_loop, name="gps-reader")
         self._start_thread(self._stale_monitor, name="gps-stale")
-        self.log.info(
-            "GPS telemetry started on %s @ %d baud", self._serial_port, self._baudrate
-        )
+
+        if self._source == "gpsd":
+            self.log.info(
+                "GPS telemetry started (gpsd %s:%d)",
+                self._gpsd_host, self._gpsd_port,
+            )
+        else:
+            self.log.info(
+                "GPS telemetry started on %s @ %d baud",
+                self._serial_port, self._baudrate,
+            )
 
     def stop(self) -> None:
         self._active = False
@@ -120,7 +151,10 @@ class GpsTelemetry(PluginBase):
     # ── Public status / snapshot API ────────────────────────────────────
 
     def get_status(self) -> dict[str, Any]:
-        with self._lock:
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return {"active": False, "connected": False}
+        with lock:
             last_age = (
                 time.time() - self._last_msg_time if self._last_msg_time else None
             )
@@ -142,7 +176,10 @@ class GpsTelemetry(PluginBase):
     def get_snapshot(self) -> dict[str, Any]:
         """Merged status + last_fix + satellites — one dict for the WS stream."""
         snap = self.get_status()
-        with self._lock:
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return snap
+        with lock:
             snap["last_fix"] = dict(self.last_fix) if self.last_fix else None
             in_use: set[int] = set()
             for s in self._sats_in_use_by_talker.values():
@@ -439,6 +476,92 @@ class GpsTelemetry(PluginBase):
                 fix["heading_deg"] = heading
             self.last_fix = fix
             self._last_msg_time = now
+
+    # ── gpsd TCP read loop ───────────────────────────────────────────────
+
+    def _gpsd_read_loop(self) -> None:
+        import socket as _socket
+
+        attempt = 0
+        while self._active:
+            sock = None
+            reader = None
+            try:
+                sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                sock.settimeout(self._read_timeout)
+                sock.connect((self._gpsd_host, self._gpsd_port))
+                sock.sendall(b'?WATCH={"enable":true,"nmea":true}\r\n')
+                reader = sock.makefile("rb")
+            except (OSError, _socket.error) as exc:
+                attempt += 1
+                self._reconnect_failures += 1
+                self.log.warning(
+                    "gpsd connect failed (attempt %d): %s", attempt, exc
+                )
+                if sock:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                if (
+                    self._max_reconnect_attempts > 0
+                    and attempt >= self._max_reconnect_attempts
+                ):
+                    self.log.error(
+                        "gpsd exceeded max reconnect attempts (%d), giving up",
+                        self._max_reconnect_attempts,
+                    )
+                    self._active = False
+                    return
+                delay = min(
+                    self._reconnect_delay * (2 ** min(attempt - 1, 5)), 300.0
+                )
+                self._sleep_while_active(delay)
+                continue
+
+            # Successfully connected
+            with self._lock:
+                self._connected = True
+            attempt = 0
+            self.event_bus.publish(
+                events.GPS_DEVICE_CONNECTED,
+                {"source": "gpsd", "host": self._gpsd_host, "port": self._gpsd_port},
+            )
+            self.log.info("gpsd connected at %s:%d", self._gpsd_host, self._gpsd_port)
+
+            try:
+                while self._active:
+                    try:
+                        raw = reader.readline()
+                    except (_socket.timeout, OSError) as exc:
+                        if isinstance(exc, _socket.timeout):
+                            continue  # read timeout — loop to check _active
+                        self.log.warning("gpsd read failed: %s", exc)
+                        break
+                    if not raw:
+                        self.log.warning("gpsd connection closed")
+                        break
+                    self._msgs_received += 1
+                    line = raw.decode("ascii", errors="replace").strip()
+                    if line.startswith("$"):
+                        self._handle_sentence(line)
+            finally:
+                with self._lock:
+                    self._connected = False
+                try:
+                    if reader:
+                        reader.close()
+                    if sock:
+                        sock.close()
+                except Exception:
+                    pass
+                self.event_bus.publish(
+                    events.GPS_DEVICE_DISCONNECTED,
+                    {"source": "gpsd", "host": self._gpsd_host},
+                )
+
+            if self._active:
+                self._sleep_while_active(self._reconnect_delay)
 
     # ── Stale-fix monitor ───────────────────────────────────────────────
 

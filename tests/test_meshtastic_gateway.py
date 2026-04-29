@@ -640,6 +640,88 @@ class TestGetMeshtasticNodes:
         assert node["latitude"] == 30.0
         assert node["longitude"] == -97.0
 
+    def test_mqtt_nodes_have_via_mqtt_flag(self, gateway_plugin):
+        gateway_plugin._connected = True
+        gateway_plugin._mesh_interface = _make_mock_mesh_interface()
+        nodes = gateway_plugin.get_meshtastic_nodes()
+        for node in nodes:
+            assert node["via_mqtt"] is True
+            assert node["via_lora"] is False
+
+    def test_serial_lora_node_has_via_lora_flag(self, gateway_plugin):
+        gateway_plugin._connected = False
+        gateway_plugin._mesh_interface = None
+        listener = MagicMock()
+        listener.nodes = {
+            "!aaa11111": {
+                "user": {"longName": "LoRaNode", "shortName": "LN", "hwModel": "RAK4631"},
+                "snr": 3.0,
+                "lastHeard": 1700002000,
+                "position": {"latitude": 31.0, "longitude": -96.0},
+            },
+        }
+        gateway_plugin._serial_listener = listener
+        nodes = gateway_plugin.get_meshtastic_nodes()
+        assert len(nodes) == 1
+        assert nodes[0]["via_lora"] is True
+        assert nodes[0]["via_mqtt"] is False
+
+    def test_serial_via_mqtt_node_has_via_mqtt_flag(self, gateway_plugin):
+        gateway_plugin._connected = False
+        gateway_plugin._mesh_interface = None
+        listener = MagicMock()
+        listener.nodes = {
+            "!bbb22222": {
+                "user": {"longName": "RelayedNode", "shortName": "RN", "hwModel": "HELTEC_V3"},
+                "snr": 1.0,
+                "lastHeard": 1700003000,
+                "position": {},
+                "viaMqtt": True,
+            },
+        }
+        gateway_plugin._serial_listener = listener
+        nodes = gateway_plugin.get_meshtastic_nodes()
+        assert len(nodes) == 1
+        assert nodes[0]["via_mqtt"] is True
+        assert nodes[0]["via_lora"] is False
+
+    def test_merged_node_has_both_transport_flags(self, gateway_plugin):
+        gateway_plugin._connected = True
+        gateway_plugin._mesh_interface = _make_mock_mesh_interface()
+        listener = MagicMock()
+        listener.nodes = {
+            "!abcd1234": {
+                "user": {"longName": "TestNode1", "shortName": "TN1", "hwModel": "RAK4631"},
+                "snr": 6.0,
+                "lastHeard": 1700005000,
+                "position": {"latitude": 30.0, "longitude": -97.0},
+            },
+        }
+        gateway_plugin._serial_listener = listener
+        nodes = gateway_plugin.get_meshtastic_nodes()
+        merged = next(n for n in nodes if n["id"] == "!abcd1234")
+        assert merged["via_mqtt"] is True
+        assert merged["via_lora"] is True
+
+    def test_self_node_always_via_lora(self, gateway_plugin):
+        gateway_plugin._connected = True
+        iface = MagicMock()
+        iface.nodes = {
+            "!12345678": {
+                "user": {"longName": "MyNode", "shortName": "MN", "hwModel": "RAK4631"},
+                "isSelf": True,
+                "lastHeard": 1700000000,
+                "position": {},
+            },
+        }
+        iface.myInfo = MagicMock()
+        iface.myInfo.my_node_num = 0x12345678
+        gateway_plugin._mesh_interface = iface
+        nodes = gateway_plugin.get_meshtastic_nodes()
+        self_node = next(n for n in nodes if n.get("is_self"))
+        assert self_node["via_lora"] is True
+        assert self_node["via_mqtt"] is False
+
 
 # ---------------------------------------------------------------------------
 # TestConnectionManagement

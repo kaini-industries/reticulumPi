@@ -44,9 +44,11 @@ class MeshTelemetryPlugin(PluginBase):
             *aspects,
         )
 
-        # Register announce handler to receive peer telemetry
-        self._handler = _TelemetryHandler(self, app_name, aspects)
-        RNS.Transport.register_announce_handler(self._handler)
+        aspect_str = ".".join([app_name] + aspects)
+        self._announce_sub = self.announce_dispatcher.subscribe(
+            aspect_str,
+            lambda dest, _identity, app_data: self.record_peer_metrics(dest, app_data),
+        )
 
         self._start_thread(self._announce_loop, "mesh-telemetry")
 
@@ -58,10 +60,7 @@ class MeshTelemetryPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        try:
-            RNS.Transport.deregister_announce_handler(self._handler)
-        except Exception:
-            pass
+        self.announce_dispatcher.unsubscribe(self._announce_sub)
         self._join_threads()
         self.destination = None
 
@@ -136,7 +135,7 @@ class MeshTelemetryPlugin(PluginBase):
                 self.log.debug("Telemetry announced")
             except Exception:
                 self.log.exception("Error during telemetry announce")
-            self._sleep_while_active(interval)
+            self._jittered_sleep(interval)
 
     def _build_telemetry_payload(self) -> bytes:
         """Build a compact umsgpack payload with system metrics."""
@@ -164,6 +163,13 @@ class MeshTelemetryPlugin(PluginBase):
                     short = _SHORT_KEYS.get(key, key)
                     payload[short] = m[key]
 
+        gps = self.app.get_plugin("gps_telemetry")
+        if gps and hasattr(gps, "last_fix") and gps.last_fix:
+            fix = gps.last_fix
+            if fix.get("lat") is not None and fix.get("lon") is not None:
+                payload["lat"] = round(fix["lat"], 5)
+                payload["lon"] = round(fix["lon"], 5)
+
         return umsgpack.packb(payload)
 
     def _get_app_start_time(self) -> float:
@@ -187,21 +193,3 @@ _SHORT_KEYS = {
 }
 
 
-class _TelemetryHandler:
-    """Registered with RNS.Transport to receive telemetry announces."""
-
-    def __init__(self, plugin: MeshTelemetryPlugin, app_name: str, aspects: list[str]):
-        self._plugin = plugin
-        # Build aspect filter from the same config used to create the destination
-        self.aspect_filter = ".".join([app_name] + aspects)
-
-    def received_announce(
-        self,
-        destination_hash: bytes,
-        announced_identity: Any,
-        app_data: bytes | None,
-    ) -> None:
-        try:
-            self._plugin.record_peer_metrics(destination_hash, app_data)
-        except Exception:
-            self._plugin.log.debug("Error handling telemetry announce", exc_info=True)

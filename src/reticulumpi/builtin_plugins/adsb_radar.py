@@ -104,7 +104,7 @@ class AdsbRadarPlugin(PluginBase):
     def validate_config(self) -> None:
         cfg = self.config
         self._dump1090_bin = str(cfg.get("dump1090_bin", "dump1090"))
-        self._device_index = int(cfg.get("device_index", 0))
+        self._device_index = str(cfg.get("device_index", "0"))
         self._gain = str(cfg.get("gain", "max"))
         self._ppm = int(cfg.get("ppm", 0))
         self._enable_bias_tee = bool(cfg.get("enable_bias_tee", False))
@@ -143,14 +143,14 @@ class AdsbRadarPlugin(PluginBase):
         self._start_thread(self._maintenance_loop, name="adsb-maintenance")
 
         self.log.info(
-            "adsb_radar started: device %d, gain %s, ppm %d, SBS port %d",
+            "adsb_radar started: device %s, gain %s, ppm %d, SBS port %d",
             self._device_index, self._gain, self._ppm, self._sbs_port,
         )
 
     def stop(self) -> None:
         self._active = False
         self._terminate_process()
-        self._join_threads(timeout=12.0)
+        self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
     # ── public API ────────────────────────────────────────────────────
@@ -211,7 +211,6 @@ class AdsbRadarPlugin(PluginBase):
             parser = threading.Thread(
                 target=self._parser_loop,
                 name="adsb-parser",
-                daemon=True,
             )
             parser.start()
 
@@ -291,12 +290,12 @@ class AdsbRadarPlugin(PluginBase):
             if proc.poll() is None:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=8)
+                    proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self.log.warning("dump1090 did not stop; sending SIGKILL")
                     proc.kill()
                     try:
-                        proc.wait(timeout=3)
+                        proc.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         self.log.warning("dump1090 did not exit after SIGKILL")
         except Exception:
@@ -318,11 +317,10 @@ class AdsbRadarPlugin(PluginBase):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5.0)
                 sock.connect(("127.0.0.1", self._sbs_port))
-                sock.settimeout(None)
+                sock.settimeout(2.0)
                 self.log.info("Connected to SBS feed on port %d", self._sbs_port)
                 buf = ""
                 while self._active:
-                    sock.settimeout(2.0)
                     try:
                         data = sock.recv(4096)
                     except socket.timeout:

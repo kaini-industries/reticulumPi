@@ -109,11 +109,22 @@ SHUTDOWN_STARTING = "shutdown.starting"
 # Messaging hub
 MESSAGE_RECEIVED = "messaging.message_received"
 MESSAGE_SENT = "messaging.message_sent"
+# Not currently published; failures route through MESSAGE_STATUS_CHANGED.
 MESSAGE_FAILED = "messaging.message_failed"
 MESSAGE_STATUS_CHANGED = "messaging.message_status_changed"
 
+# Meshtastic firmware watchdog
+MESHTASTIC_FIRMWARE_HANG = "meshtastic.firmware_hang"
+MESHTASTIC_FIRMWARE_RECOVERED = "meshtastic.firmware_recovered"
+
 # Meshtastic message ack/nak
 MESHTASTIC_MESSAGE_ACKED = "meshtastic.message_acked"
+
+# Meshtastic emoji reactions
+MESHTASTIC_REACTION_RECEIVED = "meshtastic.reaction_received"
+
+# Messaging hub — reactions
+MESSAGE_REACTION_RECEIVED = "messaging.reaction_received"
 
 # MeshCore message ack
 MESHCORE_MESSAGE_ACKED = "meshcore.message_acked"
@@ -137,8 +148,24 @@ SPACE_WEATHER_UPDATED = "space.weather.updated"
 SPECTRUM_SWEEP = "spectrum.sweep"         # one complete sweep ready
 SPECTRUM_STATUS = "spectrum.status"       # status change (running/error/unavailable)
 
+# LoRa scanner — dedicated RTL-SDR LoRa band sweep
+LORA_SCANNER_SWEEP = "lora_scanner.sweep"
+LORA_SCANNER_STATUS = "lora_scanner.status"
+
 # ADS-B radar — aircraft tracking via dump1090
 ADSB_AIRCRAFT_DETECTED = "adsb.aircraft_detected"
 ADSB_AIRCRAFT_LOST = "adsb.aircraft_lost"
 ADSB_EMERGENCY_SQUAWK = "adsb.emergency_squawk"
 ADSB_STATUS = "adsb.status"
+
+# LoRa link tester — dedicated-radio probe/ACK measurements
+LINK_TEST_STARTED = "link_test.started"
+LINK_TEST_STOPPED = "link_test.stopped"
+LINK_TEST_PROBE_RESULT = "link_test.probe_result"
+LINK_TEST_CONNECTION_CHANGED = "link_test.connection_changed"
+
+# NTP synchronization
+NTP_SYNC_ACQUIRED = "ntp.sync_acquired"
+NTP_SYNC_LOST = "ntp.sync_lost"
+NTP_STATUS_UPDATED = "ntp.status_updated"
+NTP_GPS_REFCLOCK_ACTIVE = "ntp.gps_refclock_active"

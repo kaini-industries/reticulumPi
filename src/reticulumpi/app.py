@@ -13,6 +13,7 @@ from typing import Any
 import RNS
 
 from reticulumpi import events, identity_manager
+from reticulumpi.announce_dispatcher import AnnounceDispatcher
 from reticulumpi.config import AppConfig
 from reticulumpi.event_bus import EventBus
 from reticulumpi.plugin_base import PluginBase
@@ -42,6 +43,7 @@ class ReticulumPiApp:
         self._shutdown_event = threading.Event()
         self._plugin_loader = PluginLoader()
         self.event_bus = EventBus()
+        self.announce_dispatcher = AnnounceDispatcher()
 
     def start(self) -> None:
         """Initialize Reticulum, load identity, start plugins, and enter the run loop."""
@@ -56,6 +58,10 @@ class ReticulumPiApp:
 
         self.identity = identity_manager.load_or_create(self.config.identity_path)
         log.info("Node identity hash: %s", RNS.prettyhexrep(self.identity.hash))
+
+        self.announce_dispatcher.start()
+
+        PluginBase.set_thread_budget(self.config.thread_budget)
 
         self._load_plugins()
 
@@ -91,6 +97,32 @@ class ReticulumPiApp:
     PLUGIN_STOP_TIMEOUT: float = 10.0
     PLUGIN_START_TIMEOUT: float = 30.0
 
+    def _pre_stop_signal_subprocesses(self) -> None:
+        """Send SIGTERM to all plugin subprocesses simultaneously.
+
+        Lets child processes begin winding down in parallel *before* the
+        sequential per-plugin stop loop, so each plugin's blocking wait
+        finds its process already exited or nearly so.
+        """
+        signalled: list[str] = []
+        for name, plugin in self.plugins.items():
+            proc = getattr(plugin, "_process", None)
+            if proc is None:
+                continue
+            try:
+                if proc.poll() is not None:
+                    continue
+                os.kill(proc.pid, signal.SIGTERM)
+                signalled.append(name)
+            except (OSError, ProcessLookupError):
+                pass
+        if signalled:
+            log.info(
+                "Pre-stop SIGTERM sent to %d subprocess(es): %s",
+                len(signalled),
+                ", ".join(signalled),
+            )
+
     def shutdown(self) -> None:
         """Gracefully stop all plugins and signal the run loop to exit."""
         deadline = time.monotonic() + self.SHUTDOWN_TIMEOUT
@@ -101,6 +133,8 @@ class ReticulumPiApp:
             self.event_bus.publish(events.SHUTDOWN_STARTING, {})
         except Exception:
             log.exception("Error publishing shutdown event")
+
+        self._pre_stop_signal_subprocesses()
 
         # Stop plugins in reverse order with per-plugin timeout
         for name, plugin in reversed(list(self.plugins.items())):
@@ -113,6 +147,8 @@ class ReticulumPiApp:
                 self._stop_plugin_with_timeout(name, plugin, timeout)
             except Exception:
                 log.exception("Error stopping plugin: %s", name)
+
+        self.announce_dispatcher.stop()
 
         # Clean up Reticulum instance
         self._cleanup_rns()

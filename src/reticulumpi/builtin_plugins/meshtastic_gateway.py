@@ -316,6 +316,7 @@ class _MeshtasticMQTTClient:
 
         NODEINFO_APP = PortNum.NODEINFO_APP
         TEXT_MESSAGE_APP = PortNum.TEXT_MESSAGE_APP
+        POSITION_APP = PortNum.POSITION_APP
 
         envelope = ServiceEnvelope()
         envelope.ParseFromString(payload)
@@ -355,23 +356,32 @@ class _MeshtasticMQTTClient:
         if data.portnum == NODEINFO_APP:
             self._handle_nodeinfo(from_num, data.payload)
 
+        # Track position from POSITION_APP
+        if data.portnum == POSITION_APP:
+            self._handle_position(from_num, data.payload)
+
         # Dispatch text messages
         if data.portnum == TEXT_MESSAGE_APP:
             text = data.payload.decode("utf-8", errors="replace")
             from_id = f"!{from_num:08x}"
 
             # Build a packet dict compatible with the serial pubsub format
+            decoded_dict: dict[str, Any] = {
+                "portnum": "TEXT_MESSAGE_APP",
+                "payload": data.payload,
+                "text": text,
+            }
+            if data.emoji:
+                decoded_dict["emoji"] = data.emoji
+            if data.reply_id:
+                decoded_dict["replyId"] = data.reply_id
             fake_packet = {
                 "from": from_num,
                 "to": to_num,
                 "fromId": from_id,
                 "toId": f"!{to_num:08x}",
                 "id": packet_id,
-                "decoded": {
-                    "portnum": "TEXT_MESSAGE_APP",
-                    "payload": data.payload,
-                    "text": text,
-                },
+                "decoded": decoded_dict,
                 "rxSnr": packet.rx_snr if packet.rx_snr else None,
                 "rxTime": packet.rx_time if packet.rx_time else None,
                 # Over-the-air MeshPacket.channel is the channel hash byte,
@@ -440,6 +450,37 @@ class _MeshtasticMQTTClient:
         except Exception:
             if self._logger:
                 self._logger.debug("Error parsing NODEINFO payload", exc_info=True)
+
+    def _handle_position(self, from_num: int, payload: bytes) -> None:
+        """Update node database from POSITION_APP payloads."""
+        from meshtastic.protobuf.mesh_pb2 import Position
+
+        try:
+            pos = Position()
+            pos.ParseFromString(payload)
+            lat = pos.latitude_i / 1e7 if pos.latitude_i else None
+            lon = pos.longitude_i / 1e7 if pos.longitude_i else None
+            if lat is None or lon is None:
+                return
+            if lat == 0.0 and lon == 0.0:
+                return
+
+            node_id = f"!{from_num:08x}"
+            with self._lock:
+                if node_id not in self.nodes:
+                    self.nodes[node_id] = {}
+                self.nodes[node_id]["position"] = {
+                    "latitude": lat,
+                    "longitude": lon,
+                }
+                self.nodes[node_id]["lastHeard"] = int(time.time())
+            if self._logger:
+                self._logger.debug(
+                    "Position update for %s: %.6f, %.6f", node_id, lat, lon
+                )
+        except Exception:
+            if self._logger:
+                self._logger.debug("Error parsing POSITION payload", exc_info=True)
 
     # ── Identity management ───────────────────────────────────────────
 
@@ -595,17 +636,6 @@ class _MeshtasticMQTTClient:
 # ---------------------------------------------------------------------------
 
 
-class _PropagationAnnounceHandler:
-    """RNS announce handler that auto-selects the nearest LXMF propagation node."""
-
-    def __init__(self, plugin: "MeshtasticGateway"):
-        self.aspect_filter = "lxmf.propagation"
-        self._plugin = plugin
-
-    def received_announce(self, destination_hash, announced_identity, app_data):
-        self._plugin._handle_propagation_announce(destination_hash, announced_identity, app_data)
-
-
 # ---------------------------------------------------------------------------
 # Main plugin
 # ---------------------------------------------------------------------------
@@ -702,6 +732,23 @@ class MeshtasticGateway(PluginBase):
         if not isinstance(dpi, (int, float)) or dpi < 60:
             raise ValueError("device_probe_interval must be >= 60 seconds")
 
+        # Firmware watchdog
+        fw_wd = self.config.get("firmware_watchdog", {})
+        if not isinstance(fw_wd, dict):
+            raise ValueError("firmware_watchdog must be a dictionary")
+        fw_silence = fw_wd.get("silence_timeout", 300)
+        if not isinstance(fw_silence, (int, float)) or fw_silence < 30:
+            raise ValueError("firmware_watchdog.silence_timeout must be >= 30 seconds")
+        fw_probe_to = fw_wd.get("probe_timeout", 15)
+        if not isinstance(fw_probe_to, (int, float)) or fw_probe_to < 5:
+            raise ValueError("firmware_watchdog.probe_timeout must be >= 5 seconds")
+        fw_probe_iv = fw_wd.get("probe_interval", 0)
+        if not isinstance(fw_probe_iv, (int, float)) or fw_probe_iv < 0:
+            raise ValueError("firmware_watchdog.probe_interval must be >= 0")
+        fw_max_resets = fw_wd.get("max_resets_per_hour", 3)
+        if not isinstance(fw_max_resets, int) or fw_max_resets < 0:
+            raise ValueError("firmware_watchdog.max_resets_per_hour must be >= 0")
+
         # Validate short_name (optional, max 4 chars)
         short_name = self.config.get("short_name", "")
         if short_name and (not isinstance(short_name, str) or len(short_name) > 4):
@@ -754,6 +801,29 @@ class MeshtasticGateway(PluginBase):
         self._mesh_interface: Any = None
         self._connected = False
         self._last_disconnect_time: float = 0.0
+
+        # Firmware watchdog — monitors the physical USB device for hangs.
+        # Activates when device_probe_port is set (MQTT mode with serial
+        # listener) OR when the gateway itself is in serial mode.
+        fw_wd_cfg = self.config.get("firmware_watchdog", {})
+        has_serial_device = bool(
+            self.config.get("device_probe_port") or self._mode == MODE_SERIAL
+        )
+        self._fw_watchdog_enabled = (
+            fw_wd_cfg.get("enabled", True) and has_serial_device
+        )
+        self._fw_silence_timeout: float = fw_wd_cfg.get("silence_timeout", 300)
+        self._fw_probe_timeout: float = fw_wd_cfg.get("probe_timeout", 15)
+        self._fw_probe_interval: float = fw_wd_cfg.get("probe_interval", 0)
+        self._fw_auto_reset: bool = fw_wd_cfg.get("auto_reset", True)
+        self._fw_usb_power_cycle: bool = fw_wd_cfg.get("usb_power_cycle", False)
+        self._fw_max_resets_per_hour: int = fw_wd_cfg.get("max_resets_per_hour", 3)
+        self._last_device_activity: float = 0.0
+        self._last_fw_probe_time: float = 0.0
+        self._fw_reset_timestamps: list[float] = []
+        self._fw_hang_detected: bool = False
+        self._fw_total_hangs: int = 0
+        self._fw_total_resets: int = 0
 
         # Device info probe (for dashboard device card & LoRa neighbors)
         self._cached_device_info: dict[str, Any] | None = None
@@ -826,8 +896,9 @@ class MeshtasticGateway(PluginBase):
 
         # Propagation node auto-selection
         self._best_propagation_hops = RNS.Transport.PATHFINDER_M + 1
-        self._propagation_handler = _PropagationAnnounceHandler(self)
-        RNS.Transport.register_announce_handler(self._propagation_handler)
+        self._announce_sub = self.announce_dispatcher.subscribe(
+            "lxmf.propagation", self._handle_propagation_announce,
+        )
 
         # ── Meshtastic MQTT identity persistence ────────────────────
         if self._mode == MODE_MQTT:
@@ -885,9 +956,9 @@ class MeshtasticGateway(PluginBase):
         except Exception:
             self.log.debug("Error closing serial listener", exc_info=True)
         try:
-            RNS.Transport.deregister_announce_handler(self._propagation_handler)
+            self.announce_dispatcher.unsubscribe(self._announce_sub)
         except Exception:
-            self.log.debug("Error deregistering announce handler", exc_info=True)
+            self.log.debug("Error unsubscribing announce handler", exc_info=True)
         try:
             self.lxmf_router.register_delivery_callback(None)
         except Exception:
@@ -988,6 +1059,19 @@ class MeshtasticGateway(PluginBase):
                 })
                 continue
 
+            # Firmware watchdog — only in pure serial mode (no device_probe_port).
+            # When device_probe_port is set, _device_probe_loop owns the watchdog.
+            if (
+                self._connected
+                and self._mode == MODE_SERIAL
+                and not self._device_probe_port
+                and not self._check_firmware_watchdog()
+            ):
+                self.event_bus.publish(events.MESHTASTIC_DISCONNECTED, {
+                    "reason": "firmware_hang",
+                })
+                continue
+
             # Periodic NODEINFO re-announcement (MQTT mode only)
             if self._connected and self._mode == MODE_MQTT:
                 try:
@@ -1012,6 +1096,8 @@ class MeshtasticGateway(PluginBase):
             self._mesh_interface = iface
             self._connected = True
             self._connect_count += 1
+            self._last_device_activity = time.monotonic()
+            self._fw_hang_detected = False
 
         # Register pubsub callbacks (after interface is assigned)
         pub.subscribe(self._on_mesh_text, "meshtastic.receive.text")
@@ -1156,6 +1242,91 @@ class MeshtasticGateway(PluginBase):
                 self._cached_device_info = None
                 self._cached_lora_neighbors = []
 
+    # ── Device reset ────────────────────────────────────────────
+
+    def _resolve_usb_device_path(self) -> str | None:
+        """Resolve the USB bus device path from the serial port sysfs tree.
+
+        Returns e.g. '/dev/bus/usb/004/016' or None if resolution fails.
+        """
+        try:
+            tty = os.path.realpath(self._device_probe_port)
+            tty_name = os.path.basename(tty)
+            sysfs = f"/sys/class/tty/{tty_name}/device/.."
+            busnum = int(open(f"{sysfs}/busnum").read().strip())
+            devnum = int(open(f"{sysfs}/devnum").read().strip())
+            return f"/dev/bus/usb/{busnum:03d}/{devnum:03d}"
+        except Exception:
+            return None
+
+    def _usb_bus_reset(self, usb_path: str) -> dict[str, Any]:
+        """Issue a USBDEVFS_RESET ioctl on the USB bus device."""
+        import fcntl
+
+        USBDEVFS_RESET = 0x5514
+        fd = None
+        try:
+            fd = os.open(usb_path, os.O_WRONLY)
+            fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+            return {"ok": True, "method": "usb_reset"}
+        except PermissionError:
+            return {
+                "ok": False,
+                "reason": f"Permission denied on {usb_path} — check udev rules",
+            }
+        except OSError as exc:
+            return {"ok": False, "reason": str(exc)}
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def reset_device(self) -> dict[str, Any]:
+        """Reset the Meshtastic device using escalating strategies."""
+        if not self._device_probe_port:
+            return {"ok": False, "reason": "No device_probe_port configured"}
+
+        # Step 1: Try library reboot via serial listener
+        with self._lock:
+            listener = self._serial_listener
+
+        if listener is not None:
+            local_node = getattr(listener, "localNode", None)
+            if local_node is not None:
+                try:
+                    local_node.reboot(secs=5)
+                    self.log.info("Meshtastic device reboot command sent")
+                    self._cleanup_after_reset()
+                    return {"ok": True, "method": "reboot_command"}
+                except Exception:
+                    self.log.debug(
+                        "Library reboot failed, trying USB reset", exc_info=True
+                    )
+
+        # Step 2: Try USB bus reset
+        usb_path = self._resolve_usb_device_path()
+        if usb_path is not None:
+            result = self._usb_bus_reset(usb_path)
+            if result.get("ok"):
+                self.log.info("Meshtastic device USB bus reset sent (%s)", usb_path)
+                self._cleanup_after_reset()
+                return result
+            self.log.warning("USB bus reset failed: %s", result.get("reason"))
+
+        return {"ok": False, "reason": "All reset methods failed"}
+
+    def _cleanup_after_reset(self) -> None:
+        """Close stale serial listener and clear caches after a device reset."""
+        with self._lock:
+            listener = self._serial_listener
+            self._serial_listener = None
+            self._cached_device_info = None
+            self._cached_lora_neighbors = []
+        if listener is not None:
+            try:
+                listener.close()
+            except Exception:
+                pass
+
     # ── Device info probe (for dashboard device card) ────────────
 
     def _open_serial_interface_with_timeout(self) -> Any | None:
@@ -1242,6 +1413,9 @@ class MeshtasticGateway(PluginBase):
             )
 
             consecutive_failures = 0
+            with self._lock:
+                self._last_device_activity = time.monotonic()
+                self._fw_hang_detected = False
             try:
                 # Inner loop: refresh device info from the LIVE interface
                 # without closing it.  The meshtastic library's reader
@@ -1258,6 +1432,7 @@ class MeshtasticGateway(PluginBase):
                                 self._cached_device_info = info
                                 self._device_info_cache_time = time.monotonic()
                                 self._cached_lora_neighbors = neighbors
+                                self._last_device_activity = time.monotonic()
                             self._save_name_cache()
                             self.log.debug(
                                 "Device probe OK: %s %s (%s), %d LoRa neighbors",
@@ -1285,6 +1460,13 @@ class MeshtasticGateway(PluginBase):
                                 "Serial listener appears broken — reopening",
                             )
                             break
+
+                    # Firmware watchdog: check if the device is hung
+                    if not self._check_firmware_watchdog():
+                        self.log.warning(
+                            "Firmware watchdog triggered — reopening serial listener",
+                        )
+                        break
 
                     self._sleep_while_active(self._device_probe_interval)
             finally:
@@ -1699,6 +1881,189 @@ class MeshtasticGateway(PluginBase):
                     self.log.debug("Error during mesh health check", exc_info=True)
                 return False
 
+    # ── Firmware watchdog ─────────────────────────────────────────
+
+    def _check_firmware_watchdog(self) -> bool:
+        """Layer 1+2+3 firmware hang detection.  Returns True if healthy."""
+        if not self._fw_watchdog_enabled:
+            return True
+
+        now = time.monotonic()
+
+        # Layer 3: USB enumeration — device vanished from bus entirely
+        if not self._check_usb_present():
+            self.log.warning("Firmware watchdog: USB device no longer enumerated")
+            self._handle_firmware_hang("usb_disappeared")
+            return False
+
+        # Layer 1: silence detection — no data from device for too long
+        silence = now - self._last_device_activity if self._last_device_activity else 0
+        if self._last_device_activity and silence < self._fw_silence_timeout:
+            return True
+
+        # Proactive probe even without silence (belt-and-suspenders)
+        if (
+            self._fw_probe_interval > 0
+            and self._last_fw_probe_time > 0
+            and now - self._last_fw_probe_time < self._fw_probe_interval
+        ):
+            return True
+
+        # Layer 2: active probe — ask the device for nodeinfo
+        if self._last_device_activity:
+            self.log.info(
+                "Firmware watchdog: %ds silence, sending probe",
+                int(silence),
+            )
+        else:
+            self.log.info("Firmware watchdog: no activity since connect, sending probe")
+
+        if self._probe_device_responsive():
+            self._last_fw_probe_time = now
+            self._last_device_activity = now
+            return True
+
+        self.log.warning(
+            "Firmware watchdog: device unresponsive after %ds silence + probe",
+            int(silence),
+        )
+        self._handle_firmware_hang("probe_timeout")
+        return False
+
+    def _probe_device_responsive(self) -> bool:
+        """Send a lightweight command and verify the device responds."""
+        with self._lock:
+            iface = self._serial_listener or self._mesh_interface
+        if iface is None:
+            return False
+
+        result: dict[str, Any] = {"ok": False}
+        timeout = self._fw_probe_timeout
+
+        def _do_probe() -> None:
+            try:
+                my_info = iface.getMyNodeInfo()
+                if my_info:
+                    result["ok"] = True
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_do_probe, name="fw-watchdog-probe", daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+
+        if t.is_alive():
+            self.log.debug("Firmware probe timed out after %ds", int(timeout))
+            return False
+        return result["ok"]
+
+    def _check_usb_present(self) -> bool:
+        """Check if the serial device path still exists on the filesystem."""
+        port = self._device_probe_port or self.config.get("serial_port", "auto")
+        if not port or port == "auto":
+            return True
+        try:
+            return os.path.exists(port)
+        except Exception:
+            return True
+
+    def _handle_firmware_hang(self, reason: str) -> None:
+        """Record a firmware hang and attempt recovery if configured."""
+        now = time.monotonic()
+        with self._lock:
+            self._fw_hang_detected = True
+            self._fw_total_hangs += 1
+
+        self.event_bus.publish(events.MESHTASTIC_FIRMWARE_HANG, {
+            "reason": reason,
+            "silence_seconds": (
+                int(now - self._last_device_activity)
+                if self._last_device_activity else None
+            ),
+            "total_hangs": self._fw_total_hangs,
+        })
+
+        if not self._fw_auto_reset:
+            self.log.warning("Firmware hang detected but auto_reset is disabled")
+            return
+
+        if not self._fw_reset_allowed():
+            self.log.warning(
+                "Firmware hang detected but max_resets_per_hour (%d) reached",
+                self._fw_max_resets_per_hour,
+            )
+            return
+
+        self._attempt_firmware_recovery(reason)
+
+    def _fw_reset_allowed(self) -> bool:
+        """Circuit breaker: check if we're under the hourly reset limit."""
+        if self._fw_max_resets_per_hour <= 0:
+            return True
+        now = time.monotonic()
+        cutoff = now - 3600
+        self._fw_reset_timestamps = [t for t in self._fw_reset_timestamps if t > cutoff]
+        return len(self._fw_reset_timestamps) < self._fw_max_resets_per_hour
+
+    def _attempt_firmware_recovery(self, reason: str) -> None:
+        """Escalating recovery: soft reset -> USB bus reset."""
+        self.log.info("Attempting firmware recovery (trigger: %s)", reason)
+
+        # Step 1: try soft reboot via meshtastic library on whichever
+        # serial interface owns the physical device
+        with self._lock:
+            iface = self._serial_listener or self._mesh_interface
+        if iface is not None:
+            try:
+                local_node = getattr(iface, "localNode", None)
+                if local_node is not None:
+                    local_node.reboot(secs=5)
+                    self.log.info("Firmware recovery: reboot command sent")
+                    self._record_reset("reboot_command")
+                    self._post_recovery_wait()
+                    return
+            except Exception:
+                self.log.debug("Soft reboot failed, escalating", exc_info=True)
+
+        # Step 2: USB bus reset (if enabled)
+        if self._fw_usb_power_cycle:
+            port = self._device_probe_port or self.config.get("serial_port", "")
+            if port and port != "auto":
+                try:
+                    saved = self._device_probe_port
+                    self._device_probe_port = port
+                    usb_path = self._resolve_usb_device_path()
+                    self._device_probe_port = saved
+                    if usb_path:
+                        result = self._usb_bus_reset(usb_path)
+                        if result.get("ok"):
+                            self.log.info(
+                                "Firmware recovery: USB bus reset sent (%s)", usb_path,
+                            )
+                            self._record_reset("usb_bus_reset")
+                            self._post_recovery_wait()
+                            return
+                        self.log.warning(
+                            "USB bus reset failed: %s", result.get("reason"),
+                        )
+                except Exception:
+                    self.log.debug("USB bus reset failed", exc_info=True)
+
+        self.log.error("Firmware recovery: all methods exhausted")
+
+    def _record_reset(self, method: str) -> None:
+        now = time.monotonic()
+        self._fw_reset_timestamps.append(now)
+        with self._lock:
+            self._fw_total_resets += 1
+
+    def _post_recovery_wait(self) -> None:
+        """Publish recovery event.  The caller (probe loop or connection loop)
+        is responsible for closing and reopening the affected interface."""
+        self.event_bus.publish(events.MESHTASTIC_FIRMWARE_RECOVERED, {
+            "total_resets": self._fw_total_resets,
+        })
+
     # ── Rate limiting ───────────────────────────────────────────────
 
     def _check_send_rate_limit(self) -> bool:
@@ -1727,6 +2092,7 @@ class MeshtasticGateway(PluginBase):
         serial listener.  Packet-level dedup ensures a message arriving
         via both sources is only processed once.
         """
+        _reaction: dict | None = None
         with self._lock:
             if not self._active:
                 return
@@ -1787,45 +2153,80 @@ class MeshtasticGateway(PluginBase):
                     channel_idx = packet.get("channel", 0)
 
                 decoded = packet.get("decoded", {})
-                payload = decoded.get("payload", b"")
-                text = (
-                    payload.decode("utf-8", errors="replace")
-                    if isinstance(payload, bytes)
-                    else str(payload)
-                )
 
-                if not text.strip():
-                    return
+                # ── Emoji reaction detection ───────────────────
+                emoji_codepoint = decoded.get("emoji")
+                if emoji_codepoint:
+                    reply_to = decoded.get("replyId", 0)
+                    node_name = self._resolve_mesh_node_name(from_num)
+                    is_serial = (interface is not None
+                                 and interface is self._serial_listener)
+                    source_tag = "LoRa" if is_serial else "MQTT"
+                    text_payload = decoded.get("text", "")
+                    if text_payload and text_payload.strip():
+                        emoji_char = text_payload.strip()[:16]
+                    else:
+                        try:
+                            emoji_char = chr(emoji_codepoint)
+                            if not emoji_char.isprintable():
+                                emoji_char = "\U0001F44D"
+                        except (ValueError, OverflowError):
+                            emoji_char = "\U0001F44D"
+                    self.log.info(
+                        "Meshtastic reaction [%s] from %s: %s (target=%d)",
+                        source_tag, from_id, emoji_char, reply_to,
+                    )
+                    self._last_device_activity = time.monotonic()
+                    _reaction = {
+                        "from_id": from_id,
+                        "from_name": node_name,
+                        "emoji": emoji_char,
+                        "reply_to_packet_id": reply_to,
+                        "source": source_tag,
+                        "channel": channel_idx,
+                    }
+                else:
+                    # ── Regular text message ───────────────────
+                    payload = decoded.get("payload", b"")
+                    text = (
+                        payload.decode("utf-8", errors="replace")
+                        if isinstance(payload, bytes)
+                        else str(payload)
+                    )
 
-                # Filter by allow list
-                if self._mesh_allow_set and from_id.lower() not in self._mesh_allow_set:
-                    self.log.debug("Ignoring Meshtastic msg from %s (not in allow list)", from_id)
-                    return
+                    if not text.strip():
+                        return
 
-                # Resolve node name (checks MQTT nodes, serial nodes, name cache)
-                node_name = self._resolve_mesh_node_name(from_num)
-                sender_label = f"{node_name} ({from_id})" if node_name else from_id
+                    if self._mesh_allow_set and from_id.lower() not in self._mesh_allow_set:
+                        self.log.debug("Ignoring Meshtastic msg from %s (not in allow list)", from_id)
+                        return
 
-                # Identify source for logging
-                is_serial = (interface is not None
-                             and interface is self._serial_listener)
-                source_tag = "LoRa" if is_serial else "MQTT"
+                    node_name = self._resolve_mesh_node_name(from_num)
+                    sender_label = f"{node_name} ({from_id})" if node_name else from_id
 
-                # Build formatted message
-                prefix = self.config.get("meshtastic_prefix", DEFAULT_MESH_PREFIX)
-                formatted = f"{prefix} {sender_label}:\n{text}"
+                    is_serial = (interface is not None
+                                 and interface is self._serial_listener)
+                    source_tag = "LoRa" if is_serial else "MQTT"
 
-                self.log.info(
-                    "Meshtastic msg [%s] from %s: %s",
-                    source_tag, sender_label, text[:80],
-                )
+                    prefix = self.config.get("meshtastic_prefix", DEFAULT_MESH_PREFIX)
+                    formatted = f"{prefix} {sender_label}:\n{text}"
 
-                self._msgs_mesh_to_lxmf += 1
-                self._last_mesh_msg_time = time.time()
+                    self.log.info(
+                        "Meshtastic msg [%s] from %s: %s",
+                        source_tag, sender_label, text[:80],
+                    )
+
+                    self._msgs_mesh_to_lxmf += 1
+                    self._last_mesh_msg_time = time.time()
+                    self._last_device_activity = time.monotonic()
 
             except Exception:
                 self.log.exception("Error parsing Meshtastic text message")
                 return
+
+        if _reaction is not None:
+            self.event_bus.publish(events.MESHTASTIC_REACTION_RECEIVED, _reaction)
+            return
 
         # Forward outside the lock to avoid holding it during LXMF send
         try:
@@ -1838,13 +2239,11 @@ class MeshtasticGateway(PluginBase):
             "from_name": node_name,
             "to_id": to_id,
             "is_broadcast": is_broadcast,
-            # Meshtastic packets are already capped at MTU on the wire;
-            # pass the full text so subscribers (responder command parsing,
-            # messaging_hub persistence) see what the sender actually typed.
             "text": truncate_bytes(text, MESHTASTIC_MTU),
             "forwarded_to": len(self._recipient_hashes),
-            "source": source_tag,  # "LoRa" or "MQTT"
+            "source": source_tag,
             "channel": channel_idx,
+            "packet_id": packet_id,
         })
 
     def _on_mesh_connect(self, interface: Any = None, topic: Any = None) -> None:
@@ -1868,6 +2267,8 @@ class MeshtasticGateway(PluginBase):
             if not self._connected:
                 was_disconnected = True
                 self._connected = True
+                self._last_device_activity = time.monotonic()
+                self._fw_hang_detected = False
         if was_disconnected:
             self.log.info("Meshtastic connection re-established (auto-reconnect)")
             self.event_bus.publish(events.MESHTASTIC_CONNECTED, {
@@ -2121,6 +2522,29 @@ class MeshtasticGateway(PluginBase):
                 except Exception:
                     if self.log:
                         self.log.debug("Error reading node count for status", exc_info=True)
+
+            # Firmware watchdog status
+            if self._fw_watchdog_enabled:
+                now_mono = time.monotonic()
+                silence = (
+                    int(now_mono - self._last_device_activity)
+                    if self._last_device_activity else None
+                )
+                status["firmware_watchdog"] = {
+                    "enabled": True,
+                    "hang_detected": self._fw_hang_detected,
+                    "silence_seconds": silence,
+                    "silence_timeout": int(self._fw_silence_timeout),
+                    "total_hangs": self._fw_total_hangs,
+                    "total_resets": self._fw_total_resets,
+                    "auto_reset": self._fw_auto_reset,
+                    "resets_last_hour": len([
+                        t for t in self._fw_reset_timestamps
+                        if t > now_mono - 3600
+                    ]),
+                    "max_resets_per_hour": self._fw_max_resets_per_hour,
+                }
+
             return status
 
     def get_meshtastic_nodes(self) -> list[dict[str, Any]]:
@@ -2162,9 +2586,13 @@ class MeshtasticGateway(PluginBase):
                         "last_heard": node_data.get("lastHeard"),
                         "latitude": position.get("latitude"),
                         "longitude": position.get("longitude"),
+                        "via_mqtt": True,
+                        "via_lora": False,
                     }
                     if node_data.get("isSelf"):
                         entry["is_self"] = True
+                        entry["via_mqtt"] = False
+                        entry["via_lora"] = True
                     seen[node_id] = entry
 
             # 2. Serial listener nodes (LoRa-heard, may not be on MQTT)
@@ -2186,9 +2614,19 @@ class MeshtasticGateway(PluginBase):
                             "shortName": short_name,
                             "hwModel": hw_model,
                         }
+                    serial_via_mqtt = bool(
+                        node_data.get("via_mqtt") or node_data.get("viaMqtt")
+                    )
+                    serial_via_lora = not serial_via_mqtt
+                    if node_data.get("isSelf"):
+                        serial_via_mqtt = False
+                        serial_via_lora = True
                     if node_id in seen:
-                        # Prefer non-generic name from serial over MQTT
                         existing = seen[node_id]
+                        # Merge transport flags from both sources
+                        existing["via_mqtt"] = existing.get("via_mqtt", False) or serial_via_mqtt
+                        existing["via_lora"] = existing.get("via_lora", False) or serial_via_lora
+                        # Prefer non-generic name from serial over MQTT
                         ex_name = existing.get("long_name") or ""
                         if (ex_name.startswith("Meshtastic ")
                                 and long_name
@@ -2206,6 +2644,8 @@ class MeshtasticGateway(PluginBase):
                             "last_heard": node_data.get("lastHeard"),
                             "latitude": position.get("latitude"),
                             "longitude": position.get("longitude"),
+                            "via_mqtt": serial_via_mqtt,
+                            "via_lora": serial_via_lora,
                         }
                         if node_data.get("isSelf"):
                             entry["is_self"] = True
@@ -2544,11 +2984,12 @@ class MeshtasticGateway(PluginBase):
         # Ack tracking is only possible for direct messages via serial
         can_ack = bool(is_serial and destination_id and on_ack)
 
+        sent_packet = None
         try:
             if destination_id:
                 if can_ack:
                     # Serial interface supports wantAck + onResponse
-                    iface.sendText(
+                    sent_packet = iface.sendText(
                         truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                         destinationId=destination_id,
                         wantAck=True,
@@ -2556,13 +2997,13 @@ class MeshtasticGateway(PluginBase):
                         hopLimit=MESHTASTIC_HOP_LIMIT,
                     )
                 else:
-                    iface.sendText(
+                    sent_packet = iface.sendText(
                         truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                         destinationId=destination_id,
                         hopLimit=MESHTASTIC_HOP_LIMIT,
                     )
             else:
-                iface.sendText(
+                sent_packet = iface.sendText(
                     truncate_bytes(text, MESHTASTIC_MTU), channelIndex=ch,
                     hopLimit=MESHTASTIC_HOP_LIMIT,
                 )
@@ -2586,10 +3027,18 @@ class MeshtasticGateway(PluginBase):
             "source": "hub",
         })
 
+        packet_id = None
+        if sent_packet is not None:
+            if isinstance(sent_packet, dict):
+                packet_id = sent_packet.get("id")
+            elif hasattr(sent_packet, "id"):
+                packet_id = sent_packet.id
+
         return {
             "sent": True,
             "truncated": truncated,
             "ack_tracking": "serial" if can_ack else None,
+            "packet_id": packet_id,
         }
 
     def _make_ack_handler(self, on_ack: Any) -> Any:

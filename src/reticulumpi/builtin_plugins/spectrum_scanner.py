@@ -15,11 +15,12 @@ Example config (under ``plugins:`` in ``/etc/reticulumpi/config.yaml``):
       freq_start_mhz: 88.0
       freq_stop_mhz: 108.0
       bin_khz: 25.0
-      sweep_seconds: 2
-      gain_db: 40.0          # null = auto
+      sweep_seconds: 2         # float; 0.1-60 (sub-second needs rtl_power_fftw)
+      gain_db: 40.0            # null = auto
       ppm: 0
       waterfall_rows: 128
       device_index: 0
+      power_command: rtl_power  # or rtl_power_fftw for faster sweeps
 
 Requirements:
     * ``rtl_power`` available on PATH (package: ``rtl-sdr``).
@@ -93,9 +94,9 @@ class SpectrumScanner(PluginBase):
             raise ValueError(f"bin_khz must be 1-1000, got {bin_khz}")
         self._bin_khz = bin_khz
 
-        sweep_seconds = int(cfg.get("sweep_seconds", 2))
-        if not 1 <= sweep_seconds <= 60:
-            raise ValueError(f"sweep_seconds must be 1-60, got {sweep_seconds}")
+        sweep_seconds = float(cfg.get("sweep_seconds", 2))
+        if not 0.1 <= sweep_seconds <= 60:
+            raise ValueError(f"sweep_seconds must be 0.1-60, got {sweep_seconds}")
         self._sweep_seconds = sweep_seconds
 
         gain_db = cfg.get("gain_db", 40.0)
@@ -112,7 +113,8 @@ class SpectrumScanner(PluginBase):
             raise ValueError(f"waterfall_rows must be 8-2048, got {wf_rows}")
         self._waterfall_rows = wf_rows
 
-        self._device_index = int(cfg.get("device_index", 0))
+        self._device_index = str(cfg.get("device_index", "0"))
+        self._power_command = str(cfg.get("power_command", "rtl_power"))
         self._max_restarts = int(cfg.get("max_restarts", 5))
         self._health_interval = float(cfg.get("health_check_interval", 5.0))
 
@@ -128,6 +130,8 @@ class SpectrumScanner(PluginBase):
         self._rtl_power_path: str | None = None
         self._last_error: str | None = None
         self._status = "starting"
+        self._event_sweep_topic = EVENT_SPECTRUM_SWEEP
+        self._event_status_topic = EVENT_SPECTRUM_STATUS
 
         # Rolling in-memory state the dashboard reads via get_snapshot().
         self._bins_hz: list[int] = []
@@ -175,7 +179,8 @@ class SpectrumScanner(PluginBase):
                 )
 
         self.log.info(
-            "spectrum_scanner started: %.2f-%.2f MHz, %.1f kHz bins, %ds sweep%s",
+            "%s started: %.2f-%.2f MHz, %.1f kHz bins, %.1fs sweep%s",
+            self.plugin_name,
             self._freq_start_mhz, self._freq_stop_mhz, self._bin_khz,
             self._sweep_seconds,
             f", gain {self._gain_db:.1f} dB" if self._gain_db is not None else ", auto gain",
@@ -184,7 +189,7 @@ class SpectrumScanner(PluginBase):
     def stop(self) -> None:
         self._active = False
         self._terminate_process()
-        self._join_threads(timeout=12.0)
+        self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
     # --- public API (dashboard / monitoring) ---------------------------------
@@ -282,15 +287,15 @@ class SpectrumScanner(PluginBase):
 
     def _supervisor_loop(self) -> None:
         """Launch rtl_power once; on exit, back off and retry up to max_restarts."""
-        self._rtl_power_path = shutil.which("rtl_power")
+        self._rtl_power_path = shutil.which(self._power_command)
         if not self._rtl_power_path:
             self._set_status(
                 "unavailable",
-                "rtl_power not found on PATH — install the 'rtl-sdr' package",
+                f"{self._power_command} not found on PATH",
             )
             self.log.warning(
-                "rtl_power binary not found; spectrum_scanner will stay idle. "
-                "Install with: sudo apt install rtl-sdr"
+                "%s binary not found; %s will stay idle.",
+                self._power_command, self.plugin_name,
             )
             return
 
@@ -383,7 +388,7 @@ class SpectrumScanner(PluginBase):
         cmd = [
             self._rtl_power_path,
             "-f", freq_arg,
-            "-i", f"{self._sweep_seconds}s",
+            "-i", f"{self._sweep_seconds:g}s",
             "-d", str(self._device_index),
             "-p", str(self._ppm),
         ]
@@ -402,12 +407,12 @@ class SpectrumScanner(PluginBase):
             if proc.poll() is None:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=8)
+                    proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self.log.warning("rtl_power did not stop; sending SIGKILL")
                     proc.kill()
                     try:
-                        proc.wait(timeout=3)
+                        proc.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         self.log.warning("rtl_power did not exit after SIGKILL")
         except Exception:
@@ -516,7 +521,7 @@ class SpectrumScanner(PluginBase):
         # this — but external plugins could tap in).
         try:
             self.event_bus.publish(
-                EVENT_SPECTRUM_SWEEP,
+                self._event_sweep_topic,
                 {
                     "timestamp": now,
                     "sweep_count": self._sweep_count,
@@ -538,7 +543,7 @@ class SpectrumScanner(PluginBase):
         if status != prev:
             try:
                 self.event_bus.publish(
-                    EVENT_SPECTRUM_STATUS,
+                    self._event_status_topic,
                     {"status": status, "error": error, "timestamp": time.time()},
                 )
             except Exception:

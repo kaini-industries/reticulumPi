@@ -24,12 +24,17 @@ class PluginBase(ABC):
     plugin_description: str = "No description"
     plugin_dependencies: list[str] = []
 
+    _global_thread_count: int = 0
+    _global_thread_budget: int = 40
+    _global_thread_lock: threading.Lock = threading.Lock()
+
     def __init__(self, app: "ReticulumPiApp", plugin_config: dict[str, Any]):
         self.app = app
         self.config = plugin_config
         self.rns = app.reticulum
         self.identity = app.identity
         self.event_bus = app.event_bus
+        self.announce_dispatcher = app.announce_dispatcher
         self.log = logging.getLogger(f"reticulumpi.plugin.{self.plugin_name}")
         self._stop_event = threading.Event()
         self._stop_event.set()  # starts "stopped"
@@ -69,6 +74,7 @@ class PluginBase(ABC):
         not a per-thread allowance.  This prevents a plugin with many threads
         from consuming N * timeout seconds.
         """
+        thread_count = len(self._threads)
         deadline = time.monotonic() + timeout
         for thread in self._threads:
             remaining = deadline - time.monotonic()
@@ -82,12 +88,25 @@ class PluginBase(ABC):
             if thread.is_alive():
                 self.log.warning("Thread '%s' did not exit in time", thread.name)
         self._threads.clear()
+        with PluginBase._global_thread_lock:
+            PluginBase._global_thread_count = max(
+                0, PluginBase._global_thread_count - thread_count,
+            )
 
     def _sleep_while_active(self, seconds: float) -> None:
         """Sleep for up to `seconds`, exiting early if the plugin is stopped."""
         # Event-based: wakes instantly when _active flips to False, vs. the prior
         # 1-second busy-poll that delayed shutdown by up to ~1s per sleeping thread.
         self._stop_event.wait(timeout=float(seconds))
+
+    def _jittered_sleep(self, seconds: float, jitter_pct: float = 0.1) -> None:
+        """Sleep with random jitter to desynchronize periodic network tasks.
+
+        Applies +/- *jitter_pct* (default 10 %) uniform random offset.
+        """
+        import random
+        offset = seconds * jitter_pct * (2 * random.random() - 1)
+        self._stop_event.wait(timeout=max(0.0, float(seconds + offset)))
 
     def _start_log_reader(self, process: Any, prefix: str = "") -> threading.Thread:
         """Start a daemon thread that reads process stdout line-by-line and logs it.
@@ -113,6 +132,17 @@ class PluginBase(ABC):
 
         return self._start_thread(_reader, name=f"{prefix}-log-reader" if prefix else "log-reader")
 
+    @classmethod
+    def get_thread_count(cls) -> int:
+        """Return the current global plugin thread count."""
+        return cls._global_thread_count
+
+    @classmethod
+    def set_thread_budget(cls, budget: int) -> None:
+        """Set the global soft thread budget. Logged when exceeded."""
+        with cls._global_thread_lock:
+            cls._global_thread_budget = budget
+
     def _start_thread(self, target: Any, name: str | None = None) -> threading.Thread:
         """Start a daemon thread and return it."""
         thread = threading.Thread(
@@ -122,4 +152,13 @@ class PluginBase(ABC):
         )
         thread.start()
         self._threads.append(thread)
+        with PluginBase._global_thread_lock:
+            PluginBase._global_thread_count += 1
+            count = PluginBase._global_thread_count
+            budget = PluginBase._global_thread_budget
+        if count > budget:
+            self.log.warning(
+                "Plugin thread budget exceeded: %d/%d active (started '%s')",
+                count, budget, thread.name,
+            )
         return thread

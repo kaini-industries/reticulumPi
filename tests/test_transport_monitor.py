@@ -777,7 +777,7 @@ class TestHubExchange:
             plugin = TransportMonitorPlugin(mock_app, auto_config)
             plugin.start()
         assert plugin._exchange_destination is not None
-        assert plugin._announce_handler is not None
+        assert plugin._announce_sub is not None
         # Should have 3 threads: transport-monitor + hub-pool-manager + hub-exchange
         assert len(plugin._threads) == 3
         plugin.stop()
@@ -876,10 +876,7 @@ class TestHubExchange:
         mock_dest.hash = b"\xdd" * 16
         plugin._exchange_destination = mock_dest
 
-        from reticulumpi.builtin_plugins.transport_monitor import _HubExchangeAnnounceHandler
-        handler = _HubExchangeAnnounceHandler(plugin)
-
-        handler.received_announce(
+        plugin._on_hub_announce(
             destination_hash=b"\xdd" * 16,
             announced_identity=MagicMock(),
             app_data=None,

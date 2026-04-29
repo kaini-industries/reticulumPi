@@ -38,6 +38,19 @@
   var _lastBandSignature = '';     // "<start>|<stop>" of last band-strip render
   var _legendBuilt = false;        // one-time flag for legend DOM construction
   var _legendExpanded = false;
+  var _placeholderEl = null;
+  var _hasReceivedData = false;
+  var _css = {};
+
+  // -- Zoom state -----------------------------------------------------------
+  var _zoom = null;             // null = full band, [loMhz, hiMhz] = zoomed
+  var _dragState = null;        // { startFrac, curFrac } during drag
+  var _dragRafId = null;        // rAF handle for throttled drag preview
+  var _peakHoldEnabled = false;
+  var _peakHoldDb = null;       // Float64Array, one per bin
+  var _zoomResetEl = null;
+  var _peakHoldToggleEl = null;
+  var _LS_ZOOM = 'rpi_spectrum_zoom';
   // Cursor into the shared historyStore — bumps on WS-hello reload or on
   // a bin-grid reset.  When it changes we wipe the canvas and bulk-paint
   // from the store; between bumps we just append live tail rows.
@@ -47,6 +60,78 @@
   // Waterfall canvas native dims — scaled up via CSS to fit panel width.
   var WF_ROWS = 256;
   var WF_COLS = 800;
+
+  // -- Zoom helpers ---------------------------------------------------------
+  function _clip(data, range) {
+    var bins = data.bins_hz;
+    if (!bins || bins.length === 0) return null;
+    var lo = bins[0] / 1e6, hi = bins[bins.length - 1] / 1e6;
+    var zoomed = false;
+    if (range && range.length === 2) {
+      lo = Math.max(lo, range[0]);
+      hi = Math.min(hi, range[1]);
+      if (hi <= lo) return null;
+      zoomed = true;
+    }
+    var loHz = lo * 1e6, hiHz = hi * 1e6;
+    var loIdx = -1, hiIdx = -1;
+    for (var i = 0; i < bins.length; i++) {
+      if (bins[i] >= loHz) { loIdx = i; break; }
+    }
+    for (var j = bins.length - 1; j >= 0; j--) {
+      if (bins[j] <= hiHz) { hiIdx = j; break; }
+    }
+    if (loIdx < 0 || hiIdx < 0 || hiIdx < loIdx) return null;
+    var binStepKhz = (bins.length > 1) ? (bins[1] - bins[0]) / 1000 : 0;
+    return {
+      loIdx: loIdx, hiIdx: hiIdx,
+      loMhz: bins[loIdx] / 1e6,
+      hiMhz: bins[hiIdx] / 1e6,
+      binStepKhz: binStepKhz,
+      zoomed: zoomed,
+    };
+  }
+
+  function _setZoom(range, silent) {
+    _zoom = range;
+    _lastBandSignature = '';
+    _peakHoldDb = null;
+    try { localStorage.setItem(_LS_ZOOM, range ? JSON.stringify(range) : ''); } catch (e) {}
+    if (silent) {
+      _lastRenderedSweep = 0;
+      if (_wfCtx) {
+        _wfCtx.fillStyle = _css.wfBg || '#050810';
+        _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
+      }
+      return;
+    }
+    if (_zoomResetEl) _zoomResetEl.style.display = range ? '' : 'none';
+    if (_lastData) {
+      var clip = _clip(_lastData, _zoom);
+      _renderLine(_lastData, clip);
+      _renderBands(_lastData, clip);
+      _renderScale(_lastData, clip);
+      _repaintWaterfallFromHistory(clip);
+    }
+  }
+
+  function _repaintWaterfallFromHistory(clip) {
+    if (!_wfCtx || !SC.historyStore) return;
+    var rows = SC.historyStore.rows;
+    if (!rows.length) return;
+    var chron = new Array(rows.length);
+    for (var i = 0; i < rows.length; i++) {
+      chron[rows.length - 1 - i] = rows[i];
+    }
+    if (clip && clip.zoomed) {
+      for (var k = 0; k < chron.length; k++) {
+        if (chron[k]) chron[k] = chron[k].slice(clip.loIdx, clip.hiIdx + 1);
+      }
+    }
+    SC.paintHistoryToCanvas(_wfCtx, _wfCanvas, chron, WF_COLS, WF_ROWS,
+                            _minDb, _maxDb);
+    _lastSweepCount = SC.historyStore.sweepCount;
+  }
 
   // -- DOM setup -----------------------------------------------------------
   function _resolveDom() {
@@ -76,7 +161,6 @@
       _wfCanvas.width = WF_COLS;
       _wfCanvas.height = WF_ROWS;
       _wfCtx = _wfCanvas.getContext('2d');
-      // Paint a dim background so the section doesn't flash white pre-data.
       _wfCtx.fillStyle = '#050810';
       _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
       _wfCanvas.addEventListener('mousemove', _onHover);
@@ -85,6 +169,48 @@
 
     if (_toggle) _toggle.addEventListener('click', _onToggleClick);
     if (_legendToggleEl) _legendToggleEl.addEventListener('click', _onLegendToggleClick);
+
+    // Show section immediately with a placeholder message
+    _section.style.display = '';
+    _placeholderEl = document.createElement('div');
+    _placeholderEl.className = 'spectrum-placeholder';
+    _placeholderEl.textContent = 'Waiting for spectrum data…';
+    if (_body) _body.insertBefore(_placeholderEl, _body.firstChild);
+
+    // Cache CSS custom properties once
+    var cs = getComputedStyle(document.documentElement);
+    _css.wfBg  = cs.getPropertyValue('--wf-bg').trim()      || '#050810';
+    _css.grid  = cs.getPropertyValue('--spec-grid').trim()   || '#0f1525';
+    _css.label = cs.getPropertyValue('--spec-label').trim()  || '#3a4565';
+    _css.cyan  = cs.getPropertyValue('--cyan').trim()        || '#00e5ff';
+    _css.peakHold = cs.getPropertyValue('--lora-peak-hold').trim() || 'rgba(255,182,39,0.65)';
+
+    // Zoom chip + peak hold toggle (injected by index.html)
+    _zoomResetEl = $('spectrum-zoom-reset');
+    _peakHoldToggleEl = $('spectrum-peakhold-toggle');
+
+    // Drag-to-zoom on line plot
+    if (_lineEl) _lineEl.addEventListener('mousedown', _onDragStart);
+    window.addEventListener('mousemove', _onDragMove);
+    window.addEventListener('mouseup', _onDragEnd);
+    if (_plotWrap) _plotWrap.addEventListener('dblclick', _onDoubleClickReset);
+    if (_zoomResetEl) _zoomResetEl.addEventListener('click', _onZoomChipClick);
+    if (_peakHoldToggleEl) _peakHoldToggleEl.addEventListener('click', _onPeakHoldToggle);
+
+    // Restore zoom from localStorage
+    try {
+      var zs = localStorage.getItem(_LS_ZOOM);
+      if (zs) {
+        var zp = JSON.parse(zs);
+        if (Array.isArray(zp) && zp.length === 2
+            && typeof zp[0] === 'number' && typeof zp[1] === 'number'
+            && zp[1] > zp[0]) {
+          _zoom = zp;
+          if (_zoomResetEl) _zoomResetEl.style.display = '';
+        }
+      }
+    } catch (e) {}
+
     return true;
   }
 
@@ -103,12 +229,74 @@
     var chev = _toggle.querySelector('.chevron');
     if (chev) chev.innerHTML = _expanded ? '&#9662;' : '&#9656;';
     if (_expanded && _lastData) {
-      // Repaint in case the user just opened the panel for the first time.
+      var clip = _clip(_lastData, _zoom);
       _renderMeta(_lastData);
-      _lastBandSignature = '';  // force ribbon rebuild on expand
-      _renderBands(_lastData);
+      _lastBandSignature = '';
+      _renderBands(_lastData, clip);
       _buildLegend();
-      _renderLine(_lastData);
+      _renderLine(_lastData, clip);
+    }
+  }
+
+  // -- Drag-to-zoom --------------------------------------------------------
+  function _onDragStart(ev) {
+    if (!_lineEl || !_lastData) return;
+    if (ev.button !== 0) return;
+    var rect = _lineEl.getBoundingClientRect();
+    var frac = (ev.clientX - rect.left) / rect.width;
+    if (frac < 0 || frac > 1) return;
+    _dragState = { startFrac: frac, curFrac: frac };
+    ev.preventDefault();
+    _renderLine(_lastData, _clip(_lastData, _zoom));
+  }
+  function _onDragMove(ev) {
+    if (!_dragState || !_lineEl) return;
+    var rect = _lineEl.getBoundingClientRect();
+    var frac = (ev.clientX - rect.left) / rect.width;
+    if (frac < 0) frac = 0; else if (frac > 1) frac = 1;
+    _dragState.curFrac = frac;
+    if (!_dragRafId) {
+      _dragRafId = requestAnimationFrame(function () {
+        _dragRafId = null;
+        if (_dragState && _lastData) _renderLine(_lastData, _clip(_lastData, _zoom));
+      });
+    }
+  }
+  function _onDragEnd(ev) {
+    if (!_dragState) return;
+    if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
+    var start = _dragState.startFrac, end = _dragState.curFrac;
+    _dragState = null;
+    if (Math.abs(end - start) < 0.01) {
+      if (_lastData) _renderLine(_lastData, _clip(_lastData, _zoom));
+      return;
+    }
+    var curClip = _clip(_lastData, _zoom);
+    if (!curClip) return;
+    var span = curClip.hiMhz - curClip.loMhz;
+    var a = Math.min(start, end), b = Math.max(start, end);
+    var loMhz = curClip.loMhz + a * span;
+    var hiMhz = curClip.loMhz + b * span;
+    var minSpanMhz = (curClip.binStepKhz || 250) * 2 / 1000;
+    if (hiMhz - loMhz < minSpanMhz) {
+      if (_lastData) _renderLine(_lastData, curClip);
+      return;
+    }
+    _setZoom([loMhz, hiMhz]);
+  }
+  function _onDoubleClickReset(ev) {
+    if (!_zoom) return;
+    ev.preventDefault();
+    _setZoom(null);
+  }
+  function _onZoomChipClick() { _setZoom(null); }
+  function _onPeakHoldToggle() {
+    _peakHoldEnabled = !_peakHoldEnabled;
+    _peakHoldDb = null;
+    if (_peakHoldToggleEl) _peakHoldToggleEl.classList.toggle('active', _peakHoldEnabled);
+    if (_lastData) {
+      var clip = _clip(_lastData, _zoom);
+      _renderLine(_lastData, clip);
     }
   }
 
@@ -138,12 +326,23 @@
     _statusEl.className = 'spectrum-status-' + data.status;
   }
 
-  function _renderLine(data) {
+  function _renderLine(data, clip) {
     if (!_lineEl || !data.latest_powers_db || !data.latest_powers_db.length) return;
-    var powers = data.latest_powers_db;
+    var allPowers = data.latest_powers_db;
+    var allBins = data.bins_hz;
+
+    // Slice to clip range when zoomed
+    var powers, binsLine;
+    if (clip && clip.zoomed) {
+      powers = allPowers.slice(clip.loIdx, clip.hiIdx + 1);
+      binsLine = allBins ? allBins.slice(clip.loIdx, clip.hiIdx + 1) : null;
+    } else {
+      powers = allPowers;
+      binsLine = allBins;
+    }
     var n = powers.length;
 
-    // Auto-scale Y (noise-floor + 20 dB headroom).
+    // Auto-scale Y
     var mn = Infinity, mx = -Infinity;
     for (var i = 0; i < n; i++) {
       var v = powers[i];
@@ -152,13 +351,6 @@
       if (v > mx) mx = v;
     }
     if (!isFinite(mn) || !isFinite(mx)) return;
-    // Compute a slightly padded target window.  On the very first render
-    // we lock the window to the measurement — the hard-coded default
-    // (-90..-30) is nowhere near the real noise floor of a 2 GHz span, so
-    // smoothing toward it would cause a very visible "sliding" of the
-    // line plot over several ticks.  Subsequent renders (triggered only
-    // by a *new* sweep, see update()) use an EMA so sweep-to-sweep
-    // fluctuations don't bounce the axis around.
     var tgtMin = Math.floor(mn - 3);
     var tgtMax = Math.ceil(mx + 3);
     if (!_scaleInitialized) {
@@ -184,37 +376,77 @@
 
     SC.clear(_lineEl);
 
-    // Grid lines (every ~20 dB over the auto-scale window).
+    // Grid lines
     var stepDb = 10;
     var firstTick = Math.ceil(_minDb / stepDb) * stepDb;
     for (var db = firstTick; db <= _maxDb; db += stepDb) {
       var gy = vbH - 1 - ((db - _minDb) / (_maxDb - _minDb)) * (vbH - 2);
       _lineEl.appendChild(SC.svg('line', {
         x1: 0, y1: gy, x2: vbW, y2: gy,
-        stroke: '#0f1525', 'stroke-width': 0.5,
+        stroke: _css.grid, 'stroke-width': 0.5,
       }));
       _lineEl.appendChild(SC.svg('text', {
         x: 4, y: gy - 2,
-        fill: '#3a4565', 'font-size': 9,
+        fill: _css.label, 'font-size': 9,
       }, db.toFixed(0)));
     }
 
+    // Main trace polyline
     var polyStr = pts.filter(function (p) { return p != null; }).join(' ');
     _lineEl.appendChild(SC.svg('polyline', {
       points: polyStr,
       fill: 'none',
-      stroke: '#00e5ff',
+      stroke: _css.cyan,
       'stroke-width': 1.2,
       'vector-effect': 'non-scaling-stroke',
     }));
 
-    // Frequency tick labels along the bottom (a few evenly spaced).
-    // Derive frequencies from the actual bin grid so labels line up with
-    // the line/waterfall data — see _renderBands for why the configured
-    // freq_start_hz/freq_stop_hz can't be trusted as the visual axis.
-    // Interpolating by bin index also handles non-uniform spacing in
-    // multi-segment rtl_power sweeps.
-    var binsLine = data.bins_hz;
+    // Peak hold overlay
+    if (_peakHoldEnabled) {
+      if (!_peakHoldDb || _peakHoldDb.length !== n) {
+        _peakHoldDb = new Float64Array(n);
+        for (var pi = 0; pi < n; pi++) _peakHoldDb[pi] = -Infinity;
+      }
+      var peakPts = [];
+      for (var pk = 0; pk < n; pk++) {
+        var pv = powers[pk];
+        if (pv != null && isFinite(pv) && pv > _peakHoldDb[pk]) _peakHoldDb[pk] = pv;
+        var hv = _peakHoldDb[pk];
+        if (!isFinite(hv)) continue;
+        var px = (pk * (vbW - 1)) / Math.max(1, n - 1);
+        var py = vbH - 1 - ((hv - _minDb) / (_maxDb - _minDb)) * (vbH - 2);
+        if (py < 0) py = 0; if (py > vbH - 1) py = vbH - 1;
+        peakPts.push(px.toFixed(1) + ',' + py.toFixed(1));
+      }
+      if (peakPts.length > 1) {
+        _lineEl.appendChild(SC.svg('polyline', {
+          points: peakPts.join(' '),
+          fill: 'none',
+          stroke: _css.peakHold,
+          'stroke-width': 1,
+          'stroke-dasharray': '4,3',
+          'vector-effect': 'non-scaling-stroke',
+        }));
+      }
+    }
+
+    // Drag preview rectangle
+    if (_dragState) {
+      var dlo = Math.min(_dragState.startFrac, _dragState.curFrac);
+      var dhi = Math.max(_dragState.startFrac, _dragState.curFrac);
+      var dx = dlo * vbW, dw = (dhi - dlo) * vbW;
+      if (dw > 1) {
+        _lineEl.appendChild(SC.svg('rect', {
+          x: dx, y: 0, width: dw, height: vbH,
+          fill: 'rgba(0,229,255,0.08)',
+          stroke: 'rgba(0,229,255,0.4)',
+          'stroke-width': 1,
+          'vector-effect': 'non-scaling-stroke',
+        }));
+      }
+    }
+
+    // Frequency tick labels
     var nb = binsLine ? binsLine.length : 0;
     var tickCount = 5;
     for (var t = 0; t <= tickCount; t++) {
@@ -237,7 +469,7 @@
       }
       _lineEl.appendChild(SC.svg('text', {
         x: fx, y: vbH - 2,
-        fill: '#3a4565', 'font-size': 9,
+        fill: _css.label, 'font-size': 9,
         'text-anchor': t === 0 ? 'start' : (t === tickCount ? 'end' : 'middle'),
       }, fmhz.toFixed(1)));
     }
@@ -254,24 +486,24 @@
   //                       line plot + waterfall.
   // This is HTML/CSS rather than SVG so text labels don't get stretched
   // by the line-plot SVG's `preserveAspectRatio="none"` scaling.
-  function _renderBands(data) {
+  function _renderBands(data, clip) {
     if (!_bandsEl || !_overlayEl) return;
     var bins = data.bins_hz;
     if (!bins || bins.length < 2) return;
-    // Use the actual bin grid, not the configured span. rtl_power rounds the
-    // requested span to the FFT bin grid (e.g. 88–108 MHz @ 25 kHz lands the
-    // last bin at 107.975 MHz), and multi-segment sweeps can shift the
-    // endpoints further. The waterfall + line plot are drawn from bins_hz,
-    // so band positions must use the same axis or labels drift relative to
-    // the data — the drift is ~0 at the low end and grows with frequency.
-    var startMhz = bins[0] / 1e6;
-    var stopMhz  = bins[bins.length - 1] / 1e6;
+    var startMhz, stopMhz;
+    if (clip && clip.zoomed) {
+      startMhz = clip.loMhz;
+      stopMhz  = clip.hiMhz;
+    } else {
+      startMhz = bins[0] / 1e6;
+      stopMhz  = bins[bins.length - 1] / 1e6;
+    }
     var spanMhz  = stopMhz - startMhz;
     if (spanMhz <= 0) return;
 
     // Skip rebuild if the axis hasn't changed — the band ribbon is purely
     // a function of (freq_start, freq_stop), not of the sweep data.
-    var sig = startMhz.toFixed(3) + '|' + stopMhz.toFixed(3);
+    var sig = startMhz.toFixed(3) + '|' + stopMhz.toFixed(3) + (_zoom ? '|z' : '');
     if (sig === _lastBandSignature) return;
     _lastBandSignature = sig;
 
@@ -372,27 +604,25 @@
     }
   }
 
-  function _paintRowToCanvas(powers) {
+  function _paintRowToCanvas(powers, clip) {
     if (!_wfCtx || !powers || !powers.length) return;
-    // Scroll existing waterfall down by 1 px, then paint new row on top.
+    var row = (clip && clip.zoomed) ? powers.slice(clip.loIdx, clip.hiIdx + 1) : powers;
+    var n = row.length;
+    if (!n) return;
     _wfCtx.drawImage(
       _wfCanvas,
       0, 0, WF_COLS, WF_ROWS - 1,
       0, 1, WF_COLS, WF_ROWS - 1
     );
-    // Build a 1-row ImageData at WF_COLS wide; sample powers array.
     var img = _wfCtx.createImageData(WF_COLS, 1);
     var data = img.data;
-    var n = powers.length;
     var lo = _minDb, hi = _maxDb;
     var range = hi - lo;
     if (range < 1) range = 1;
     for (var x = 0; x < WF_COLS; x++) {
-      // Nearest-neighbour from power array; good enough visually and much
-      // faster than linear interpolation here.
       var srcIdx = (n > 1) ? Math.floor((x * (n - 1)) / (WF_COLS - 1)) : 0;
       if (srcIdx < 0) srcIdx = 0; else if (srcIdx >= n) srcIdx = n - 1;
-      var p = powers[srcIdx];
+      var p = row[srcIdx];
       var norm;
       if (p == null || !isFinite(p)) {
         norm = 0;
@@ -414,25 +644,25 @@
   // Called whenever the store's generation cursor changes (WS hello, or
   // bin-grid reset).  Uses the shared helper so we do a single
   // putImageData instead of N scrolls.
-  function _bulkPaintFromStore() {
+  function _bulkPaintFromStore(clip) {
     if (!_wfCtx || !SC.historyStore) return;
     var rows = SC.historyStore.rows;
     if (!rows.length) return;
-    // Helper expects oldest→newest; store is newest-first.
     var chron = new Array(rows.length);
     for (var i = 0; i < rows.length; i++) {
       chron[rows.length - 1 - i] = rows[i];
+    }
+    if (clip && clip.zoomed) {
+      for (var k = 0; k < chron.length; k++) {
+        if (chron[k]) chron[k] = chron[k].slice(clip.loIdx, clip.hiIdx + 1);
+      }
     }
     SC.paintHistoryToCanvas(_wfCtx, _wfCanvas, chron, WF_COLS, WF_ROWS,
                             _minDb, _maxDb);
     _lastSweepCount = SC.historyStore.sweepCount;
   }
 
-  function _ingestNewSweeps(data) {
-    // Figure out how many sweeps we haven't seen yet; paint those from the
-    // snapshot's waterfall_tail.  If we've missed more than tail.length
-    // sweeps (e.g., client was paused), we just catch up to whatever's in
-    // the tail — older missed sweeps are gone.
+  function _ingestNewSweeps(data, clip) {
     var sc = data.sweep_count || 0;
     var delta = sc - _lastSweepCount;
     if (delta <= 0) return;
@@ -440,7 +670,7 @@
     if (!tail.length) { _lastSweepCount = sc; return; }
     var toDraw = Math.min(delta, tail.length);
     for (var i = tail.length - toDraw; i < tail.length; i++) {
-      _paintRowToCanvas(tail[i]);
+      _paintRowToCanvas(tail[i], clip);
     }
     _lastSweepCount = sc;
   }
@@ -452,9 +682,12 @@
     var fracX = (ev.clientX - rect.left) / rect.width;
     var fracY = (ev.clientY - rect.top) / rect.height;
     if (fracX < 0 || fracX > 1 || fracY < 0 || fracY > 1) return;
+    var clip = _clip(_lastData, _zoom);
     var bins = _lastData.bins_hz;
-    var n = bins.length;
-    var idx = Math.min(n - 1, Math.max(0, Math.round(fracX * (n - 1))));
+    var loIdx = (clip && clip.zoomed) ? clip.loIdx : 0;
+    var hiIdx = (clip && clip.zoomed) ? clip.hiIdx : bins.length - 1;
+    var n = hiIdx - loIdx + 1;
+    var idx = loIdx + Math.min(n - 1, Math.max(0, Math.round(fracX * (n - 1))));
     var freqMhz = bins[idx] / 1e6;
     // Row age: the topmost pixel row (y=0) is the most recent sweep.
     // Prefer the server-supplied per-row timestamp over the old
@@ -480,8 +713,10 @@
     // feels "clicky" at wide views without being overeager when zoomed.
     var headerLine = freqMhz.toFixed(3) + ' MHz · ' + dbStr + ' · ' + ageStr;
     var bandLine = '';
-    var spanMhz = (_lastData.freq_stop_hz - _lastData.freq_start_hz) / 1e6;
-    var lmTol = Math.max(0.5, spanMhz * 0.004);  // ~0.4% of span, min 0.5 MHz
+    var visSpanMhz = (clip && clip.zoomed)
+      ? (clip.hiMhz - clip.loMhz)
+      : (_lastData.freq_stop_hz - _lastData.freq_start_hz) / 1e6;
+    var lmTol = Math.max(0.5, visSpanMhz * 0.004);
     var lm = SC.findNearLandmark(freqMhz, lmTol);
     var band = SC.findBand(freqMhz);
     if (lm) {
@@ -504,18 +739,67 @@
     if (_hoverEl) _hoverEl.style.display = 'none';
   }
 
+  // -- Scale strip ----------------------------------------------------------
+  var _lastScaleSweep = 0;
+  var _lastScaleZoomed = false;
+  function _renderScale(data, clip) {
+    if (!_scaleEl) return;
+    var sc = data.sweep_count || 0;
+    var isZoomed = !!(clip && clip.zoomed);
+    if (sc === _lastScaleSweep && isZoomed === _lastScaleZoomed) return;
+    _lastScaleSweep = sc;
+    _lastScaleZoomed = isZoomed;
+    var parts = [];
+    parts.push(_minDb.toFixed(0) + ' … ' + _maxDb.toFixed(0) + ' dB');
+    var bins = data.bins_hz;
+    if (bins && bins.length > 1) {
+      var spanMhz;
+      if (clip && clip.zoomed) {
+        spanMhz = clip.hiMhz - clip.loMhz;
+        parts.push(spanMhz.toFixed(1) + ' MHz span (zoomed)');
+      } else {
+        spanMhz = (bins[bins.length - 1] - bins[0]) / 1e6;
+        parts.push(spanMhz.toFixed(1) + ' MHz span');
+      }
+      var binStep = (bins[1] - bins[0]) / 1000;
+      var binCount = clip && clip.zoomed ? (clip.hiIdx - clip.loIdx + 1) : bins.length;
+      parts.push(binCount + ' bins @ ' + binStep.toFixed(1) + ' kHz');
+    }
+    if (data.sweep_seconds) {
+      parts.push('~' + data.sweep_seconds.toFixed(1) + 's/sweep');
+    }
+    _scaleEl.textContent = parts.join(' · ');
+  }
+
   // -- Public entry point --------------------------------------------------
   function update(data) {
     if (!data) return;
     if (!_resolveDom()) return;
 
-    // Reveal section + expand the first time any data arrives.
-    if (_section.style.display === 'none') {
-      _section.style.display = '';
+    // Handle unavailable / error states with placeholder
+    if (data.status === 'unavailable') {
+      if (_placeholderEl) {
+        _placeholderEl.textContent = 'RTL-SDR scanner unavailable';
+        _placeholderEl.style.display = '';
+      }
+      return;
+    }
+    if (data.status === 'error') {
+      if (_placeholderEl) {
+        _placeholderEl.textContent = 'Scanner error' + (data.error ? ' — ' + data.error : '');
+        _placeholderEl.style.display = '';
+      }
+      return;
+    }
+
+    // Hide placeholder + expand body on first real data
+    if (!_hasReceivedData && data.latest_powers_db && data.latest_powers_db.length) {
+      _hasReceivedData = true;
+      if (_placeholderEl) _placeholderEl.style.display = 'none';
       if (_body && _body.classList.contains('hidden')) {
         _body.classList.remove('hidden');
         _expanded = true;
-        var chev = _toggle.querySelector('.chevron');
+        var chev = _toggle ? _toggle.querySelector('.chevron') : null;
         if (chev) chev.innerHTML = '&#9662;';
       }
     }
@@ -530,45 +814,31 @@
       _lastSweepCount = 0;
       _lastRenderedSweep = 0;
       _scaleInitialized = false;
-      _lastBandSignature = '';  // force band ribbon rebuild at new axis
+      _lastBandSignature = '';
       _needsBulkPaint = true;
-      if (_wfCtx) {
-        _wfCtx.fillStyle = '#050810';
-        _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
-      }
+      _setZoom(null, true);
     }
 
     _lastData = data;
+    var clip = _clip(data, _zoom);
 
-    // Meta (span, bin count, gain, sweep age) refreshes every tick so
-    // "Xs ago" ticks up even on WS broadcasts that carry no new sweep.
     _renderMeta(data);
-
-    // Band ribbon + legend only depend on the configured span, not on the
-    // sweep data.  _renderBands no-ops if the axis hasn't changed, so
-    // calling it every tick is cheap; _buildLegend is one-time.
-    _renderBands(data);
+    _renderBands(data, clip);
     _buildLegend();
 
-    // The WS broadcast runs ~every 2 s, but a wide-span rtl_power sweep
-    // can take 40+ s.  If the sweep_count hasn't advanced, the payload is
-    // byte-for-byte the same one we just rendered — re-running the line
-    // plot every tick just makes the waveform appear to drift as the
-    // auto-scale EMA converges on a fixed target.  Only redraw when
-    // something has actually changed.
     var sc = data.sweep_count || 0;
     if (sc > _lastRenderedSweep) {
-      // Always refresh the line plot first — auto-scale runs here, so
-      // _minDb/_maxDb are valid by the time history rows paint below.
-      _renderLine(data);
+      _renderLine(data, clip);
       _lastRenderedSweep = sc;
       if (_needsBulkPaint) {
-        _bulkPaintFromStore();
+        _bulkPaintFromStore(clip);
         _needsBulkPaint = false;
       } else {
-        _ingestNewSweeps(data);
+        _ingestNewSweeps(data, clip);
       }
     }
+
+    _renderScale(data, clip);
 
     if (_countEl) _countEl.textContent = data.sweep_count + ' sweeps';
     if (R.markUpdated) R.markUpdated('spectrum-section');

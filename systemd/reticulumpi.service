@@ -1,7 +1,7 @@
 [Unit]
 Description=ReticulumPi Network Node
-After=network-online.target rnsd.service
-Wants=network-online.target rnsd.service
+After=network-online.target rnsd.service gpsd.service
+Wants=network-online.target rnsd.service gpsd.service
 
 [Service]
 Type=simple
@@ -31,18 +31,13 @@ TimeoutStopSec=30
 # restricts escalation to exactly those two systemctl commands.
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /home/reticulumpi/.local/share/reticulumpi /home/reticulumpi/.nomadnet /home/reticulumpi/.nomadnet-tui /opt/reticulumpi/meshchat/storage
+ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /home/reticulumpi/.local/share/reticulumpi /home/reticulumpi/.nomadnet /home/reticulumpi/.nomadnet-tui /opt/reticulumpi/meshchat/storage /etc/chrony/conf.d
 PrivateTmp=yes
 
 # Resource limits — prevent runaway plugins from starving the system
-# NOTE: RNS spawns a new thread for every announce callback. With 3
-# subprocesses (reticulumpi + nomadnet + meshchat) and an active mesh
-# (14k+ nodes), thread counts can spike during announce storms.
-# network_map uses a queue-based architecture to cap its own threads,
-# but other RNS consumers (meshchat, nomadnet) still spawn freely.
-# MemoryMax covers the whole cgroup (reticulumpi + nomadnet + meshchat +
-# rtl_power). Steady state ~986M with old 1G ceiling left only ~38M of
-# headroom and triggered OOM risk during announce storms.
+# MemoryHigh triggers kernel reclaim pressure before the hard MemoryMax
+# wall, giving the cgroup breathing room instead of sudden swap death.
+MemoryHigh=1536M
 MemoryMax=2G
 TasksMax=2048
 CPUQuota=90%

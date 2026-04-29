@@ -10,17 +10,6 @@ import RNS.vendor.umsgpack as umsgpack
 from reticulumpi.plugin_base import PluginBase
 
 
-class _PropagationAnnounceHandler:
-    """RNS announce handler that auto-selects the nearest LXMF propagation node."""
-
-    def __init__(self, plugin: "MessageEcho"):
-        self.aspect_filter = "lxmf.propagation"
-        self._plugin = plugin
-
-    def received_announce(self, destination_hash, announced_identity, app_data):
-        self._plugin._handle_propagation_announce(destination_hash, announced_identity, app_data)
-
-
 class MessageEcho(PluginBase):
     """Listens for incoming LXMF messages and replies with an echo."""
 
@@ -57,8 +46,9 @@ class MessageEcho(PluginBase):
 
         # Auto-select the nearest LXMF propagation node for store-and-forward
         self._best_propagation_hops = RNS.Transport.PATHFINDER_M + 1
-        self._propagation_handler = _PropagationAnnounceHandler(self)
-        RNS.Transport.register_announce_handler(self._propagation_handler)
+        self._announce_sub = self.announce_dispatcher.subscribe(
+            "lxmf.propagation", self._handle_propagation_announce,
+        )
 
         self._active = True
         self.log.info(
@@ -68,7 +58,7 @@ class MessageEcho(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        RNS.Transport.deregister_announce_handler(self._propagation_handler)
+        self.announce_dispatcher.unsubscribe(self._announce_sub)
         self.lxmf_router.register_delivery_callback(None)
         self._join_threads()
 

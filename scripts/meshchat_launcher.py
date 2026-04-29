@@ -426,6 +426,122 @@ def _apply_patches(meshchat_module):
     except Exception as exc:
         print(f"{_TAG} Warning: could not patch display_name_from_app_data ({exc})")
 
+    # --- Patch 10: Announce handler multiplexer ---
+    # RNS spawns a new daemon thread for every matching announce handler
+    # callback (Transport.py lines 1904-1927).  MeshChat registers 4 handlers
+    # and LXMF adds 2 more — with overlapping aspect filters on lxmf.delivery
+    # and lxmf.propagation, each qualifying announce spawns 2 short-lived
+    # threads.  At hundreds of announces per minute this fragments CPython's
+    # allocator over multi-day operation.  Intercept all handler registrations
+    # and multiplex through a single wildcard handler with a queue worker.
+    try:
+        import inspect as _inspect
+        import queue as _queue
+        import threading as _threading
+        import RNS
+
+        class _AnnounceMultiplexer:
+            aspect_filter = None
+            receive_path_responses = True
+
+            def __init__(self):
+                self._subs = []
+                self._lock = _threading.Lock()
+                self._q = _queue.Queue(maxsize=10_000)
+                t = _threading.Thread(
+                    target=self._dispatch_loop,
+                    name="meshchat-announce-mux",
+                    daemon=True,
+                )
+                t.start()
+
+            def add(self, handler):
+                try:
+                    pc = len(_inspect.signature(handler.received_announce).parameters)
+                except Exception:
+                    pc = 4
+                wants_pr = getattr(handler, "receive_path_responses", False) is True
+                af = getattr(handler, "aspect_filter", None)
+                with self._lock:
+                    self._subs.append((handler, pc, wants_pr, af))
+
+            def remove(self, handler):
+                with self._lock:
+                    self._subs = [s for s in self._subs if s[0] is not handler]
+
+            def received_announce(
+                self, destination_hash, announced_identity, app_data,
+                announce_packet_hash, is_path_response,
+            ):
+                try:
+                    self._q.put_nowait(
+                        (destination_hash, announced_identity, app_data,
+                         announce_packet_hash, is_path_response)
+                    )
+                except _queue.Full:
+                    print(f"{_TAG} Announce mux queue full — dropped")
+
+            def _dispatch_loop(self):
+                while True:
+                    try:
+                        item = self._q.get(timeout=1.0)
+                    except _queue.Empty:
+                        continue
+                    dh, ident, ad, pkh, is_pr = item
+                    with self._lock:
+                        subs = list(self._subs)
+                    matched = {}
+                    for handler, pc, wants_pr, af in subs:
+                        try:
+                            if is_pr and not wants_pr:
+                                continue
+                            if af is not None:
+                                if af not in matched:
+                                    matched[af] = self._aspect_matches(af, dh, ident)
+                                if not matched[af]:
+                                    continue
+                            if pc >= 5:
+                                handler.received_announce(dh, ident, ad, pkh, is_pr)
+                            elif pc == 4:
+                                handler.received_announce(dh, ident, ad, pkh)
+                            else:
+                                handler.received_announce(dh, ident, ad)
+                        except Exception:
+                            pass
+
+            @staticmethod
+            def _aspect_matches(af, dh, ident):
+                if ident is None:
+                    return False
+                try:
+                    expected = RNS.Destination.hash_from_name_and_identity(af, ident)
+                    return dh == expected
+                except Exception:
+                    return False
+
+        _mux = _AnnounceMultiplexer()
+        _mux_registered = [False]
+        _mux_lock = _threading.Lock()
+        _orig_register = RNS.Transport.register_announce_handler
+
+        def _patched_register(handler):
+            _mux.add(handler)
+            with _mux_lock:
+                if not _mux_registered[0]:
+                    _orig_register(_mux)
+                    _mux_registered[0] = True
+            af = getattr(handler, "aspect_filter", None)
+            print(f"{_TAG} Multiplexed handler: aspect={af}")
+
+        def _patched_deregister(handler):
+            _mux.remove(handler)
+
+        RNS.Transport.register_announce_handler = staticmethod(_patched_register)
+        RNS.Transport.deregister_announce_handler = staticmethod(_patched_deregister)
+        print(f"{_TAG} Announce multiplexer installed")
+    except Exception as exc:
+        print(f"{_TAG} Warning: could not install announce multiplexer ({exc})")
+
     return ok
 
 
@@ -445,6 +561,13 @@ def main():
 
     # Apply all patches (timeouts + logging).
     _apply_patches(meshchat)
+
+    import signal as _signal
+
+    def _handle_sigterm(signum, frame):
+        raise SystemExit(0)
+
+    _signal.signal(_signal.SIGTERM, _handle_sigterm)
 
     # Hand off to MeshChat's normal CLI entry point.
     meshchat.main()

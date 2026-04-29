@@ -32,6 +32,8 @@ _HUB_EXCHANGE_ASPECT = "hubexchange"
 _EXCHANGE_INTERVAL_DEFAULT = 900  # 15 minutes between exchange rounds
 _EXCHANGE_LINK_TIMEOUT = 30  # seconds to wait for link establishment
 _MAX_EXCHANGE_PEERS = 20  # max peers to track from announces
+_DEFAULT_HUB_STALE_HOURS = 24
+_HUB_SWEEP_INTERVAL_TICKS = 10
 
 
 class TransportMonitorPlugin(PluginBase):
@@ -168,12 +170,14 @@ class TransportMonitorPlugin(PluginBase):
         self._auto_interfaces: dict[str, Any] = {}
         self._hub_cooldowns: dict[str, dict[str, Any]] = {}
         self._pinned_hubs: set[str] = set()
+        self._stale_hours: float = auto.get("stale_hours", _DEFAULT_HUB_STALE_HOURS)
+        self._sweep_tick_counter: int = 0
 
         # Hub exchange state
         self._exchange_interval = auto.get("exchange_interval", _EXCHANGE_INTERVAL_DEFAULT)
         self._exchange_peers: dict[bytes, float] = {}  # dest_hash -> last_seen monotonic
         self._exchange_destination: Any = None
-        self._announce_handler: Any = None
+        self._announce_sub: str | None = None
 
         if self._auto_enabled:
             self._start_thread(self._auto_discovery_loop, "hub-pool-manager")
@@ -344,7 +348,7 @@ class TransportMonitorPlugin(PluginBase):
     def _monitor_loop(self) -> None:
         """Periodically check hub health and manage failover."""
         while self._active:
-            self._sleep_while_active(self._check_interval)
+            self._jittered_sleep(self._check_interval)
             if not self._active:
                 break
 
@@ -516,6 +520,11 @@ class TransportMonitorPlugin(PluginBase):
         for hub in self._auto_extra_hubs:
             pool.append(hub)
 
+        # Stamp all entries with last_seen for stale sweep
+        now = time.monotonic()
+        for hub in pool:
+            hub.setdefault("last_seen", now)
+
         with self._lock:
             self._hub_pool = pool
 
@@ -589,10 +598,15 @@ class TransportMonitorPlugin(PluginBase):
             except Exception:
                 self.log.debug("Error in auto-discovery tick", exc_info=True)
 
-            self._sleep_while_active(self._auto_probe_interval)
+            self._jittered_sleep(self._auto_probe_interval)
 
     def _auto_discovery_tick(self) -> None:
         """One cycle: probe existing pool connections, replace unhealthy ones."""
+        self._sweep_tick_counter += 1
+        if self._sweep_tick_counter >= _HUB_SWEEP_INTERVAL_TICKS:
+            self._sweep_tick_counter = 0
+            self._sweep_stale_hubs()
+
         # Don't create TCP interfaces when user has disabled all TCP
         if self._tcp_disabled:
             # Tear down any pool interfaces we already created
@@ -733,8 +747,12 @@ class TransportMonitorPlugin(PluginBase):
             RNS.Transport.interfaces.append(iface)
             with self._lock:
                 self._auto_interfaces[key] = iface
-                # Clear cooldown on success
+                # Clear cooldown and refresh last_seen on success
                 self._hub_cooldowns.pop(key, None)
+                for h in self._hub_pool:
+                    if f"{h['target_host']}:{h['target_port']}" == key:
+                        h["last_seen"] = time.monotonic()
+                        break
             self.log.info(
                 "Pool hub connected: %s (%s:%d, region=%s)",
                 name, host, port, hub.get("region", "unknown"),
@@ -834,8 +852,10 @@ class TransportMonitorPlugin(PluginBase):
             )
 
             # Listen for other nodes announcing hub exchange
-            self._announce_handler = _HubExchangeAnnounceHandler(self)
-            RNS.Transport.register_announce_handler(self._announce_handler)
+            _aspect = f"{_HUB_EXCHANGE_APP}.{_HUB_EXCHANGE_ASPECT}"
+            self._announce_sub = self.announce_dispatcher.subscribe(
+                _aspect, self._on_hub_announce,
+            )
 
             # Announce ourselves so other nodes can find us
             self._exchange_destination.announce()
@@ -852,12 +872,9 @@ class TransportMonitorPlugin(PluginBase):
 
     def _teardown_hub_exchange(self) -> None:
         """Clean up hub exchange resources."""
-        if self._announce_handler:
-            try:
-                RNS.Transport.deregister_announce_handler(self._announce_handler)
-            except Exception:
-                pass
-            self._announce_handler = None
+        if getattr(self, "_announce_sub", None):
+            self.announce_dispatcher.unsubscribe(self._announce_sub)
+            self._announce_sub = None
         self._exchange_destination = None
 
     def _exchange_link_established(self, link: Any) -> None:
@@ -907,7 +924,7 @@ class TransportMonitorPlugin(PluginBase):
                 except Exception:
                     pass
 
-            self._sleep_while_active(self._exchange_interval)
+            self._jittered_sleep(self._exchange_interval)
 
     def _exchange_tick(self) -> None:
         """Query one exchange peer for their hub list."""
@@ -1015,6 +1032,38 @@ class TransportMonitorPlugin(PluginBase):
     # Hard cap on hub pool size to prevent memory exhaustion via malicious peers
     _MAX_HUB_POOL_SIZE = 500
 
+    def _sweep_stale_hubs(self) -> None:
+        """Remove exchange-sourced hubs that have been unreachable too long."""
+        threshold = self._stale_hours * 3600
+        now = time.monotonic()
+        cutoff = now - threshold
+
+        with self._lock:
+            before = len(self._hub_pool)
+            connected_keys = set(self._auto_interfaces.keys())
+            self._hub_pool = [
+                hub for hub in self._hub_pool
+                if hub.get("last_seen", now) > cutoff
+                or f"{hub['target_host']}:{hub['target_port']}" in connected_keys
+                or hub.get("source") != "exchange"
+            ]
+            removed = before - len(self._hub_pool)
+
+            pool_keys = {
+                f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool
+            }
+            stale_cooldowns = [
+                k for k in self._hub_cooldowns if k not in pool_keys
+            ]
+            for k in stale_cooldowns:
+                del self._hub_cooldowns[k]
+
+        if removed > 0:
+            self.log.info(
+                "Hub pool sweep: removed %d stale hubs (threshold=%dh, pool=%d)",
+                removed, int(self._stale_hours), len(self._hub_pool),
+            )
+
     def _merge_exchanged_hubs(self, received: list[dict]) -> int:
         """Merge hubs received from a peer into our pool. Returns count of new hubs."""
         added = 0
@@ -1045,6 +1094,7 @@ class TransportMonitorPlugin(PluginBase):
                 "name": entry.get("n", key),
                 "region": entry.get("r", "unknown"),
                 "source": "exchange",
+                "last_seen": time.monotonic(),
             }
             with self._lock:
                 self._hub_pool.append(new_hub)
@@ -1052,6 +1102,17 @@ class TransportMonitorPlugin(PluginBase):
             added += 1
 
         return added
+
+    def _on_hub_announce(
+        self,
+        destination_hash: bytes,
+        announced_identity: Any,
+        app_data: bytes | None,
+    ) -> None:
+        if self._exchange_destination and \
+                destination_hash == self._exchange_destination.hash:
+            return
+        self._on_peer_announced(destination_hash)
 
     def _on_peer_announced(self, dest_hash: bytes) -> None:
         """Called by the announce handler when a hub exchange peer is discovered."""
@@ -1070,22 +1131,3 @@ class TransportMonitorPlugin(PluginBase):
         )
 
 
-class _HubExchangeAnnounceHandler:
-    """Listens for other reticulumPi nodes announcing hub exchange capability."""
-
-    aspect_filter = f"{_HUB_EXCHANGE_APP}.{_HUB_EXCHANGE_ASPECT}"
-
-    def __init__(self, plugin: TransportMonitorPlugin):
-        self._plugin = plugin
-
-    def received_announce(
-        self,
-        destination_hash: bytes,
-        announced_identity: Any,
-        app_data: bytes | None,
-    ) -> None:
-        # Don't add ourselves
-        if self._plugin._exchange_destination and \
-                destination_hash == self._plugin._exchange_destination.hash:
-            return
-        self._plugin._on_peer_announced(destination_hash)

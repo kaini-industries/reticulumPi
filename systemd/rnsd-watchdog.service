@@ -1,0 +1,15 @@
+[Unit]
+Description=rnsd socket watchdog check
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '\
+  if ! systemctl is-active --quiet rnsd; then exit 0; fi; \
+  if ss -xa 2>/dev/null | grep -q "@rns/default"; then exit 0; fi; \
+  echo "rnsd running but socket dead — restarting"; \
+  systemctl restart rnsd; \
+  for i in $(seq 1 30); do ss -xa 2>/dev/null | grep -q "@rns/default" && break; sleep 1; done; \
+  if systemctl is-failed --quiet reticulumpi; then \
+    echo "reticulumpi in failed state — restarting"; \
+    systemctl restart reticulumpi; \
+  fi'

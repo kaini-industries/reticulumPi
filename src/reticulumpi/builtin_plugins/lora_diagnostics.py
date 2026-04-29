@@ -129,9 +129,10 @@ class LoRaDiagnosticsPlugin(PluginBase):
         self._beacons_sent = 0
         self._last_beacon_time: float | None = None
 
-        # Register announce handler for monitored destinations
-        self._announce_handler = _AnnounceHandler(self)
-        RNS.Transport.register_announce_handler(self._announce_handler)
+        # Subscribe to announces for monitored destinations
+        self._announce_sub = self.announce_dispatcher.subscribe(
+            "lxmf.delivery", self.on_announce_received,
+        )
 
         # Start background threads
         self._start_thread(self._monitor_loop, "lora-monitor")
@@ -146,11 +147,8 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        if hasattr(self, "_announce_handler"):
-            try:
-                RNS.Transport.deregister_announce_handler(self._announce_handler)
-            except Exception:
-                pass
+        if hasattr(self, "_announce_sub"):
+            self.announce_dispatcher.unsubscribe(self._announce_sub)
         self._join_threads()
 
     # ------------------------------------------------------------------
@@ -354,7 +352,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 self._check_monitored_paths()
             except Exception:
                 self.log.warning("Error in LoRa monitor loop", exc_info=True)
-            self._sleep_while_active(interval)
+            self._jittered_sleep(interval)
 
     def _poll_interface_stats(self, iface_name: str) -> None:
         """Query rnsd for interface stats and update LoRa tracking."""
@@ -474,7 +472,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 self._send_beacons()
             except Exception:
                 self.log.warning("Error in LoRa beacon loop", exc_info=True)
-            self._sleep_while_active(interval)
+            self._jittered_sleep(interval)
 
     def _send_beacons(self) -> None:
         """Trigger announces on sibling plugins' destinations.
@@ -550,23 +548,3 @@ class LoRaDiagnosticsPlugin(PluginBase):
         )
 
 
-class _AnnounceHandler:
-    """RNS announce handler that forwards relevant announces to the plugin."""
-
-    aspect_filter = "lxmf.delivery"
-
-    def __init__(self, plugin: LoRaDiagnosticsPlugin) -> None:
-        self._plugin = plugin
-
-    def received_announce(
-        self,
-        destination_hash: bytes,
-        announced_identity: Any,
-        app_data: bytes | None,
-    ) -> None:
-        try:
-            self._plugin.on_announce_received(
-                destination_hash, announced_identity, app_data
-            )
-        except Exception:
-            pass

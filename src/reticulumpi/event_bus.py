@@ -14,6 +14,9 @@ EventCallback = Callable[[str, dict[str, Any]], None]
 _offload_executor = ThreadPoolExecutor(
     max_workers=4, thread_name_prefix="eventbus",
 )
+_OFFLOAD_MAX_PENDING = 64
+_OFFLOAD_ACQUIRE_TIMEOUT = 0.1
+_offload_semaphore = threading.BoundedSemaphore(value=_OFFLOAD_MAX_PENDING)
 
 
 def _safe_offload(callback: EventCallback, evt: str, data: dict[str, Any]) -> None:
@@ -25,6 +28,8 @@ def _safe_offload(callback: EventCallback, evt: str, data: dict[str, Any]) -> No
             getattr(callback, "__qualname__", callback),
             evt,
         )
+    finally:
+        _offload_semaphore.release()
 
 
 class EventBus:
@@ -57,6 +62,13 @@ class EventBus:
             wrapper = self._offload_map.get(callback)
             if wrapper is None:
                 def _wrapper(evt: str, data: dict[str, Any]) -> None:
+                    if not _offload_semaphore.acquire(timeout=_OFFLOAD_ACQUIRE_TIMEOUT):
+                        log.warning(
+                            "Event bus backpressure: dropping '%s' for %s",
+                            evt,
+                            getattr(callback, "__qualname__", callback),
+                        )
+                        return
                     _offload_executor.submit(_safe_offload, callback, evt, data)
                 self._offload_map[callback] = _wrapper
                 wrapper = _wrapper

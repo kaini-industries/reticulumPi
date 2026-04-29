@@ -91,7 +91,7 @@ fi
 # 3. Update systemd service files if they changed
 echo "[3/5] Updating systemd services..."
 SERVICES_CHANGED=false
-for svc in reticulumpi.service rnsd.service; do
+for svc in reticulumpi.service rnsd.service rnsd-watchdog.service rnsd-watchdog.timer; do
     src="$INSTALL_DIR/systemd/$svc"
     dest="/etc/systemd/system/$svc"
     if [ -f "$src" ] && [ -f "$dest" ]; then

@@ -1,8 +1,22 @@
 """Tests for PluginBase helper methods."""
 
+import logging
 import time
 
+import pytest
+
 from reticulumpi.plugin_base import PluginBase
+
+
+@pytest.fixture(autouse=True)
+def _reset_thread_budget():
+    """Save and restore class-level thread budget state between tests."""
+    saved_count = PluginBase._global_thread_count
+    saved_budget = PluginBase._global_thread_budget
+    PluginBase._global_thread_count = 0
+    yield
+    PluginBase._global_thread_count = saved_count
+    PluginBase._global_thread_budget = saved_budget
 
 
 class FakePlugin(PluginBase):
@@ -129,3 +143,46 @@ def test_plugin_name_collision_last_wins(tmp_path):
     found = loader.discover([str(plugin_a), str(plugin_b)])
     assert "dupe" in found
     assert found["dupe"].plugin_version == "2.0.0"
+
+
+# ── Thread budget tests ───────────────────────────────────────────
+
+
+def test_start_thread_increments_global_count(mock_app):
+    plugin = FakePlugin(mock_app, {"enabled": True})
+    assert PluginBase.get_thread_count() == 0
+    t = plugin._start_thread(lambda: None, "budget-t1")
+    t.join(timeout=2)
+    assert PluginBase.get_thread_count() == 1
+
+
+def test_join_threads_decrements_global_count(mock_app):
+    plugin = FakePlugin(mock_app, {"enabled": True})
+    t1 = plugin._start_thread(lambda: None, "budget-t1")
+    t2 = plugin._start_thread(lambda: None, "budget-t2")
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+    assert PluginBase.get_thread_count() == 2
+    plugin._join_threads()
+    assert PluginBase.get_thread_count() == 0
+
+
+def test_thread_budget_warning_logged(mock_app, caplog):
+    PluginBase.set_thread_budget(0)
+    plugin = FakePlugin(mock_app, {"enabled": True})
+    with caplog.at_level(logging.WARNING):
+        t = plugin._start_thread(lambda: None, "over-budget")
+        t.join(timeout=2)
+    assert "thread budget exceeded" in caplog.text.lower()
+
+
+def test_set_thread_budget(mock_app):
+    PluginBase.set_thread_budget(10)
+    assert PluginBase._global_thread_budget == 10
+
+
+def test_thread_count_never_negative(mock_app):
+    PluginBase._global_thread_count = 0
+    plugin = FakePlugin(mock_app, {"enabled": True})
+    plugin._join_threads()
+    assert PluginBase.get_thread_count() == 0

@@ -269,6 +269,21 @@ async def handle_meshtastic_device(
     return _ok(gw.get_device_info())
 
 
+async def handle_meshtastic_device_reset(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/meshtastic/device/reset — Reboot or USB-reset the Meshtastic device."""
+    plugin = _get_plugin(request)
+    gw = plugin.app.get_plugin("meshtastic_gateway")
+    if not gw or not hasattr(gw, "reset_device"):
+        return _error("meshtastic_gateway plugin not enabled", 503)
+
+    result = gw.reset_device()
+    if result.get("ok"):
+        return _ok(result)
+    return _error(result.get("reason", "Reset failed"), 400)
+
+
 async def handle_meshtastic_lora_neighbors(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
@@ -849,6 +864,97 @@ async def handle_adsb_snapshot(
     return _ok(snap)
 
 
+async def handle_ntp_snapshot(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/ntp — full NTP/chrony status + sources."""
+    plugin = _get_plugin(request)
+    ntp = plugin.app.get_plugin("ntp_server")
+    if not ntp or not hasattr(ntp, "get_snapshot"):
+        return _ok({"available": False, "message": "ntp_server plugin not enabled"})
+    try:
+        snap = ntp.get_snapshot()
+    except Exception:
+        return _error("Failed to gather ntp_server snapshot", 500)
+    snap["available"] = True
+    return _ok(snap)
+
+
+async def handle_ntp_sources(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/ntp/sources — chrony source list only."""
+    plugin = _get_plugin(request)
+    ntp = plugin.app.get_plugin("ntp_server")
+    if not ntp or not hasattr(ntp, "get_snapshot"):
+        return _ok({"available": False, "sources": []})
+    try:
+        snap = ntp.get_snapshot()
+    except Exception:
+        return _ok({"available": False, "sources": []})
+    return _ok({"available": True, "sources": snap.get("sources", [])})
+
+
+# ── LoRa link tester ────────────────────────────────────────────────────
+
+
+async def handle_link_tester_snapshot(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/link_tester — status + full history."""
+    plugin = _get_plugin(request)
+    lt = plugin.app.get_plugin("lora_link_tester")
+    if not lt or not hasattr(lt, "get_history"):
+        return _ok({"available": False, "message": "lora_link_tester plugin not enabled"})
+    try:
+        return _ok(lt.get_history())
+    except Exception:
+        return _error("Failed to gather link tester data", 500)
+
+
+async def handle_link_tester_start(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/link_tester/start — start a test run."""
+    plugin = _get_plugin(request)
+    lt = plugin.app.get_plugin("lora_link_tester")
+    if not lt or not hasattr(lt, "start_test"):
+        return _error("lora_link_tester plugin not available", 503)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = lt.start_test(
+        target=body.get("target"),
+        count=body.get("count"),
+    )
+    if not result.get("ok"):
+        return _error(result.get("reason", "unknown error"), 400)
+    return _ok(result)
+
+
+async def handle_link_tester_stop(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/link_tester/stop — stop current test run."""
+    plugin = _get_plugin(request)
+    lt = plugin.app.get_plugin("lora_link_tester")
+    if not lt or not hasattr(lt, "stop_test"):
+        return _error("lora_link_tester plugin not available", 503)
+    return _ok(lt.stop_test())
+
+
+async def handle_link_tester_clear(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/link_tester/clear — clear history buffer."""
+    plugin = _get_plugin(request)
+    lt = plugin.app.get_plugin("lora_link_tester")
+    if not lt or not hasattr(lt, "clear_history"):
+        return _error("lora_link_tester plugin not available", 503)
+    return _ok(lt.clear_history())
+
+
 def setup_service_routes(app: aiohttp.web.Application) -> None:
     """Register plugin service API routes."""
     # LoRa
@@ -868,6 +974,7 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/meshtastic/status", handle_meshtastic_status)
     app.router.add_get("/api/meshtastic/nodes", handle_meshtastic_nodes)
     app.router.add_get("/api/meshtastic/device", handle_meshtastic_device)
+    app.router.add_post("/api/meshtastic/device/reset", handle_meshtastic_device_reset)
     app.router.add_get("/api/meshtastic/lora_neighbors", handle_meshtastic_lora_neighbors)
     app.router.add_get("/api/meshtastic/channels", handle_meshtastic_channels)
     app.router.add_post("/api/meshtastic/channels/join", handle_meshtastic_channel_join)
@@ -905,3 +1012,11 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/gps/satellites", handle_gps_satellites)
     # ADS-B radar
     app.router.add_get("/api/adsb", handle_adsb_snapshot)
+    # NTP server
+    app.router.add_get("/api/ntp", handle_ntp_snapshot)
+    app.router.add_get("/api/ntp/sources", handle_ntp_sources)
+    # LoRa link tester
+    app.router.add_get("/api/link_tester", handle_link_tester_snapshot)
+    app.router.add_post("/api/link_tester/start", handle_link_tester_start)
+    app.router.add_post("/api/link_tester/stop", handle_link_tester_stop)
+    app.router.add_post("/api/link_tester/clear", handle_link_tester_clear)

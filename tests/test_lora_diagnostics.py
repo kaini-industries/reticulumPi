@@ -310,18 +310,13 @@ class TestAnnounceHandler:
         plugin.stop()
 
     @patch("RNS.Transport")
-    def test_announce_handler_class(self, mock_transport, mock_app, base_config):
-        """The _AnnounceHandler delegates to the plugin."""
-        from reticulumpi.builtin_plugins.lora_diagnostics import _AnnounceHandler
-
+    def test_announce_callback(self, mock_transport, mock_app, base_config):
+        """on_announce_received updates monitored destination state."""
         plugin = _make_plugin(mock_app, base_config)
         plugin.start()
 
-        handler = _AnnounceHandler(plugin)
-        assert handler.aspect_filter == "lxmf.delivery"
-
         dest_hash = bytes.fromhex("c99eced76cb1bbc2e6711b6fbea115eb")
-        handler.received_announce(dest_hash, MagicMock(), b"test")
+        plugin.on_announce_received(dest_hash, MagicMock(), b"test")
 
         ratcom = plugin._monitored["c99eced76cb1bbc2e6711b6fbea115eb"]
         assert ratcom["last_announce_seen"] is not None

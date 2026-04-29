@@ -237,7 +237,7 @@
     // Stats bar
     if (_statsEl) {
       var parts = [];
-      parts.push('<strong>' + aircraft.length + '</strong> aircraft');
+      parts.push('<strong>' + aircraft.length + '</strong>&nbsp;aircraft');
       parts.push(stats.total_messages ? stats.total_messages.toLocaleString() + ' msgs' : '');
       parts.push(stats.aircraft_seen_total ? stats.aircraft_seen_total + ' seen total' : '');
       if (stats.receiver_lat != null && stats.receiver_lon != null) {

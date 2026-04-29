@@ -14,9 +14,9 @@
  * server config (plugins.web_dashboard.lora_region in config.yaml) > US
  * default.  There is no auto-detection from live data.
  *
- * Shares rtl_power data with `spectrum.js` — no second SDR stream; this
- * panel just clips `bins_hz` / `latest_powers_db` / `waterfall_tail` to the
- * selected region's band window.  Shared primitives (turbo colormap,
+ * When a dedicated `lora_scanner` plugin is running, this panel uses its
+ * high-resolution data directly.  Otherwise falls back to clipping the
+ * wideband `spectrum_scanner` data.  Shared primitives (turbo colormap,
  * waterfall painter, SVG/DOM helpers, EMA auto-scale) come from
  * `window.RPI.spectrumCommon`.
  */
@@ -50,6 +50,8 @@
   // -- DOM handles (resolved lazily on first data tick) --------------------
   var _section = null, _body = null, _toggle = null, _countEl = null;
   var _metaEl, _lineEl, _wfCanvas, _wfCtx, _overlayEl, _hoverEl, _scaleEl, _bandsEl;
+  var _placeholderEl = null;
+  var _hasReceivedData = false;
 
   // -- Runtime state -------------------------------------------------------
   var _expanded = false;
@@ -64,11 +66,9 @@
   var _lastSweepCount = 0;
   var _lastRenderedSweep = 0;
   var _scale = { minDb: -90, maxDb: -30, initialized: false };
-  // Waterfall history lives in the shared `spectrumCommon.historyStore` —
-  // populated once per WS connect via the `spectrum_history` hello frame,
-  // then kept current by `ingestTick` on each broadcast.  We just track
-  // the store's generation counter here to know when to wipe canvas and
-  // bulk-paint (hello arrival, bin-grid change).
+  // Waterfall history lives in spectrumCommon — either `historyStore`
+  // (shared wideband) or `loraHistoryStore` (dedicated scanner).  The
+  // `_store()` helper picks the right one based on `_dedicatedMode`.
   var _lastStoreGen = -1;
   var _needsBulkPaint = false;
   var _lastOverlaySig = '';    // "<region>|<freq>|<bw>|<zoom>" for overlay rebuild
@@ -76,11 +76,37 @@
   // Zoom: null = full clipped region; else [loMhz, hiMhz] user-selected window.
   var _zoom = null;
   var _dragState = null;       // {startFrac, curFrac, rectEl} during a drag
+  var _dragRafId = null;
   var _zoomResetEl = null;     // "Reset zoom" chip
   var _presetBtns = {};        // {rnode, full} button handles
+  var _dedicatedMode = false;
+  function _store() { return _dedicatedMode ? SC.loraHistoryStore : SC.historyStore; }
 
   var _peakHoldEnabled = false;
   var _peakHoldDb = null;      // per-bin max dB, aligned with spec.bins_hz
+
+  // -- Channel grid state ---------------------------------------------------
+  var _chGridWrap = null, _chGridUp = null, _chGridDn = null;
+  var _chDetailEl = null;
+  var _chCells = [];           // DOM elements for all channel cells
+  var _chGridBuilt = false;
+  var _selectedChannel = null;
+  var _chTooltipEl = null;
+  var _channelPowerHistory = null;
+
+  // -- Stats panel state ----------------------------------------------------
+  var _statsPanelEl = null, _nfTrendEl = null, _chUtilEl = null, _chTimelineEl = null;
+  var _nfTrendSig = '', _chUtilSig = '', _chTimelineSig = '';
+
+  // -- CSS custom property cache (read once in _resolveDom) -----------------
+  var _css = {};
+
+  // -- Waterfall scale controls ---------------------------------------------
+  var _wfScaleManual = false;
+  var _wfScaleMin = -100;
+  var _wfScaleMax = -30;
+  var _LS_WF_SCALE = 'rpi_lora_wf_scale';
+  var _LS_ZOOM = 'rpi_lora_zoom';
 
   // -- DOM setup -----------------------------------------------------------
   function _resolveDom() {
@@ -103,7 +129,7 @@
       _wfCanvas.width = WF_COLS;
       _wfCanvas.height = WF_ROWS;
       _wfCtx = _wfCanvas.getContext('2d');
-      _wfCtx.fillStyle = '#050810';
+      _wfCtx.fillStyle = _css.wfBg || '#050810';
       _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
       _wfCanvas.addEventListener('mousemove', _onHover);
       _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
@@ -119,7 +145,52 @@
     if (plotWrap) plotWrap.addEventListener('dblclick', _onDoubleClickReset);
     if (_zoomResetEl) _zoomResetEl.addEventListener('click', _onZoomChipClick);
 
+    // Channel grid + stats panel DOM handles
+    _chGridWrap = $('lora-channel-grid-wrap');
+    _chGridUp = $('lora-channel-grid-up');
+    _chGridDn = $('lora-channel-grid-dn');
+    _chDetailEl = $('lora-channel-detail');
+    _statsPanelEl = $('lora-stats-panel');
+    _nfTrendEl = $('lora-nf-trend');
+    _chUtilEl = $('lora-ch-util');
+    _chTimelineEl = $('lora-ch-timeline');
+
+    // Cache CSS custom properties once for use in SVG renderers
+    var cs = getComputedStyle(document.documentElement);
+    _css.wfBg      = cs.getPropertyValue('--wf-bg').trim()         || '#050810';
+    _css.grid      = cs.getPropertyValue('--spec-grid').trim()     || '#0f1525';
+    _css.label     = cs.getPropertyValue('--spec-label').trim()    || '#3a4565';
+    _css.sublabel  = cs.getPropertyValue('--spec-sublabel').trim() || '#5a6785';
+    _css.statText  = cs.getPropertyValue('--spec-stat-text').trim()|| '#8a9ab5';
+    _css.peakHold  = cs.getPropertyValue('--lora-peak-hold').trim()  || 'rgba(255,182,39,0.65)';
+    _css.cwMarker  = cs.getPropertyValue('--lora-cw-marker').trim()  || 'rgba(220,53,69,0.8)';
+    _css.noiseLine = cs.getPropertyValue('--lora-noise-line').trim() || 'rgba(240,160,64,0.5)';
+    _css.cyan      = cs.getPropertyValue('--cyan').trim()            || '#00e5ff';
+
+    // Restore trace toggle state and zoom from localStorage
+    _loadWfScaleState();
+    try {
+      var zs = localStorage.getItem(_LS_ZOOM);
+      if (zs) {
+        var zp = JSON.parse(zs);
+        if (Array.isArray(zp) && zp.length === 2
+            && typeof zp[0] === 'number' && typeof zp[1] === 'number'
+            && zp[1] > zp[0]) {
+          _zoom = zp;
+        }
+      }
+    } catch (e) {}
+
     if (_toggle) _toggle.addEventListener('click', _onToggleClick);
+
+    // Show section immediately with a placeholder until data arrives.
+    if (_section.style.display === 'none') {
+      _section.style.display = '';
+      _placeholderEl = document.createElement('div');
+      _placeholderEl.className = 'lora-spectrum-placeholder';
+      _placeholderEl.textContent = 'Waiting for spectrum data…';
+      if (_body) _body.insertBefore(_placeholderEl, _body.firstChild);
+    }
 
     // Region bootstrap: synchronous localStorage load + async config fetch.
     // `_resolveRegion()` runs twice — once now (with user-or-default) and
@@ -456,6 +527,11 @@
     if (spec.sweep_seconds) {
       parts.push(spec.sweep_seconds + 's/sweep');
     }
+    if (spec.sweep_count) {
+      var sweepInfo = '#' + spec.sweep_count;
+      if (spec.sweep_seconds > 0) sweepInfo += ' (' + (1 / spec.sweep_seconds).toFixed(1) + '/s)';
+      parts.push(sweepInfo);
+    }
     _scaleEl.innerHTML = parts.join(' · ');
   }
 
@@ -511,10 +587,10 @@
     for (var db = first; db <= _scale.maxDb; db += step) {
       var gy = vbH - 1 - ((db - _scale.minDb) / (_scale.maxDb - _scale.minDb)) * (vbH - 2);
       _lineEl.appendChild(SC.svg('line', {
-        x1: 0, y1: gy, x2: vbW, y2: gy, stroke: '#0f1525', 'stroke-width': 0.5,
+        x1: 0, y1: gy, x2: vbW, y2: gy, stroke: _css.grid, 'stroke-width': 0.5,
       }));
       _lineEl.appendChild(SC.svg('text', {
-        x: 4, y: gy - 2, fill: '#3a4565', 'font-size': 9,
+        x: 4, y: gy - 2, fill: _css.label, 'font-size': 9,
       }, db.toFixed(0)));
     }
 
@@ -535,7 +611,7 @@
         _lineEl.appendChild(SC.svg('polyline', {
           points: pkPts.join(' '),
           fill: 'none',
-          stroke: 'rgba(255, 182, 39, 0.65)',
+          stroke: _css.peakHold,
           'stroke-width': 0.9,
           'stroke-dasharray': '2,2',
           'vector-effect': 'non-scaling-stroke',
@@ -557,7 +633,7 @@
           width: Math.max(0.5, barW - 0.5).toFixed(2),
           height: bh.toFixed(2),
           fill: 'rgba(0, 229, 255, 0.55)',
-          stroke: '#00e5ff',
+          stroke: _css.cyan,
           'stroke-width': 0.8,
         }));
       }
@@ -574,9 +650,103 @@
       }
       _lineEl.appendChild(SC.svg('polyline', {
         points: pts.join(' '),
-        fill: 'none', stroke: '#00e5ff', 'stroke-width': 1.2,
+        fill: 'none', stroke: _css.cyan, 'stroke-width': 1.2,
         'vector-effect': 'non-scaling-stroke',
       }));
+    }
+
+    // Active channel markers from channel_analysis.
+    var ca = spec.channel_analysis;
+    if (ca && ca.channels) {
+      var viewSpanMhz = clip.hiMhz - clip.loMhz;
+      for (var ci = 0; ci < ca.channels.length; ci++) {
+        var ch = ca.channels[ci];
+        if (!ch.active) continue;
+        var cmhz = ch.center_mhz;
+        if (cmhz < clip.loMhz || cmhz > clip.hiMhz) continue;
+        var cx = ((cmhz - clip.loMhz) / viewSpanMhz) * vbW;
+        var markerColor = ch.dir === 'dn' ? '#00e5ff' : '#ff6b9d';
+        // Small inverted triangle at top
+        var tw = 4, th = 5;
+        _lineEl.appendChild(SC.svg('polygon', {
+          points: (cx - tw / 2).toFixed(1) + ',0 '
+            + (cx + tw / 2).toFixed(1) + ',0 '
+            + cx.toFixed(1) + ',' + th,
+          fill: markerColor, opacity: '0.8',
+        }));
+        // Channel number label
+        _lineEl.appendChild(SC.svg('text', {
+          x: cx, y: th + 7, fill: markerColor, 'font-size': 7,
+          'text-anchor': 'middle', opacity: '0.7',
+        }, String(ch.idx)));
+      }
+    }
+
+    // Interference markers on line plot.
+    if (ca && ca.interference_flags) {
+      for (var ii = 0; ii < ca.interference_flags.length; ii++) {
+        var flag = ca.interference_flags[ii];
+        if (flag.type === 'cw' && flag.freq_mhz != null) {
+          var cfMhz = flag.freq_mhz;
+          if (cfMhz >= clip.loMhz && cfMhz <= clip.hiMhz) {
+            var cfx = ((cfMhz - clip.loMhz) / (clip.hiMhz - clip.loMhz)) * vbW;
+            // Red dashed vertical line
+            _lineEl.appendChild(SC.svg('line', {
+              x1: cfx, y1: 0, x2: cfx, y2: vbH,
+              stroke: 'rgba(220,53,69,0.5)', 'stroke-width': 0.8,
+              'stroke-dasharray': '3,2',
+            }));
+            // Red diamond marker
+            var dw = 3;
+            var dcy = 14;
+            _lineEl.appendChild(SC.svg('polygon', {
+              points: cfx.toFixed(1) + ',' + (dcy - dw)
+                + ' ' + (cfx + dw).toFixed(1) + ',' + dcy
+                + ' ' + cfx.toFixed(1) + ',' + (dcy + dw)
+                + ' ' + (cfx - dw).toFixed(1) + ',' + dcy,
+              fill: _css.cwMarker,
+            }));
+            _lineEl.appendChild(SC.svg('text', {
+              x: cfx, y: dcy + dw + 8, fill: '#dc3545', 'font-size': 7,
+              'text-anchor': 'middle',
+            }, 'CW'));
+          }
+        }
+        if (flag.type === 'noise_elevated' && flag.current_db != null) {
+          var nfLineY = vbH - 1 - ((flag.current_db - _scale.minDb) / span) * (vbH - 2);
+          _lineEl.appendChild(SC.svg('line', {
+            x1: 0, y1: nfLineY, x2: vbW, y2: nfLineY,
+            stroke: _css.noiseLine, 'stroke-width': 0.8,
+            'stroke-dasharray': '4,2',
+          }));
+          if (flag.baseline_db != null) {
+            var blY = vbH - 1 - ((flag.baseline_db - _scale.minDb) / span) * (vbH - 2);
+            _lineEl.appendChild(SC.svg('line', {
+              x1: 0, y1: blY, x2: vbW, y2: blY,
+              stroke: 'rgba(90,103,133,0.5)', 'stroke-width': 0.6,
+              'stroke-dasharray': '2,3',
+            }));
+          }
+        }
+      }
+    }
+
+    // Selected channel highlight band on line plot
+    if (_selectedChannel != null && ca && ca.channels) {
+      var selCh = ca.channels[_selectedChannel];
+      if (selCh) {
+        var selLoMhz = selCh.center_mhz - (selCh.bw_khz / 2000);
+        var selHiMhz = selCh.center_mhz + (selCh.bw_khz / 2000);
+        if (selHiMhz > clip.loMhz && selLoMhz < clip.hiMhz) {
+          var selX1 = Math.max(0, ((selLoMhz - clip.loMhz) / (clip.hiMhz - clip.loMhz)) * vbW);
+          var selX2 = Math.min(vbW, ((selHiMhz - clip.loMhz) / (clip.hiMhz - clip.loMhz)) * vbW);
+          _lineEl.appendChild(SC.svg('rect', {
+            x: selX1, y: 0, width: selX2 - selX1, height: vbH,
+            fill: 'rgba(0,229,255,0.1)', stroke: 'rgba(0,229,255,0.3)',
+            'stroke-width': 0.6, 'stroke-dasharray': '3,2',
+          }));
+        }
+      }
     }
 
     // MHz ticks
@@ -586,7 +756,7 @@
       var fx = frac * vbW;
       var fmhz = clip.loMhz + frac * (clip.hiMhz - clip.loMhz);
       _lineEl.appendChild(SC.svg('text', {
-        x: fx, y: vbH - 2, fill: '#3a4565', 'font-size': 9,
+        x: fx, y: vbH - 2, fill: _css.label, 'font-size': 9,
         'text-anchor': t === 0 ? 'start' : (t === tickCount ? 'end' : 'middle'),
       }, fmhz.toFixed(3)));
     }
@@ -633,7 +803,7 @@
     if (!_overlayEl) return;
     var sig = [_region, _ourFreqHz, _ourBwHz,
                clip ? clip.loMhz.toFixed(3) : '', clip ? clip.hiMhz.toFixed(3) : '',
-               _zoom ? 'Z' : 'F'].join('|');
+               _zoom ? 'Z' : 'F', _selectedChannel].join('|');
     if (sig === _lastOverlaySig) return;
     _lastOverlaySig = sig;
 
@@ -676,11 +846,32 @@
         var lblTxt = fMhz.toFixed(3) + ' MHz';
         if (_ourBwHz) lblTxt += ' · BW ' + (_ourBwHz / 1000).toFixed(0) + 'k';
         if (_ourSf) lblTxt += ' · SF ' + _ourSf;
+        if (_ourCr) lblTxt += ' · CR 4/' + _ourCr;
         var lblBox = document.createElement('span');
         lblBox.className = 'lora-rnode-box-label';
         lblBox.textContent = lblTxt;
         box.appendChild(lblBox);
         _overlayEl.appendChild(box);
+      }
+    }
+
+    // Selected channel highlight on waterfall
+    if (_selectedChannel != null) {
+      var spec = data.spectrum || {};
+      var ca = spec.channel_analysis;
+      if (ca && ca.channels && ca.channels[_selectedChannel]) {
+        var selCh = ca.channels[_selectedChannel];
+        var sLoMhz = selCh.center_mhz - (selCh.bw_khz / 2000);
+        var sHiMhz = selCh.center_mhz + (selCh.bw_khz / 2000);
+        if (sHiMhz > clip.loMhz && sLoMhz < clip.hiMhz) {
+          var sLeftPct = _xPct(Math.max(sLoMhz, clip.loMhz), clip);
+          var sWidthPct = _xPct(Math.min(sHiMhz, clip.hiMhz), clip) - sLeftPct;
+          var selBox = document.createElement('div');
+          selBox.className = 'lora-selected-ch-box';
+          selBox.style.left = sLeftPct.toFixed(3) + '%';
+          selBox.style.width = Math.max(0.2, sWidthPct).toFixed(3) + '%';
+          _overlayEl.appendChild(selBox);
+        }
       }
     }
   }
@@ -724,7 +915,7 @@
     // a blank pixel below the filled region, or when the backend didn't
     // ship timestamps.
     var rowIdx = Math.floor(fracY * WF_ROWS);
-    var rowTs = SC.historyStore.rowTimestamps[rowIdx];
+    var rowTs = _store().rowTimestamps[rowIdx];
     var agoSec = (rowTs != null) ? (Date.now() / 1000 - rowTs) : null;
     var ageStr;
     if (agoSec == null) ageStr = '—';
@@ -742,6 +933,7 @@
         var rnLbl = '<strong>RNode</strong> · ' + fMhz.toFixed(3) + ' MHz';
         if (_ourBwHz) rnLbl += ' · BW ' + (_ourBwHz / 1000).toFixed(0) + 'k';
         if (_ourSf)   rnLbl += ' · SF ' + _ourSf;
+        if (_ourCr)   rnLbl += ' · CR 4/' + _ourCr;
         bandLine = rnLbl;
       }
     }
@@ -749,6 +941,25 @@
     // 2. Off the regulatory band edges entirely?
     if (!bandLine && (freqMhz < _regionInfo.lo || freqMhz > _regionInfo.hi)) {
       bandLine = '<strong>Out of band</strong> for ' + esc(_regionInfo.label);
+    }
+
+    // 3. Near a CW interference marker?
+    if (!bandLine) {
+      var ca = spec.channel_analysis;
+      var iFlags = ca ? ca.interference_flags : null;
+      if (iFlags) {
+        for (var fi = 0; fi < iFlags.length; fi++) {
+          var fl = iFlags[fi];
+          if (fl.type === 'cw' && fl.freq_mhz != null
+              && Math.abs(freqMhz - fl.freq_mhz) < 0.1) {
+            bandLine = '<strong>CW interference</strong> · '
+              + fl.freq_mhz.toFixed(3) + ' MHz';
+            if (fl.power_db != null) bandLine += ' · ' + fl.power_db.toFixed(1) + ' dB';
+            if (fl.duration_s != null) bandLine += ' · ' + fl.duration_s.toFixed(0) + 's';
+            break;
+          }
+        }
+      }
     }
 
     if (bandLine) {
@@ -771,6 +982,7 @@
   function _setZoom(range, silent) {
     _zoom = range;
     _lastOverlaySig = '';  // overlay bounds depend on zoom
+    try { localStorage.setItem(_LS_ZOOM, range ? JSON.stringify(range) : ''); } catch (e) {}
     if (silent) {
       // Hard reset path — called on a generation bump (bin grid changed or
       // WS hello backfill arrived), so peak-hold (per-bin index) no longer
@@ -779,7 +991,7 @@
       _peakHoldDb = null;
       _lastRenderedSweep = 0;
       if (_wfCtx) {
-        _wfCtx.fillStyle = '#050810';
+        _wfCtx.fillStyle = _css.wfBg || '#050810';
         _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
       }
       return;
@@ -804,9 +1016,9 @@
   // which is newest-first — convert to oldest-first for the painter.
   function _repaintWaterfallFromHistory(clip) {
     if (!_wfCtx) return;
-    _wfCtx.fillStyle = '#050810';
+    _wfCtx.fillStyle = _css.wfBg || '#050810';
     _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
-    var rows = SC.historyStore.rows;
+    var rows = _store().rows;
     if (!clip || !rows || !rows.length) return;
     var sliced = new Array(rows.length);
     for (var i = 0; i < rows.length; i++) {
@@ -835,10 +1047,16 @@
     var frac = (ev.clientX - rect.left) / rect.width;
     if (frac < 0) frac = 0; else if (frac > 1) frac = 1;
     _dragState.curFrac = frac;
-    _renderLine(_lastData, _clip(_lastData.spectrum || {}, _zoom));
+    if (!_dragRafId) {
+      _dragRafId = requestAnimationFrame(function () {
+        _dragRafId = null;
+        if (_dragState && _lastData) _renderLine(_lastData, _clip(_lastData.spectrum || {}, _zoom));
+      });
+    }
   }
   function _onDragEnd(ev) {
     if (!_dragState) return;
+    if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
     var start = _dragState.startFrac, end = _dragState.curFrac;
     _dragState = null;
     if (Math.abs(end - start) < 0.01) {
@@ -899,6 +1117,369 @@
     if (_lastData) _renderAll(_lastData);
   }
 
+  function _loadWfScaleState() {
+    try {
+      var v = window.localStorage ? window.localStorage.getItem(_LS_WF_SCALE) : null;
+      if (!v) return;
+      var o = JSON.parse(v);
+      _wfScaleManual = !!o.manual;
+      if (typeof o.min === 'number') _wfScaleMin = o.min;
+      if (typeof o.max === 'number') _wfScaleMax = o.max;
+    } catch (e) { /* ignore */ }
+  }
+  function _saveWfScaleState() {
+    try {
+      if (!window.localStorage) return;
+      window.localStorage.setItem(_LS_WF_SCALE, JSON.stringify({
+        manual: _wfScaleManual, min: _wfScaleMin, max: _wfScaleMax,
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  // -- Channel activity grid -------------------------------------------------
+  function _buildChannelGrid(channels) {
+    if (!_chGridUp || !_chGridDn || _chGridBuilt) return;
+    _chCells = [];
+    SC.clear(_chGridUp);
+    SC.clear(_chGridDn);
+    for (var i = 0; i < channels.length; i++) {
+      var ch = channels[i];
+      var cell = document.createElement('div');
+      cell.className = 'lora-ch-cell lora-ch-idle';
+      cell.textContent = String(ch.idx);
+      cell.setAttribute('data-ch-idx', ch.idx);
+      cell.addEventListener('click', _onChCellClick);
+      cell.addEventListener('mouseenter', _onChCellEnter);
+      cell.addEventListener('mouseleave', _onChCellLeave);
+      if (ch.dir === 'dn') _chGridDn.appendChild(cell);
+      else _chGridUp.appendChild(cell);
+      _chCells.push(cell);
+    }
+    _chGridBuilt = true;
+  }
+
+  function _renderChannelGrid(channelAnalysis) {
+    if (!channelAnalysis || !channelAnalysis.channels) {
+      if (_chGridWrap) _chGridWrap.style.display = 'none';
+      return;
+    }
+    var channels = channelAnalysis.channels;
+    if (!_chGridBuilt) _buildChannelGrid(channels);
+    if (_chGridWrap) _chGridWrap.style.display = '';
+
+    var nowSec = Date.now() / 1000;
+    for (var i = 0; i < channels.length && i < _chCells.length; i++) {
+      var ch = channels[i];
+      var cell = _chCells[i];
+      var duty = ch.duty_pct || 0;
+      var cls = 'lora-ch-cell';
+      if (duty < 1) cls += ' lora-ch-idle';
+      else if (duty < 10) cls += ' lora-ch-low';
+      else if (duty < 25) cls += ' lora-ch-med';
+      else cls += ' lora-ch-high';
+      if (_selectedChannel === ch.idx) cls += ' selected';
+      if (ch.last_active_at) {
+        var age = nowSec - ch.last_active_at;
+        if (age < 30) cls += ' lora-ch-recent';
+      }
+      cell.className = cls;
+    }
+  }
+
+  function _onChCellClick(ev) {
+    var idx = parseInt(ev.currentTarget.getAttribute('data-ch-idx'), 10);
+    if (_selectedChannel === idx) {
+      _selectedChannel = null;
+      if (_chDetailEl) _chDetailEl.style.display = 'none';
+    } else {
+      _selectedChannel = idx;
+      _showChannelDetail(idx);
+    }
+    if (_lastData) _renderAll(_lastData);
+  }
+
+  function _onChCellEnter(ev) {
+    if (!_lastData || !_lastData.spectrum) return;
+    var ca = _lastData.spectrum.channel_analysis;
+    if (!ca || !ca.channels) return;
+    var idx = parseInt(ev.currentTarget.getAttribute('data-ch-idx'), 10);
+    var ch = ca.channels[idx];
+    if (!ch) return;
+    if (!_chTooltipEl) {
+      _chTooltipEl = document.createElement('div');
+      _chTooltipEl.className = 'lora-ch-tooltip';
+      document.body.appendChild(_chTooltipEl);
+    }
+    var lines = [
+      'Ch ' + ch.idx + ' · ' + ch.center_mhz.toFixed(3) + ' MHz · ' + ch.bw_khz + ' kHz ' + (ch.dir === 'dn' ? 'DN' : 'UP'),
+      'Power: ' + (ch.power_db != null ? ch.power_db.toFixed(1) + ' dB' : '—'),
+      'Avg: ' + (ch.avg_db != null ? ch.avg_db.toFixed(1) + ' dB' : '—')
+        + ' · Peak: ' + (ch.peak_db != null ? ch.peak_db.toFixed(1) + ' dB' : '—'),
+      'Duty: ' + ch.duty_pct.toFixed(1) + '% · Det: ' + ch.det_count,
+    ];
+    _chTooltipEl.innerHTML = lines.map(esc).join('<br>');
+    var r = ev.currentTarget.getBoundingClientRect();
+    _chTooltipEl.style.left = (r.right + 4) + 'px';
+    _chTooltipEl.style.top = (r.top) + 'px';
+    _chTooltipEl.style.display = 'block';
+  }
+
+  function _onChCellLeave() {
+    if (_chTooltipEl) _chTooltipEl.style.display = 'none';
+  }
+
+  function _showChannelDetail(idx) {
+    if (!_chDetailEl || !_lastData || !_lastData.spectrum) return;
+    var ca = _lastData.spectrum.channel_analysis;
+    if (!ca || !ca.channels || !ca.channels[idx]) return;
+    var ch = ca.channels[idx];
+    _chDetailEl.style.display = '';
+    _chDetailEl.innerHTML = ''
+      + '<span class="lora-channel-detail-close" data-action="close">&times;</span>'
+      + '<div class="lora-channel-detail-header">'
+      +   'Ch ' + esc(String(ch.idx)) + ' · '
+      +   ch.center_mhz.toFixed(3) + ' MHz · '
+      +   ch.bw_khz + ' kHz ' + (ch.dir === 'dn' ? 'Downlink' : 'Uplink')
+      + '</div>'
+      + 'Power: ' + (ch.power_db != null ? ch.power_db.toFixed(1) + ' dB' : '—')
+      + ' · Avg: ' + (ch.avg_db != null ? ch.avg_db.toFixed(1) + ' dB' : '—')
+      + ' · Peak: ' + (ch.peak_db != null ? ch.peak_db.toFixed(1) + ' dB' : '—')
+      + '<br>Duty cycle: ' + ch.duty_pct.toFixed(1) + '%'
+      + ' · Detections: ' + ch.det_count;
+    var sc = (_lastData.spectrum && _lastData.spectrum.sweep_count) ? _lastData.spectrum.sweep_count : 0;
+    if (sc > 0 && ch.det_count > 0) {
+      _chDetailEl.innerHTML += ' (' + (ch.det_count / sc * 100).toFixed(1) + '% of sweeps)';
+    }
+    var closeBtn = _chDetailEl.querySelector('[data-action="close"]');
+    if (closeBtn) closeBtn.addEventListener('click', function () {
+      _selectedChannel = null;
+      _chDetailEl.style.display = 'none';
+      if (_lastData) _renderAll(_lastData);
+    });
+  }
+
+  // -- Interference alerts in meta strip ------------------------------------
+  function _renderAlerts(channelAnalysis) {
+    var existing = _metaEl ? _metaEl.querySelector('.lora-alert-strip') : null;
+    if (existing) existing.remove();
+    if (!channelAnalysis || !_metaEl) return;
+    var flags = channelAnalysis.interference_flags;
+    if (!flags || !flags.length) return;
+    var strip = document.createElement('span');
+    strip.className = 'lora-alert-strip';
+    for (var i = 0; i < flags.length; i++) {
+      var f = flags[i];
+      var badge = document.createElement('span');
+      badge.className = 'lora-alert-badge ' + (f.type === 'cw' ? 'cw' : 'noise');
+      var dot = document.createElement('span');
+      dot.className = 'lora-alert-dot';
+      badge.appendChild(dot);
+      var txt;
+      if (f.type === 'cw') {
+        txt = 'CW @ ' + (f.freq_mhz != null ? f.freq_mhz.toFixed(3) : '?') + ' MHz';
+      } else if (f.type === 'noise_elevated') {
+        txt = 'Noise +' + (f.delta_db != null ? f.delta_db.toFixed(1) : '?') + ' dB';
+      } else {
+        txt = f.type;
+      }
+      badge.appendChild(document.createTextNode(txt));
+      strip.appendChild(badge);
+    }
+    _metaEl.appendChild(strip);
+  }
+
+  // -- Stats panel: noise floor trend sparkline -----------------------------
+  function _renderNfTrend(channelAnalysis) {
+    if (!_nfTrendEl) return;
+    if (!channelAnalysis || !channelAnalysis.noise_floor_trend
+        || channelAnalysis.noise_floor_trend.length < 2) {
+      _nfTrendSig = '';
+      _nfTrendEl.innerHTML = '';
+      return;
+    }
+    var trend = channelAnalysis.noise_floor_trend;
+    var baseline = channelAnalysis.noise_baseline_db;
+    var nfNow = channelAnalysis.noise_floor_db;
+    var isElevated = false;
+    var flags = channelAnalysis.interference_flags || [];
+    for (var fi = 0; fi < flags.length; fi++) {
+      if (flags[fi].type === 'noise_elevated') { isElevated = true; break; }
+    }
+
+    var sig = trend.length + '|' + trend[trend.length - 1].db + '|' + baseline + '|' + isElevated;
+    if (sig === _nfTrendSig) return;
+    _nfTrendSig = sig;
+
+    var w = 380, h = 55, pad = 20;
+    var vals = [];
+    for (var i = 0; i < trend.length; i++) vals.push(trend[i].db);
+    var mn = Infinity, mx = -Infinity;
+    for (var j = 0; j < vals.length; j++) {
+      if (vals[j] < mn) mn = vals[j];
+      if (vals[j] > mx) mx = vals[j];
+    }
+    if (baseline != null) { mn = Math.min(mn, baseline); mx = Math.max(mx, baseline); }
+    var span = mx - mn;
+    if (span < 2) { mn -= 1; mx += 1; span = mx - mn; }
+
+    var pts = [];
+    for (var k = 0; k < vals.length; k++) {
+      var x = pad + (k / (vals.length - 1)) * (w - pad * 2);
+      var y = h - 5 - ((vals[k] - mn) / span) * (h - 12);
+      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    var lineColor = isElevated ? '#ffc107' : _css.cyan;
+    var fillColor = isElevated ? 'rgba(255,193,7,0.08)' : 'rgba(0,229,255,0.08)';
+
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + h + 'px">';
+    // Fill area
+    var fillPts = pts.join(' ')
+      + ' ' + (pad + (w - pad * 2)).toFixed(1) + ',' + (h - 5)
+      + ' ' + pad.toFixed(1) + ',' + (h - 5);
+    svg += '<polygon points="' + fillPts + '" fill="' + fillColor + '"/>';
+    // Baseline dashed line
+    if (baseline != null) {
+      var by = h - 5 - ((baseline - mn) / span) * (h - 12);
+      svg += '<line x1="' + pad + '" y1="' + by.toFixed(1)
+        + '" x2="' + (w - pad) + '" y2="' + by.toFixed(1)
+        + '" stroke="' + _css.sublabel + '" stroke-dasharray="3,2" stroke-width="0.8"/>';
+      svg += '<text x="' + (w - pad + 2) + '" y="' + (by + 3).toFixed(1)
+        + '" fill="' + _css.sublabel + '" font-size="7">baseline</text>';
+    }
+    // Line
+    svg += '<polyline points="' + pts.join(' ')
+      + '" fill="none" stroke="' + lineColor + '" stroke-width="1.2"/>';
+    // Labels
+    svg += '<text x="' + pad + '" y="' + (h - 0) + '" fill="' + _css.label + '" font-size="7">older</text>';
+    svg += '<text x="' + (w - pad) + '" y="' + (h - 0) + '" fill="' + _css.label + '" font-size="7" text-anchor="end">now</text>';
+    if (nfNow != null) {
+      svg += '<text x="' + (w / 2) + '" y="8" fill="' + _css.statText + '" font-size="8" text-anchor="middle">Noise floor: '
+        + nfNow.toFixed(1) + ' dB</text>';
+    }
+    svg += '</svg>';
+
+    _nfTrendEl.innerHTML = '<div class="lora-stats-label">Noise Floor Trend</div>' + svg;
+  }
+
+  // -- Stats panel: channel utilization bar chart ---------------------------
+  function _renderChUtil(channelAnalysis) {
+    if (!_chUtilEl) return;
+    if (!channelAnalysis || !channelAnalysis.channels) {
+      _chUtilSig = '';
+      _chUtilEl.innerHTML = '';
+      return;
+    }
+    var channels = channelAnalysis.channels;
+    var dutySum = 0;
+    for (var di = 0; di < channels.length; di++) dutySum += Math.round((channels[di].duty_pct || 0) * 10);
+    var sig = channels.length + '|' + dutySum;
+    if (sig === _chUtilSig) return;
+    _chUtilSig = sig;
+
+    var w = 380, barH = 2.5;
+    var h = channels.length * barH + 20;
+    var pad = 25;
+
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + Math.round(h) + 'px">';
+    svg += '<text x="' + (w / 2) + '" y="8" fill="' + _css.statText + '" font-size="8" text-anchor="middle">Channel Duty Cycle %</text>';
+    for (var i = 0; i < channels.length; i++) {
+      var ch = channels[i];
+      var duty = ch.duty_pct || 0;
+      var y = 14 + i * barH;
+      var barW = Math.max(0, (duty / 100) * (w - pad - 10));
+      var color;
+      if (duty < 1) color = '#1a1f35';
+      else if (duty < 10) color = 'rgba(40, 167, 69, 0.6)';
+      else if (duty < 25) color = 'rgba(255, 193, 7, 0.6)';
+      else color = 'rgba(220, 53, 69, 0.7)';
+      svg += '<rect x="' + pad + '" y="' + y.toFixed(1) + '" width="' + barW.toFixed(1)
+        + '" height="' + (barH - 0.5).toFixed(1) + '" fill="' + color + '" rx="0.5"/>';
+      if (i % 8 === 0) {
+        svg += '<text x="' + (pad - 2) + '" y="' + (y + barH).toFixed(1)
+          + '" fill="' + _css.label + '" font-size="6" text-anchor="end">' + ch.idx + '</text>';
+      }
+    }
+    svg += '</svg>';
+
+    _chUtilEl.innerHTML = '<div class="lora-stats-label">Channel Utilization</div>' + svg;
+  }
+
+  // -- Stats panel: per-channel time series ---------------------------------
+  function _renderChTimeline(idx) {
+    if (!_chTimelineEl || !_lastData || !_lastData.spectrum) return;
+    var ca = _lastData.spectrum.channel_analysis;
+    if (!ca || !ca.channels || !ca.channels[idx]) {
+      _chTimelineSig = '';
+      _chTimelineEl.style.display = 'none';
+      return;
+    }
+    var ch = ca.channels[idx];
+    var hist = _lastData._channelPowerHistory;
+    if (!hist || !hist[idx] || hist[idx].length < 2) {
+      _chTimelineSig = '';
+      _chTimelineEl.style.display = '';
+      _chTimelineEl.innerHTML = '<div class="lora-stats-label">Ch ' + ch.idx
+        + ' Time Series</div><div style="color:' + _css.sublabel + ';font-size:0.7rem">Collecting data...</div>';
+      return;
+    }
+    var entries = hist[idx];
+    var lastEntry = entries[entries.length - 1];
+    var sig = idx + '|' + entries.length + '|' + (lastEntry ? lastEntry[1] : '');
+    if (sig === _chTimelineSig) return;
+    _chTimelineSig = sig;
+    var w = 780, h = 100, pad = 30;
+    var mn = Infinity, mx = -Infinity;
+    for (var i = 0; i < entries.length; i++) {
+      var v = entries[i][1];
+      if (v != null) { if (v < mn) mn = v; if (v > mx) mx = v; }
+    }
+    var nf = ca.noise_floor_db;
+    if (nf != null) { mn = Math.min(mn, nf); mx = Math.max(mx, nf); }
+    var span = mx - mn;
+    if (span < 3) { mn -= 1.5; mx += 1.5; span = mx - mn; }
+
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + h + 'px">';
+    svg += '<text x="' + (w / 2) + '" y="10" fill="' + _css.statText + '" font-size="8" text-anchor="middle">'
+      + 'Ch ' + ch.idx + ' · ' + ch.center_mhz.toFixed(3) + ' MHz · Duty ' + ch.duty_pct.toFixed(1) + '%</text>';
+    // Noise floor reference
+    if (nf != null) {
+      var nfY = h - 8 - ((nf - mn) / span) * (h - 22);
+      svg += '<line x1="' + pad + '" y1="' + nfY.toFixed(1) + '" x2="' + (w - 10)
+        + '" y2="' + nfY.toFixed(1) + '" stroke="' + _css.sublabel + '" stroke-dasharray="3,2" stroke-width="0.7"/>';
+    }
+    // Power line
+    var pts = [];
+    for (var j = 0; j < entries.length; j++) {
+      var pv = entries[j][1];
+      if (pv == null) continue;
+      var x = pad + (j / (entries.length - 1)) * (w - pad - 10);
+      var y = h - 8 - ((pv - mn) / span) * (h - 22);
+      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    if (pts.length) {
+      svg += '<polyline points="' + pts.join(' ')
+        + '" fill="none" stroke="' + _css.cyan + '" stroke-width="1"/>';
+    }
+    svg += '</svg>';
+    _chTimelineEl.style.display = '';
+    _chTimelineEl.innerHTML = '<div class="lora-stats-label">Channel Time Series</div>' + svg;
+  }
+
+  // -- Render stats panel (calls sub-renderers) -----------------------------
+  function _renderStatsPanel(data) {
+    if (!_statsPanelEl) return;
+    var spec = data.spectrum || {};
+    var ca = spec.channel_analysis;
+    if (!ca) {
+      _statsPanelEl.style.display = 'none';
+      return;
+    }
+    _statsPanelEl.style.display = '';
+    _renderNfTrend(ca);
+    _renderChUtil(ca);
+    if (_selectedChannel != null) _renderChTimeline(_selectedChannel);
+  }
+
   // -- Orchestration ------------------------------------------------------
   function _renderAll(data) {
     var spec = data.spectrum || {};
@@ -909,7 +1490,7 @@
     // peak-hold and the current waterfall canvas, so drop them and re-arm
     // a bulk paint for the next sweep.  _setZoom(silent=true) does the
     // canvas wipe + peak-hold clear + _lastRenderedSweep reset.
-    var gen = SC.historyStore.generation;
+    var gen = _store().generation;
     if (gen !== _lastStoreGen) {
       _lastStoreGen = gen;
       _lastSweepCount = 0;
@@ -923,6 +1504,11 @@
     _renderOverlay(data, clip);
     _renderScale(data, clip);
     _renderZoomChip(clip);
+
+    var ca = spec.channel_analysis || null;
+    _renderChannelGrid(ca);
+    _renderAlerts(ca);
+    _renderStatsPanel(data);
 
     // Always re-render the line plot so zoom changes (drag, preset buttons,
     // double-click reset) take effect immediately — not only on the next
@@ -938,7 +1524,7 @@
       if (_needsBulkPaint) {
         _repaintWaterfallFromHistory(clip);
         _needsBulkPaint = false;
-        _lastSweepCount = SC.historyStore.sweepCount;
+        _lastSweepCount = _store().sweepCount;
       } else {
         _ingestNewSweeps(data, clip);
       }
@@ -949,17 +1535,43 @@
   function update(data) {
     if (!data) return;
     if (!_resolveDom()) return;
-    if (!data.spectrum) return;   // nothing to show without the scanner
 
-    // Reveal section + expand the first time any data arrives.
-    if (_section.style.display === 'none') {
-      _section.style.display = '';
+    // Prefer dedicated lora_scanner data; fall back to wideband spectrum.
+    if (data.lora_scanner && data.lora_scanner.bins_hz && data.lora_scanner.bins_hz.length) {
+      _dedicatedMode = true;
+      data = Object.assign({}, data, { spectrum: data.lora_scanner });
+    } else {
+      _dedicatedMode = false;
+    }
+    if (!data.spectrum) return;
+
+    // Show scanner status in placeholder when not yet producing sweeps
+    var specStatus = data.spectrum.status;
+    if (specStatus === 'unavailable' || specStatus === 'error') {
+      if (_placeholderEl) {
+        _placeholderEl.textContent = specStatus === 'unavailable'
+          ? 'RTL-SDR scanner unavailable'
+          : 'Scanner error: ' + (data.spectrum.error || 'unknown');
+        _placeholderEl.style.display = '';
+      }
+      return;
+    }
+
+    // Expand + remove placeholder the first time real data arrives.
+    if (!_hasReceivedData) {
+      _hasReceivedData = true;
+      if (_placeholderEl) { _placeholderEl.style.display = 'none'; }
       if (_body && _body.classList.contains('hidden')) {
         _body.classList.remove('hidden');
         _expanded = true;
         var chev = _toggle ? _toggle.querySelector('.chevron') : null;
         if (chev) chev.innerHTML = '&#9662;';
       }
+    }
+
+    // Carry channel power history from WS backfill for time-series drill-down
+    if (_channelPowerHistory) {
+      data._channelPowerHistory = _channelPowerHistory;
     }
 
     _lastData = data;
@@ -973,5 +1585,18 @@
     if (R.markUpdated) R.markUpdated('lora-spectrum-section');
   }
 
-  R.loraSpectrum = { update: update };
+  R.loraSpectrum = {
+    update: update,
+    loadChannelHistory: function (hist) {
+      _channelPowerHistory = hist;
+      var _CPH_MAX = 256;
+      if (_channelPowerHistory) {
+        for (var k in _channelPowerHistory) {
+          if (_channelPowerHistory[k] && _channelPowerHistory[k].length > _CPH_MAX) {
+            _channelPowerHistory[k] = _channelPowerHistory[k].slice(-_CPH_MAX);
+          }
+        }
+      }
+    },
+  };
 })();

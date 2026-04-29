@@ -80,9 +80,11 @@ class EmergencyBroadcastPlugin(PluginBase):
             "broadcast",
         )
 
-        # Register announce handler to receive emergency broadcasts from others
-        self._handler = _EmergencyHandler(self)
-        RNS.Transport.register_announce_handler(self._handler)
+        # Subscribe to receive emergency broadcasts from others
+        self._announce_sub = self.announce_dispatcher.subscribe(
+            "reticulumpi.emergency.broadcast",
+            lambda dest, _identity, app_data: self.receive_emergency(dest, app_data),
+        )
 
         self.log.info(
             "Emergency broadcast active at %s (max TTL: %d)",
@@ -92,10 +94,7 @@ class EmergencyBroadcastPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        try:
-            RNS.Transport.deregister_announce_handler(self._handler)
-        except Exception:
-            pass
+        self.announce_dispatcher.unsubscribe(self._announce_sub)
         self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
@@ -285,20 +284,3 @@ class EmergencyBroadcastPlugin(PluginBase):
         return hashlib.sha256(raw).hexdigest()[:32]
 
 
-class _EmergencyHandler:
-    """Registered with RNS.Transport to receive emergency broadcasts."""
-
-    def __init__(self, plugin: EmergencyBroadcastPlugin):
-        self._plugin = plugin
-        self.aspect_filter = "reticulumpi.emergency.broadcast"
-
-    def received_announce(
-        self,
-        destination_hash: bytes,
-        announced_identity: Any,
-        app_data: bytes | None,
-    ) -> None:
-        try:
-            self._plugin.receive_emergency(destination_hash, app_data)
-        except Exception:
-            self._plugin.log.debug("Error handling emergency broadcast", exc_info=True)
