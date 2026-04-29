@@ -77,28 +77,31 @@ class NetworkMapPlugin(PluginBase):
         # One-time: reclassify unclassified nodes using app_data heuristics
         self._reclassify_unclassified()
 
-        # Announce processing queue — RNS spawns a new thread for every
-        # announce callback, so we must return from callbacks as fast as
-        # possible (just a queue.put_nowait) to prevent thread exhaustion.
-        # A single worker thread drains the queue and batches DB writes.
+        # Announce processing queue — the shared AnnounceDispatcher delivers
+        # callbacks on a single worker thread, so we still queue+batch to
+        # keep the dispatcher responsive.
         self._announce_queue: queue.Queue = queue.Queue(maxsize=10000)
         self._pending_upserts: dict[bytes, dict[str, Any]] = {}
         self._start_thread(self._announce_worker, "network-map-announces")
 
-        # Register per-aspect handlers so RNS provides the aspect string,
-        # plus a wildcard handler to catch custom/unknown aspects.
+        # Subscribe to announces via the shared dispatcher instead of
+        # registering per-aspect RNS handlers (which each spawn a thread).
         extra = self.config.get("extra_aspects", [])
         aspects = list(dict.fromkeys(_DEFAULT_ASPECTS + list(extra)))
 
-        self._handlers: list = []
+        self._sub_ids: list[str] = []
         for aspect in aspects:
-            handler = _AspectHandler(self, aspect)
-            RNS.Transport.register_announce_handler(handler)
-            self._handlers.append(handler)
+            def _on_aspect(dest, identity, app_data, _a=aspect):
+                self.record_announce(dest, identity, app_data, _a)
+            self._sub_ids.append(
+                self.announce_dispatcher.subscribe(aspect, _on_aspect)
+            )
 
-        self._wildcard_handler = _WildcardHandler(self)
-        RNS.Transport.register_announce_handler(self._wildcard_handler)
-        self._handlers.append(self._wildcard_handler)
+        def _on_wildcard(dest, identity, app_data):
+            self.record_announce(dest, identity, app_data, "", from_wildcard=True)
+        self._sub_ids.append(
+            self.announce_dispatcher.subscribe(None, _on_wildcard)
+        )
 
         # Background thread for periodic interface stats and DB pruning
         self._start_thread(self._maintenance_loop, "network-map")
@@ -112,11 +115,8 @@ class NetworkMapPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        for handler in getattr(self, "_handlers", []):
-            try:
-                RNS.Transport.deregister_announce_handler(handler)
-            except Exception:
-                pass
+        for sub_id in getattr(self, "_sub_ids", []):
+            self.announce_dispatcher.unsubscribe(sub_id)
         self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
@@ -314,84 +314,68 @@ class NetworkMapPlugin(PluginBase):
             return len(self._known_nodes)
 
     def get_mesh_summary(self) -> dict[str, Any]:
-        """Return aggregate mesh stats for the dashboard summary strip."""
-        import time as _time
-        now = _time.time()
+        """Return aggregate mesh stats for the dashboard summary strip.
+
+        Consolidates into 2 queries (one aggregation + one GROUP BY)
+        instead of 6 separate full-table scans.
+        """
+        now = time.time()
         try:
             with sqlite3.connect(self._db_path) as conn:
                 conn.row_factory = sqlite3.Row
 
-                # Total nodes
-                total = conn.execute("SELECT COUNT(*) FROM known_nodes").fetchone()[0]
+                # Single-pass aggregation for totals, hops, activity, growth, nearby
+                agg = conn.execute(
+                    "SELECT "
+                    "COUNT(*) AS total, "
+                    "SUM(CASE WHEN hops = 0 THEN 1 ELSE 0 END) AS h0, "
+                    "SUM(CASE WHEN hops BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS h1_3, "
+                    "SUM(CASE WHEN hops BETWEEN 4 AND 10 THEN 1 ELSE 0 END) AS h4_10, "
+                    "SUM(CASE WHEN hops BETWEEN 11 AND 50 THEN 1 ELSE 0 END) AS h11_50, "
+                    "SUM(CASE WHEN hops > 50 THEN 1 ELSE 0 END) AS h51, "
+                    "SUM(CASE WHEN hops IS NULL THEN 1 ELSE 0 END) AS h_null, "
+                    "SUM(CASE WHEN last_seen > :t_1h THEN 1 ELSE 0 END) AS last_1h, "
+                    "SUM(CASE WHEN last_seen > :t_24h THEN 1 ELSE 0 END) AS last_24h, "
+                    "SUM(CASE WHEN last_seen > :t_7d THEN 1 ELSE 0 END) AS last_7d, "
+                    "SUM(CASE WHEN first_seen > :t_24h THEN 1 ELSE 0 END) AS new_24h, "
+                    "SUM(CASE WHEN first_seen > :t_7d THEN 1 ELSE 0 END) AS new_7d, "
+                    "SUM(CASE WHEN hops IS NOT NULL AND hops <= 4 THEN 1 ELSE 0 END) AS nearby "
+                    "FROM known_nodes",
+                    {
+                        "t_1h": now - 3600,
+                        "t_24h": now - 86400,
+                        "t_7d": now - 604800,
+                    },
+                ).fetchone()
 
-                # App breakdown
+                # App breakdown (separate query — different result shape)
                 app_rows = conn.execute(
                     "SELECT COALESCE(app_name, '') AS app, COUNT(*) AS cnt "
                     "FROM known_nodes GROUP BY app ORDER BY cnt DESC"
                 ).fetchall()
                 app_breakdown = {r["app"]: r["cnt"] for r in app_rows}
 
-                # Hop distribution (bucketed)
-                hop_rows = conn.execute(
-                    "SELECT "
-                    "SUM(CASE WHEN hops = 0 THEN 1 ELSE 0 END) AS h0, "
-                    "SUM(CASE WHEN hops BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS h1_3, "
-                    "SUM(CASE WHEN hops BETWEEN 4 AND 10 THEN 1 ELSE 0 END) AS h4_10, "
-                    "SUM(CASE WHEN hops BETWEEN 11 AND 50 THEN 1 ELSE 0 END) AS h11_50, "
-                    "SUM(CASE WHEN hops > 50 THEN 1 ELSE 0 END) AS h51, "
-                    "SUM(CASE WHEN hops IS NULL THEN 1 ELSE 0 END) AS h_null "
-                    "FROM known_nodes"
-                ).fetchone()
-                hop_distribution = {
-                    "0": hop_rows["h0"] or 0,
-                    "1-3": hop_rows["h1_3"] or 0,
-                    "4-10": hop_rows["h4_10"] or 0,
-                    "11-50": hop_rows["h11_50"] or 0,
-                    "51+": hop_rows["h51"] or 0,
-                    "unknown": hop_rows["h_null"] or 0,
-                }
-
-                # Activity stats
-                act_row = conn.execute(
-                    "SELECT "
-                    "SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS last_1h, "
-                    "SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS last_24h, "
-                    "SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS last_7d "
-                    "FROM known_nodes",
-                    (now - 3600, now - 86400, now - 604800),
-                ).fetchone()
-                activity_stats = {
-                    "last_1h": act_row["last_1h"] or 0,
-                    "last_24h": act_row["last_24h"] or 0,
-                    "last_7d": act_row["last_7d"] or 0,
-                }
-
-                # Growth (new nodes discovered)
-                growth_row = conn.execute(
-                    "SELECT "
-                    "SUM(CASE WHEN first_seen > ? THEN 1 ELSE 0 END) AS new_24h, "
-                    "SUM(CASE WHEN first_seen > ? THEN 1 ELSE 0 END) AS new_7d "
-                    "FROM known_nodes",
-                    (now - 86400, now - 604800),
-                ).fetchone()
-                growth = {
-                    "last_24h": growth_row["new_24h"] or 0,
-                    "last_7d": growth_row["new_7d"] or 0,
-                }
-
-                # Nearby count (hops <= 4)
-                nearby = conn.execute(
-                    "SELECT COUNT(*) FROM known_nodes "
-                    "WHERE hops IS NOT NULL AND hops <= 4"
-                ).fetchone()[0]
-
                 return {
-                    "total_nodes": total,
+                    "total_nodes": agg["total"] or 0,
                     "app_breakdown": app_breakdown,
-                    "hop_distribution": hop_distribution,
-                    "activity_stats": activity_stats,
-                    "growth": growth,
-                    "nearby": nearby,
+                    "hop_distribution": {
+                        "0": agg["h0"] or 0,
+                        "1-3": agg["h1_3"] or 0,
+                        "4-10": agg["h4_10"] or 0,
+                        "11-50": agg["h11_50"] or 0,
+                        "51+": agg["h51"] or 0,
+                        "unknown": agg["h_null"] or 0,
+                    },
+                    "activity_stats": {
+                        "last_1h": agg["last_1h"] or 0,
+                        "last_24h": agg["last_24h"] or 0,
+                        "last_7d": agg["last_7d"] or 0,
+                    },
+                    "growth": {
+                        "last_24h": agg["new_24h"] or 0,
+                        "last_7d": agg["new_7d"] or 0,
+                    },
+                    "nearby": agg["nearby"] or 0,
                 }
         except Exception:
             self.log.exception("Error computing mesh summary")
@@ -400,23 +384,34 @@ class NetworkMapPlugin(PluginBase):
                     "growth": {}, "nearby": 0}
 
     def get_recent_announces(self, since: float = 0, limit: int = 10) -> list[dict[str, Any]]:
-        """Return nodes announced since a given timestamp (for WS deltas)."""
-        results = []
-        with self._nodes_lock:
-            items = list(self._known_nodes.items())
-        for dest_hash, info in items:
-            if info.get("last_seen", 0) > since:
-                results.append({
-                    "destination_hash": RNS.prettyhexrep(dest_hash),
-                    "app_name": info.get("app_name", ""),
-                    "aspects": info.get("aspects", ""),
-                    "hops": info.get("hops"),
-                    "last_seen": info.get("last_seen"),
-                    "announce_count": info.get("announce_count", 0),
-                    "app_data": info.get("app_data_str", ""),
-                })
-        results.sort(key=lambda n: n.get("last_seen", 0), reverse=True)
-        return results[:limit]
+        """Return nodes announced since a given timestamp (for WS deltas).
+
+        Uses the idx_known_nodes_last_seen index for an O(limit) seek
+        instead of scanning the full in-memory dict.
+        """
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM known_nodes WHERE last_seen > ? "
+                    "ORDER BY last_seen DESC LIMIT ?",
+                    (since, limit),
+                ).fetchall()
+                return [
+                    {
+                        "destination_hash": "<" + (row["destination_hash"] or "") + ">",
+                        "app_name": row["app_name"] or "",
+                        "aspects": row["aspects"] or "",
+                        "hops": row["hops"],
+                        "last_seen": row["last_seen"],
+                        "announce_count": row["announce_count"] or 0,
+                        "app_data": row["app_data_str"] or "",
+                    }
+                    for row in rows
+                ]
+        except Exception:
+            self.log.exception("Error querying recent announces")
+            return []
 
     def get_interface_stats(self) -> list[dict[str, Any]]:
         """Collect current interface statistics."""
@@ -687,6 +682,12 @@ class NetworkMapPlugin(PluginBase):
                     peers INTEGER
                 )
             """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_app_name ON known_nodes(app_name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_last_seen ON known_nodes(last_seen DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_announce_count ON known_nodes(announce_count DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_hops ON known_nodes(hops)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_app_lastseen ON known_nodes(app_name, last_seen DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_interface_stats_timestamp ON interface_stats(timestamp)")
 
     def _load_from_db(self) -> None:
         try:
@@ -824,55 +825,3 @@ class NetworkMapPlugin(PluginBase):
                 cycles_since_prune = 0
 
 
-class _AspectHandler:
-    """Receives announces for a specific aspect (e.g. ``lxmf.delivery``).
-
-    Because ``aspect_filter`` is set, RNS guarantees that only announces
-    matching this aspect reach the handler, and we can pass the known
-    aspect string into ``record_announce``.
-    """
-
-    def __init__(self, plugin: NetworkMapPlugin, aspect: str):
-        self._plugin = plugin
-        self.aspect_filter = aspect
-        self._aspect = aspect
-
-    def received_announce(
-        self,
-        destination_hash: bytes,
-        announced_identity: Any,
-        app_data: bytes | None,
-    ) -> None:
-        try:
-            self._plugin.record_announce(
-                destination_hash, announced_identity, app_data, self._aspect
-            )
-        except Exception:
-            self._plugin.log.debug("Error handling announce", exc_info=True)
-
-
-class _WildcardHandler:
-    """Catches announces for any aspect, including unknown/custom ones.
-
-    The wildcard handler cannot determine the aspect from RNS, so it
-    passes an empty string.  ``record_announce`` will not overwrite
-    app_name data already set by a specific-aspect handler.
-    """
-
-    def __init__(self, plugin: NetworkMapPlugin):
-        self._plugin = plugin
-        self.aspect_filter = None
-
-    def received_announce(
-        self,
-        destination_hash: bytes,
-        announced_identity: Any,
-        app_data: bytes | None,
-    ) -> None:
-        try:
-            self._plugin.record_announce(
-                destination_hash, announced_identity, app_data, "",
-                from_wildcard=True,
-            )
-        except Exception:
-            self._plugin.log.debug("Error handling announce", exc_info=True)
