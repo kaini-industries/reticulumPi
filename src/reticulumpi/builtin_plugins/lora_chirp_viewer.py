@@ -58,6 +58,7 @@ _CHIRP_DEFAULTS: dict[str, object] = {
     "chirp_detection_bin_tolerance": 1,
     "chirp_detection_cooldown_s": 0.5,
     "chirp_detection_history_depth": 256,
+    "chirp_packet_history_depth": 128,
 }
 
 _VALID_SAMPLE_RATES = (250_000, 1_024_000, 2_048_000)
@@ -92,6 +93,7 @@ class LoraChirpViewer(LoraScanner):
         self._detection_bin_tolerance = int(self.config["chirp_detection_bin_tolerance"])
         self._detection_cooldown_s = float(self.config["chirp_detection_cooldown_s"])
         self._detection_history_depth = int(self.config["chirp_detection_history_depth"])
+        self._packet_history_depth = int(self.config["chirp_packet_history_depth"])
 
         super().validate_config()
 
@@ -127,6 +129,9 @@ class LoraChirpViewer(LoraScanner):
         self._preamble_tracker: PreambleTracker | None = None
         self._detection_history: deque[dict[str, Any]] = deque(
             maxlen=self._detection_history_depth,
+        )
+        self._packet_history: deque[dict[str, Any]] = deque(
+            maxlen=self._packet_history_depth,
         )
         self._last_detection_ts: dict[int, float] = {}
         if self._detection_enabled:
@@ -256,6 +261,9 @@ class LoraChirpViewer(LoraScanner):
             "payload_hex": payload_hex,
         }
 
+        with self._state_lock:
+            self._packet_history.append(payload)
+
         self.log.info(
             "LoRa packet: SF%d CR4/%d len=%d crc=%s [%s]",
             decoded.detection.sf,
@@ -347,6 +355,10 @@ class LoraChirpViewer(LoraScanner):
     def get_detection_history(self) -> list[dict[str, Any]]:
         with self._state_lock:
             return list(self._detection_history)
+
+    def get_packet_history(self) -> list[dict[str, Any]]:
+        with self._state_lock:
+            return list(self._packet_history)
 
     def get_detection_stats(self) -> dict[str, Any]:
         with self._state_lock:

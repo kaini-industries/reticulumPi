@@ -384,6 +384,20 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             except Exception:
                 log.debug("Failed to send chirp detection history hello", exc_info=True)
 
+    if chirp_viewer and hasattr(chirp_viewer, "get_packet_history"):
+        try:
+            pkt_hist = chirp_viewer.get_packet_history()
+        except Exception:
+            pkt_hist = []
+        if pkt_hist:
+            try:
+                await ws.send_str(json.dumps({
+                    "type": "chirp_packet_history",
+                    "data": pkt_hist,
+                }))
+            except Exception:
+                log.debug("Failed to send chirp packet history hello", exc_info=True)
+
     link_tester = plugin.app.get_plugin("lora_link_tester")
     if link_tester and hasattr(link_tester, "get_history"):
         try:

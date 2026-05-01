@@ -63,6 +63,7 @@ def _make_plugin(config: dict | None = None) -> LoraChirpViewer:
     # Detection state
     plugin._preamble_tracker = None
     plugin._detection_history = deque(maxlen=plugin._detection_history_depth)
+    plugin._packet_history = deque(maxlen=plugin._packet_history_depth)
     plugin._last_detection_ts = {}
     if plugin._detection_enabled:
         plugin._init_detection()

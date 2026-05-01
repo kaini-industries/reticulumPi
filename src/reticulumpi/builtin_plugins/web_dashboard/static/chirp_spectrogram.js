@@ -29,10 +29,13 @@
   // -- DOM handles --------------------------------------------------------
   var _section, _freqSelect, _bwSelect, _sfToggle, _statusLabel;
   var _metaEl, _canvas, _ctx, _overlayEl, _hoverEl, _detIndicator, _pktIndicator;
+  var _pktDetail, _pktTbody;
   var _resolved = false;
 
   // -- Canvas dimensions --------------------------------------------------
-  var _canvasW = 800, _canvasH = 512;
+  var _canvasW = 800, _canvasH = 400;
+  var _detCanvas, _detCtx;
+  var _detRowOffset = 0;
 
   // -- State --------------------------------------------------------------
   var _scale = { minDb: -90, maxDb: -30, initialized: false };
@@ -52,6 +55,7 @@
   var _packets = [];             // ring buffer of decoded packets (newest first)
   var MAX_PACKETS = 128;
   var _pktCount = 0;
+  var _pktExpanded = false;
 
   // -- Contextual hover state (populated from periodic updates) -----------
   var _ourFreqHz = null, _ourBwHz = null, _ourSf = null, _ourCr = null;
@@ -76,6 +80,17 @@
     _hoverEl = $('chirp-hover');
     _detIndicator = $('chirp-det-indicator');
     _pktIndicator = $('chirp-pkt-indicator');
+    _pktDetail = $('chirp-pkt-detail');
+    _pktTbody = $('chirp-pkt-tbody');
+
+    if (_pktIndicator) {
+      _pktIndicator.addEventListener('click', _togglePktDetail);
+    }
+
+    _detCanvas = $('chirp-det-canvas');
+    if (_detCanvas) {
+      _detCtx = _detCanvas.getContext('2d');
+    }
 
     if (_canvas) {
       _ctx = _canvas.getContext('2d');
@@ -123,6 +138,10 @@
     _canvas.height = _canvasH;
     _ctx.fillStyle = _css.wfBg || '#050810';
     _ctx.fillRect(0, 0, _canvasW, _canvasH);
+    if (_detCanvas) {
+      _detCanvas.width = _canvasW;
+      _detCanvas.height = _canvasH;
+    }
   }
 
   function _populateFreqSelect() {
@@ -212,12 +231,20 @@
     _scale.initialized = false;
     _detections = [];
     _detCount = 0;
+    _detRowOffset = 0;
     _packets = [];
     _pktCount = 0;
+    _pktExpanded = false;
+    if (_pktDetail) _pktDetail.style.display = 'none';
+    if (_pktTbody) _pktTbody.innerHTML = '';
+    if (_pktIndicator) _pktIndicator.classList.remove('open');
     _updateDetIndicator();
     if (_ctx) {
       _ctx.fillStyle = _css.wfBg || '#050810';
       _ctx.fillRect(0, 0, _canvasW, _canvasH);
+    }
+    if (_detCtx) {
+      _detCtx.clearRect(0, 0, _canvasW, _canvasH);
     }
   }
 
@@ -267,6 +294,7 @@
         : null;
       _rowTimestamps.unshift(ts);
       _sweepCount++;
+      _detRowOffset++;
     }
 
     // Trim history
@@ -275,6 +303,7 @@
       _rowTimestamps.length = MAX_HIST;
     }
 
+    _repaintDetections();
     _updateMeta(batch);
     _paintOverlays(batch);
     _updateStatus(batch);
@@ -334,6 +363,7 @@
     }
     SC.paintHistoryToCanvas(_ctx, _canvas, oldest, _canvasW, _canvasH,
                             _scale.minDb, _scale.maxDb);
+    _repaintDetections();
   }
 
   // -- Metadata strip -----------------------------------------------------
@@ -536,49 +566,95 @@
 
   // -- Detection handling -------------------------------------------------
 
-  function _paintDetectionMarker(det) {
-    if (!_ctx || !_lastMeta) return;
+  var _LORA_BW_HZ = 125000;
+
+  function _detFreqToX(det) {
+    if (!_lastMeta) return -1;
     var sr = _lastMeta.sample_rate || 250000;
     var centerHz = _lastMeta.freq_center_hz || 0;
     var loHz = centerHz - sr / 2;
     var spanHz = sr;
-    if (spanHz <= 0) return;
+    if (spanHz <= 0) return -1;
 
-    var freqHz = (det.freq_center_hz || centerHz) + (det.freq_offset_hz || 0) - sr / 2;
+    // Dechirp wraps negative carrier offsets modulo LoRa BW:
+    // offset > BW/2 means the signal is actually below center frequency.
+    var offset = det.freq_offset_hz || 0;
+    if (offset > _LORA_BW_HZ / 2) offset -= _LORA_BW_HZ;
+
+    var freqHz = (det.freq_center_hz || centerHz) + offset;
     var fracX = (freqHz - loHz) / spanHz;
-    if (fracX < 0 || fracX > 1) fracX = 0.5;
+    if (fracX < 0 || fracX > 1) return -1;
+    return Math.round(fracX * _canvasW);
+  }
 
-    var x = Math.round(fracX * _canvasW);
+  function _paintDetectionMarkerAt(ctx, det, y) {
+    var x = _detFreqToX(det);
+    if (x < 0) return;
     var color = SF_COLORS[det.sf] || '#ffffff';
+    var sz = 10;
 
-    _ctx.save();
-    _ctx.globalAlpha = 0.85;
-    _ctx.fillStyle = color;
+    ctx.save();
 
-    // Small triangle at the top of the canvas pointing down
-    var sz = 6;
-    _ctx.beginPath();
-    _ctx.moveTo(x - sz, 0);
-    _ctx.lineTo(x + sz, 0);
-    _ctx.lineTo(x, sz * 1.5);
-    _ctx.closePath();
-    _ctx.fill();
+    // Full-height vertical line (draw first, behind triangle)
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(x, y + sz * 1.4);
+    ctx.lineTo(x, _canvasH);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
 
-    // Thin vertical line from the triangle
-    _ctx.globalAlpha = 0.35;
-    _ctx.strokeStyle = color;
-    _ctx.lineWidth = 1;
-    _ctx.beginPath();
-    _ctx.moveTo(x, sz * 1.5);
-    _ctx.lineTo(x, Math.min(30, _canvasH));
-    _ctx.stroke();
+    // Triangle pointing down
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(x - sz, y);
+    ctx.lineTo(x + sz, y);
+    ctx.lineTo(x, y + sz * 1.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
 
     // SF label
-    _ctx.globalAlpha = 0.9;
-    _ctx.font = '9px monospace';
-    _ctx.fillStyle = color;
-    _ctx.fillText('SF' + det.sf, x + sz + 2, sz * 1.5);
-    _ctx.restore();
+    ctx.globalAlpha = 1.0;
+    ctx.font = 'bold 11px monospace';
+    ctx.fillStyle = color;
+    var label = 'SF' + det.sf;
+    var snr = det.snr_db != null ? ' ' + det.snr_db.toFixed(1) + 'dB' : '';
+    var labelX = x + sz + 4;
+    var labelY = y + sz * 1.2;
+    if (labelX + 80 > _canvasW) labelX = x - sz - 4 - ctx.measureText(label + snr).width;
+    ctx.fillText(label + snr, labelX, labelY);
+
+    ctx.restore();
+  }
+
+  function _repaintDetections() {
+    if (!_detCtx) return;
+    _detCtx.clearRect(0, 0, _canvasW, _canvasH);
+    for (var i = _detections.length - 1; i >= 0; i--) {
+      var det = _detections[i];
+      if (det._arrivalRow == null) continue;
+      var y = _detRowOffset - det._arrivalRow;
+      if (y < 0 || y >= _canvasH) continue;
+      _paintDetectionMarkerAt(_detCtx, det, y);
+    }
+  }
+
+  function _timestampToRow(ts) {
+    if (!ts || !_rowTimestamps.length) return _detRowOffset;
+    var best = 0, bestDist = Infinity;
+    for (var i = 0; i < _rowTimestamps.length; i++) {
+      if (_rowTimestamps[i] == null) continue;
+      var d = Math.abs(_rowTimestamps[i] - ts);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return _detRowOffset - best;
   }
 
   function _updateDetIndicator() {
@@ -602,11 +678,17 @@
   function handleDetection(det) {
     if (!det) return;
     if (!_resolveDom()) return;
+    det._arrivalRow = _detRowOffset;
     _detections.unshift(det);
     if (_detections.length > MAX_DETECTIONS) _detections.length = MAX_DETECTIONS;
     _detCount++;
-    _paintDetectionMarker(det);
+    _repaintDetections();
     _updateDetIndicator();
+    if (_detIndicator) {
+      _detIndicator.classList.remove('det-flash');
+      void _detIndicator.offsetWidth;
+      _detIndicator.classList.add('det-flash');
+    }
   }
 
   function handleDetectionHistory(data) {
@@ -614,11 +696,14 @@
     if (!_resolveDom()) return;
     _detections = [];
     for (var i = data.length - 1; i >= 0; i--) {
-      _detections.unshift(data[i]);
+      var det = data[i];
+      det._arrivalRow = _timestampToRow(det.timestamp);
+      _detections.unshift(det);
     }
     if (_detections.length > MAX_DETECTIONS) _detections.length = MAX_DETECTIONS;
     _detCount = data.length;
     _updateDetIndicator();
+    _repaintDetections();
   }
 
   // -- Decoded packet indicator -------------------------------------------
@@ -630,8 +715,10 @@
       return;
     }
     _pktIndicator.style.display = '';
+    _pktIndicator.classList.add('expandable');
     var p = _packets.length > 0 ? _packets[0] : null;
-    var parts = '<span class="pkt-count">' + esc(String(_pktCount)) + ' packet' +
+    var parts = '<span class="pkt-chevron">▶</span>' +
+      '<span class="pkt-count">' + esc(String(_pktCount)) + ' packet' +
       (_pktCount === 1 ? '' : 's') + '</span>';
     if (p) {
       var crcTag = p.crc_ok === true ? 'CRC OK' : (p.crc_ok === false ? 'CRC FAIL' : 'no CRC');
@@ -652,6 +739,69 @@
     if (_packets.length > MAX_PACKETS) _packets.length = MAX_PACKETS;
     _pktCount++;
     _updatePktIndicator();
+    if (_pktExpanded && _pktTbody) {
+      var now = Date.now() / 1000;
+      var row = _pktRow(pkt, now);
+      _pktTbody.insertBefore(row, _pktTbody.firstChild);
+      if (_pktTbody.children.length > MAX_PACKETS) {
+        _pktTbody.removeChild(_pktTbody.lastChild);
+      }
+    }
+  }
+
+  function handlePacketHistory(data) {
+    if (!data || !data.length) return;
+    if (!_resolveDom()) return;
+    _packets = [];
+    for (var i = data.length - 1; i >= 0; i--) {
+      _packets.push(data[i]);
+    }
+    if (_packets.length > MAX_PACKETS) _packets.length = MAX_PACKETS;
+    _pktCount = data.length;
+    _updatePktIndicator();
+    if (_pktExpanded) _rebuildPktTable();
+  }
+
+  function _togglePktDetail() {
+    _pktExpanded = !_pktExpanded;
+    if (_pktIndicator) {
+      _pktIndicator.classList.toggle('open', _pktExpanded);
+    }
+    if (_pktDetail) {
+      _pktDetail.style.display = _pktExpanded ? '' : 'none';
+    }
+    if (_pktExpanded) _rebuildPktTable();
+  }
+
+  function _rebuildPktTable() {
+    if (!_pktTbody) return;
+    _pktTbody.innerHTML = '';
+    var now = Date.now() / 1000;
+    for (var i = 0; i < _packets.length; i++) {
+      _pktTbody.appendChild(_pktRow(_packets[i], now));
+    }
+  }
+
+  function _pktRow(p, now) {
+    var tr = document.createElement('tr');
+    var age = (p.timestamp != null) ? SC.formatAge(now - p.timestamp) : '--';
+    var sfColor = SF_COLORS[p.sf] || '#fff';
+    var crText = 'CR4/' + (4 + (p.cr || 0));
+    var crcText, crcClass;
+    if (p.crc_ok === true) { crcText = 'OK'; crcClass = 'crc-ok'; }
+    else if (p.crc_ok === false) { crcText = 'FAIL'; crcClass = 'crc-fail'; }
+    else { crcText = '--'; crcClass = 'crc-none'; }
+    var hex = p.payload_hex || '';
+    var hexShort = hex.length > 48 ? hex.substring(0, 48) + '…' : hex;
+
+    tr.innerHTML =
+      '<td>' + esc(age) + '</td>' +
+      '<td style="color:' + sfColor + '">SF' + esc(String(p.sf)) + '</td>' +
+      '<td>' + esc(crText) + '</td>' +
+      '<td class="' + crcClass + '">' + esc(crcText) + '</td>' +
+      '<td>' + esc(String(p.payload_len != null ? p.payload_len : '')) + '</td>' +
+      '<td class="pkt-hex-cell" title="' + esc(hex) + '">' + esc(hexShort) + '</td>';
+    return tr;
   }
 
   // -- Public interface ---------------------------------------------------
@@ -694,6 +844,7 @@
     handleDetection: handleDetection,
     handleDetectionHistory: handleDetectionHistory,
     handlePacketDecoded: handlePacketDecoded,
+    handlePacketHistory: handlePacketHistory,
     setFreqMhz: setFreqMhz,
   };
 })();

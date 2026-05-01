@@ -885,8 +885,17 @@
           <div class="chirp-meta" id="chirp-meta" style="display:none"></div>
           <div class="chirp-det-indicator" id="chirp-det-indicator" style="display:none"></div>
           <div class="chirp-pkt-indicator" id="chirp-pkt-indicator" style="display:none"></div>
+          <div class="chirp-pkt-detail" id="chirp-pkt-detail" style="display:none">
+            <div class="table-scroll" style="max-height:300px">
+              <table class="data-table">
+                <thead><tr><th>Time</th><th>SF</th><th>CR</th><th>CRC</th><th>Len</th><th>Payload</th></tr></thead>
+                <tbody id="chirp-pkt-tbody"></tbody>
+              </table>
+            </div>
+          </div>
           <div class="chirp-plot-wrap">
             <canvas id="chirp-canvas" class="chirp-canvas"></canvas>
+            <canvas id="chirp-det-canvas" class="chirp-det-canvas"></canvas>
             <div class="chirp-overlay" id="chirp-overlay"></div>
             <div class="chirp-hover" id="chirp-hover"></div>
           </div>
