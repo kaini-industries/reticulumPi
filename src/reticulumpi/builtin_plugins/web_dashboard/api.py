@@ -166,6 +166,10 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/plugins/{name}", handle_plugin_detail)
     app.router.add_post("/api/services/restart", handle_services_restart)
     app.router.add_get("/api/config", handle_config)
+    # Chirp capture
+    app.router.add_post("/api/chirp/capture", handle_chirp_capture)
+    app.router.add_get("/api/chirp/status", handle_chirp_status)
+    app.router.add_get("/api/chirp/history", handle_chirp_history)
     # Domain sub-modules
     setup_interface_routes(app)
     setup_mesh_routes(app)
@@ -412,6 +416,59 @@ async def handle_services_restart(
 
     asyncio.create_task(_do_restart())
     return _ok({"message": "Restarting services..."})
+
+
+async def handle_chirp_capture(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/chirp/capture — trigger an on-demand chirp spectrogram capture."""
+    if not request.get("token"):
+        return _error("Authentication required", 401)
+
+    plugin = _get_plugin(request)
+    viewer = plugin.app.plugins.get("lora_chirp_viewer")
+    if not viewer:
+        return _error("lora_chirp_viewer plugin not enabled", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    freq_hz = int(float(body.get("freq_mhz", 0)) * 1e6) or None
+    sample_rate = int(body.get("sample_rate", 0)) or None
+    duration_s = float(body.get("duration_s", 0)) or None
+
+    try:
+        capture_id = viewer.capture_chirps(freq_hz, sample_rate, duration_s)
+    except RuntimeError as exc:
+        return _error(str(exc), 409)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+    return _ok({"status": "capturing", "capture_id": capture_id})
+
+
+async def handle_chirp_status(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/chirp/status — current capture state."""
+    plugin = _get_plugin(request)
+    viewer = plugin.app.plugins.get("lora_chirp_viewer")
+    if not viewer:
+        return _error("lora_chirp_viewer plugin not enabled", 404)
+    return _ok(viewer.get_capture_status())
+
+
+async def handle_chirp_history(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/chirp/history — chirp waterfall buffer."""
+    plugin = _get_plugin(request)
+    viewer = plugin.app.plugins.get("lora_chirp_viewer")
+    if not viewer or not hasattr(viewer, "get_chirp_waterfall_history"):
+        return _error("lora_chirp_viewer plugin not enabled", 404)
+    return _ok(viewer.get_chirp_waterfall_history())
 
 
 async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:

@@ -3255,8 +3255,6 @@ body {
   display: block;
   width: 100%;
   height: 320px;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
   cursor: crosshair;
 }
 .spectrum-hover {
@@ -3521,8 +3519,6 @@ body {
   display: block;
   width: 100%;
   height: 320px;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
   cursor: crosshair;
 }
 .lora-spectrum-overlay {
@@ -3590,6 +3586,28 @@ body {
   top: 0; bottom: 0;
   width: 0;
   border-left: 1px dashed rgba(240, 173, 78, 0.55);
+}
+.lora-energy-cluster {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(255, 182, 39, 0.10);
+  border-left: 1px solid rgba(255, 182, 39, 0.55);
+  border-right: 1px solid rgba(255, 182, 39, 0.55);
+  box-shadow: inset 0 0 12px rgba(255, 182, 39, 0.08);
+}
+.lora-energy-cluster-label {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 9px;
+  color: rgba(255, 230, 180, 0.95);
+  background: rgba(8, 18, 22, 0.88);
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(255, 182, 39, 0.4);
 }
 
 .lora-spectrum-hover {
@@ -3767,6 +3785,27 @@ body {
   border-color: rgba(240, 200, 80, 0.55);
   background: rgba(240, 200, 80, 0.08);
 }
+.lora-cluster-toggle {
+  font: inherit;
+  font-size: 0.72rem;
+  color: var(--text-muted, #8b949e);
+  background: transparent;
+  border: 1px solid var(--border, #1e2430);
+  padding: 2px 8px;
+  margin-left: 0.3rem;
+  border-radius: 3px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.lora-cluster-toggle:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.lora-cluster-toggle.active {
+  color: #ffb627;
+  border-color: rgba(255, 182, 39, 0.5);
+  background: rgba(255, 182, 39, 0.08);
+}
 
 /* ── Channel activity grid ────────────────────────────────────────────── */
 .lora-channel-grid-wrap {
@@ -3943,6 +3982,8 @@ body {
   .lora-zoom-preset        { font-size: 0.68rem; padding: 1px 6px; }
   .lora-stat               { font-size: 0.7rem; }
   .lora-peakhold-toggle    { font-size: 0.68rem; padding: 1px 6px; margin-left: 0.2rem; }
+  .lora-cluster-toggle     { font-size: 0.68rem; padding: 1px 6px; margin-left: 0.2rem; }
+  .lora-energy-cluster-label { font-size: 8px; }
   .lora-stat-rnode-group   { padding: 1px 6px; gap: 0.35rem; }
   .lora-stat-group-label   { font-size: 0.62rem; }
   .lora-channel-grid-wrap  { padding: 0.2rem 0.3rem; }
@@ -4326,3 +4367,155 @@ body {
 .lt-log th { position: sticky; top: 0; background: var(--bg-secondary); }
 .lt-log td { font-size: 0.75rem; font-family: var(--mono); }
 tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
+
+/* ═══════════ Chirp Spectrogram Viewer ═══════════ */
+.chirp-viewer {
+  margin-top: 0.75rem;
+  border-top: 1px solid var(--border, #1e2430);
+  padding-top: 0.5rem;
+}
+.chirp-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.8rem;
+  flex-wrap: wrap;
+}
+.chirp-capture-btn {
+  background: rgba(0, 229, 255, 0.15);
+  color: var(--cyan, #00e5ff);
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.chirp-capture-btn:hover { background: rgba(0, 229, 255, 0.25); }
+.chirp-capture-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.chirp-capture-btn.capturing {
+  animation: chirp-pulse 1.2s ease-in-out infinite;
+}
+@keyframes chirp-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+.chirp-select {
+  background: var(--bg-secondary, #0d1117);
+  color: var(--text, #d6dee8);
+  border: 1px solid var(--border, #1e2430);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 0.72rem;
+}
+.chirp-select optgroup {
+  color: var(--accent, #58a6ff);
+  font-weight: 600;
+}
+.chirp-sf-toggle {
+  font-size: 0.72rem;
+  color: var(--text-muted, #6a7a8a);
+  cursor: pointer;
+  user-select: none;
+}
+.chirp-sf-toggle input { margin-right: 3px; }
+.chirp-status-label {
+  font-size: 0.72rem;
+  color: var(--text-muted, #6a7a8a);
+  margin-left: auto;
+}
+.chirp-meta {
+  font-size: 0.7rem;
+  color: var(--text-muted, #6a7a8a);
+  padding: 0.55rem 0.8rem;
+  display: flex;
+  gap: 0.4rem 0.8rem;
+  flex-wrap: wrap;
+}
+.chirp-meta span { white-space: nowrap; }
+.chirp-det-indicator {
+  font-size: 0.7rem;
+  padding: 0.3rem 0.8rem;
+  color: var(--text-muted, #6a7a8a);
+}
+.chirp-det-indicator .det-count {
+  font-weight: 600;
+  color: var(--accent, #58a6ff);
+}
+.chirp-det-indicator .det-latest { font-weight: 500; }
+.chirp-pkt-indicator {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.8rem;
+  color: var(--text-muted, #6a7a8a);
+}
+.chirp-pkt-indicator .pkt-count {
+  font-weight: 600;
+  color: #4f4;
+}
+.chirp-pkt-indicator .pkt-latest { font-weight: 500; }
+.chirp-pkt-indicator .pkt-hex {
+  font-family: monospace;
+  font-size: 0.65rem;
+  opacity: 0.7;
+}
+.chirp-plot-wrap {
+  position: relative;
+  margin-top: 4px;
+}
+.chirp-canvas {
+  display: block;
+  width: 100%;
+  height: 400px;
+  cursor: crosshair;
+  background: #050810;
+}
+.chirp-overlay {
+  position: absolute;
+  left: 0; right: 0; top: 0; bottom: 0;
+  pointer-events: none;
+}
+.chirp-hover {
+  position: absolute;
+  bottom: 6px;
+  right: 8px;
+  display: none;
+  padding: 5px 9px;
+  background: rgba(6, 10, 18, 0.92);
+  color: var(--text, #d6dee8);
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  border: 1px solid var(--accent, #ff2d7b);
+  border-radius: 3px;
+  pointer-events: none;
+  letter-spacing: 0.02em;
+  max-width: 70%;
+  line-height: 1.45;
+}
+.chirp-hover-band {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-muted, #8b949e);
+  font-size: 0.72rem;
+}
+.chirp-hover-band strong {
+  color: var(--text, #d6dee8);
+  font-weight: 600;
+}
+.chirp-sf-line {
+  position: absolute;
+  border-left: 1px dashed;
+  opacity: 0.5;
+  pointer-events: none;
+  transform-origin: bottom left;
+}
+.chirp-sf-label {
+  position: absolute;
+  font-size: 0.6rem;
+  font-family: var(--mono, monospace);
+  pointer-events: none;
+  opacity: 0.7;
+}

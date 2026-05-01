@@ -217,11 +217,11 @@
 
     <!-- Mesh Bridge (Meshtastic ↔ MeshCore) -->
     <div class="section" id="mesh-bridge-section" style="display:none;">
-      <div class="section-header">
-        <span>Mesh Bridge</span>
+      <div class="section-header collapsible" id="mesh-bridge-section-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Mesh Bridge</span>
         <span class="mesh-bridge-status-pill" id="mesh-bridge-status-pill">—</span>
       </div>
-      <div class="section-body">
+      <div class="section-body hidden" id="mesh-bridge-section-body">
         <div class="mesh-bridge-content">
           <div id="mesh-bridge-auto-pause-banner" class="mesh-bridge-banner hidden">
             <span id="mesh-bridge-auto-pause-reason">Paused automatically</span>
@@ -826,7 +826,7 @@
         <div class="spectrum-plot-wrap">
           <div class="spectrum-bands" id="spectrum-bands" title="Frequency band allocations — hover a band for details"></div>
           <svg id="spectrum-line" class="spectrum-line" viewBox="0 0 800 160" preserveAspectRatio="none"></svg>
-          <canvas id="spectrum-waterfall" class="spectrum-waterfall" width="800" height="256"></canvas>
+          <canvas id="spectrum-waterfall" class="spectrum-waterfall"></canvas>
           <div class="spectrum-overlay" id="spectrum-overlay"></div>
           <div class="spectrum-hover" id="spectrum-hover"></div>
           <div class="spectrum-zoom-reset" id="spectrum-zoom-reset" style="display:none">Full band</div>
@@ -859,7 +859,7 @@
         <div class="lora-spectrum-plot-wrap">
           <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
           <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
-          <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall" width="800" height="256"></canvas>
+          <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall"></canvas>
           <div class="lora-spectrum-overlay" id="lora-spectrum-overlay"></div>
           <div class="lora-spectrum-hover" id="lora-spectrum-hover"></div>
           <div class="lora-spec-zoom-reset" id="lora-spec-zoom-reset" style="display:none">Reset zoom</div>
@@ -871,6 +871,25 @@
             <div class="lora-ch-util" id="lora-ch-util"></div>
           </div>
           <div class="lora-ch-timeline" id="lora-ch-timeline" style="display:none"></div>
+        </div>
+        <div class="chirp-viewer" id="chirp-viewer-section" style="display:none">
+          <div class="chirp-controls" id="chirp-controls">
+            <select class="chirp-select" id="chirp-freq-select" title="Center frequency"></select>
+            <select class="chirp-select" id="chirp-bw-select" title="Capture bandwidth">
+              <option value="250000">250 kHz (1 ch)</option>
+              <option value="2048000">2 MHz (16 ch)</option>
+            </select>
+            <label class="chirp-sf-toggle" title="Show SF slope guides"><input type="checkbox" id="chirp-sf-toggle" checked> SF guides</label>
+            <span class="chirp-status-label" id="chirp-status-label"></span>
+          </div>
+          <div class="chirp-meta" id="chirp-meta" style="display:none"></div>
+          <div class="chirp-det-indicator" id="chirp-det-indicator" style="display:none"></div>
+          <div class="chirp-pkt-indicator" id="chirp-pkt-indicator" style="display:none"></div>
+          <div class="chirp-plot-wrap">
+            <canvas id="chirp-canvas" class="chirp-canvas"></canvas>
+            <div class="chirp-overlay" id="chirp-overlay"></div>
+            <div class="chirp-hover" id="chirp-hover"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -994,8 +1013,8 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=31"></script>
-  <script src="/static/messages_panel.js?v=6"></script>
+  <script src="/static/app.js?v=32"></script>
+  <script src="/static/messages_panel.js?v=7"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
   <script src="/static/mqtt_feed.js?v=1"></script>
   <script src="/static/messages_meshtastic_lora.js?v=1"></script>
@@ -1013,6 +1032,7 @@
   <script src="/static/spectrum_common.js?v=1"></script>
   <script src="/static/spectrum.js?v=9"></script>
   <script src="/static/lora_spectrum.js?v=17"></script>
+  <script src="/static/chirp_spectrogram.js?v=6"></script>
   <script src="/static/adsb.js?v=1"></script>
   <script src="/static/ntp.js?v=1"></script>
   <script src="/static/link_tester.js?v=1"></script>

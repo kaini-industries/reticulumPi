@@ -156,6 +156,8 @@ class SpectrumScanner(PluginBase):
         self._current_ts: str | None = None
 
         self._active = True
+        self._device_released = False
+        self._supervisor_alive = True
         self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
         # E4000 gap warning — informational only.
@@ -287,6 +289,13 @@ class SpectrumScanner(PluginBase):
 
     def _supervisor_loop(self) -> None:
         """Launch rtl_power once; on exit, back off and retry up to max_restarts."""
+        self._supervisor_alive = True
+        try:
+            self._supervisor_loop_inner()
+        finally:
+            self._supervisor_alive = False
+
+    def _supervisor_loop_inner(self) -> None:
         self._rtl_power_path = shutil.which(self._power_command)
         if not self._rtl_power_path:
             self._set_status(
@@ -300,6 +309,11 @@ class SpectrumScanner(PluginBase):
             return
 
         while self._active:
+            if self._device_released:
+                self._set_status("paused", "device released for external use")
+                self._sleep_while_active(1.0)
+                continue
+
             try:
                 self._launch_rtl_power()
             except Exception as exc:
@@ -423,6 +437,21 @@ class SpectrumScanner(PluginBase):
                     proc.stdout.close()
                 except Exception:
                     pass
+
+    def _restart_sweep(self) -> None:
+        """Restart the rtl_power supervisor after an external interruption.
+
+        Subclasses (e.g. LoraChirpViewer) call this after temporarily
+        stopping the sweep to use the USB device for I/Q capture.
+        Clears the device-released flag so the existing supervisor thread
+        resumes; only spawns a new thread if the old one exited.
+        """
+        self._restart_count = 0
+        self._segments = {}
+        self._current_ts = None
+        self._device_released = False
+        if not self._supervisor_alive:
+            self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
     # --- parser --------------------------------------------------------------
 

@@ -163,6 +163,27 @@
     { mhz: 1575.420, name: 'GPS L1',  desc: 'GPS L1 C/A carrier' },
   ];
 
+  // LoRa ISM region definitions.  Channel grid (base, spacing, count) is
+  // shared by the chirp viewer (frequency presets) and the LoRa spectrum
+  // panel (channel overlays).  Spacing is in kHz.
+  var LORA_REGIONS = {
+    US:     { lo: 902.0, hi: 928.0, base: 902.8625, spacing: 250, count: 108, label: 'US 902–928' },
+    EU_868: { lo: 863.0, hi: 870.0, base: 864.125,  spacing: 250, count: 24,  label: 'EU 868' },
+    EU_433: { lo: 433.0, hi: 434.7, base: 433.175,  spacing: 250, count: 6,   label: 'EU 433' },
+    CN:     { lo: 470.0, hi: 510.0, base: 470.125,  spacing: 250, count: 160, label: 'CN 470–510' },
+    JP:     { lo: 920.8, hi: 927.8, base: 921.875,  spacing: 500, count: 15,  label: 'JP 920–928' },
+    ANZ:    { lo: 915.0, hi: 928.0, base: 916.375,  spacing: 250, count: 52,  label: 'ANZ 915–928' },
+  };
+  var LORA_REGION_ORDER = ['US', 'EU_868', 'EU_433', 'CN', 'JP', 'ANZ'];
+
+  function findLoraRegion(mhz) {
+    for (var i = 0; i < LORA_REGION_ORDER.length; i++) {
+      var r = LORA_REGIONS[LORA_REGION_ORDER[i]];
+      if (mhz >= r.lo && mhz <= r.hi) return r;
+    }
+    return null;
+  }
+
   // Find the band covering a given frequency, or null.  Bands are ordered
   // but can overlap at boundaries; first match wins (which is fine — the
   // data has no meaningful overlaps, only abutting edges).
@@ -225,11 +246,15 @@
     var range = hi - lo;
     if (range < 1) range = 1;
     for (var x = 0; x < cols; x++) {
-      // Nearest-neighbour from power array; good enough visually and much
-      // faster than linear interpolation here.
-      var srcIdx = (n > 1) ? Math.floor((x * (n - 1)) / (cols - 1)) : 0;
-      if (srcIdx < 0) srcIdx = 0; else if (srcIdx >= n) srcIdx = n - 1;
-      var p = powers[srcIdx];
+      var srcF = (n > 1) ? (x * (n - 1)) / (cols - 1) : 0;
+      var srcLo = Math.floor(srcF);
+      var srcHi = Math.min(srcLo + 1, n - 1);
+      var frac = srcF - srcLo;
+      var pLo = powers[srcLo], pHi = powers[srcHi];
+      var p;
+      if (pLo == null || !isFinite(pLo)) p = pHi;
+      else if (pHi == null || !isFinite(pHi)) p = pLo;
+      else p = pLo + (pHi - pLo) * frac;
       var norm;
       if (p == null || !isFinite(p)) {
         norm = 0;
@@ -267,9 +292,15 @@
       var n = powers.length;
       var rowOff = r * cols * 4;
       for (var x = 0; x < cols; x++) {
-        var srcIdx = (n > 1) ? Math.floor((x * (n - 1)) / (cols - 1)) : 0;
-        if (srcIdx < 0) srcIdx = 0; else if (srcIdx >= n) srcIdx = n - 1;
-        var p = powers[srcIdx];
+        var srcF = (n > 1) ? (x * (n - 1)) / (cols - 1) : 0;
+        var srcLo = Math.floor(srcF);
+        var srcHi = Math.min(srcLo + 1, n - 1);
+        var frac = srcF - srcLo;
+        var pLo = powers[srcLo], pHi = powers[srcHi];
+        var p;
+        if (pLo == null || !isFinite(pLo)) p = pHi;
+        else if (pHi == null || !isFinite(pHi)) p = pLo;
+        else p = pLo + (pHi - pLo) * frac;
         var norm;
         if (p == null || !isFinite(p)) {
           norm = 0;
@@ -382,6 +413,38 @@
   var historyStore = createHistoryStore();
   var loraHistoryStore = createHistoryStore();
 
+  function loraBandLine(freqMhz, opts) {
+    var rn = opts.rnode, reg = opts.region, iFlags = opts.interferenceFlags;
+    var e = opts.esc || function (s) { return s; };
+    if (rn && rn.freqHz != null && rn.bwHz != null) {
+      var fMhz = rn.freqHz / 1e6;
+      var bwMhz = rn.bwHz / 1e6;
+      if (freqMhz >= fMhz - bwMhz / 2 && freqMhz <= fMhz + bwMhz / 2) {
+        var s = '<strong>RNode</strong> · ' + e(fMhz.toFixed(3)) + ' MHz';
+        if (rn.bwHz) s += ' · BW ' + e((rn.bwHz / 1000).toFixed(0)) + 'k';
+        if (rn.sf)   s += ' · SF ' + e(String(rn.sf));
+        if (rn.cr)   s += ' · CR 4/' + e(String(rn.cr));
+        return s;
+      }
+    }
+    if (reg && (freqMhz < reg.lo || freqMhz > reg.hi)) {
+      return '<strong>Out of band</strong> for ' + e(reg.label);
+    }
+    if (iFlags) {
+      for (var fi = 0; fi < iFlags.length; fi++) {
+        var fl = iFlags[fi];
+        if (fl.type === 'cw' && fl.freq_mhz != null
+            && Math.abs(freqMhz - fl.freq_mhz) < 0.1) {
+          var cw = '<strong>CW interference</strong> · ' + e(fl.freq_mhz.toFixed(3)) + ' MHz';
+          if (fl.power_db != null) cw += ' · ' + e(fl.power_db.toFixed(1)) + ' dB';
+          if (fl.duration_s != null) cw += ' · ' + e(fl.duration_s.toFixed(0)) + 's';
+          return cw;
+        }
+      }
+    }
+    return '';
+  }
+
   R.spectrumCommon = {
     RAMP: RAMP,
     colorForNorm: colorForNorm,
@@ -393,11 +456,15 @@
     CATEGORIES: CATEGORIES,
     BANDS: BANDS,
     LANDMARKS: LANDMARKS,
+    LORA_REGIONS: LORA_REGIONS,
+    LORA_REGION_ORDER: LORA_REGION_ORDER,
     findBand: findBand,
+    findLoraRegion: findLoraRegion,
     findNearLandmark: findNearLandmark,
     emaAutoScale: emaAutoScale,
     paintRowToCanvas: paintRowToCanvas,
     paintHistoryToCanvas: paintHistoryToCanvas,
+    loraBandLine: loraBandLine,
     historyStore: historyStore,
     loraHistoryStore: loraHistoryStore,
   };

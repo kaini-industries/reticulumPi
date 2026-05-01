@@ -272,7 +272,7 @@ _BROADCAST_PLUGIN_NAMES: tuple[str, ...] = (
     "connectivity_monitor", "path_warmer", "transport_health",
     "meshtastic_gateway", "meshcore_gateway", "meshcore_observer",
     "mesh_bridge", "space_tracker", "spectrum_scanner", "lora_scanner",
-    "lora_diagnostics", "gps_telemetry", "messaging_hub",
+    "lora_chirp_viewer", "lora_diagnostics", "gps_telemetry", "messaging_hub",
     "ntp_server", "adsb_radar", "lora_link_tester",
 )
 
@@ -339,7 +339,10 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         except Exception:
             log.debug("Failed to send spectrum history hello", exc_info=True)
 
-    lora_scanner = plugin.app.get_plugin("lora_scanner")
+    lora_scanner = (
+        plugin.app.get_plugin("lora_scanner")
+        or plugin.app.get_plugin("lora_chirp_viewer")
+    )
     if lora_scanner and hasattr(lora_scanner, "get_history"):
         try:
             lora_hist = lora_scanner.get_history()
@@ -352,6 +355,34 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             }))
         except Exception:
             log.debug("Failed to send lora_scanner history hello", exc_info=True)
+
+    chirp_viewer = plugin.app.get_plugin("lora_chirp_viewer")
+    if chirp_viewer and hasattr(chirp_viewer, "get_chirp_waterfall_history"):
+        try:
+            chirp_hist = chirp_viewer.get_chirp_waterfall_history()
+        except Exception:
+            chirp_hist = {"available": False}
+        try:
+            await ws.send_str(json.dumps({
+                "type": "chirp_waterfall_history",
+                "data": chirp_hist,
+            }))
+        except Exception:
+            log.debug("Failed to send chirp waterfall history hello", exc_info=True)
+
+    if chirp_viewer and hasattr(chirp_viewer, "get_detection_history"):
+        try:
+            det_hist = chirp_viewer.get_detection_history()
+        except Exception:
+            det_hist = []
+        if det_hist:
+            try:
+                await ws.send_str(json.dumps({
+                    "type": "chirp_detection_history",
+                    "data": det_hist,
+                }))
+            except Exception:
+                log.debug("Failed to send chirp detection history hello", exc_info=True)
 
     link_tester = plugin.app.get_plugin("lora_link_tester")
     if link_tester and hasattr(link_tester, "get_history"):
@@ -398,7 +429,8 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             if msg.type == aiohttp.WSMsgType.ERROR:
                 log.debug("WebSocket error: %s", ws.exception())
                 break
-            # We don't expect client messages, but handle ping/pong gracefully
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                _handle_ws_command(msg.data, plugin)
     finally:
         _ws_clients.discard(ws)
         _ws_last_activity.pop(ws, None)
@@ -691,10 +723,14 @@ def _collect_broadcast_data(
         skipped.append("spectrum_scanner")
 
     lora_scanner_data: dict = {}
+    lora_chirp_viewer_data: dict = {}
     if not _over_budget():
         lora_scanner = refs.get("lora_scanner")
         if lora_scanner and hasattr(lora_scanner, "get_snapshot"):
             lora_scanner_data = _timed("lora_scanner", lora_scanner.get_snapshot) or {}
+        lora_chirp = refs.get("lora_chirp_viewer")
+        if lora_chirp and hasattr(lora_chirp, "get_snapshot"):
+            lora_chirp_viewer_data = _timed("lora_chirp_viewer", lora_chirp.get_snapshot) or {}
     else:
         skipped.append("lora_scanner")
 
@@ -771,6 +807,8 @@ def _collect_broadcast_data(
         data["spectrum"] = spectrum_data
     if lora_scanner_data:
         data["lora_scanner"] = lora_scanner_data
+    if lora_chirp_viewer_data:
+        data["lora_chirp_viewer"] = lora_chirp_viewer_data
     if lora_diag_data:
         data["lora_diagnostics"] = lora_diag_data
     if gps_data:
@@ -934,6 +972,10 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.PLUGIN_STARTED, _on_plugin_lifecycle)
         event_bus.subscribe(_events.PLUGIN_STOPPED, _on_plugin_lifecycle)
         event_bus.subscribe(_events.PLUGIN_CRASHED, _on_plugin_lifecycle)
+        event_bus.subscribe(_events.CHIRP_CAPTURE_DONE, _on_chirp_capture_done)
+        event_bus.subscribe(_events.CHIRP_WATERFALL_ROWS, _on_chirp_waterfall_rows)
+        event_bus.subscribe(_events.CHIRP_DETECTION, _on_chirp_detection)
+        event_bus.subscribe(_events.CHIRP_PACKET_DECODED, _on_chirp_packet_decoded)
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -948,6 +990,10 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_reaction_event)
             event_bus.unsubscribe_all(_on_alert_event)
             event_bus.unsubscribe_all(_on_plugin_lifecycle)
+            event_bus.unsubscribe_all(_on_chirp_capture_done)
+            event_bus.unsubscribe_all(_on_chirp_waterfall_rows)
+            event_bus.unsubscribe_all(_on_chirp_detection)
+            event_bus.unsubscribe_all(_on_chirp_packet_decoded)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _broadcast_task:
@@ -1043,6 +1089,76 @@ def _on_reaction_event(event_type: str, data: dict) -> None:
         _ws_loop.call_soon_threadsafe(_schedule_push, "reaction", data)
     except RuntimeError:
         pass
+
+
+def _on_chirp_capture_done(event_type: str, data: dict) -> None:
+    """Event-bus callback for CHIRP_CAPTURE_DONE — push spectrogram to WS clients."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_result", data)
+    except RuntimeError:
+        pass
+
+
+def _on_chirp_waterfall_rows(event_type: str, data: dict) -> None:
+    """Event-bus callback for CHIRP_WATERFALL_ROWS — push streaming batch."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_waterfall_rows", data)
+    except RuntimeError:
+        pass
+
+
+def _on_chirp_detection(event_type: str, data: dict) -> None:
+    """Event-bus callback for CHIRP_DETECTION — push detection to WS clients."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_detection", data)
+    except RuntimeError:
+        pass
+
+
+def _on_chirp_packet_decoded(event_type: str, data: dict) -> None:
+    """Event-bus callback for CHIRP_PACKET_DECODED — push decoded packet to WS."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_packet_decoded", data)
+    except RuntimeError:
+        pass
+
+
+def _handle_ws_command(raw: str, plugin: Any) -> None:
+    """Process a JSON command from a WebSocket client."""
+    try:
+        cmd = json.loads(raw)
+    except Exception:
+        return
+    action = cmd.get("action")
+    if action == "chirp_capture":
+        viewer = plugin.app.plugins.get("lora_chirp_viewer")
+        if viewer and hasattr(viewer, "capture_chirps"):
+            try:
+                viewer.capture_chirps(
+                    freq_hz=int(cmd["freq_hz"]) if "freq_hz" in cmd else None,
+                    sample_rate=int(cmd["sample_rate"]) if "sample_rate" in cmd else None,
+                    duration_s=float(cmd["duration_s"]) if "duration_s" in cmd else None,
+                )
+            except Exception:
+                log.debug("Chirp capture command failed", exc_info=True)
+    elif action == "chirp_set_params":
+        viewer = plugin.app.plugins.get("lora_chirp_viewer")
+        if viewer and hasattr(viewer, "set_continuous_params"):
+            try:
+                viewer.set_continuous_params(
+                    freq_mhz=float(cmd["freq_mhz"]) if "freq_mhz" in cmd else None,
+                    sample_rate=int(cmd["sample_rate"]) if "sample_rate" in cmd else None,
+                )
+            except Exception:
+                log.debug("Chirp set_params command failed", exc_info=True)
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
