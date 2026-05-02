@@ -31,6 +31,7 @@ import numpy as np
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.lora_dechirp import (
+    ChannelFilter,
     ChirpReference,
     DecodedPacket,
     Detection,
@@ -38,6 +39,7 @@ from reticulumpi.builtin_plugins.lora_dechirp import (
     PacketExtractor,
     PacketSymbols,
     PreambleTracker,
+    max_packet_samples,
 )
 from reticulumpi.builtin_plugins.lora_scanner import LoraScanner
 
@@ -56,6 +58,8 @@ _CHIRP_DEFAULTS: dict[str, object] = {
     "chirp_detection_sfs": [7, 8, 9, 10, 11, 12],
     "chirp_detection_preamble_len": 8,
     "chirp_detection_snr_threshold_db": 12.0,
+    "chirp_detection_snr_margin_db": 10.0,
+    "chirp_detection_snr_floor_db": 6.0,
     "chirp_detection_bin_tolerance": 1,
     "chirp_detection_cooldown_s": 0.5,
     "chirp_detection_history_depth": 256,
@@ -95,6 +99,8 @@ class LoraChirpViewer(LoraScanner):
         self._detection_sfs = [int(s) for s in self.config["chirp_detection_sfs"]]
         self._detection_preamble_len = int(self.config["chirp_detection_preamble_len"])
         self._detection_snr_threshold_db = float(self.config["chirp_detection_snr_threshold_db"])
+        self._detection_snr_margin_db = float(self.config["chirp_detection_snr_margin_db"])
+        self._detection_snr_floor_db = float(self.config["chirp_detection_snr_floor_db"])
         self._detection_bin_tolerance = int(self.config["chirp_detection_bin_tolerance"])
         self._detection_cooldown_s = float(self.config["chirp_detection_cooldown_s"])
         self._detection_history_depth = int(self.config["chirp_detection_history_depth"])
@@ -171,6 +177,7 @@ class LoraChirpViewer(LoraScanner):
 
     def _init_detection(self) -> None:
         self._trackers: list[tuple[int, PreambleTracker, PacketExtractor]] = []
+        self._channel_filters: dict[int, ChannelFilter] = {}
         for bw in self._detection_bws:
             chirp_ref = ChirpReference(self._chirp_sr, bw)
             tracker = PreambleTracker(
@@ -179,10 +186,19 @@ class LoraChirpViewer(LoraScanner):
                 preamble_len=self._detection_preamble_len,
                 bin_tolerance=self._detection_bin_tolerance,
                 snr_threshold_db=self._detection_snr_threshold_db,
+                snr_margin_db=self._detection_snr_margin_db,
+                snr_floor_db=self._detection_snr_floor_db,
             )
             extractor = PacketExtractor(chirp_ref)
             self._trackers.append((bw, tracker, extractor))
-        self._iq_ring_buffer = IQRingBuffer(self._chirp_sr * 2)
+            self._channel_filters[bw] = ChannelFilter(self._chirp_sr, bw)
+        max_sf = max(self._detection_sfs)
+        min_bw = min(self._detection_bws)
+        capacity = max_packet_samples(
+            max_sf, self._chirp_sr, bw=min_bw,
+        )
+        capacity = max(capacity, self._chirp_sr * 2)
+        self._iq_ring_buffer = IQRingBuffer(capacity)
         self._pending_extractions: deque[tuple[Detection, PacketExtractor]] = deque(maxlen=32)
 
     def _handle_detection(self, det: Detection) -> None:
@@ -225,7 +241,9 @@ class LoraChirpViewer(LoraScanner):
         self._iq_ring_buffer.write(iq)
 
         for _bw, tracker, extractor in self._trackers:
-            detections = tracker.feed_chunk(iq, timestamp)
+            filt = self._channel_filters.get(_bw)
+            filtered = filt.apply(iq) if filt is not None else iq
+            detections = tracker.feed_chunk(filtered, timestamp)
             for det in detections:
                 self._handle_detection(det)
                 self._pending_extractions.append((det, extractor))

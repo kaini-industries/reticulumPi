@@ -24,6 +24,27 @@ _DEFAULT_BIN_TOLERANCE = 1
 _DEFAULT_SNR_THRESHOLD_DB = 12.0
 
 
+def max_packet_samples(
+    sf: int,
+    sample_rate: int,
+    bw: int = _LORA_BW_HZ,
+    cr: int = 4,
+    max_payload_len: int = 255,
+    preamble_len: int = _DEFAULT_PREAMBLE_LEN,
+) -> int:
+    """Compute the maximum IQ samples needed for a complete LoRa packet."""
+    sym_len = int(round(sample_rate * (2**sf) / bw))
+    total_payload_nibs = max_payload_len * 2 + 4  # +4 for CRC
+    header_payload_nibs = max(0, sf - 6)
+    remaining_nibs = max(0, total_payload_nibs - header_payload_nibs)
+    ppm = 4 + cr
+    n_blocks = (remaining_nibs + sf - 1) // sf
+    n_payload_syms = n_blocks * ppm
+    # preamble + 2 sync + 2.25 SFD + 8 header + payload
+    total_sym_quarters = (preamble_len + 2 + 8 + n_payload_syms) * 4 + 9
+    return (total_sym_quarters * sym_len + 3) // 4
+
+
 @dataclass
 class Detection:
     """A detected LoRa preamble."""
@@ -74,6 +95,48 @@ class ChirpReference:
         return np.exp(-1j * phase).astype(np.complex64)
 
 
+class ChannelFilter:
+    """FIR lowpass filter at BW/2 for rejecting out-of-band noise.
+
+    Halves the noise bandwidth for a 125 kHz LoRa signal captured at
+    250 kHz, yielding ~3 dB SNR improvement.  Kernel is cached per
+    (sample_rate, bw) pair.
+    """
+
+    _cache: dict[tuple[int, int, int], np.ndarray] = {}
+
+    def __init__(
+        self,
+        sample_rate: int,
+        bw: int = _LORA_BW_HZ,
+        num_taps: int = 31,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.bw = bw
+        self.num_taps = num_taps
+        key = (sample_rate, bw, num_taps)
+        kernel = self._cache.get(key)
+        if kernel is None:
+            kernel = self._make_kernel(sample_rate, bw, num_taps)
+            self._cache[key] = kernel
+        self._kernel = kernel
+
+    @staticmethod
+    def _make_kernel(sample_rate: int, bw: int, num_taps: int) -> np.ndarray:
+        cutoff = bw / (2.0 * sample_rate)
+        n = np.arange(num_taps, dtype=np.float64) - (num_taps - 1) / 2.0
+        with np.errstate(invalid="ignore"):
+            h = np.where(n == 0, 2.0 * cutoff, np.sin(2.0 * np.pi * cutoff * n) / (np.pi * n))
+        h *= np.hanning(num_taps)
+        h /= np.sum(h)
+        return h.astype(np.float32)
+
+    def apply(self, iq: np.ndarray) -> np.ndarray:
+        if len(iq) <= self.num_taps:
+            return iq
+        return np.convolve(iq, self._kernel, mode="same").astype(np.complex64)
+
+
 class SymbolDetector:
     """Batch-dechirps an IQ chunk into per-symbol peaks for one SF.
 
@@ -86,8 +149,11 @@ class SymbolDetector:
         iq: np.ndarray,
         sf: int,
         ref: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Dechirp *iq* and return (peak_bins, peak_mags, noise_floors).
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Dechirp *iq* and return (peak_bins, peak_mags, noise_floors, frac_bins).
+
+        ``frac_bins`` are parabolic-interpolated fractional peak positions
+        (float32), giving sub-bin accuracy for CFO estimation.
 
         Each array has length ``n_symbols = len(iq) // len(ref)``.
         Leftover samples shorter than one symbol are silently dropped.
@@ -101,6 +167,7 @@ class SymbolDetector:
                 np.array([], dtype=np.int32),
                 empty,
                 empty,
+                empty,
             )
 
         usable = iq[: n_symbols * sym_len].reshape(n_symbols, sym_len)
@@ -109,13 +176,25 @@ class SymbolDetector:
         mag = np.abs(spectra[:, :n_bins])
 
         peak_bins = np.argmax(mag, axis=1).astype(np.int32)
-        peak_mags = mag[np.arange(n_symbols), peak_bins].astype(np.float32)
+        idx = np.arange(n_symbols)
+        peak_mags = mag[idx, peak_bins].astype(np.float32)
 
-        # Noise floor: median of all bins (dominated by noise since only
-        # one bin holds the signal).
         noise_floors = np.median(mag, axis=1).astype(np.float32)
 
-        return peak_bins, peak_mags, noise_floors
+        alpha = mag[idx, (peak_bins - 1) % n_bins]
+        gamma = mag[idx, (peak_bins + 1) % n_bins]
+        denom = alpha - 2.0 * peak_mags + gamma
+        safe = np.abs(denom) > 1e-10
+        delta = np.zeros(n_symbols, dtype=np.float32)
+        delta[safe] = (0.5 * (alpha[safe] - gamma[safe]) / denom[safe]).astype(np.float32)
+        frac_bins = peak_bins.astype(np.float32) + delta
+
+        return peak_bins, peak_mags, noise_floors, frac_bins
+
+
+_DEFAULT_SNR_MARGIN_DB = 10.0
+_DEFAULT_SNR_FLOOR_DB = 6.0
+_DEFAULT_NOISE_EMA_ALPHA = 0.01
 
 
 @dataclass
@@ -125,9 +204,11 @@ class _SfState:
     last_bin: int = -1
     count: int = 0
     first_sample_offset: int = 0
+    peak_bins: list[float] = field(default_factory=list)
     peak_mags: list[float] = field(default_factory=list)
     noise_floors: list[float] = field(default_factory=list)
     leftover: np.ndarray | None = None
+    noise_ema: float = 0.0
 
 
 class PreambleTracker:
@@ -146,12 +227,18 @@ class PreambleTracker:
         preamble_len: int = _DEFAULT_PREAMBLE_LEN,
         bin_tolerance: int = _DEFAULT_BIN_TOLERANCE,
         snr_threshold_db: float = _DEFAULT_SNR_THRESHOLD_DB,
+        snr_margin_db: float = _DEFAULT_SNR_MARGIN_DB,
+        snr_floor_db: float = _DEFAULT_SNR_FLOOR_DB,
+        noise_ema_alpha: float = _DEFAULT_NOISE_EMA_ALPHA,
     ) -> None:
         self.chirp_ref = chirp_ref
         self.sfs = tuple(sfs)
         self.preamble_len = preamble_len
         self.bin_tolerance = bin_tolerance
         self.snr_threshold_db = snr_threshold_db
+        self.snr_margin_db = snr_margin_db
+        self.snr_floor_db = snr_floor_db
+        self._noise_ema_alpha = noise_ema_alpha
         self._state: dict[int, _SfState] = {sf: _SfState() for sf in self.sfs}
         self._chunk_sample_offset = 0
 
@@ -204,14 +291,25 @@ class PreambleTracker:
         if len(iq_full) < sym_len:
             return []
 
-        peak_bins, peak_mags, noise_floors = SymbolDetector.dechirp(
+        peak_bins, peak_mags, noise_floors, frac_bins = SymbolDetector.dechirp(
             iq_full, sf, ref,
         )
 
         detections: list[Detection] = []
 
+        # Update noise floor EMA — use 25th percentile to resist
+        # inflation from signal-bearing symbols (SFD, header, payload).
+        if len(noise_floors) > 0:
+            chunk_noise = float(np.percentile(noise_floors, 25))
+            a = self._noise_ema_alpha
+            if st.noise_ema < 1e-10:
+                st.noise_ema = chunk_noise
+            else:
+                st.noise_ema = st.noise_ema * (1 - a) + chunk_noise * a
+
         for i in range(len(peak_bins)):
             b = int(peak_bins[i])
+            fb = float(frac_bins[i])
             mag = float(peak_mags[i])
             nf = float(noise_floors[i])
 
@@ -219,6 +317,7 @@ class PreambleTracker:
             dist = min(dist, n_bins - dist)
             if st.count > 0 and dist <= self.bin_tolerance:
                 st.count += 1
+                st.peak_bins.append(fb)
                 st.peak_mags.append(mag)
                 st.noise_floors.append(nf)
             else:
@@ -227,6 +326,7 @@ class PreambleTracker:
                 st.first_sample_offset = (
                     self._chunk_sample_offset - prepend_len + i * sym_len
                 )
+                st.peak_bins = [fb]
                 st.peak_mags = [mag]
                 st.noise_floors = [nf]
 
@@ -234,9 +334,9 @@ class PreambleTracker:
                 det = self._make_detection(sf, st, timestamp)
                 if det is not None:
                     detections.append(det)
-                # Reset to allow detecting the next packet
                 st.last_bin = -1
                 st.count = 0
+                st.peak_bins = []
                 st.peak_mags = []
                 st.noise_floors = []
 
@@ -254,7 +354,17 @@ class PreambleTracker:
             mean_noise = 1e-10
         snr_db = 20.0 * np.log10(mean_peak / mean_noise)
 
-        if snr_db < self.snr_threshold_db:
+        if snr_db < self.snr_floor_db:
+            return None
+
+        # Adaptive threshold: when the noise EMA is primed, require the
+        # peak to exceed noise_ema by snr_margin_db.  Otherwise fall back
+        # to the fixed snr_threshold_db.
+        if st.noise_ema > 1e-10:
+            adaptive_peak = st.noise_ema * 10.0 ** (self.snr_margin_db / 20.0)
+            if mean_peak < adaptive_peak:
+                return None
+        elif snr_db < self.snr_threshold_db:
             return None
 
         bw = self.chirp_ref.bw
@@ -436,14 +546,22 @@ class PacketExtractor:
         sf = detection.sf
         sym_len = self.chirp_ref.symbol_length(sf)
         ref = self.chirp_ref.get(sf)
+        sr = self.chirp_ref.sample_rate
+        bw = self.chirp_ref.bw
 
         post = detection.sample_offset + preamble_len * sym_len
+
+        # Refine CFO from preamble IQ via high-resolution FFT
+        cfo_hz = self._estimate_cfo(
+            ring_buf, detection.sample_offset, preamble_len, ref, sf, sr,
+        )
 
         # --- Sync word (2 upchirps) ---
         sync_iq = ring_buf.read(post, 2 * sym_len)
         if sync_iq is None:
             return None
-        sync_bins, _, _ = SymbolDetector.dechirp(sync_iq, sf, ref)
+        sync_iq = self._compensate_cfo(sync_iq, cfo_hz, sr, post)
+        sync_bins, _, _, _ = SymbolDetector.dechirp(sync_iq, sf, ref)
         if len(sync_bins) < 2:
             return None
         sync_byte = self._match_sync_word(
@@ -460,7 +578,8 @@ class PacketExtractor:
         hdr_iq = ring_buf.read(hdr_start, self._HEADER_PPM * sym_len)
         if hdr_iq is None:
             return None
-        hdr_bins, _, _ = SymbolDetector.dechirp(hdr_iq, sf, ref)
+        hdr_iq = self._compensate_cfo(hdr_iq, cfo_hz, sr, hdr_start)
+        hdr_bins, _, _, _ = SymbolDetector.dechirp(hdr_iq, sf, ref)
         if len(hdr_bins) < self._HEADER_PPM:
             return None
         header_symbols = [int(b) for b in hdr_bins[: self._HEADER_PPM]]
@@ -491,7 +610,8 @@ class PacketExtractor:
             pay_iq = ring_buf.read(pay_start, n_syms * sym_len)
             if pay_iq is None:
                 return None
-            pay_bins, _, _ = SymbolDetector.dechirp(pay_iq, sf, ref)
+            pay_iq = self._compensate_cfo(pay_iq, cfo_hz, sr, pay_start)
+            pay_bins, _, _, _ = SymbolDetector.dechirp(pay_iq, sf, ref)
             payload_symbols = [int(b) for b in pay_bins]
 
         return PacketSymbols(
@@ -505,6 +625,45 @@ class PacketExtractor:
             has_crc=has_crc,
             header_ok=header_ok,
         )
+
+    @staticmethod
+    def _estimate_cfo(
+        ring_buf: IQRingBuffer,
+        sample_offset: int,
+        preamble_len: int,
+        ref: np.ndarray,
+        sf: int,
+        sample_rate: int,
+    ) -> float:
+        """Estimate carrier frequency offset from the preamble IQ.
+
+        Dechirps the full preamble and uses a long FFT across all symbols
+        for sub-bin frequency resolution.
+        """
+        sym_len = len(ref)
+        preamble_iq = ring_buf.read(sample_offset, preamble_len * sym_len)
+        if preamble_iq is None:
+            return 0.0
+        dechirped = preamble_iq * np.tile(ref, preamble_len)
+        n_fft = len(dechirped)
+        spectrum = np.abs(np.fft.fft(dechirped))
+        half = n_fft // 2
+        peak = int(np.argmax(spectrum))
+        if peak > half:
+            peak -= n_fft
+        return peak * sample_rate / n_fft
+
+    @staticmethod
+    def _compensate_cfo(
+        iq: np.ndarray,
+        cfo_hz: float,
+        sample_rate: int,
+        start_sample: int,
+    ) -> np.ndarray:
+        if abs(cfo_hz) < 1.0:
+            return iq
+        t = (start_sample + np.arange(len(iq), dtype=np.float64)) / sample_rate
+        return (iq * np.exp(-2j * np.pi * cfo_hz * t)).astype(np.complex64)
 
     # ------------------------------------------------------------------
 

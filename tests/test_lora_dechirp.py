@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from reticulumpi.builtin_plugins.lora_dechirp import (
+    ChannelFilter,
     ChirpReference,
     DecodedPacket,
     Detection,
@@ -14,6 +15,7 @@ from reticulumpi.builtin_plugins.lora_dechirp import (
     PacketSymbols,
     PreambleTracker,
     SymbolDetector,
+    max_packet_samples,
     sync_word_bins,
 )
 
@@ -122,7 +124,7 @@ class TestSymbolDetector:
         cr = ChirpReference(SAMPLE_RATE, BW)
         ref = cr.get(sf)
         chirp = make_upchirp(sf, symbol=0)
-        bins, mags, nfs = SymbolDetector.dechirp(chirp, sf, ref)
+        bins, mags, nfs, _ = SymbolDetector.dechirp(chirp, sf, ref)
         assert len(bins) == 1
         assert bins[0] == 0
 
@@ -135,7 +137,7 @@ class TestSymbolDetector:
         cr = ChirpReference(SAMPLE_RATE, BW)
         ref = cr.get(sf)
         chirp = make_upchirp(sf, symbol=symbol)
-        bins, mags, _ = SymbolDetector.dechirp(chirp, sf, ref)
+        bins, mags, _, _ = SymbolDetector.dechirp(chirp, sf, ref)
         assert len(bins) == 1
         assert bins[0] == symbol, f"expected bin {symbol}, got {bins[0]}"
 
@@ -145,7 +147,7 @@ class TestSymbolDetector:
         ref = cr.get(sf)
         symbols = [0, 10, 50, 100, 127]
         iq = np.concatenate([make_upchirp(sf, s) for s in symbols])
-        bins, mags, nfs = SymbolDetector.dechirp(iq, sf, ref)
+        bins, mags, nfs, _ = SymbolDetector.dechirp(iq, sf, ref)
         assert len(bins) == len(symbols)
         for i, s in enumerate(symbols):
             assert bins[i] == s
@@ -155,7 +157,7 @@ class TestSymbolDetector:
         cr = ChirpReference(SAMPLE_RATE, BW)
         ref = cr.get(sf)
         iq = make_preamble(sf, n_symbols=1, symbol=42, snr_db=10.0)
-        bins, _, _ = SymbolDetector.dechirp(iq, sf, ref)
+        bins, _, _, _ = SymbolDetector.dechirp(iq, sf, ref)
         assert bins[0] == 42
 
     def test_empty_input(self):
@@ -163,7 +165,7 @@ class TestSymbolDetector:
         cr = ChirpReference(SAMPLE_RATE, BW)
         ref = cr.get(sf)
         iq = np.array([], dtype=np.complex64)
-        bins, mags, nfs = SymbolDetector.dechirp(iq, sf, ref)
+        bins, mags, nfs, _ = SymbolDetector.dechirp(iq, sf, ref)
         assert len(bins) == 0
 
     def test_short_input_dropped(self):
@@ -171,7 +173,7 @@ class TestSymbolDetector:
         cr = ChirpReference(SAMPLE_RATE, BW)
         ref = cr.get(sf)
         iq = np.ones(10, dtype=np.complex64)
-        bins, _, _ = SymbolDetector.dechirp(iq, sf, ref)
+        bins, _, _, _ = SymbolDetector.dechirp(iq, sf, ref)
         assert len(bins) == 0
 
 
@@ -228,6 +230,7 @@ class TestPreambleTracker:
         cr = ChirpReference(SAMPLE_RATE, BW)
         tracker = PreambleTracker(
             cr, sfs=(7,), preamble_len=8, snr_threshold_db=40.0,
+            snr_floor_db=40.0,
         )
         iq = make_preamble(7, n_symbols=8, snr_db=3.0)
         dets = tracker.feed_chunk(iq, timestamp=1000.0)
@@ -798,3 +801,240 @@ class TestPacketExtractor:
         ext = PacketExtractor(cref, known_sync_words=(sync,), sync_tolerance=0)
         syms = ext.try_extract(self._make_detection(sf), ring)
         assert syms is None
+
+
+# ===========================================================================
+# max_packet_samples
+# ===========================================================================
+
+
+class TestMaxPacketSamples:
+    def test_sf7_fits_actual_packet(self):
+        """Capacity must be >= actual packet IQ length for any payload."""
+        sf, cr = 7, 1
+        payload = b"\xDE\xAD"
+        pkt_iq = make_lora_packet(sf, payload, cr=cr)
+        cap = max_packet_samples(sf, SAMPLE_RATE, BW, cr=cr, max_payload_len=len(payload))
+        assert cap >= len(pkt_iq)
+
+    def test_sf12_max_payload(self):
+        cap = max_packet_samples(12, SAMPLE_RATE, BW, cr=4, max_payload_len=255)
+        assert cap > SAMPLE_RATE * 2, "SF12 max packet must exceed 2s buffer"
+
+    @pytest.mark.parametrize("sf", [7, 8, 9, 10, 11, 12])
+    def test_monotonic_with_sf(self, sf: int):
+        """Higher SF → more samples (at same payload/CR)."""
+        cap = max_packet_samples(sf, SAMPLE_RATE, BW)
+        cap_prev = max_packet_samples(max(7, sf - 1), SAMPLE_RATE, BW)
+        if sf > 7:
+            assert cap > cap_prev
+
+    def test_sf12_ring_buffer_holds_packet(self):
+        sf, cr = 12, 1
+        payload = b"\xAB\xCD"
+        pkt_iq = make_lora_packet(sf, payload, cr=cr)
+        cap = max_packet_samples(sf, SAMPLE_RATE, BW, cr=cr, max_payload_len=len(payload))
+        ring = IQRingBuffer(cap)
+        ring.write(pkt_iq)
+        result = ring.read(0, len(pkt_iq))
+        assert result is not None
+        np.testing.assert_array_equal(result, pkt_iq)
+
+
+# ===========================================================================
+# CFO compensation
+# ===========================================================================
+
+
+def _apply_freq_offset(iq: np.ndarray, offset_hz: float, sample_rate: int) -> np.ndarray:
+    """Shift IQ by a constant frequency offset (simulates RTL-SDR drift)."""
+    t = np.arange(len(iq), dtype=np.float64) / sample_rate
+    return (iq * np.exp(2j * np.pi * offset_hz * t)).astype(np.complex64)
+
+
+class TestCFOCompensation:
+    def _extract_with_offset(
+        self,
+        sf: int,
+        payload: bytes,
+        offset_hz: float,
+        cr: int = 1,
+        sync: int = 0x34,
+    ) -> DecodedPacket | None:
+        pkt_iq = make_lora_packet(sf, payload, cr=cr, sync_byte=sync)
+        shifted = _apply_freq_offset(pkt_iq, offset_hz, SAMPLE_RATE)
+
+        cref = ChirpReference(SAMPLE_RATE, BW)
+        ring = IQRingBuffer(len(shifted) + 10000)
+        ring.write(shifted)
+
+        tracker = PreambleTracker(
+            cref, sfs=(sf,), preamble_len=8,
+            snr_threshold_db=0.0, snr_floor_db=0.0,
+        )
+        dets = tracker.feed_chunk(shifted, timestamp=1000.0)
+        if not dets:
+            return None
+
+        ext = PacketExtractor(cref, known_sync_words=(sync,))
+        syms = ext.try_extract(dets[0], ring)
+        if syms is None:
+            return None
+        return PacketExtractor.decode(syms)
+
+    def test_zero_offset_still_works(self):
+        decoded = self._extract_with_offset(7, b"\xDE\xAD", 0.0)
+        assert decoded is not None
+        assert decoded.payload == b"\xDE\xAD"
+        assert decoded.crc_ok is True
+
+    @pytest.mark.parametrize("offset_hz", [500.0, 1000.0, 2000.0, 4000.0])
+    def test_sf7_recovers_with_moderate_offset(self, offset_hz: float):
+        decoded = self._extract_with_offset(7, b"\xCA\xFE", offset_hz)
+        assert decoded is not None
+        assert decoded.payload == b"\xCA\xFE"
+        assert decoded.crc_ok is True
+
+    @pytest.mark.parametrize("offset_hz", [-1000.0, -3000.0])
+    def test_negative_offset(self, offset_hz: float):
+        decoded = self._extract_with_offset(7, b"\xAB", offset_hz)
+        assert decoded is not None
+        assert decoded.payload == b"\xAB"
+        assert decoded.crc_ok is True
+
+    def test_sf9_with_large_offset(self):
+        """SF9 has 512 bins — 4.5 kHz offset is ~18 bins, would fail without CFO."""
+        decoded = self._extract_with_offset(9, b"\x01\x02", 4000.0)
+        assert decoded is not None
+        assert decoded.crc_ok is True
+
+
+# ===========================================================================
+# ChannelFilter
+# ===========================================================================
+
+
+class TestChannelFilter:
+    def test_preserves_in_band_signal(self):
+        """A LoRa preamble within BW should pass through unharmed."""
+        filt = ChannelFilter(SAMPLE_RATE, BW)
+        preamble = make_preamble(7, n_symbols=8)
+        filtered = filt.apply(preamble)
+        assert filtered.shape == preamble.shape
+        assert filtered.dtype == np.complex64
+        # Signal power should be mostly preserved (> 90%)
+        ratio = np.mean(np.abs(filtered) ** 2) / np.mean(np.abs(preamble) ** 2)
+        assert ratio > 0.9
+
+    def test_attenuates_out_of_band_noise(self):
+        """Noise outside BW should be reduced."""
+        filt = ChannelFilter(SAMPLE_RATE, BW)
+        rng = np.random.default_rng(42)
+        n = 10000
+        # Broadband noise
+        noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64)
+        filtered = filt.apply(noise)
+        # Filtered noise should have less power (filter passes BW/SR = 50% of band)
+        ratio = np.mean(np.abs(filtered) ** 2) / np.mean(np.abs(noise) ** 2)
+        assert ratio < 0.7
+
+    def test_improves_detection_at_low_snr(self):
+        """Filter should enable preamble detection at SNR that fails without it."""
+        sf = 7
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        filt = ChannelFilter(SAMPLE_RATE, BW)
+
+        preamble = make_preamble(sf, n_symbols=8, snr_db=6.0)
+
+        # Without filter — may or may not detect
+        tracker_raw = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, snr_threshold_db=8.0,
+        )
+        dets_raw = tracker_raw.feed_chunk(preamble, timestamp=1000.0)
+
+        # With filter — should detect due to reduced noise
+        tracker_filt = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, snr_threshold_db=8.0,
+        )
+        filtered = filt.apply(preamble)
+        dets_filt = tracker_filt.feed_chunk(filtered, timestamp=1000.0)
+
+        assert len(dets_filt) >= len(dets_raw)
+        assert len(dets_filt) >= 1
+
+    def test_kernel_cached(self):
+        f1 = ChannelFilter(SAMPLE_RATE, BW)
+        f2 = ChannelFilter(SAMPLE_RATE, BW)
+        assert f1._kernel is f2._kernel
+
+    def test_short_input_passthrough(self):
+        filt = ChannelFilter(SAMPLE_RATE, BW, num_taps=31)
+        short = np.ones(10, dtype=np.complex64)
+        result = filt.apply(short)
+        np.testing.assert_array_equal(result, short)
+
+
+# ===========================================================================
+# Adaptive SNR threshold
+# ===========================================================================
+
+
+class TestAdaptiveSNRThreshold:
+    def test_weak_signal_detected_in_quiet_environment(self):
+        """An 8 dB preamble should be detected when the noise floor is low,
+        even though 8 dB is below the default fixed threshold of 12 dB."""
+        sf = 7
+        cr = ChirpReference(SAMPLE_RATE, BW)
+
+        # Prime the tracker with noise-only chunks so noise_ema stabilises
+        rng = np.random.default_rng(99)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8,
+            snr_threshold_db=12.0,
+            snr_margin_db=10.0,
+            snr_floor_db=5.0,
+        )
+        sym_len = cr.symbol_length(sf)
+        noise_chunk = (rng.standard_normal(sym_len * 20).astype(np.float32) * 0.01
+                       + 1j * rng.standard_normal(sym_len * 20).astype(np.float32) * 0.01)
+        tracker.feed_chunk(noise_chunk.astype(np.complex64), timestamp=999.0)
+
+        # Now feed a preamble at 8 dB SNR
+        preamble = make_preamble(sf, n_symbols=8, snr_db=8.0)
+        dets = tracker.feed_chunk(preamble, timestamp=1000.0)
+        assert len(dets) >= 1, "8 dB preamble should be detected in quiet noise"
+
+    def test_noise_only_no_false_detection(self):
+        """Pure noise should never trigger a detection."""
+        sf = 7
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8,
+            snr_threshold_db=12.0,
+            snr_margin_db=10.0,
+            snr_floor_db=5.0,
+        )
+        rng = np.random.default_rng(77)
+        sym_len = cr.symbol_length(sf)
+        for i in range(10):
+            noise = (rng.standard_normal(sym_len * 16).astype(np.float32)
+                     + 1j * rng.standard_normal(sym_len * 16).astype(np.float32))
+            dets = tracker.feed_chunk(noise.astype(np.complex64), timestamp=1000.0 + i)
+            assert len(dets) == 0, f"False detection in noise chunk {i}"
+
+    def test_floor_prevents_absurdly_weak_detection(self):
+        """Even in dead silence, SNR below snr_floor_db should be rejected.
+        Post-dechirp SNR for a 3 dB input preamble at SF7 is ~28 dB
+        (dechirp gain ≈ 10·log10(128) ≈ 21 dB), so the floor must be
+        set above that to reject."""
+        sf = 7
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8,
+            snr_threshold_db=12.0,
+            snr_margin_db=10.0,
+            snr_floor_db=35.0,  # above the ~28 dB post-dechirp SNR
+        )
+        preamble = make_preamble(sf, n_symbols=8, snr_db=3.0)
+        dets = tracker.feed_chunk(preamble, timestamp=1000.0)
+        assert len(dets) == 0, "Post-dechirp ~28 dB should be rejected by 35 dB floor"
