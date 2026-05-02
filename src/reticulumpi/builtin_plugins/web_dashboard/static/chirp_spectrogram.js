@@ -25,9 +25,11 @@
     7:  '#ff6b9d', 8:  '#ff9f43', 9:  '#ffd93d',
     10: '#6bff6b', 11: '#43c9ff', 12: '#b67dff',
   };
+  var SYNC_COLORS = { 0x34: '#ffffff', 0x12: '#00e5ff' };
+  var SYNC_NAMES  = { 0x34: 'LoRaWAN', 0x12: 'Meshtastic' };
 
   // -- DOM handles --------------------------------------------------------
-  var _section, _freqSelect, _bwSelect, _sfToggle, _statusLabel;
+  var _section, _freqSelect, _freqInput, _bwSelect, _sfToggle, _statusLabel;
   var _metaEl, _canvas, _ctx, _overlayEl, _hoverEl, _detIndicator, _pktIndicator;
   var _pktDetail, _pktTbody;
   var _resolved = false;
@@ -56,6 +58,7 @@
   var MAX_PACKETS = 128;
   var _pktCount = 0;
   var _pktExpanded = false;
+  var _highlightedPktKey = null;
 
   // -- Contextual hover state (populated from periodic updates) -----------
   var _ourFreqHz = null, _ourBwHz = null, _ourSf = null, _ourCr = null;
@@ -71,6 +74,7 @@
     _section = $('chirp-viewer-section');
     if (!_section) return false;
     _freqSelect = $('chirp-freq-select');
+    _freqInput = $('chirp-freq-input');
     _bwSelect = $('chirp-bw-select');
     _sfToggle = $('chirp-sf-toggle');
     _statusLabel = $('chirp-status-label');
@@ -97,6 +101,7 @@
       _resizeCanvas();
       _canvas.addEventListener('mousemove', _onHover);
       _canvas.addEventListener('mouseleave', _onHoverLeave);
+      _canvas.addEventListener('click', _onDetClick);
       var parent = _canvas.parentElement;
       if (parent && typeof ResizeObserver !== 'undefined') {
         new ResizeObserver(function () {
@@ -115,10 +120,26 @@
     // Wire controls
     if (_freqSelect) {
       _populateFreqSelect();
-      _freqSelect.addEventListener('change', _onParamChange);
+      _freqSelect.addEventListener('change', function () {
+        var prev = _freqSelect.querySelector('[data-custom]');
+        if (prev) prev.remove();
+        _freqSelect.classList.remove('chirp-select--custom');
+        if (_freqInput) _freqInput.value = parseFloat(_freqSelect.value).toFixed(3);
+        _onParamChange();
+      });
+    }
+    if (_freqInput) {
+      _freqInput.addEventListener('change', function () {
+        _syncSelectToInput();
+        _onParamChange();
+      });
+      _freqInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); _freqInput.blur(); }
+      });
     }
     if (_bwSelect) _bwSelect.addEventListener('change', function () {
       _populateFreqSelect();
+      _syncSelectToInput();
       _onParamChange();
     });
 
@@ -146,11 +167,52 @@
 
   function _populateFreqSelect() {
     if (!_freqSelect) return;
-    var prev = parseFloat(_freqSelect.value);
+    var prev = _freqInput ? parseFloat(_freqInput.value) : parseFloat(_freqSelect.value);
     _freqSelect.innerHTML = '';
 
     var bwHz = _bwSelect ? parseInt(_bwSelect.value) : 250000;
     var bwMhz = bwHz / 1e6;
+
+    // Mesh network presets (off-grid frequencies)
+    var meshPresets = [
+      { mhz: 906.875,  label: 'LongFast 250k · 906.875' },
+      { mhz: 912.8125, label: 'LongModerate 125k · 912.813' },
+      { mhz: 905.3125, label: 'LongSlow 125k · 905.313' },
+      { mhz: 905.0313, label: 'VLongSlow 62.5k · 905.031' },
+      { mhz: 913.125,  label: 'MediumFast 250k · 913.125' },
+      { mhz: 914.875,  label: 'MediumSlow 250k · 914.875' },
+      { mhz: 918.875,  label: 'ShortFast 250k · 918.875' },
+      { mhz: 920.625,  label: 'ShortSlow 250k · 920.625' },
+      { mhz: 926.75,   label: 'ShortTurbo 500k · 926.750' },
+    ];
+    var meshGroup = document.createElement('optgroup');
+    meshGroup.label = 'Meshtastic US';
+    for (var mi = 0; mi < meshPresets.length; mi++) {
+      var mp = meshPresets[mi];
+      var mopt = document.createElement('option');
+      mopt.value = mp.mhz.toFixed(4);
+      mopt.textContent = mp.label;
+      meshGroup.appendChild(mopt);
+    }
+    _freqSelect.appendChild(meshGroup);
+
+    var mcGroup = document.createElement('optgroup');
+    mcGroup.label = 'MeshCore US';
+    var mcOpt = document.createElement('option');
+    mcOpt.value = '910.5250';
+    mcOpt.textContent = 'Default 62.5k · 910.525';
+    mcGroup.appendChild(mcOpt);
+    _freqSelect.appendChild(mcGroup);
+
+    var rnGroup = document.createElement('optgroup');
+    rnGroup.label = 'Reticulum RNode';
+    var rnOpt = document.createElement('option');
+    rnOpt.value = '915.0000';
+    rnOpt.textContent = 'Default 125k · 915.000';
+    rnGroup.appendChild(rnOpt);
+    _freqSelect.appendChild(rnGroup);
+
+    // LoRaWAN channel grid regions
     var regions = SC.LORA_REGIONS;
     var order = SC.LORA_REGION_ORDER;
 
@@ -209,12 +271,40 @@
       }
       if (bestDist < 5) _freqSelect.selectedIndex = bestIdx;
     }
+    if (_freqInput && !_freqInput.value && _freqSelect.value) {
+      _freqInput.value = parseFloat(_freqSelect.value).toFixed(3);
+    }
+  }
+
+  function _syncSelectToInput() {
+    if (!_freqSelect || !_freqInput) return;
+    var mhz = parseFloat(_freqInput.value);
+    if (isNaN(mhz)) return;
+    // Remove any previous "Custom" placeholder
+    var prev = _freqSelect.querySelector('[data-custom]');
+    if (prev) prev.remove();
+    for (var i = 0; i < _freqSelect.options.length; i++) {
+      if (Math.abs(parseFloat(_freqSelect.options[i].value) - mhz) < 0.05) {
+        _freqSelect.selectedIndex = i;
+        _freqSelect.classList.remove('chirp-select--custom');
+        return;
+      }
+    }
+    // No preset match — show "Custom" so the dropdown doesn't mislead
+    var opt = document.createElement('option');
+    opt.value = mhz.toFixed(4);
+    opt.textContent = '• ' + mhz.toFixed(3) + ' MHz';
+    opt.setAttribute('data-custom', '1');
+    _freqSelect.insertBefore(opt, _freqSelect.firstChild);
+    _freqSelect.selectedIndex = 0;
+    _freqSelect.classList.add('chirp-select--custom');
   }
 
   // -- Parameter changes --------------------------------------------------
 
   function _onParamChange() {
-    var freqMhz = _freqSelect ? parseFloat(_freqSelect.value) : null;
+    var freqMhz = _freqInput ? parseFloat(_freqInput.value)
+      : (_freqSelect ? parseFloat(_freqSelect.value) : null);
     var sampleRate = _bwSelect ? parseInt(_bwSelect.value) : null;
     var ws = R.ws;
     if (ws && ws.readyState === 1) {
@@ -439,38 +529,59 @@
     var cW = canvasRect.width, cH = canvasRect.height;
     if (!cW || !cH) return;
 
-    var cols = m.cols || m.fft_size || 256;
     var timeResMs = m.time_res_ms || 31;
+    var bws = m.detection_bws || [_LORA_BW_HZ];
+    var slopesMap = m.sf_slopes;
 
-    for (var si = 0; si < m.sf_slopes.length; si++) {
-      var s = m.sf_slopes[si];
+    // sf_slopes may be a dict keyed by BW or a flat array (legacy)
+    var slopesByBw = {};
+    if (Array.isArray(slopesMap)) {
+      slopesByBw[_LORA_BW_HZ] = slopesMap;
+    } else {
+      slopesByBw = slopesMap;
+    }
+
+    for (var bi = 0; bi < bws.length; bi++) {
+      var bw = bws[bi];
+      var slopes = slopesByBw[bw];
+      if (!slopes) continue;
+      var isDimmed = bi > 0;
+
+    for (var si = 0; si < slopes.length; si++) {
+      var s = slopes[si];
       var sf = s.sf;
       var tSymMs = s.t_symbol_ms;
 
-      // How many display rows one symbol takes
       var rowsPerSym = tSymMs / timeResMs;
       var pixPerSym = rowsPerSym * (cH / _canvasH);
-      // Full chirp sweeps the entire BW horizontally
-      var angleDeg = Math.atan2(pixPerSym, cW) * (180 / Math.PI);
+      var bwFrac = bw / (m.sample_rate || 250000);
+      var chirpWidthPx = cW * bwFrac;
+      var angleDeg = Math.atan2(pixPerSym, chirpWidthPx) * (180 / Math.PI);
 
       var color = SF_COLORS[sf] || '#ffffff';
-      var lineLen = Math.sqrt(cW * cW + pixPerSym * pixPerSym);
+      var lineLen = Math.sqrt(chirpWidthPx * chirpWidthPx + pixPerSym * pixPerSym);
+
+      var opacity = isDimmed ? '0.4' : '0.7';
 
       var guide = document.createElement('div');
       guide.className = 'chirp-sf-line';
       guide.style.cssText =
         'left:0;bottom:0;width:' + lineLen.toFixed(0) + 'px;' +
-        'border-color:' + color + ';' +
+        'border-color:' + color + ';opacity:' + opacity + ';' +
         'transform:rotate(-' + angleDeg.toFixed(1) + 'deg);';
       _overlayEl.appendChild(guide);
 
+      var bwKhz = bw / 1000;
+      var bwStr = bws.length > 1 ? ' ' + bwKhz + 'k' : '';
       var label = document.createElement('div');
       label.className = 'chirp-sf-label';
       label.style.cssText =
-        'left:4px;bottom:' + (pixPerSym + 2).toFixed(0) + 'px;color:' + color + ';';
-      label.textContent = 'SF' + sf;
+        'left:4px;bottom:' + (pixPerSym + 2).toFixed(0) + 'px;color:' + color +
+        ';opacity:' + opacity + ';';
+      label.textContent = 'SF' + sf + bwStr;
       _overlayEl.appendChild(label);
     }
+    } // end bws loop
   }
 
   // -- Hover crosshair ----------------------------------------------------
@@ -483,8 +594,20 @@
     var fracY = (ev.clientY - rect.top) / rect.height;
     if (fracX < 0 || fracX > 1 || fracY < 0 || fracY > 1) {
       _hoverEl.style.display = 'none';
+      _hoverEl.classList.remove('det-tooltip');
+      _highlightPktRow(null);
       return;
     }
+
+    var canvasX = Math.round(fracX * _canvasW);
+    var canvasY = Math.round(fracY * _canvasH);
+    var hitDet = _findDetectionNear(canvasX, canvasY);
+    if (hitDet) {
+      _showDetectionTooltip(hitDet);
+      return;
+    }
+    _hoverEl.classList.remove('det-tooltip');
+    _highlightPktRow(null);
 
     var sr = m.sample_rate || 250000;
     var centerHz = m.freq_center_hz || 0;
@@ -528,7 +651,11 @@
   }
 
   function _onHoverLeave() {
-    if (_hoverEl) _hoverEl.style.display = 'none';
+    if (_hoverEl) {
+      _hoverEl.style.display = 'none';
+      _hoverEl.classList.remove('det-tooltip');
+    }
+    _highlightPktRow(null);
   }
 
   // -- Status updates from periodic broadcast -----------------------------
@@ -568,6 +695,15 @@
 
   var _LORA_BW_HZ = 125000;
 
+  function _detActualFreqHz(det) {
+    var centerHz = det.freq_center_hz || (_lastMeta ? _lastMeta.freq_center_hz : 0);
+    if (!centerHz) return null;
+    var offset = det.freq_offset_hz || 0;
+    var bw = det.detection_bw || _LORA_BW_HZ;
+    if (offset > bw / 2) offset -= bw;
+    return centerHz + offset;
+  }
+
   function _detFreqToX(det) {
     if (!_lastMeta) return -1;
     var sr = _lastMeta.sample_rate || 250000;
@@ -575,16 +711,26 @@
     var loHz = centerHz - sr / 2;
     var spanHz = sr;
     if (spanHz <= 0) return -1;
-
-    // Dechirp wraps negative carrier offsets modulo LoRa BW:
-    // offset > BW/2 means the signal is actually below center frequency.
-    var offset = det.freq_offset_hz || 0;
-    if (offset > _LORA_BW_HZ / 2) offset -= _LORA_BW_HZ;
-
-    var freqHz = (det.freq_center_hz || centerHz) + offset;
+    var freqHz = _detActualFreqHz(det);
+    if (freqHz == null) return -1;
     var fracX = (freqHz - loHz) / spanHz;
     if (fracX < 0 || fracX > 1) return -1;
     return Math.round(fracX * _canvasW);
+  }
+
+  function _linkDetectionToPacket(det) {
+    det._pkt = null;
+    for (var i = 0; i < _packets.length; i++) {
+      var p = _packets[i];
+      if (p.timestamp === det.timestamp && p.sf === det.sf) {
+        det._pkt = p;
+        return;
+      }
+    }
+  }
+
+  function _relinkAllDetections() {
+    for (var i = 0; i < _detections.length; i++) _linkDetectionToPacket(_detections[i]);
   }
 
   function _paintDetectionMarkerAt(ctx, det, y) {
@@ -592,10 +738,11 @@
     if (x < 0) return;
     var color = SF_COLORS[det.sf] || '#ffffff';
     var sz = 10;
+    var pkt = det._pkt;
 
     ctx.save();
 
-    // Full-height vertical line (draw first, behind triangle)
+    // Full-height vertical line
     ctx.globalAlpha = 0.55;
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
@@ -607,7 +754,7 @@
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Triangle pointing down
+    // Triangle fill
     ctx.globalAlpha = 0.9;
     ctx.fillStyle = color;
     ctx.shadowColor = color;
@@ -620,16 +767,48 @@
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // SF label
+    // Sync word outline on triangle
+    if (pkt && pkt.sync_word != null) {
+      ctx.strokeStyle = SYNC_COLORS[pkt.sync_word] || '#888';
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 1.0;
+      ctx.beginPath();
+      ctx.moveTo(x - sz, y);
+      ctx.lineTo(x + sz, y);
+      ctx.lineTo(x, y + sz * 1.4);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // CRC badge
+    var badgeOffset = 0;
+    if (pkt) {
+      var crcColor = pkt.crc_ok === true ? '#4f4'
+                   : pkt.crc_ok === false ? '#f44' : '#888';
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = crcColor;
+      ctx.beginPath();
+      ctx.arc(x + sz + 6, y + sz * 0.7, 4, 0, 2 * Math.PI);
+      ctx.fill();
+      badgeOffset = 14;
+    }
+
+    // Label: SF + frequency + SNR
     ctx.globalAlpha = 1.0;
     ctx.font = 'bold 11px monospace';
     ctx.fillStyle = color;
-    var label = 'SF' + det.sf;
+    var freqHz = _detActualFreqHz(det);
+    var freqStr = freqHz != null ? ' ' + (freqHz / 1e6).toFixed(2) : '';
+    var detBwKhz = (det.detection_bw || 125000) / 1000;
+    var bwStr = detBwKhz !== 125 ? ' ' + detBwKhz + 'k' : '';
+    var label = 'SF' + det.sf + bwStr + freqStr;
     var snr = det.snr_db != null ? ' ' + det.snr_db.toFixed(1) + 'dB' : '';
-    var labelX = x + sz + 4;
+    var fullLabel = label + snr;
+    var textW = ctx.measureText(fullLabel).width;
+    var labelX = x + sz + 4 + badgeOffset;
     var labelY = y + sz * 1.2;
-    if (labelX + 80 > _canvasW) labelX = x - sz - 4 - ctx.measureText(label + snr).width;
-    ctx.fillText(label + snr, labelX, labelY);
+    if (labelX + textW > _canvasW) labelX = x - sz - 4 - textW;
+    ctx.fillText(fullLabel, labelX, labelY);
 
     ctx.restore();
   }
@@ -646,6 +825,98 @@
     }
   }
 
+  function _findDetectionNear(canvasX, canvasY) {
+    var hitRadius = 18;
+    var best = null, bestDist = Infinity;
+    for (var i = 0; i < _detections.length; i++) {
+      var det = _detections[i];
+      if (det._arrivalRow == null) continue;
+      var markerY = _detRowOffset - det._arrivalRow;
+      if (markerY < 0 || markerY >= _canvasH) continue;
+      var dy = canvasY - markerY;
+      if (Math.abs(dy) > hitRadius) continue;
+      var markerX = _detFreqToX(det);
+      if (markerX < 0) continue;
+      var dx = canvasX - markerX;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < hitRadius && dist < bestDist) {
+        bestDist = dist;
+        best = det;
+      }
+    }
+    return best;
+  }
+
+  function _showDetectionTooltip(det) {
+    if (!_hoverEl) return;
+    var lines = [];
+    var freqHz = _detActualFreqHz(det);
+    if (freqHz) lines.push((freqHz / 1e6).toFixed(3) + ' MHz');
+    lines.push('SF' + det.sf + ' · ' + det.snr_db.toFixed(1) + ' dB SNR');
+
+    var pkt = det._pkt;
+    if (pkt) {
+      var syncName = SYNC_NAMES[pkt.sync_word] || ('0x' + (pkt.sync_word || 0).toString(16));
+      lines.push('Sync: ' + syncName);
+      lines.push('CR 4/' + (4 + (pkt.cr || 0)));
+      var crcStr = pkt.crc_ok === true ? 'CRC OK'
+                 : pkt.crc_ok === false ? 'CRC FAIL' : 'no CRC';
+      if (pkt.errors_corrected) crcStr += ' (' + pkt.errors_corrected + ' corrected)';
+      lines.push(crcStr);
+      if (pkt.payload_len != null) lines.push(pkt.payload_len + ' bytes');
+      if (pkt.payload_hex) {
+        var hex = pkt.payload_hex.length > 48
+          ? pkt.payload_hex.substring(0, 48) + '…'
+          : pkt.payload_hex;
+        lines.push(hex);
+      }
+    } else {
+      lines.push('(no decoded packet)');
+    }
+
+    var age = det.timestamp ? SC.formatAge(Date.now() / 1000 - det.timestamp) : '';
+    if (age) lines.push(age);
+
+    _hoverEl.innerHTML = lines.map(function (l) { return esc(l); }).join('<br>');
+    _hoverEl.classList.add('det-tooltip');
+    _hoverEl.style.display = 'block';
+
+    if (pkt) {
+      _highlightPktRow(pkt.timestamp + ':' + pkt.sf);
+    } else {
+      _highlightPktRow(null);
+    }
+  }
+
+  function _highlightPktRow(key) {
+    if (key === _highlightedPktKey) return;
+    if (_highlightedPktKey && _pktTbody) {
+      var prev = _pktTbody.querySelector('[data-pkt-key="' + _highlightedPktKey + '"]');
+      if (prev) prev.classList.remove('pkt-highlight');
+    }
+    _highlightedPktKey = key;
+    if (!key || !_pktTbody) return;
+    var row = _pktTbody.querySelector('[data-pkt-key="' + key + '"]');
+    if (row) row.classList.add('pkt-highlight');
+  }
+
+  function _onDetClick(ev) {
+    var rect = _canvas.getBoundingClientRect();
+    var fracX = (ev.clientX - rect.left) / rect.width;
+    var fracY = (ev.clientY - rect.top) / rect.height;
+    var canvasX = Math.round(fracX * _canvasW);
+    var canvasY = Math.round(fracY * _canvasH);
+    var det = _findDetectionNear(canvasX, canvasY);
+    if (!det || !det._pkt) return;
+    if (!_pktExpanded) _togglePktDetail();
+    var key = det._pkt.timestamp + ':' + det._pkt.sf;
+    _highlightPktRow(key);
+    if (_pktTbody) {
+      var row = _pktTbody.querySelector('[data-pkt-key="' + key + '"]');
+      if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
   function _timestampToRow(ts) {
     if (!ts || !_rowTimestamps.length) return _detRowOffset;
     var best = 0, bestDist = Infinity;
@@ -655,6 +926,25 @@
       if (d < bestDist) { bestDist = d; best = i; }
     }
     return _detRowOffset - best;
+  }
+
+  function _detectionRate() {
+    if (_detections.length < 2) return null;
+    var now = Date.now() / 1000;
+    var windowSec = 60;
+    var count = 0;
+    for (var i = 0; i < _detections.length; i++) {
+      if (_detections[i].timestamp && (now - _detections[i].timestamp) <= windowSec) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    if (count < 1) return null;
+    var oldest = _detections[Math.min(count - 1, _detections.length - 1)].timestamp;
+    var span = now - oldest;
+    if (span < 1) return null;
+    return (count / span) * 60;
   }
 
   function _updateDetIndicator() {
@@ -667,18 +957,22 @@
     var recent = _detections.length > 0 ? _detections[0] : null;
     var sfText = recent ? 'SF' + recent.sf : '';
     var snrText = recent ? recent.snr_db.toFixed(1) + ' dB' : '';
+    var rate = _detectionRate();
+    var rateText = rate != null ? rate.toFixed(1) + '/min' : '';
     _detIndicator.innerHTML =
       '<span class="det-count">' + esc(String(_detCount)) + ' detection' +
       (_detCount === 1 ? '' : 's') + '</span>' +
       (sfText ? ' <span class="det-latest" style="color:' +
         (SF_COLORS[recent.sf] || '#fff') + '">' +
-        esc(sfText) + ' · ' + esc(snrText) + '</span>' : '');
+        esc(sfText) + ' · ' + esc(snrText) + '</span>' : '') +
+      (rateText ? ' <span class="det-rate">' + esc(rateText) + '</span>' : '');
   }
 
   function handleDetection(det) {
     if (!det) return;
     if (!_resolveDom()) return;
     det._arrivalRow = _detRowOffset;
+    _linkDetectionToPacket(det);
     _detections.unshift(det);
     if (_detections.length > MAX_DETECTIONS) _detections.length = MAX_DETECTIONS;
     _detCount++;
@@ -702,6 +996,7 @@
     }
     if (_detections.length > MAX_DETECTIONS) _detections.length = MAX_DETECTIONS;
     _detCount = data.length;
+    _relinkAllDetections();
     _updateDetIndicator();
     _repaintDetections();
   }
@@ -738,6 +1033,12 @@
     _packets.unshift(pkt);
     if (_packets.length > MAX_PACKETS) _packets.length = MAX_PACKETS;
     _pktCount++;
+    for (var i = 0; i < _detections.length; i++) {
+      if (_detections[i].timestamp === pkt.timestamp && _detections[i].sf === pkt.sf) {
+        _detections[i]._pkt = pkt;
+        break;
+      }
+    }
     _updatePktIndicator();
     if (_pktExpanded && _pktTbody) {
       var now = Date.now() / 1000;
@@ -758,6 +1059,7 @@
     }
     if (_packets.length > MAX_PACKETS) _packets.length = MAX_PACKETS;
     _pktCount = data.length;
+    _relinkAllDetections();
     _updatePktIndicator();
     if (_pktExpanded) _rebuildPktTable();
   }
@@ -784,6 +1086,9 @@
 
   function _pktRow(p, now) {
     var tr = document.createElement('tr');
+    if (p.timestamp != null && p.sf != null) {
+      tr.setAttribute('data-pkt-key', p.timestamp + ':' + p.sf);
+    }
     var age = (p.timestamp != null) ? SC.formatAge(now - p.timestamp) : '--';
     var sfColor = SF_COLORS[p.sf] || '#fff';
     var crText = 'CR4/' + (4 + (p.cr || 0));
@@ -816,22 +1121,9 @@
   }
 
   function setFreqMhz(mhz) {
-    if (!_freqSelect) return;
-    var found = false;
-    for (var i = 0; i < _freqSelect.options.length; i++) {
-      if (Math.abs(parseFloat(_freqSelect.options[i].value) - mhz) < 0.05) {
-        _freqSelect.selectedIndex = i;
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      var opt = document.createElement('option');
-      opt.value = mhz.toFixed(4);
-      opt.textContent = mhz.toFixed(3) + ' MHz';
-      _freqSelect.appendChild(opt);
-      _freqSelect.value = opt.value;
-    }
+    if (!_resolveDom()) return;
+    if (_freqInput) _freqInput.value = mhz.toFixed(3);
+    _syncSelectToInput();
   }
 
   R.chirpSpectrogram = {

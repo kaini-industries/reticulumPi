@@ -52,6 +52,7 @@ _CHIRP_DEFAULTS: dict[str, object] = {
     "chirp_batch_interval_s": 0.5,
     "chirp_waterfall_depth": 1024,
     "chirp_detection_enabled": True,
+    "chirp_detection_bws": [125_000],
     "chirp_detection_sfs": [7, 8, 9, 10, 11, 12],
     "chirp_detection_preamble_len": 8,
     "chirp_detection_snr_threshold_db": 12.0,
@@ -87,6 +88,10 @@ class LoraChirpViewer(LoraScanner):
         self._chirp_wf_depth = int(self.config["chirp_waterfall_depth"])
 
         self._detection_enabled = bool(self.config["chirp_detection_enabled"])
+        raw_bws = self.config["chirp_detection_bws"]
+        if not isinstance(raw_bws, list):
+            raw_bws = [raw_bws]
+        self._detection_bws: list[int] = [int(b) for b in raw_bws]
         self._detection_sfs = [int(s) for s in self.config["chirp_detection_sfs"]]
         self._detection_preamble_len = int(self.config["chirp_detection_preamble_len"])
         self._detection_snr_threshold_db = float(self.config["chirp_detection_snr_threshold_db"])
@@ -126,7 +131,7 @@ class LoraChirpViewer(LoraScanner):
         self._window = np.hanning(fft_size).astype(np.float32)
 
         # Chirp detection (dechirp-based preamble finder)
-        self._preamble_tracker: PreambleTracker | None = None
+        self._trackers: list[tuple[int, PreambleTracker, PacketExtractor]] = []
         self._detection_history: deque[dict[str, Any]] = deque(
             maxlen=self._detection_history_depth,
         )
@@ -165,17 +170,20 @@ class LoraChirpViewer(LoraScanner):
         return self._chirp_fft_wide if sr > 500_000 else self._chirp_fft_narrow
 
     def _init_detection(self) -> None:
-        chirp_ref = ChirpReference(self._chirp_sr, _LORA_BW_HZ)
-        self._preamble_tracker = PreambleTracker(
-            chirp_ref=chirp_ref,
-            sfs=self._detection_sfs,
-            preamble_len=self._detection_preamble_len,
-            bin_tolerance=self._detection_bin_tolerance,
-            snr_threshold_db=self._detection_snr_threshold_db,
-        )
+        self._trackers: list[tuple[int, PreambleTracker, PacketExtractor]] = []
+        for bw in self._detection_bws:
+            chirp_ref = ChirpReference(self._chirp_sr, bw)
+            tracker = PreambleTracker(
+                chirp_ref=chirp_ref,
+                sfs=self._detection_sfs,
+                preamble_len=self._detection_preamble_len,
+                bin_tolerance=self._detection_bin_tolerance,
+                snr_threshold_db=self._detection_snr_threshold_db,
+            )
+            extractor = PacketExtractor(chirp_ref)
+            self._trackers.append((bw, tracker, extractor))
         self._iq_ring_buffer = IQRingBuffer(self._chirp_sr * 2)
-        self._packet_extractor = PacketExtractor(chirp_ref)
-        self._pending_extractions: deque[Detection] = deque(maxlen=32)
+        self._pending_extractions: deque[tuple[Detection, PacketExtractor]] = deque(maxlen=32)
 
     def _handle_detection(self, det: Detection) -> None:
         last = self._last_detection_ts.get(det.sf, 0.0)
@@ -191,6 +199,7 @@ class LoraChirpViewer(LoraScanner):
             "snr_db": det.snr_db,
             "freq_center_hz": int(self._chirp_freq_mhz * 1e6),
             "sample_rate": self._chirp_sr,
+            "detection_bw": det.bw,
         }
 
         with self._state_lock:
@@ -207,7 +216,7 @@ class LoraChirpViewer(LoraScanner):
             self.log.debug("chirp detection publish failed", exc_info=True)
 
     def _run_detection(self, raw_bytes: bytes, timestamp: float) -> None:
-        if self._preamble_tracker is None:
+        if not self._trackers:
             return
         raw = np.frombuffer(raw_bytes, dtype=np.uint8)
         iq = (raw[0::2].astype(np.float32) - 127.5) + \
@@ -215,10 +224,11 @@ class LoraChirpViewer(LoraScanner):
 
         self._iq_ring_buffer.write(iq)
 
-        detections = self._preamble_tracker.feed_chunk(iq, timestamp)
-        for det in detections:
-            self._handle_detection(det)
-            self._pending_extractions.append(det)
+        for _bw, tracker, extractor in self._trackers:
+            detections = tracker.feed_chunk(iq, timestamp)
+            for det in detections:
+                self._handle_detection(det)
+                self._pending_extractions.append((det, extractor))
 
         self._process_pending_extractions()
 
@@ -226,17 +236,19 @@ class LoraChirpViewer(LoraScanner):
         if not self._pending_extractions:
             return
         oldest, _ = self._iq_ring_buffer.available_range()
-        remaining: deque[Detection] = deque(maxlen=self._pending_extractions.maxlen)
-        for det in self._pending_extractions:
+        remaining: deque[tuple[Detection, PacketExtractor]] = deque(
+            maxlen=self._pending_extractions.maxlen,
+        )
+        for det, extractor in self._pending_extractions:
             if det.sample_offset < oldest:
                 continue
-            pkt = self._packet_extractor.try_extract(
+            pkt = extractor.try_extract(
                 det, self._iq_ring_buffer, self._detection_preamble_len,
             )
             if pkt is not None:
                 self._handle_packet(pkt)
             else:
-                remaining.append(det)
+                remaining.append((det, extractor))
         self._pending_extractions = remaining
 
     def _handle_packet(self, pkt: PacketSymbols) -> None:
@@ -259,6 +271,7 @@ class LoraChirpViewer(LoraScanner):
             "header_ok": decoded.header_ok,
             "errors_corrected": decoded.errors_corrected,
             "payload_hex": payload_hex,
+            "detection_bw": pkt.detection.bw,
         }
 
         with self._state_lock:
@@ -347,9 +360,13 @@ class LoraChirpViewer(LoraScanner):
             ],
             "row_timestamps": [round(ts, 3) for ts, _ in entries],
             "streaming": self._stream_active,
-            "sf_slopes": _compute_sf_slopes(
-                self._chirp_sr, fft_size, hop, pool_factor,
-            ),
+            "detection_bws": self._detection_bws,
+            "sf_slopes": {
+                bw: _compute_sf_slopes(
+                    self._chirp_sr, fft_size, hop, pool_factor, bw=bw,
+                )
+                for bw in self._detection_bws
+            },
         }
 
     def get_detection_history(self) -> list[dict[str, Any]]:
@@ -420,8 +437,8 @@ class LoraChirpViewer(LoraScanner):
         self._db_hi = None
         self._chirp_waterfall.clear()
         self._chirp_sweep_count = 0
-        if self._preamble_tracker is not None:
-            self._preamble_tracker.reset()
+        for _bw, tracker, _ext in self._trackers:
+            tracker.reset()
         if hasattr(self, "_iq_ring_buffer"):
             self._iq_ring_buffer.reset()
             self._pending_extractions.clear()
@@ -562,7 +579,7 @@ class LoraChirpViewer(LoraScanner):
                         time_res_ms, freq_res_hz, pool_factor, hop,
                     )
 
-                if self._preamble_tracker is not None:
+                if self._trackers:
                     self._run_detection(new_raw, now)
 
         except (OSError, ValueError):
@@ -671,9 +688,13 @@ class LoraChirpViewer(LoraScanner):
                     "db_max": round(db_hi, 1),
                     "time_res_ms": time_res_ms,
                     "freq_res_hz": freq_res_hz,
-                    "sf_slopes": _compute_sf_slopes(
-                        sample_rate, fft_size, hop, pool_factor,
-                    ),
+                    "detection_bws": self._detection_bws,
+                    "sf_slopes": {
+                        bw: _compute_sf_slopes(
+                            sample_rate, fft_size, hop, pool_factor, bw=bw,
+                        )
+                        for bw in self._detection_bws
+                    },
                 },
             )
         except Exception:
@@ -689,11 +710,12 @@ def _compute_sf_slopes(
     fft_size: int,
     hop: int,
     pool_factor: int = 1,
+    bw: int = _LORA_BW_HZ,
 ) -> list[dict[str, Any]]:
     slopes = []
     for sf in range(7, 13):
-        t_symbol = (2 ** sf) / _LORA_BW_HZ
-        chirp_rate_hz_per_s = _LORA_BW_HZ / t_symbol
+        t_symbol = (2 ** sf) / bw
+        chirp_rate_hz_per_s = bw / t_symbol
         bins_per_frame = chirp_rate_hz_per_s * (hop * pool_factor / sample_rate) * (fft_size / sample_rate)
         slopes.append({
             "sf": sf,

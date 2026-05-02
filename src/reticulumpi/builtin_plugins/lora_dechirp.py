@@ -34,6 +34,7 @@ class Detection:
     freq_offset_bin: int
     snr_db: float
     sample_offset: int
+    bw: int = _LORA_BW_HZ
 
 
 class ChirpReference:
@@ -182,6 +183,7 @@ class PreambleTracker:
         st = self._state[sf]
         ref = self.chirp_ref.get(sf)
         sym_len = len(ref)
+        n_bins = 2**sf
 
         # Prepend leftover from previous chunk
         if st.leftover is not None and len(st.leftover) > 0:
@@ -213,7 +215,9 @@ class PreambleTracker:
             mag = float(peak_mags[i])
             nf = float(noise_floors[i])
 
-            if st.count > 0 and abs(b - st.last_bin) <= self.bin_tolerance:
+            dist = abs(b - st.last_bin)
+            dist = min(dist, n_bins - dist)
+            if st.count > 0 and dist <= self.bin_tolerance:
                 st.count += 1
                 st.peak_mags.append(mag)
                 st.noise_floors.append(nf)
@@ -264,6 +268,7 @@ class PreambleTracker:
             freq_offset_bin=st.last_bin,
             snr_db=round(snr_db, 1),
             sample_offset=st.first_sample_offset,
+            bw=bw,
         )
 
 

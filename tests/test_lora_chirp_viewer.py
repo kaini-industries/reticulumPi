@@ -61,7 +61,7 @@ def _make_plugin(config: dict | None = None) -> LoraChirpViewer:
     plugin._window = np.hanning(fft_size).astype(np.float32)
 
     # Detection state
-    plugin._preamble_tracker = None
+    plugin._trackers = []
     plugin._detection_history = deque(maxlen=plugin._detection_history_depth)
     plugin._packet_history = deque(maxlen=plugin._packet_history_depth)
     plugin._last_detection_ts = {}
@@ -309,7 +309,8 @@ class TestGetChirpWaterfallHistory:
         assert hist["cols"] == 256
         assert hist["freq_center_hz"] == int(903.9 * 1e6)
         assert "sf_slopes" in hist
-        assert len(hist["sf_slopes"]) == 6
+        assert 125_000 in hist["sf_slopes"]
+        assert len(hist["sf_slopes"][125_000]) == 6
 
 
 class TestSfSlopes:
@@ -331,6 +332,12 @@ class TestSfSlopes:
         for s1, s4 in zip(slopes_1, slopes_4):
             assert s1["t_symbol_ms"] == s4["t_symbol_ms"]
             assert abs(s4["bins_per_frame"]) > abs(s1["bins_per_frame"])
+
+    def test_bw_param_affects_symbol_time(self):
+        slopes_125k = _compute_sf_slopes(250_000, 256, 64, bw=125_000)
+        slopes_62k = _compute_sf_slopes(250_000, 256, 64, bw=62_500)
+        for s125, s62 in zip(slopes_125k, slopes_62k):
+            assert s62["t_symbol_ms"] == pytest.approx(s125["t_symbol_ms"] * 2, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +367,7 @@ class TestDetectionConfig:
     def test_detection_disabled_via_config(self):
         plugin = _make_plugin({"chirp_detection_enabled": False})
         assert plugin._detection_enabled is False
-        assert plugin._preamble_tracker is None
+        assert plugin._trackers == []
 
     def test_detection_sfs_default(self):
         plugin = _make_plugin()
@@ -376,7 +383,14 @@ class TestDetectionConfig:
 
     def test_tracker_initialized_when_enabled(self):
         plugin = _make_plugin()
-        assert plugin._preamble_tracker is not None
+        assert len(plugin._trackers) > 0
+
+    def test_multi_bw_trackers(self):
+        plugin = _make_plugin({"chirp_detection_bws": [125_000, 62_500]})
+        assert len(plugin._trackers) == 2
+        bws = [bw for bw, _t, _e in plugin._trackers]
+        assert 125_000 in bws
+        assert 62_500 in bws
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +447,21 @@ class TestRunDetection:
         assert "freq_center_hz" in d
         assert "sample_rate" in d
         assert d["sample_rate"] == 250_000
+        assert "detection_bw" in d
+        assert d["detection_bw"] == 125_000
+
+    def test_detection_bw_62k_in_payload(self):
+        plugin = _make_plugin({
+            "chirp_detection_bws": [62_500],
+            "chirp_detection_sfs": [7],
+            "chirp_detection_snr_threshold_db": 0.0,
+        })
+        iq = make_preamble(7, n_symbols=10, bw=62_500)
+        raw = _iq_to_raw_bytes(iq)
+        plugin._run_detection(raw, 1000.0)
+        assert len(plugin._detection_history) >= 1
+        d = plugin._detection_history[0]
+        assert d["detection_bw"] == 62_500
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +493,8 @@ class TestDetectionCooldown:
         raw = _iq_to_raw_bytes(iq)
         plugin._run_detection(raw, 1000.0)
         assert len(plugin._detection_history) == 1
-        plugin._preamble_tracker.reset()
+        for _bw, tracker, _ext in plugin._trackers:
+            tracker.reset()
         plugin._run_detection(raw, 1001.0)
         assert len(plugin._detection_history) == 2
 
@@ -533,7 +563,8 @@ class TestDetectionHistoryAndStats:
         iq = make_preamble(7, n_symbols=10)
         raw = _iq_to_raw_bytes(iq)
         for i in range(10):
-            plugin._preamble_tracker.reset()
+            for _bw, tracker, _ext in plugin._trackers:
+                tracker.reset()
             plugin._run_detection(raw, 1000.0 + i * 10)
         assert len(plugin._detection_history) <= 4
 
@@ -570,18 +601,18 @@ class TestDetectionTrackerReset:
             "chirp_detection_sfs": [7],
             "chirp_detection_snr_threshold_db": 0.0,
         })
-        old_tracker = plugin._preamble_tracker
+        old_trackers = plugin._trackers
         plugin.set_continuous_params(freq_mhz=915.0)
-        assert plugin._preamble_tracker is not old_tracker
+        assert plugin._trackers is not old_trackers
 
     def test_reinit_on_sr_change(self):
         plugin = _make_plugin({
             "chirp_detection_sfs": [7],
             "chirp_detection_snr_threshold_db": 0.0,
         })
-        old_tracker = plugin._preamble_tracker
+        old_trackers = plugin._trackers
         plugin.set_continuous_params(sample_rate=1_024_000)
-        assert plugin._preamble_tracker is not old_tracker
+        assert plugin._trackers is not old_trackers
 
 
 class TestPendingExtractionRetry:
@@ -594,7 +625,8 @@ class TestPendingExtractionRetry:
         sf = 7
         payload = b"\xAA\xBB"
         pkt_iq = make_lora_packet(sf, payload, cr=1, sync_byte=0x34)
-        cref = plugin._preamble_tracker.chirp_ref
+        _bw, first_tracker, _ext = plugin._trackers[0]
+        cref = first_tracker.chirp_ref
         sym_len = cref.symbol_length(sf)
 
         preamble_end = 8 * sym_len
@@ -621,12 +653,13 @@ class TestExpiredDetectionPruning:
             timestamp=500.0, sf=7, freq_offset_hz=0.0,
             freq_offset_bin=0, snr_db=20.0, sample_offset=0,
         )
-        plugin._pending_extractions.append(stale_det)
+        _bw, _tracker, extractor = plugin._trackers[0]
+        plugin._pending_extractions.append((stale_det, extractor))
 
         big_iq = np.zeros(plugin._iq_ring_buffer.capacity + 1000, dtype=np.complex64)
         plugin._iq_ring_buffer.write(big_iq)
 
         plugin._process_pending_extractions()
-        stale_offsets = [d.sample_offset for d in plugin._pending_extractions
+        stale_offsets = [d.sample_offset for d, _e in plugin._pending_extractions
                          if d.sample_offset == 0]
         assert len(stale_offsets) == 0

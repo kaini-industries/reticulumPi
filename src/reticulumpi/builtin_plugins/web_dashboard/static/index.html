@@ -874,7 +874,8 @@
         </div>
         <div class="chirp-viewer" id="chirp-viewer-section" style="display:none">
           <div class="chirp-controls" id="chirp-controls">
-            <select class="chirp-select" id="chirp-freq-select" title="Center frequency"></select>
+            <select class="chirp-select" id="chirp-freq-select" title="Preset frequencies"></select>
+            <input type="number" class="chirp-freq-input" id="chirp-freq-input" title="Center frequency (MHz)" placeholder="MHz" step="0.001" min="30" max="1800">
             <select class="chirp-select" id="chirp-bw-select" title="Capture bandwidth">
               <option value="250000">250 kHz (1 ch)</option>
               <option value="2048000">2 MHz (16 ch)</option>

@@ -191,6 +191,19 @@ class TestPreambleTracker:
         assert len(dets) == 1
         assert dets[0].sf == 7
         assert isinstance(dets[0], Detection)
+        assert dets[0].bw == BW
+
+    def test_detection_bw_field_matches_chirp_ref(self):
+        """Detection.bw should reflect the ChirpReference BW, not a hardcoded default."""
+        half_bw = BW // 2
+        cr = ChirpReference(SAMPLE_RATE, half_bw)
+        tracker = PreambleTracker(
+            cr, sfs=(7,), preamble_len=8, snr_threshold_db=0.0,
+        )
+        iq = make_preamble(7, n_symbols=8, bw=half_bw)
+        dets = tracker.feed_chunk(iq, timestamp=1000.0)
+        assert len(dets) == 1
+        assert dets[0].bw == half_bw
 
     def test_no_detection_below_threshold(self):
         cr = ChirpReference(SAMPLE_RATE, BW)
@@ -287,6 +300,23 @@ class TestPreambleTracker:
         iq = np.concatenate(chirps)
         dets = tracker.feed_chunk(iq, timestamp=1000.0)
         assert len(dets) == 0
+
+    def test_bin_tolerance_wraparound(self):
+        """Bins 0 and n_bins-1 are adjacent modulo FFT; tolerance should wrap."""
+        sf = 7
+        n_bins = 2**sf
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, bin_tolerance=1,
+            snr_threshold_db=0.0,
+        )
+        chirps = []
+        for i in range(8):
+            sym = 0 if (i % 2 == 0) else n_bins - 1
+            chirps.append(make_upchirp(sf, symbol=sym))
+        iq = np.concatenate(chirps)
+        dets = tracker.feed_chunk(iq, timestamp=1000.0)
+        assert len(dets) == 1
 
     def test_multiple_sfs_simultaneously(self):
         cr = ChirpReference(SAMPLE_RATE, BW)
