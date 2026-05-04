@@ -498,6 +498,9 @@ class TestSyncWordBins:
     def test_zero_sync(self):
         assert sync_word_bins(0x00, 7) == (0, 0)
 
+    def test_meshtastic_sf7(self):
+        assert sync_word_bins(0x2B, 7) == (2 * 8, 11 * 8)
+
     def test_ff_sync_sf7(self):
         assert sync_word_bins(0xFF, 7) == (15 * 8, 15 * 8)
 
@@ -691,6 +694,19 @@ class TestPacketExtractor:
     def test_private_sync_word(self):
         sf, sync = 7, 0x12
         payload = b"\xBE\xEF"
+        pkt_iq = make_lora_packet(sf, payload, sync_byte=sync)
+        cref = ChirpReference(SAMPLE_RATE, BW)
+        ring = IQRingBuffer(len(pkt_iq) + 10000)
+        ring.write(pkt_iq)
+
+        ext = PacketExtractor(cref)
+        syms = ext.try_extract(self._make_detection(sf), ring)
+        assert syms is not None
+        assert syms.sync_word == sync
+
+    def test_meshtastic_sync_word(self):
+        sf, sync = 7, 0x2B
+        payload = b"\xCA\xFE"
         pkt_iq = make_lora_packet(sf, payload, sync_byte=sync)
         cref = ChirpReference(SAMPLE_RATE, BW)
         ring = IQRingBuffer(len(pkt_iq) + 10000)

@@ -25,8 +25,8 @@
     7:  '#ff6b9d', 8:  '#ff9f43', 9:  '#ffd93d',
     10: '#6bff6b', 11: '#43c9ff', 12: '#b67dff',
   };
-  var SYNC_COLORS = { 0x34: '#ffffff', 0x12: '#00e5ff' };
-  var SYNC_NAMES  = { 0x34: 'LoRaWAN', 0x12: 'Meshtastic' };
+  var SYNC_COLORS = { 0x34: '#ffffff', 0x12: '#00e5ff', 0x2B: '#6bff6b' };
+  var SYNC_NAMES  = { 0x34: 'LoRaWAN', 0x12: 'MeshCore', 0x2B: 'Meshtastic' };
 
   // -- DOM handles --------------------------------------------------------
   var _section, _freqSelect, _freqInput, _bwSelect, _sfToggle, _statusLabel;

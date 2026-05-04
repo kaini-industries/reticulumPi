@@ -517,7 +517,7 @@ class PacketExtractor:
     → Hamming FEC → de-whiten → CRC) and returns a :class:`DecodedPacket`.
     """
 
-    _DEFAULT_SYNC_WORDS = (0x34, 0x12)
+    _DEFAULT_SYNC_WORDS = (0x34, 0x12, 0x2B)
     _SFD_FACTOR = 9  # 2.25 symbols → 9/4 of sym_len
     _HEADER_CR = 4
     _HEADER_PPM = 8  # 4 + _HEADER_CR
