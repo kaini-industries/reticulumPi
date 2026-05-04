@@ -30,6 +30,7 @@ Requirements:
 from __future__ import annotations
 
 import math
+import re
 import shutil
 import socket
 import subprocess
@@ -121,6 +122,78 @@ class AdsbRadarPlugin(PluginBase):
             self._receiver_lat = float(lat)
             self._receiver_lon = float(lon)
 
+    # ── device resolution ────────────────────────────────────────────
+
+    _RTL_DEVICE_RE = re.compile(r"^\s*(\d+):\s+.*SN:\s*(\S+)")
+
+    @staticmethod
+    def resolve_device_index(
+        configured: str,
+        rtl_test_output: str,
+    ) -> int:
+        """Resolve a ``device_index`` config value to a numeric RTL-SDR index.
+
+        *configured* may be a USB serial string (e.g. ``"00000001"``) or a
+        plain numeric index (``"0"``).  We first try to match it against
+        serial numbers reported by ``rtl_test``.  If no serial matches,
+        we fall back to interpreting the value as a literal integer index.
+        """
+        devices: list[tuple[int, str]] = []
+        for line in rtl_test_output.splitlines():
+            m = AdsbRadarPlugin._RTL_DEVICE_RE.match(line)
+            if m:
+                devices.append((int(m.group(1)), m.group(2)))
+
+        # Try serial match first.
+        for idx, serial in devices:
+            if serial == configured:
+                return idx
+
+        # Fall back to numeric index.
+        try:
+            return int(configured)
+        except ValueError:
+            available = ", ".join(f"{i}: SN {s}" for i, s in devices)
+            raise RuntimeError(
+                f"RTL-SDR device '{configured}' not found. "
+                f"Available: [{available}]"
+            ) from None
+
+    def _resolve_device(self) -> None:
+        """Run ``rtl_test`` and resolve configured serial → numeric index."""
+        rtl_test_path = shutil.which("rtl_test")
+        if not rtl_test_path:
+            self.log.warning(
+                "rtl_test not found; using device_index '%s' as-is",
+                self._device_index,
+            )
+            return
+
+        try:
+            result = subprocess.run(
+                [rtl_test_path, "-t"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            output = result.stdout + result.stderr
+        except Exception as exc:
+            self.log.warning("rtl_test failed: %s; using device_index as-is", exc)
+            return
+
+        try:
+            resolved = self.resolve_device_index(self._device_index, output)
+            if str(resolved) != self._device_index:
+                self.log.info(
+                    "Resolved device serial '%s' → index %d",
+                    self._device_index, resolved,
+                )
+            self._resolved_index = resolved
+        except RuntimeError as exc:
+            self._set_status("error", str(exc))
+            self.log.error("%s", exc)
+            raise
+
     # ── lifecycle ─────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -135,10 +208,21 @@ class AdsbRadarPlugin(PluginBase):
         self._aircraft: dict[str, AircraftState] = {}
         self._total_messages = 0
         self._aircraft_seen_total = 0
+        self._resolved_index: int | None = None
 
         self._active = True
 
+        self.event_bus.subscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
         self.event_bus.subscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
+
+        if self._receiver_lat is None or self._receiver_lon is None:
+            gps = self.app.get_plugin("gps_telemetry") if hasattr(self.app, "get_plugin") else None
+            if gps is not None and hasattr(gps, "last_fix"):
+                fix = getattr(gps, "last_fix", None)
+                if isinstance(fix, dict) and fix.get("lat") is not None and fix.get("lon") is not None:
+                    self._receiver_lat = float(fix["lat"])
+                    self._receiver_lon = float(fix["lon"])
+                    self.log.info("Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon)
 
         self._start_thread(self._supervisor_loop, name="adsb-supervisor")
         self._start_thread(self._maintenance_loop, name="adsb-maintenance")
@@ -150,6 +234,8 @@ class AdsbRadarPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
+        self.event_bus.unsubscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
         self._terminate_process()
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
@@ -199,6 +285,11 @@ class AdsbRadarPlugin(PluginBase):
             self.log.warning(
                 "%s not found; adsb_radar will stay idle", self._dump1090_bin,
             )
+            return
+
+        try:
+            self._resolve_device()
+        except RuntimeError:
             return
 
         while self._active:
@@ -269,7 +360,7 @@ class AdsbRadarPlugin(PluginBase):
         assert self._dump1090_path is not None
         cmd = [
             self._dump1090_path,
-            "--device-index", str(self._device_index),
+            "--device-index", str(self._resolved_index if self._resolved_index is not None else self._device_index),
             "--gain", self._gain,
             "--ppm", str(self._ppm),
             "--net",
@@ -491,13 +582,16 @@ class AdsbRadarPlugin(PluginBase):
 
     # ── GPS event handler ─────────────────────────────────────────────
 
-    def _on_gps_fix(self, data: dict) -> None:
-        lat = data.get("latitude")
-        lon = data.get("longitude")
+    def _on_gps_fix(self, event_type: str, data: dict) -> None:
+        lat = data.get("lat")
+        lon = data.get("lon")
         if lat is not None and lon is not None:
+            had_position = self._receiver_lat is not None
             with self._state_lock:
                 self._receiver_lat = float(lat)
                 self._receiver_lon = float(lon)
+            if not had_position:
+                self.log.info("Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon)
 
     # ── helpers ───────────────────────────────────────────────────────
 
