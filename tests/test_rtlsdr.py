@@ -27,13 +27,16 @@ def _clear_cache():
 
 
 def _mock_rtl_test(output: str = _RTL_TEST_OUTPUT, which: str = "/usr/bin/rtl_test"):
-    """Patch shutil.which and subprocess.run to return canned rtl_test output."""
+    """Patch shutil.which and _run_rtl_test to return canned device list."""
+    from reticulumpi.rtlsdr import _DEVICE_RE
+    devices = []
+    for line in output.splitlines():
+        m = _DEVICE_RE.match(line)
+        if m:
+            devices.append((int(m.group(1)), m.group(2)))
     return [
         patch("reticulumpi.rtlsdr.shutil.which", return_value=which),
-        patch(
-            "reticulumpi.rtlsdr.subprocess.run",
-            return_value=type("R", (), {"stdout": output, "stderr": ""})(),
-        ),
+        patch("reticulumpi.rtlsdr._run_rtl_test", return_value=devices),
     ]
 
 
@@ -57,7 +60,7 @@ class TestEnumerateDevices:
     def test_empty_when_rtl_test_fails(self):
         with (
             patch("reticulumpi.rtlsdr.shutil.which", return_value="/usr/bin/rtl_test"),
-            patch("reticulumpi.rtlsdr.subprocess.run", side_effect=OSError("fail")),
+            patch("reticulumpi.rtlsdr._run_rtl_test", side_effect=OSError("fail")),
         ):
             assert enumerate_devices() == []
 

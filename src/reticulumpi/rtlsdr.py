@@ -11,10 +11,50 @@ import threading
 log = logging.getLogger("reticulumpi.rtlsdr")
 
 _DEVICE_RE = re.compile(r"^\s*(\d+):\s+.*SN:\s*(\S+)")
+_FOUND_RE = re.compile(r"^Found\s+(\d+)\s+device")
 
 _cache: list[tuple[int, str]] | None = None
 _cache_lock = threading.Lock()
 _claimed: dict[str, str] = {}
+
+
+def _run_rtl_test(rtl_test_path: str) -> list[tuple[int, str]]:
+    """Run rtl_test, capture the device listing, kill before it opens a device.
+
+    rtl_test prints the device listing to stderr immediately, then tries
+    to open device 0 for testing (which hangs if the device is in use).
+    We stream stderr line-by-line, capture the device entries, and kill
+    the process once we've seen all expected devices or a blank line
+    after the listing.
+    """
+    proc = subprocess.Popen(
+        [rtl_test_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        devices: list[tuple[int, str]] = []
+        expected = -1
+        for line in proc.stderr:
+            line = line.rstrip()
+            if expected < 0:
+                fm = _FOUND_RE.match(line)
+                if fm:
+                    expected = int(fm.group(1))
+                    continue
+            m = _DEVICE_RE.match(line)
+            if m:
+                devices.append((int(m.group(1)), m.group(2)))
+                if len(devices) >= expected > 0:
+                    break
+                continue
+            if expected >= 0 and not line.strip():
+                break
+        return devices
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 def enumerate_devices() -> list[tuple[int, str]]:
@@ -36,27 +76,11 @@ def enumerate_devices() -> list[tuple[int, str]]:
             return []
 
         try:
-            # No -t flag: just list devices without opening/testing tuners.
-            # The -t flag runs a tuner sensitivity test that exclusively
-            # claims every device for several seconds, racing with plugins
-            # that are starting their subprocesses concurrently.
-            result = subprocess.run(
-                [rtl_test_path],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            output = result.stdout + result.stderr
+            devices = _run_rtl_test(rtl_test_path)
         except Exception as exc:
             log.warning("rtl_test failed: %s", exc)
             _cache = []
             return []
-
-        devices: list[tuple[int, str]] = []
-        for line in output.splitlines():
-            m = _DEVICE_RE.match(line)
-            if m:
-                devices.append((int(m.group(1)), m.group(2)))
 
         _cache = list(devices)
         return devices
