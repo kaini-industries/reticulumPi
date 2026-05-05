@@ -22,7 +22,10 @@ class PluginBase(ABC):
     plugin_name: str = "unnamed"
     plugin_version: str = "0.0.0"
     plugin_description: str = "No description"
-    plugin_dependencies: list[str] = []
+    plugin_dependencies: tuple[str, ...] = ()
+
+    broadcast_tier: int | None = None
+    broadcast_keys: str | list[str] | None = None
 
     _global_thread_count: int = 0
     _global_thread_budget: int = 40
@@ -66,6 +69,17 @@ class PluginBase(ABC):
     def get_status(self) -> dict[str, Any]:
         """Return status info for monitoring. Override for richer status."""
         return {"active": self._active}
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        """Return data for the WebSocket broadcast payload.
+
+        Override to provide broadcast data. The default calls get_snapshot()
+        if it exists. Plugins that set broadcast_tier and broadcast_keys
+        participate in the broadcast automatically.
+        """
+        if hasattr(self, "get_snapshot"):
+            return self.get_snapshot()
+        return None
 
     def _join_threads(self, timeout: float = 5.0) -> None:
         """Wait for all tracked threads to finish within a shared deadline.
@@ -142,6 +156,21 @@ class PluginBase(ABC):
         """Set the global soft thread budget. Logged when exceeded."""
         with cls._global_thread_lock:
             cls._global_thread_budget = budget
+
+    def _remove_thread(self, thread: threading.Thread) -> None:
+        """Remove a finished thread from tracking and decrement the global count.
+
+        Call after joining a thread locally (e.g. in a supervisor restart cycle)
+        to prevent stale entries from accumulating in self._threads.
+        """
+        try:
+            self._threads.remove(thread)
+        except ValueError:
+            return
+        with PluginBase._global_thread_lock:
+            PluginBase._global_thread_count = max(
+                0, PluginBase._global_thread_count - 1,
+            )
 
     def _start_thread(self, target: Any, name: str | None = None) -> threading.Thread:
         """Start a daemon thread and return it."""

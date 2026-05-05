@@ -43,6 +43,8 @@ class NtpServerPlugin(PluginBase):
     plugin_name = "ntp_server"
     plugin_version = "1.0.0"
     plugin_description = "GPS-disciplined NTP time synchronization via chrony"
+    broadcast_tier = 2
+    broadcast_keys = "ntp"
 
     def validate_config(self) -> None:
         interval = self.config.get("check_interval", 30)

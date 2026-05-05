@@ -1083,13 +1083,30 @@ class LXMFAdapter(TransportAdapter):
             self._hub.log.exception("Error handling propagation node announce")
 
     def _select_best_prop_node(self) -> bytes | None:
-        """Pick best propagation node (fewest hops, <3 failures). Caller holds lock."""
+        """Pick best propagation node (fewest hops, <3 failures, not stale). Caller holds lock."""
+        now = time.time()
         for entry in self._propagation_nodes:
-            if entry["failures"] < 3:
+            if entry["failures"] < 3 and (now - entry["last_seen"]) < self._PROP_STALE_S:
                 return entry["hash"]
-        if self._propagation_nodes:
-            return min(self._propagation_nodes, key=lambda e: e["failures"])["hash"]
+        fresh = [e for e in self._propagation_nodes if (now - e["last_seen"]) < self._PROP_STALE_S]
+        if fresh:
+            return min(fresh, key=lambda e: e["failures"])["hash"]
         return None
+
+    def prune_stale_propagation(self) -> None:
+        """Remove propagation nodes not seen within the staleness window."""
+        now = time.time()
+        with self._prop_lock:
+            before = len(self._propagation_nodes)
+            self._propagation_nodes = [
+                e for e in self._propagation_nodes
+                if (now - e["last_seen"]) < self._PROP_STALE_S
+            ]
+            if len(self._propagation_nodes) < before:
+                self._hub.log.debug(
+                    "Pruned %d stale propagation node(s)",
+                    before - len(self._propagation_nodes),
+                )
 
     def _check_propagation_failover(self) -> None:
         """Increment failure count on current prop node; failover if needed."""
@@ -1550,6 +1567,8 @@ class MessagingHubPlugin(PluginBase):
     plugin_name = "messaging_hub"
     plugin_version = "1.1.0"
     plugin_description = "Unified message store and chat hub for LXMF, Meshtastic, and MeshCore"
+    broadcast_tier = 1
+    broadcast_keys = "messaging"
 
     def validate_config(self) -> None:
         limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)
@@ -1613,6 +1632,7 @@ class MessagingHubPlugin(PluginBase):
             self.config.get("delivery_timeout", 300)
         )
         self._start_thread(self._delivery_timeout_loop, name="msg-delivery-timeout")
+        self._start_thread(self._adapter_maintenance_loop, name="msg-adapter-maint")
         self.log.info(
             "Messaging hub started with %d transport(s): %s",
             len(self._adapters),
@@ -1639,6 +1659,21 @@ class MessagingHubPlugin(PluginBase):
         # still call get_unread_counts() etc. The connection is released
         # when Python GCs the store at process exit moments later.
         self._join_threads()
+
+    def _adapter_maintenance_loop(self) -> None:
+        """Periodically prune stale state in transport adapters."""
+        while self._active:
+            self._sleep_while_active(600.0)
+            if not self._active:
+                break
+            with self._lock:
+                adapters = list(self._adapters.values())
+            for adapter in adapters:
+                if hasattr(adapter, "prune_stale_propagation"):
+                    try:
+                        adapter.prune_stale_propagation()
+                    except Exception:
+                        self.log.debug("Error pruning adapter state", exc_info=True)
 
     # ── Adapter registry ───────────────────────────────────────────
 
@@ -2330,6 +2365,14 @@ class MessagingHubPlugin(PluginBase):
             "by_transport": stats.get("by_transport", {}),
             "by_direction": stats.get("by_direction", {}),
         }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        result = {}
+        if hasattr(self, "get_transports"):
+            result["transports"] = self.get_transports()
+        if hasattr(self, "get_unread_counts_grouped"):
+            result["unread"] = self.get_unread_counts_grouped()
+        return result or None
 
     # ── Internal ───────────────────────────────────────────────────
 

@@ -254,6 +254,8 @@ class SensorFrameworkPlugin(PluginBase):
     plugin_name = "sensor_framework"
     plugin_version = "1.0.0"
     plugin_description = "Config-driven sensor reading, logging, and mesh broadcast"
+    broadcast_tier = 2
+    broadcast_keys = "sensors"
 
     def validate_config(self) -> None:
         sensors = self.config.get("sensors", [])
@@ -383,6 +385,9 @@ class SensorFrameworkPlugin(PluginBase):
                 "readings_total": self._readings_count,
                 "last_readings": dict(self._last_readings),
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_latest_readings()
 
     def get_latest_readings(self) -> dict[str, dict[str, Any]]:
         """Return the most recent reading from each sensor."""

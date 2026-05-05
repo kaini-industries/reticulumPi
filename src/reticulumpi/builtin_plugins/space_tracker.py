@@ -286,6 +286,8 @@ class SpaceTrackerPlugin(PluginBase):
     plugin_name = "space_tracker"
     plugin_version = "0.1.0"
     plugin_description = "Satellite tracking, launch schedule, and space weather"
+    broadcast_tier = 2
+    broadcast_keys = "space"
 
     # Minimum enforced intervals — these are floors, the user can configure
     # larger values but not smaller.

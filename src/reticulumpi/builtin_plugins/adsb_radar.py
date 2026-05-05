@@ -98,19 +98,24 @@ class AdsbRadarPlugin(PluginBase):
     plugin_name = "adsb_radar"
     plugin_version = "1.0.0"
     plugin_description = "ADS-B aircraft tracker using RTL-SDR and dump1090"
+    broadcast_tier = 2
+    broadcast_keys = "adsb"
+
+    _MAX_SBS_BUF = 1_048_576  # 1 MB
 
     # ── config ────────────────────────────────────────────────────────
 
     def validate_config(self) -> None:
         cfg = self.config
         self._dump1090_bin = str(cfg.get("dump1090_bin", "dump1090"))
-        self._device_index = str(cfg.get("device_index", "0"))
+        self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
         self._gain = str(cfg.get("gain", "max"))
         self._ppm = int(cfg.get("ppm", 0))
         self._enable_bias_tee = bool(cfg.get("enable_bias_tee", False))
         self._sbs_port = int(cfg.get("sbs_port", 30003))
         self._stale_timeout = float(cfg.get("stale_timeout", 300))
         self._max_restarts = int(cfg.get("max_restarts", 5))
+        self._max_aircraft = int(cfg.get("max_aircraft", 500))
 
         self._receiver_lat: float | None = None
         self._receiver_lon: float | None = None
@@ -134,22 +139,40 @@ class AdsbRadarPlugin(PluginBase):
         self._aircraft: dict[str, AircraftState] = {}
         self._total_messages = 0
         self._aircraft_seen_total = 0
+        self._resolved_index: int | None = None
 
         self._active = True
 
+        self.event_bus.subscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
         self.event_bus.subscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
+
+        if self._receiver_lat is None or self._receiver_lon is None:
+            gps = self.app.get_plugin("gps_telemetry") if hasattr(self.app, "get_plugin") else None
+            if gps is not None and hasattr(gps, "last_fix"):
+                fix = getattr(gps, "last_fix", None)
+                if isinstance(fix, dict) and fix.get("lat") is not None and fix.get("lon") is not None:
+                    self._receiver_lat = float(fix["lat"])
+                    self._receiver_lon = float(fix["lon"])
+                    self.log.info("Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon)
 
         self._start_thread(self._supervisor_loop, name="adsb-supervisor")
         self._start_thread(self._maintenance_loop, name="adsb-maintenance")
 
         self.log.info(
             "adsb_radar started: device %s, gain %s, ppm %d, SBS port %d",
-            self._device_index, self._gain, self._ppm, self._sbs_port,
+            self._device_id, self._gain, self._ppm, self._sbs_port,
         )
 
     def stop(self) -> None:
         self._active = False
+        self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
+        self.event_bus.unsubscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
         self._terminate_process()
+        try:
+            from reticulumpi.rtlsdr import release_device
+            release_device(self._device_id, caller=self.plugin_name)
+        except Exception:
+            pass
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -200,6 +223,14 @@ class AdsbRadarPlugin(PluginBase):
             )
             return
 
+        try:
+            from reticulumpi.rtlsdr import resolve_device
+            self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+        except RuntimeError as exc:
+            self._set_status("error", str(exc))
+            self.log.error("%s", exc)
+            return
+
         while self._active:
             try:
                 self._launch_dump1090()
@@ -208,11 +239,7 @@ class AdsbRadarPlugin(PluginBase):
                 self.log.exception("Failed to launch %s", self._dump1090_bin)
                 break
 
-            parser = threading.Thread(
-                target=self._parser_loop,
-                name="adsb-parser",
-            )
-            parser.start()
+            parser = self._start_thread(self._parser_loop, name="adsb-parser")
 
             while self._active and self._process is not None:
                 rc = self._process.poll()
@@ -222,6 +249,7 @@ class AdsbRadarPlugin(PluginBase):
                 self._sleep_while_active(5.0)
 
             parser.join(timeout=3.0)
+            self._remove_thread(parser)
             self._terminate_process()
 
             if not self._active:
@@ -254,10 +282,6 @@ class AdsbRadarPlugin(PluginBase):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
         )
         self._pid = self._process.pid
         self._start_log_reader(self._process, prefix="dump1090")
@@ -268,7 +292,7 @@ class AdsbRadarPlugin(PluginBase):
         assert self._dump1090_path is not None
         cmd = [
             self._dump1090_path,
-            "--device-index", str(self._device_index),
+            "--device-index", str(self._resolved_index if self._resolved_index is not None else self._device_id),
             "--gain", self._gain,
             "--ppm", str(self._ppm),
             "--net",
@@ -328,6 +352,13 @@ class AdsbRadarPlugin(PluginBase):
                     if not data:
                         break
                     buf += data.decode("utf-8", errors="replace")
+                    if len(buf) > self._MAX_SBS_BUF:
+                        self.log.warning(
+                            "SBS buffer exceeded %d bytes; discarding to resync",
+                            self._MAX_SBS_BUF,
+                        )
+                        buf = ""
+                        continue
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
                         line = line.strip()
@@ -391,6 +422,12 @@ class AdsbRadarPlugin(PluginBase):
                 self._aircraft[icao] = ac
                 self._aircraft_seen_total += 1
                 new_aircraft = True
+                if len(self._aircraft) > self._max_aircraft:
+                    oldest_icao = min(
+                        self._aircraft,
+                        key=lambda k: self._aircraft[k].last_seen,
+                    )
+                    del self._aircraft[oldest_icao]
 
             ac.last_seen = now
             ac.message_count += 1
@@ -484,13 +521,16 @@ class AdsbRadarPlugin(PluginBase):
 
     # ── GPS event handler ─────────────────────────────────────────────
 
-    def _on_gps_fix(self, data: dict) -> None:
-        lat = data.get("latitude")
-        lon = data.get("longitude")
+    def _on_gps_fix(self, event_type: str, data: dict) -> None:
+        lat = data.get("lat")
+        lon = data.get("lon")
         if lat is not None and lon is not None:
+            had_position = self._receiver_lat is not None
             with self._state_lock:
                 self._receiver_lat = float(lat)
                 self._receiver_lon = float(lon)
+            if not had_position:
+                self.log.info("Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon)
 
     # ── helpers ───────────────────────────────────────────────────────
 

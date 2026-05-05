@@ -190,6 +190,7 @@
 
   /* ── Expose shared utilities for sub-modules ─────────────────────── */
   RPI.api = api;
+  RPI.apiRetry = apiRetry;
   RPI.$ = $;
   RPI.esc = esc;
   RPI.formatUptime = formatUptime;
@@ -1048,9 +1049,11 @@
 
   // --- Data fetching ---
 
+  var _nodeLoaded = false;
   function fetchNode() {
-    api('/api/node').then(function(r) {
+    apiRetry('/api/node').then(function(r) {
       if (!r || !r.ok) return;
+      _nodeLoaded = true;
       var d = r.data;
       $('node-name').textContent = d.node_name || 'ReticulumPi';
       $('version').textContent = 'v' + (d.version || '?');
@@ -1177,6 +1180,7 @@
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var url = proto + '//' + location.host + '/ws/metrics';
     try { ws = new WebSocket(url); } catch(e) { startPolling(); return; }
+    RPI.ws = ws;
 
     ws.onopen = function() {
       reconnectDelay = 1000;
@@ -1185,6 +1189,7 @@
       // Reset traffic rate tracking so we don't compute stale deltas
       _prevTraffic = {};
       prevIfaces = {};
+      if (!_nodeLoaded) fetchNode();
     };
 
     ws.onmessage = function(ev) {
@@ -1206,6 +1211,54 @@
           }
           if (msg.data.channel_power_history && RPI.loraSpectrum && RPI.loraSpectrum.loadChannelHistory) {
             RPI.loraSpectrum.loadChannelHistory(msg.data.channel_power_history);
+          }
+          return;
+        }
+        if (msg.type === 'chirp_result' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleChirpResult) {
+            RPI.chirpSpectrogram.handleChirpResult(msg.data);
+          }
+          return;
+        }
+        if (msg.type === 'chirp_waterfall_rows' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleWaterfallRows) {
+            RPI.chirpSpectrogram.handleWaterfallRows(msg.data);
+          }
+          return;
+        }
+        if (msg.type === 'chirp_waterfall_history' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleWaterfallHistory) {
+            RPI.chirpSpectrogram.handleWaterfallHistory(msg.data);
+          }
+          return;
+        }
+        if (msg.type === 'chirp_detection' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleDetection) {
+            RPI.chirpSpectrogram.handleDetection(msg.data);
+          }
+          if (RPI.loraSpectrum && RPI.loraSpectrum.handleDetection) {
+            RPI.loraSpectrum.handleDetection(msg.data);
+          }
+          return;
+        }
+        if (msg.type === 'chirp_detection_history' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleDetectionHistory) {
+            RPI.chirpSpectrogram.handleDetectionHistory(msg.data);
+          }
+          if (RPI.loraSpectrum && RPI.loraSpectrum.handleDetectionHistory) {
+            RPI.loraSpectrum.handleDetectionHistory(msg.data);
+          }
+          return;
+        }
+        if (msg.type === 'chirp_packet_decoded' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handlePacketDecoded) {
+            RPI.chirpSpectrogram.handlePacketDecoded(msg.data);
+          }
+          return;
+        }
+        if (msg.type === 'chirp_packet_history' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handlePacketHistory) {
+            RPI.chirpSpectrogram.handlePacketHistory(msg.data);
           }
           return;
         }
@@ -1234,9 +1287,10 @@
               && RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
             RPI.spectrumCommon.historyStore.ingestTick(msg.data.spectrum);
           }
-          if (msg.data.lora_scanner
+          var loraData = msg.data.lora_scanner || msg.data.lora_chirp_viewer;
+          if (loraData
               && RPI.spectrumCommon && RPI.spectrumCommon.loraHistoryStore) {
-            RPI.spectrumCommon.loraHistoryStore.ingestTick(msg.data.lora_scanner);
+            RPI.spectrumCommon.loraHistoryStore.ingestTick(loraData);
           }
           if (msg.data.metrics) updateMetrics(msg.data.metrics);
           if (msg.data.interfaces) {
@@ -1275,7 +1329,7 @@
           }
           if (msg.data.space && RPI.space && RPI.space.update) RPI.space.update(msg.data.space);
           if (msg.data.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(msg.data.spectrum);
-          if ((msg.data.spectrum || msg.data.lora_scanner) && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
+          if ((msg.data.spectrum || msg.data.lora_scanner || msg.data.lora_chirp_viewer) && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
           if (msg.data.gps && RPI.updateGps) RPI.updateGps(msg.data.gps);
           if (msg.data.gps && msg.data.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(msg.data.gps.last_fix);
           if (msg.data.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(msg.data.adsb);
@@ -1335,7 +1389,7 @@
   function registerDeferredSection(name, fn) { _sectionFirstExpand[name] = fn; }
   RPI.registerDeferredSection = registerDeferredSection;
 
-  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency'].forEach(function(name) {
+  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section'].forEach(function(name) {
     var toggle = $(name + '-toggle');
     var body = $(name + '-body');
     if (toggle && body) {

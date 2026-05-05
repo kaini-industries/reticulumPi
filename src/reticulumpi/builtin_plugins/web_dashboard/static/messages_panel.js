@@ -20,7 +20,7 @@
   'use strict';
   var R = window.RPI;
   if (!R) return;
-  var api = R.api, $ = R.$, esc = R.esc;
+  var api = R.api, apiRetry = R.apiRetry, $ = R.$, esc = R.esc;
   var formatTimeAgo = R.formatTimeAgo;
 
   // Shared /api/meshtastic/channels fetcher.  Both Meshtastic panels
@@ -36,7 +36,7 @@
       return Promise.resolve(_chCache.data);
     }
     if (_chInflight) return _chInflight;
-    _chInflight = api('/api/meshtastic/channels').then(function (r) {
+    _chInflight = apiRetry('/api/meshtastic/channels').then(function (r) {
       _chInflight = null;
       if (!r || !r.ok) return [];
       var data = r.data.channels || [];
@@ -58,7 +58,7 @@
       return Promise.resolve(_trCache.data);
     }
     if (_trInflight) return _trInflight;
-    _trInflight = api('/api/messages/transports').then(function (r) {
+    _trInflight = apiRetry('/api/messages/transports').then(function (r) {
       _trInflight = null;
       if (!r || !r.ok) return [];
       var data = r.data.transports || [];
@@ -335,7 +335,7 @@
     }
 
     function _fetchConversations() {
-      return api('/api/messages/conversations' + _qs()).then(function (r) {
+      return apiRetry('/api/messages/conversations' + _qs()).then(function (r) {
         if (!r) { _showConvsError('network error'); return; }
         if (!r.ok) { _showConvsError(r.error || 'request failed'); return; }
         _clearConvsError();
@@ -355,7 +355,7 @@
       var url = '/api/messages/conversation/' + encodeURIComponent(contactId) +
                 '?' + extra.join('&');
       if (append) _olderLoading = true;
-      return api(url).then(function (r) {
+      return apiRetry(url).then(function (r) {
         if (append) _olderLoading = false;
         if (contactId !== _activeContactId) return;
         if (!r || !r.ok) return;
@@ -382,7 +382,7 @@
     }
 
     function _fetchContacts() {
-      return api('/api/messages/contacts' + _qs()).then(function (r) {
+      return apiRetry('/api/messages/contacts' + _qs()).then(function (r) {
         if (!r || !r.ok) return;
         _contacts = r.data.contacts || [];
         _renderDestSelect();
@@ -390,7 +390,7 @@
     }
 
     function _fetchUnread() {
-      return api('/api/messages/unread' + _qs()).then(function (r) {
+      return apiRetry('/api/messages/unread' + _qs()).then(function (r) {
         if (!r || !r.ok) return;
         _unreadCounts = r.data.unread || {};
         _updateUnreadUI();
@@ -1339,7 +1339,7 @@
       if (q === _lastSearchQuery) return;  // debounced input sent the same query
       _lastSearchQuery = q;
       var extra = ['q=' + encodeURIComponent(q), 'limit=30'];
-      api('/api/messages/search' + _qs(extra)).then(function (r) {
+      apiRetry('/api/messages/search' + _qs(extra)).then(function (r) {
         if (!r || !r.ok) return;
         // Stale result check: user typed further and _lastSearchQuery
         // has already moved on — drop this render to avoid flicker.

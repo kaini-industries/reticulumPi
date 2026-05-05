@@ -39,6 +39,8 @@ class EmergencyBroadcastPlugin(PluginBase):
     plugin_name = "emergency_broadcast"
     plugin_version = "1.0.0"
     plugin_description = "Mesh-wide emergency broadcast with flood propagation"
+    broadcast_tier = 1
+    broadcast_keys = "emergency"
 
     def validate_config(self) -> None:
         max_ttl = self.config.get("max_ttl", 5)
@@ -69,6 +71,8 @@ class EmergencyBroadcastPlugin(PluginBase):
         self._messages_sent = 0
         self._messages_received = 0
         self._messages_rebroadcast = 0
+
+        self._start_thread(self._periodic_prune_loop, "emergency-prune")
 
         # Create destination for emergency broadcasts
         self.destination = RNS.Destination(
@@ -105,6 +109,9 @@ class EmergencyBroadcastPlugin(PluginBase):
             "messages_rebroadcast": self._messages_rebroadcast,
             "stored_messages": len(self._messages),
         }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_status()
 
     def get_messages(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return stored emergency messages, most recent first."""
@@ -268,6 +275,14 @@ class EmergencyBroadcastPlugin(PluginBase):
             to_remove = len(self._seen_ids) - self._max_seen
             for k, _ in by_age[:to_remove]:
                 del self._seen_ids[k]
+
+    def _periodic_prune_loop(self) -> None:
+        while self._active:
+            self._sleep_while_active(600.0)
+            if not self._active:
+                break
+            with self._lock:
+                self._prune_seen_ids(time.time())
 
     def _store_message(self, msg: dict[str, Any]) -> None:
         """Store a message in the local buffer."""

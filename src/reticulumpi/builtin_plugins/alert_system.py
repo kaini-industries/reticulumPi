@@ -30,6 +30,8 @@ class AlertSystemPlugin(PluginBase):
     plugin_name = "alert_system"
     plugin_version = "1.0.0"
     plugin_description = "LXMF alert notifications for threshold breaches and failures"
+    broadcast_tier = 1
+    broadcast_keys = "alerts"
 
     def validate_config(self) -> None:
         recipients = self.config.get("recipients", [])
@@ -110,6 +112,12 @@ class AlertSystemPlugin(PluginBase):
                     if time.time() - t < self.config.get("cooldown_seconds", 300)
                 ),
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        s = self.get_status()
+        if not s:
+            return None
+        return {"alerts_sent": s.get("alerts_sent", 0), "last_alert": s.get("last_alert")}
 
     # --- LXMF setup ---
 

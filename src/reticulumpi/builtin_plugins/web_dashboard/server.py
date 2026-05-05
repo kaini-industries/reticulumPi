@@ -97,6 +97,12 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
             plugin.config.get("allow_localhost_api", False)
             and request.remote in ("127.0.0.1", "::1")
         ):
+            if request.method in ("POST", "PUT", "DELETE"):
+                if not request.headers.get("X-Requested-With"):
+                    raise aiohttp.web.HTTPForbidden(
+                        text='{"ok": false, "error": "Missing X-Requested-With header", "code": 403}',
+                        content_type="application/json",
+                    )
             return await handler(request)
 
         # Extract token from Authorization header or cookie

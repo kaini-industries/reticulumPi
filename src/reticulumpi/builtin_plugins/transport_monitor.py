@@ -58,6 +58,8 @@ class TransportMonitorPlugin(PluginBase):
         "Monitors TCP hub health, activates fallback connections, "
         "and auto-discovers community hubs"
     )
+    broadcast_tier = 0
+    broadcast_keys = "transport"
 
     def validate_config(self) -> None:
         interval = self.config.get("check_interval", 15)
@@ -294,6 +296,9 @@ class TransportMonitorPlugin(PluginBase):
                     "exchange_peers": len(self._exchange_peers),
                 },
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_hub_health()
 
     # --- Primary/fallback internals (unchanged) ---
 
@@ -1072,15 +1077,8 @@ class TransportMonitorPlugin(PluginBase):
                 f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool
             }
             pinned = set(self._pinned_hubs)
-            pool_size = len(self._hub_pool)
 
         for entry in received:
-            if pool_size + added >= self._MAX_HUB_POOL_SIZE:
-                self.log.debug(
-                    "Hub pool cap reached (%d), ignoring remaining exchanged hubs",
-                    self._MAX_HUB_POOL_SIZE,
-                )
-                break
             host = entry.get("h", "")
             port = entry.get("p", 0)
             if not host or not port:
@@ -1097,6 +1095,12 @@ class TransportMonitorPlugin(PluginBase):
                 "last_seen": time.monotonic(),
             }
             with self._lock:
+                if len(self._hub_pool) >= self._MAX_HUB_POOL_SIZE:
+                    self.log.debug(
+                        "Hub pool cap reached (%d), ignoring remaining exchanged hubs",
+                        self._MAX_HUB_POOL_SIZE,
+                    )
+                    break
                 self._hub_pool.append(new_hub)
             existing_keys.add(key)
             added += 1

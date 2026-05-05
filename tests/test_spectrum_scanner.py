@@ -52,6 +52,9 @@ def _make_plugin(config: dict | None = None) -> SpectrumScanner:
     plugin._waterfall = deque(maxlen=plugin._waterfall_rows)
     plugin._segments = {}
     plugin._current_ts = None
+    plugin._device_released = False
+    plugin._supervisor_alive = False
+    plugin._resolved_index = None
     return plugin
 
 
@@ -68,7 +71,7 @@ class TestValidateConfig:
         assert p._gain_db == 40.0
         assert p._ppm == 0
         assert p._waterfall_rows == 128
-        assert p._device_index == "0"
+        assert p._device_id == "0"
 
     def test_custom_config_overrides_defaults(self):
         p = _make_plugin({
@@ -88,7 +91,7 @@ class TestValidateConfig:
         assert p._gain_db == 29.0
         assert p._ppm == -3
         assert p._waterfall_rows == 256
-        assert p._device_index == "1"
+        assert p._device_id == "1"
 
     def test_null_gain_means_auto(self):
         p = _make_plugin({"gain_db": None})
@@ -459,6 +462,30 @@ class TestSupervisorMissingBinary:
 # ---------------------------------------------------------------------------
 # Module-level constants are exposed for documentation / UI hints
 # ---------------------------------------------------------------------------
+class TestRestartSweep:
+    def test_skips_thread_spawn_when_supervisor_alive(self):
+        """_restart_sweep should NOT spawn a new thread if the supervisor is running."""
+        p = _make_plugin()
+        p._supervisor_alive = True
+        p._device_released = True
+        p._restart_count = 3
+        with patch.object(p, "_start_thread") as mock_start:
+            p._restart_sweep()
+        mock_start.assert_not_called()
+        assert p._device_released is False
+        assert p._restart_count == 0
+
+    def test_spawns_thread_when_supervisor_dead(self):
+        """_restart_sweep should spawn a new thread if the supervisor exited."""
+        p = _make_plugin()
+        p._supervisor_alive = False
+        p._device_released = True
+        with patch.object(p, "_start_thread") as mock_start:
+            p._restart_sweep()
+        mock_start.assert_called_once()
+        assert p._device_released is False
+
+
 class TestModuleConstants:
     def test_gain_steps_cover_expected_e4000_values(self):
         assert 42.0 in _COMMON_GAIN_STEPS_DB

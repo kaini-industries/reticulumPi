@@ -51,15 +51,21 @@ class NetworkMapPlugin(PluginBase):
     plugin_name = "network_map"
     plugin_version = "1.1.0"
     plugin_description = "Passive network topology mapping via announce monitoring"
+    broadcast_tier = 1
+    broadcast_keys = "mesh"
 
     def validate_config(self) -> None:
         max_days = self.config.get("max_history_days", 30)
         if not isinstance(max_days, (int, float)) or max_days < 1:
             raise ValueError("max_history_days must be >= 1")
+        max_cached = self.config.get("max_cached_nodes", 10000)
+        if not isinstance(max_cached, int) or max_cached < 100:
+            raise ValueError("max_cached_nodes must be an integer >= 100")
 
     def start(self) -> None:
         self._active = True
         self._known_nodes: dict[bytes, dict[str, Any]] = {}
+        self._max_cached_nodes: int = self.config.get("max_cached_nodes", 10000)
         self._nodes_lock = threading.Lock()
 
         db_path = os.path.expanduser(
@@ -125,6 +131,16 @@ class NetworkMapPlugin(PluginBase):
             "known_nodes": len(self._known_nodes),
             "db_path": getattr(self, "_db_path", None),
         }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        mesh = {}
+        if hasattr(self, "get_node_count"):
+            mesh["node_count"] = self.get_node_count()
+        if hasattr(self, "get_recent_announces"):
+            mesh["recent_announces"] = self.get_recent_announces()
+        if cycle_count % 3 == 0 and hasattr(self, "get_mesh_summary"):
+            mesh["summary"] = self.get_mesh_summary()
+        return mesh or None
 
     def get_known_nodes(self) -> list[dict[str, Any]]:
         """Return all known nodes as a list of dicts (for API consumption)."""
@@ -559,9 +575,16 @@ class NetworkMapPlugin(PluginBase):
                     "app_data_str": app_data_str,
                 }
                 is_new = True
+                if len(self._known_nodes) > self._max_cached_nodes:
+                    oldest_hash = min(
+                        self._known_nodes,
+                        key=lambda h: self._known_nodes[h].get("last_seen", 0),
+                    )
+                    del self._known_nodes[oldest_hash]
             node_info = dict(self._known_nodes[destination_hash])
 
-        # Queue for batched DB write (instead of per-announce SQLite open/write/close)
+        # _nodes_lock is released here — event publishing and DB writes
+        # happen outside the lock to avoid deadlocks with event handlers.
         self._pending_upserts[destination_hash] = node_info
 
         if is_new:
@@ -704,6 +727,13 @@ class NetworkMapPlugin(PluginBase):
                         "announce_count": row["announce_count"],
                         "app_data_str": row["app_data_str"] or "",
                     }
+            if len(self._known_nodes) > self._max_cached_nodes:
+                by_recency = sorted(
+                    self._known_nodes.items(),
+                    key=lambda kv: kv[1].get("last_seen", 0),
+                    reverse=True,
+                )
+                self._known_nodes = dict(by_recency[:self._max_cached_nodes])
             self.log.info("Loaded %d known nodes from database", len(self._known_nodes))
         except Exception:
             self.log.exception("Error loading known nodes from database")

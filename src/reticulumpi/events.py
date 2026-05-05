@@ -152,6 +152,17 @@ SPECTRUM_STATUS = "spectrum.status"       # status change (running/error/unavail
 LORA_SCANNER_SWEEP = "lora_scanner.sweep"
 LORA_SCANNER_STATUS = "lora_scanner.status"
 
+# LoRa chirp viewer — on-demand I/Q capture + spectrogram
+CHIRP_CAPTURE_STARTING = "chirp.capture_starting"
+CHIRP_CAPTURE_DONE = "chirp.capture_done"
+
+# LoRa chirp viewer — continuous streaming waterfall
+CHIRP_WATERFALL_ROWS = "chirp.waterfall_rows"
+
+# LoRa chirp detection — preamble / packet detection from dechirp
+CHIRP_DETECTION = "chirp.detection"
+CHIRP_PACKET_DECODED = "chirp.packet_decoded"
+
 # ADS-B radar — aircraft tracking via dump1090
 ADSB_AIRCRAFT_DETECTED = "adsb.aircraft_detected"
 ADSB_AIRCRAFT_LOST = "adsb.aircraft_lost"

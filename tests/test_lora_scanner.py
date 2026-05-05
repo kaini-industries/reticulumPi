@@ -36,6 +36,7 @@ def _make_plugin(config: dict | None = None) -> LoraScanner:
     plugin._waterfall = deque(maxlen=plugin._waterfall_rows)
     plugin._segments = {}
     plugin._current_ts = None
+    plugin._resolved_index = None
     return plugin
 
 

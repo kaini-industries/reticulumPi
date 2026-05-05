@@ -46,6 +46,7 @@ def _make_plugin(config: dict | None = None) -> AdsbRadarPlugin:
     plugin._aircraft = {}
     plugin._total_messages = 0
     plugin._aircraft_seen_total = 0
+    plugin._resolved_index = None
     return plugin
 
 
@@ -57,7 +58,7 @@ class TestValidateConfig:
     def test_defaults(self):
         p = _make_plugin()
         assert p._dump1090_bin == "dump1090"
-        assert p._device_index == "0"
+        assert p._device_id == "0"
         assert p._gain == "max"
         assert p._ppm == 0
         assert p._enable_bias_tee is False
@@ -79,7 +80,7 @@ class TestValidateConfig:
             "receiver_lon": -74.0060,
         })
         assert p._dump1090_bin == "/opt/dump1090-fa/dump1090-fa"
-        assert p._device_index == "1"
+        assert p._device_id == "1"
         assert p._gain == "40"
         assert p._ppm == -3
         assert p._enable_bias_tee is True
@@ -428,6 +429,35 @@ class TestHaversine:
 
 
 # ---------------------------------------------------------------------------
+# device resolution (via shared rtlsdr module; full resolver tests in test_rtlsdr.py)
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceResolution:
+    def test_build_cmd_uses_resolved_index(self):
+        p = _make_plugin({"device_index": "00000001"})
+        p._resolved_index = 0
+        cmd = p._build_cmd()
+        idx = cmd.index("--device-index")
+        assert cmd[idx + 1] == "0"
+
+    def test_build_cmd_falls_back_without_resolution(self):
+        p = _make_plugin({"device_index": "2"})
+        p._resolved_index = None
+        cmd = p._build_cmd()
+        idx = cmd.index("--device-index")
+        assert cmd[idx + 1] == "2"
+
+    def test_device_serial_takes_precedence(self):
+        p = _make_plugin({"device_serial": "00000001", "device_index": "99"})
+        assert p._device_id == "00000001"
+
+    def test_device_index_fallback(self):
+        p = _make_plugin({"device_index": "14342860"})
+        assert p._device_id == "14342860"
+
+
+# ---------------------------------------------------------------------------
 # Supervisor: missing binary → graceful 'unavailable' status
 # ---------------------------------------------------------------------------
 
@@ -454,14 +484,64 @@ class TestSupervisorMissingBinary:
 class TestGpsHandler:
     def test_updates_receiver_position(self):
         p = _make_plugin()
-        p._on_gps_fix({"latitude": 40.7, "longitude": -74.0})
+        p._on_gps_fix("gps.fix_updated", {"lat": 40.7, "lon": -74.0})
         assert p._receiver_lat == pytest.approx(40.7)
         assert p._receiver_lon == pytest.approx(-74.0)
 
+    def test_first_fix_event(self):
+        p = _make_plugin()
+        p._on_gps_fix("gps.fix_received", {"lat": 51.5, "lon": -0.1, "alt_m": 10.0, "timestamp": 1.0})
+        assert p._receiver_lat == pytest.approx(51.5)
+        assert p._receiver_lon == pytest.approx(-0.1)
+
     def test_ignores_incomplete_fix(self):
         p = _make_plugin()
-        p._on_gps_fix({"latitude": 40.7})
+        p._on_gps_fix("gps.fix_updated", {"lat": 40.7})
         assert p._receiver_lat is None
+
+    def test_startup_picks_up_existing_gps_fix(self):
+        app = _make_app()
+        gps = MagicMock()
+        gps.last_fix = {"lat": 48.8, "lon": 2.35, "alt_m": 35.0}
+        app.get_plugin = MagicMock(return_value=gps)
+        plugin = AdsbRadarPlugin(app, {})
+        plugin._state_lock = threading.Lock()
+        plugin._process = None
+        plugin._pid = None
+        plugin._restart_count = 0
+        plugin._status = "starting"
+        plugin._last_error = None
+        plugin._dump1090_path = "/usr/bin/dump1090"
+        plugin._aircraft = {}
+        plugin._total_messages = 0
+        plugin._aircraft_seen_total = 0
+        plugin._resolved_index = None
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+        assert plugin._receiver_lat == pytest.approx(48.8)
+        assert plugin._receiver_lon == pytest.approx(2.35)
+
+    def test_static_config_takes_priority_over_gps(self):
+        app = _make_app()
+        gps = MagicMock()
+        gps.last_fix = {"lat": 48.8, "lon": 2.35, "alt_m": 35.0}
+        app.get_plugin = MagicMock(return_value=gps)
+        plugin = AdsbRadarPlugin(app, {"receiver_lat": 40.7, "receiver_lon": -74.0})
+        plugin._state_lock = threading.Lock()
+        plugin._process = None
+        plugin._pid = None
+        plugin._restart_count = 0
+        plugin._status = "starting"
+        plugin._last_error = None
+        plugin._dump1090_path = "/usr/bin/dump1090"
+        plugin._aircraft = {}
+        plugin._total_messages = 0
+        plugin._aircraft_seen_total = 0
+        plugin._resolved_index = None
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+        assert plugin._receiver_lat == pytest.approx(40.7)
+        assert plugin._receiver_lon == pytest.approx(-74.0)
 
 
 # ---------------------------------------------------------------------------

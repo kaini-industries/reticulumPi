@@ -134,6 +134,23 @@
   }
 
   // -- DOM setup -----------------------------------------------------------
+  function _resizeCanvas() {
+    if (!_wfCanvas || !_wfCtx) return false;
+    var container = _wfCanvas.parentElement;
+    if (!container) return false;
+    var newCols = Math.max(400, Math.min(container.clientWidth, 1920));
+    newCols = (newCols + 1) & ~1;
+    if (newCols === WF_COLS && _wfCanvas.width === WF_COLS) return false;
+    WF_COLS = newCols;
+    _wfCanvas.width = WF_COLS;
+    _wfCanvas.height = WF_ROWS;
+    _wfCtx.fillStyle = '#050810';
+    _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
+    _needsBulkPaint = true;
+    _lastSweepCount = 0;
+    return true;
+  }
+
   function _resolveDom() {
     if (_section) return true;
     _section = $('spectrum-section');
@@ -158,13 +175,18 @@
     _plotWrap = _wfCanvas ? _wfCanvas.parentNode : null;
 
     if (_wfCanvas) {
-      _wfCanvas.width = WF_COLS;
-      _wfCanvas.height = WF_ROWS;
       _wfCtx = _wfCanvas.getContext('2d');
-      _wfCtx.fillStyle = '#050810';
-      _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
+      _resizeCanvas();
       _wfCanvas.addEventListener('mousemove', _onHover);
       _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
+      var wfParent = _wfCanvas.parentElement;
+      if (wfParent && typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(function () {
+          if (!_resizeCanvas()) return;
+          var clip = _lastData ? _clip(_lastData, _zoom) : null;
+          _bulkPaintFromStore(clip);
+        }).observe(wfParent);
+      }
     }
 
     if (_toggle) _toggle.addEventListener('click', _onToggleClick);
@@ -620,9 +642,15 @@
     var range = hi - lo;
     if (range < 1) range = 1;
     for (var x = 0; x < WF_COLS; x++) {
-      var srcIdx = (n > 1) ? Math.floor((x * (n - 1)) / (WF_COLS - 1)) : 0;
-      if (srcIdx < 0) srcIdx = 0; else if (srcIdx >= n) srcIdx = n - 1;
-      var p = row[srcIdx];
+      var srcF = (n > 1) ? (x * (n - 1)) / (WF_COLS - 1) : 0;
+      var srcLo = Math.floor(srcF);
+      var srcHi = Math.min(srcLo + 1, n - 1);
+      var frac = srcF - srcLo;
+      var pLo = row[srcLo], pHi = row[srcHi];
+      var p;
+      if (pLo == null || !isFinite(pLo)) p = pHi;
+      else if (pHi == null || !isFinite(pHi)) p = pLo;
+      else p = pLo + (pHi - pLo) * frac;
       var norm;
       if (p == null || !isFinite(p)) {
         norm = 0;

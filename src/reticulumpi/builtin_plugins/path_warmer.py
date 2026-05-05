@@ -37,6 +37,8 @@ class PathWarmerPlugin(PluginBase):
     plugin_name = "path_warmer"
     plugin_version = "1.0.0"
     plugin_description = "Proactively refreshes paths to known/important nodes"
+    broadcast_tier = 1
+    broadcast_keys = "path_warming"
 
     def validate_config(self) -> None:
         interval = self.config.get("warm_interval", _DEFAULT_WARM_INTERVAL)
@@ -111,6 +113,9 @@ class PathWarmerPlugin(PluginBase):
                 "last_cycle_time": self._last_cycle_time,
                 "priority_nodes": len(self._priority_hashes),
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_warming_stats()
 
     def get_warming_stats(self) -> dict[str, Any]:
         """Full stats for dashboard API."""

@@ -75,6 +75,8 @@ class SpectrumScanner(PluginBase):
     plugin_name = "spectrum_scanner"
     plugin_version = "0.1.0"
     plugin_description = "RTL-SDR spectrum sweep + waterfall feed"
+    broadcast_tier = 2
+    broadcast_keys = "spectrum"
 
     # --- config validation ---------------------------------------------------
 
@@ -113,7 +115,7 @@ class SpectrumScanner(PluginBase):
             raise ValueError(f"waterfall_rows must be 8-2048, got {wf_rows}")
         self._waterfall_rows = wf_rows
 
-        self._device_index = str(cfg.get("device_index", "0"))
+        self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
         self._power_command = str(cfg.get("power_command", "rtl_power"))
         self._max_restarts = int(cfg.get("max_restarts", 5))
         self._health_interval = float(cfg.get("health_check_interval", 5.0))
@@ -130,6 +132,7 @@ class SpectrumScanner(PluginBase):
         self._rtl_power_path: str | None = None
         self._last_error: str | None = None
         self._status = "starting"
+        self._resolved_index: int | None = None
         self._event_sweep_topic = EVENT_SPECTRUM_SWEEP
         self._event_status_topic = EVENT_SPECTRUM_STATUS
 
@@ -155,7 +158,16 @@ class SpectrumScanner(PluginBase):
         self._segments: dict[int, tuple[int, list[float | None]]] = {}
         self._current_ts: str | None = None
 
+        try:
+            from reticulumpi.rtlsdr import resolve_device
+            self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+        except (RuntimeError, ValueError) as exc:
+            self.log.error("RTL-SDR device resolution failed: %s", exc)
+            self._set_status("error", str(exc))
+
         self._active = True
+        self._device_released = False
+        self._supervisor_alive = True
         self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
         # E4000 gap warning — informational only.
@@ -189,6 +201,11 @@ class SpectrumScanner(PluginBase):
     def stop(self) -> None:
         self._active = False
         self._terminate_process()
+        try:
+            from reticulumpi.rtlsdr import release_device
+            release_device(self._device_id, caller=self.plugin_name)
+        except Exception:
+            pass
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -287,6 +304,13 @@ class SpectrumScanner(PluginBase):
 
     def _supervisor_loop(self) -> None:
         """Launch rtl_power once; on exit, back off and retry up to max_restarts."""
+        self._supervisor_alive = True
+        try:
+            self._supervisor_loop_inner()
+        finally:
+            self._supervisor_alive = False
+
+    def _supervisor_loop_inner(self) -> None:
         self._rtl_power_path = shutil.which(self._power_command)
         if not self._rtl_power_path:
             self._set_status(
@@ -300,6 +324,11 @@ class SpectrumScanner(PluginBase):
             return
 
         while self._active:
+            if self._device_released:
+                self._set_status("paused", "device released for external use")
+                self._sleep_while_active(1.0)
+                continue
+
             try:
                 self._launch_rtl_power()
             except Exception as exc:
@@ -307,14 +336,7 @@ class SpectrumScanner(PluginBase):
                 self.log.exception("Failed to launch rtl_power")
                 break
 
-            # Start a parser thread dedicated to this subprocess instance;
-            # it exits when rtl_power closes its stdout.
-            parser = threading.Thread(
-                target=self._parser_loop,
-                name="spectrum-parser",
-                daemon=True,
-            )
-            parser.start()
+            parser = self._start_thread(self._parser_loop, name="spectrum-parser")
 
             # Block until rtl_power exits or we're stopped.
             while self._active and self._process is not None:
@@ -326,6 +348,7 @@ class SpectrumScanner(PluginBase):
 
             # Wait for parser to drain.
             parser.join(timeout=2.0)
+            self._remove_thread(parser)
             self._terminate_process()  # idempotent; cleans up zombies
 
             if not self._active:
@@ -389,7 +412,7 @@ class SpectrumScanner(PluginBase):
             self._rtl_power_path,
             "-f", freq_arg,
             "-i", f"{self._sweep_seconds:g}s",
-            "-d", str(self._device_index),
+            "-d", str(self._resolved_index if self._resolved_index is not None else self._device_id),
             "-p", str(self._ppm),
         ]
         if self._gain_db is not None:
@@ -423,6 +446,21 @@ class SpectrumScanner(PluginBase):
                     proc.stdout.close()
                 except Exception:
                     pass
+
+    def _restart_sweep(self) -> None:
+        """Restart the rtl_power supervisor after an external interruption.
+
+        Subclasses (e.g. LoraChirpViewer) call this after temporarily
+        stopping the sweep to use the USB device for I/Q capture.
+        Clears the device-released flag so the existing supervisor thread
+        resumes; only spawns a new thread if the old one exited.
+        """
+        self._restart_count = 0
+        self._segments = {}
+        self._current_ts = None
+        self._device_released = False
+        if not self._supervisor_alive:
+            self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
     # --- parser --------------------------------------------------------------
 

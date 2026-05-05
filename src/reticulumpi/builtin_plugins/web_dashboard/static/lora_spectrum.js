@@ -85,6 +85,19 @@
   var _peakHoldEnabled = false;
   var _peakHoldDb = null;      // per-bin max dB, aligned with spec.bins_hz
 
+  // -- Energy cluster detection state ----------------------------------------
+  var _clusterEmaDb = null;
+  var _clusterTracked = [];
+  var _clusterIdCounter = 0;
+  var _clusterEnabled = true;
+  var _clusterVisibleSig = '';
+  var CLUSTER_EMA_ALPHA = 0.15;
+  var CLUSTER_LIFT_DB = 2;
+  var CLUSTER_GAP = 2;
+  var CLUSTER_MIN_BINS = 3;
+  var CLUSTER_APPEAR = 3;
+  var CLUSTER_DISAPPEAR = 5;
+
   // -- Channel grid state ---------------------------------------------------
   var _chGridWrap = null, _chGridUp = null, _chGridDn = null;
   var _chDetailEl = null;
@@ -93,6 +106,17 @@
   var _selectedChannel = null;
   var _chTooltipEl = null;
   var _channelPowerHistory = null;
+
+  // -- Chirp detection aggregation by channel --------------------------------
+  var _detByChannel = {};        // chIdx → {count, latestTs, latestSf, latestSnr}
+  var _detBandHistory = [];      // ring buffer of raw det objects
+  var _detBandTotal = 0;
+  var _DET_BAND_MAX = 512;
+
+  var SF_COLORS = {
+    7:  '#ff6b9d', 8:  '#ff9f43', 9:  '#ffd93d',
+    10: '#6bff6b', 11: '#43c9ff', 12: '#b67dff',
+  };
 
   // -- Stats panel state ----------------------------------------------------
   var _statsPanelEl = null, _nfTrendEl = null, _chUtilEl = null, _chTimelineEl = null;
@@ -106,9 +130,26 @@
   var _wfScaleMin = -100;
   var _wfScaleMax = -30;
   var _LS_WF_SCALE = 'rpi_lora_wf_scale';
-  var _LS_ZOOM = 'rpi_lora_zoom';
+  function _zoomKey() { return 'rpi_lora_zoom_' + _region; }
 
   // -- DOM setup -----------------------------------------------------------
+  function _resizeCanvas() {
+    if (!_wfCanvas || !_wfCtx) return false;
+    var container = _wfCanvas.parentElement;
+    if (!container) return false;
+    var newCols = Math.max(400, Math.min(container.clientWidth, 1920));
+    newCols = (newCols + 1) & ~1;
+    if (newCols === WF_COLS && _wfCanvas.width === WF_COLS) return false;
+    WF_COLS = newCols;
+    _wfCanvas.width = WF_COLS;
+    _wfCanvas.height = WF_ROWS;
+    _wfCtx.fillStyle = _css.wfBg || '#050810';
+    _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
+    _needsBulkPaint = true;
+    _lastRenderedSweep = 0;
+    return true;
+  }
+
   function _resolveDom() {
     if (_section) return true;
     _section = $('lora-spectrum-section');
@@ -126,13 +167,20 @@
     _zoomResetEl = $('lora-spec-zoom-reset');
 
     if (_wfCanvas) {
-      _wfCanvas.width = WF_COLS;
-      _wfCanvas.height = WF_ROWS;
       _wfCtx = _wfCanvas.getContext('2d');
-      _wfCtx.fillStyle = _css.wfBg || '#050810';
-      _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
+      _resizeCanvas();
       _wfCanvas.addEventListener('mousemove', _onHover);
       _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
+      var wfParent = _wfCanvas.parentElement;
+      if (wfParent && typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(function () {
+          if (!_resizeCanvas()) return;
+          if (_lastData) {
+            var clip = _clip(_lastData.spectrum || {}, _zoom);
+            if (clip) _repaintWaterfallFromHistory(clip);
+          }
+        }).observe(wfParent);
+      }
     }
 
     if (_lineEl) {
@@ -167,18 +215,11 @@
     _css.noiseLine = cs.getPropertyValue('--lora-noise-line').trim() || 'rgba(240,160,64,0.5)';
     _css.cyan      = cs.getPropertyValue('--cyan').trim()            || '#00e5ff';
 
-    // Restore trace toggle state and zoom from localStorage
+    // Restore toggle state from localStorage
     _loadWfScaleState();
     try {
-      var zs = localStorage.getItem(_LS_ZOOM);
-      if (zs) {
-        var zp = JSON.parse(zs);
-        if (Array.isArray(zp) && zp.length === 2
-            && typeof zp[0] === 'number' && typeof zp[1] === 'number'
-            && zp[1] > zp[0]) {
-          _zoom = zp;
-        }
-      }
+      var cv = localStorage.getItem('rpi_lora_clusters');
+      if (cv === '0') _clusterEnabled = false;
     } catch (e) {}
 
     if (_toggle) _toggle.addEventListener('click', _onToggleClick);
@@ -197,6 +238,22 @@
     // again when `/api/config` lands (which may promote 'default' → 'config').
     _loadUserRegion();
     _resolveRegion();
+
+    // Restore zoom AFTER region is resolved so _zoomKey() returns the
+    // correct region-scoped key.  Validate against region bounds.
+    try {
+      var zs = localStorage.getItem(_zoomKey());
+      if (zs) {
+        var zp = JSON.parse(zs);
+        if (Array.isArray(zp) && zp.length === 2
+            && typeof zp[0] === 'number' && typeof zp[1] === 'number'
+            && zp[1] > zp[0]
+            && zp[0] < _regionInfo.hi && zp[1] > _regionInfo.lo) {
+          _zoom = zp;
+        }
+      }
+    } catch (e) {}
+
     _fetchServerConfig();
 
     return true;
@@ -268,12 +325,24 @@
     if (regionChanged) {
       // Region change is a SOFT reset: the bin grid is unchanged (rtl_power
       // still scans the same frequencies), we're just clipping to a
-      // different slice.  Drop zoom (its MHz bounds are relative to the old
-      // region) and repaint the waterfall from the shared history store
-      // against the new clip.  Peak-hold stays aligned (per-bin index is
-      // unchanged).  The non-silent _setZoom path re-renders first so the
-      // EMA dB scale converges on the new window.
-      _setZoom(null, /*silent=*/false);
+      // different slice.  Try to restore a saved zoom for the NEW region;
+      // fall back to null (full band).  Peak-hold stays aligned (per-bin
+      // index is unchanged).  The non-silent _setZoom path re-renders and
+      // repaints the waterfall against the new clip.
+      var savedZoom = null;
+      try {
+        var zs = localStorage.getItem(_zoomKey());
+        if (zs) {
+          var zp = JSON.parse(zs);
+          if (Array.isArray(zp) && zp.length === 2
+              && typeof zp[0] === 'number' && typeof zp[1] === 'number'
+              && zp[1] > zp[0]
+              && zp[0] < _regionInfo.hi && zp[1] > _regionInfo.lo) {
+            savedZoom = zp;
+          }
+        }
+      } catch (e) {}
+      _setZoom(savedZoom, /*silent=*/false);
     } else if (sourceChanged) {
       _renderAll(_lastData);
     }
@@ -410,6 +479,7 @@
       rnodeInRegion ? '1' : '0',
       _zoom ? '1' : '0',
       _peakHoldEnabled ? '1' : '0',
+      _clusterEnabled ? '1' : '0',
     ].join('|');
 
     if (structSig !== _metaStructSig) {
@@ -446,6 +516,8 @@
         + '</span>'
         + '<button class="lora-peakhold-toggle' + (_peakHoldEnabled ? ' active' : '')
         +   '" title="Peak-hold trace (max per bin since enable)">Peak hold</button>'
+        + '<button class="lora-cluster-toggle' + (_clusterEnabled ? ' active' : '')
+        +   '" title="Auto-detect RF energy clusters">Clusters</button>'
         + '<span class="lora-stats-strip">'
         +   '<span class="lora-stat"><span class="lora-stat-label">Noise</span>'
         +     '<span class="lora-stat-value" data-role="noise">—</span></span>'
@@ -467,6 +539,8 @@
       }
       var phBtn = _metaEl.querySelector('.lora-peakhold-toggle');
       if (phBtn) phBtn.addEventListener('click', _onPeakHoldToggle);
+      var clBtn = _metaEl.querySelector('.lora-cluster-toggle');
+      if (clBtn) clBtn.addEventListener('click', _onClusterToggle);
       _regionSelectEl = _metaEl.querySelector('[data-role="region-select"]');
       if (_regionSelectEl) _regionSelectEl.addEventListener('change', _onRegionSelectChange);
 
@@ -541,6 +615,135 @@
     _zoomResetEl.style.display = (_zoom && clip) ? '' : 'none';
   }
 
+  // -- Energy cluster detection --------------------------------------------
+
+  function _updateClusterEma(powers) {
+    if (!_clusterEmaDb || _clusterEmaDb.length !== powers.length) {
+      _clusterEmaDb = new Array(powers.length);
+      for (var i = 0; i < powers.length; i++) _clusterEmaDb[i] = null;
+    }
+    var a = CLUSTER_EMA_ALPHA;
+    for (var i = 0; i < powers.length; i++) {
+      var v = powers[i];
+      if (v == null || !isFinite(v)) continue;
+      var prev = _clusterEmaDb[i];
+      _clusterEmaDb[i] = (prev == null) ? v : a * v + (1 - a) * prev;
+    }
+  }
+
+  function _detectClusters(spec, clip) {
+    if (!_clusterEmaDb || !clip) return [];
+    var bins = spec.bins_hz;
+    if (!bins || !bins.length) return [];
+    var lo = clip.loIdx, hi = clip.hiIdx;
+    var n = hi - lo + 1;
+    if (n < 5) return [];
+
+    // Smoothed local baseline — wide moving average so individual energy
+    // bands get averaged out, leaving only the broad spectral shape.
+    var halfW = Math.max(8, Math.floor(n / 10));
+    var baseline = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var sum = 0, cnt = 0;
+      var jLo = Math.max(lo, lo + i - halfW);
+      var jHi = Math.min(hi, lo + i + halfW);
+      for (var j = jLo; j <= jHi; j++) {
+        var bv = _clusterEmaDb[j];
+        if (bv != null && isFinite(bv)) { sum += bv; cnt++; }
+      }
+      baseline[i] = cnt > 0 ? sum / cnt : null;
+    }
+
+    // A bin is "hot" when it exceeds its local baseline by CLUSTER_LIFT_DB.
+    var clusters = [];
+    var runStart = -1, gap = 0, peakDb = -Infinity;
+    var wSum = 0, wFreq = 0;
+    for (var i = 0; i < n; i++) {
+      var idx = lo + i;
+      var v = _clusterEmaDb[idx];
+      var bl = baseline[i];
+      var hot = (v != null && isFinite(v) && bl != null && v > bl + CLUSTER_LIFT_DB);
+      if (hot) {
+        if (runStart < 0) runStart = idx;
+        gap = 0;
+        var lin = Math.pow(10, v / 10);
+        wSum += lin;
+        wFreq += lin * bins[idx];
+        if (v > peakDb) peakDb = v;
+      } else if (runStart >= 0) {
+        gap++;
+        if (gap > CLUSTER_GAP) {
+          var runEnd = idx - gap;
+          if (runEnd - runStart + 1 >= CLUSTER_MIN_BINS) {
+            clusters.push({
+              loMhz: bins[runStart] / 1e6,
+              hiMhz: bins[runEnd] / 1e6,
+              centerMhz: (wSum > 0) ? (wFreq / wSum) / 1e6 : bins[Math.floor((runStart + runEnd) / 2)] / 1e6,
+              peakDb: peakDb
+            });
+          }
+          runStart = -1; gap = 0; peakDb = -Infinity; wSum = 0; wFreq = 0;
+        }
+      }
+    }
+    if (runStart >= 0) {
+      var runEnd = hi - gap;
+      if (runEnd - runStart + 1 >= CLUSTER_MIN_BINS) {
+        clusters.push({
+          loMhz: bins[runStart] / 1e6,
+          hiMhz: bins[runEnd] / 1e6,
+          centerMhz: (wSum > 0) ? (wFreq / wSum) / 1e6 : bins[Math.floor((runStart + runEnd) / 2)] / 1e6,
+          peakDb: peakDb
+        });
+      }
+    }
+    return clusters;
+  }
+
+  function _trackClusters(raw) {
+    for (var ti = 0; ti < _clusterTracked.length; ti++) {
+      _clusterTracked[ti]._matched = false;
+    }
+    for (var ri = 0; ri < raw.length; ri++) {
+      var rc = raw[ri];
+      var best = null, bestDist = Infinity;
+      for (var ti = 0; ti < _clusterTracked.length; ti++) {
+        var tc = _clusterTracked[ti];
+        if (tc._matched) continue;
+        if (rc.centerMhz >= tc.loMhz && rc.centerMhz <= tc.hiMhz) {
+          var d = Math.abs(rc.centerMhz - tc.centerMhz);
+          if (d < bestDist) { best = tc; bestDist = d; }
+        }
+      }
+      if (best) {
+        best.loMhz = rc.loMhz;
+        best.hiMhz = rc.hiMhz;
+        best.centerMhz = rc.centerMhz;
+        best.peakDb = rc.peakDb;
+        best.age++;
+        best.missCount = 0;
+        best._matched = true;
+        if (!best.visible && best.age >= CLUSTER_APPEAR) best.visible = true;
+      } else {
+        _clusterTracked.push({
+          id: _clusterIdCounter++,
+          loMhz: rc.loMhz, hiMhz: rc.hiMhz,
+          centerMhz: rc.centerMhz, peakDb: rc.peakDb,
+          age: 1, missCount: 0, visible: false, _matched: true
+        });
+      }
+    }
+    for (var ti = _clusterTracked.length - 1; ti >= 0; ti--) {
+      var tc = _clusterTracked[ti];
+      if (!tc._matched) {
+        tc.missCount++;
+        if (tc.missCount >= CLUSTER_DISAPPEAR) {
+          _clusterTracked.splice(ti, 1);
+        }
+      }
+    }
+  }
+
   // -- Line plot ----------------------------------------------------------
   // ``pts`` polyline when bin count is dense; step-rect bars at deep zoom so
   // the rendering is honest about the scanner's 250 kHz bin resolution.
@@ -576,6 +779,19 @@
         var prev = _peakHoldDb[ph];
         if (prev == null || pv > prev) _peakHoldDb[ph] = pv;
       }
+    }
+
+    _updateClusterEma(powers);
+    if (_clusterEnabled) {
+      var prevSig = _clusterVisibleSig;
+      var rawC = _detectClusters(spec, clip);
+      _trackClusters(rawC);
+      var sigParts = [];
+      for (var ci = 0; ci < _clusterTracked.length; ci++) {
+        if (_clusterTracked[ci].visible) sigParts.push(_clusterTracked[ci].centerMhz.toFixed(1));
+      }
+      _clusterVisibleSig = sigParts.join(',');
+      if (_clusterVisibleSig !== prevSig) _lastOverlaySig = '';
     }
 
     var vbW = 800, vbH = 120;
@@ -761,6 +977,23 @@
       }, fmhz.toFixed(3)));
     }
 
+    // Chirp detection markers on channels
+    if (ca && ca.channels) {
+      for (var di = 0; di < ca.channels.length; di++) {
+        var dch = ca.channels[di];
+        var dentry = _detByChannel[dch.idx];
+        if (!dentry || dentry.count === 0) continue;
+        if (dch.center_mhz < clip.loMhz || dch.center_mhz > clip.hiMhz) continue;
+        var dx = ((dch.center_mhz - clip.loMhz) / (clip.hiMhz - clip.loMhz)) * vbW;
+        var dr = Math.min(5, 2 + Math.log2(dentry.count));
+        var dcolor = SF_COLORS[dentry.latestSf] || '#fff';
+        _lineEl.appendChild(SC.svg('circle', {
+          cx: dx.toFixed(1), cy: 4, r: dr.toFixed(1),
+          fill: dcolor, opacity: 0.8,
+        }));
+      }
+    }
+
     // Live drag preview rect (if dragging right now).
     if (_dragState) {
       var a = Math.min(_dragState.startFrac, _dragState.curFrac);
@@ -798,12 +1031,13 @@
     _lastSweepCount = sc;
   }
 
-  // -- Overlays (RNode box, MT grid, reg edges) ---------------------------
+  // -- Overlays (RNode box, MT grid, reg edges, clusters) -----------------
   function _renderOverlay(data, clip) {
     if (!_overlayEl) return;
     var sig = [_region, _ourFreqHz, _ourBwHz,
                clip ? clip.loMhz.toFixed(3) : '', clip ? clip.hiMhz.toFixed(3) : '',
-               _zoom ? 'Z' : 'F', _selectedChannel].join('|');
+               _zoom ? 'Z' : 'F', _selectedChannel,
+               _clusterEnabled ? _clusterVisibleSig : ''].join('|');
     if (sig === _lastOverlaySig) return;
     _lastOverlaySig = sig;
 
@@ -813,6 +1047,28 @@
     // Regulatory edges — dashed lines at band lo/hi if inside viewport.
     _drawEdge(clip, _regionInfo.lo, 'lora-reg-edge');
     _drawEdge(clip, _regionInfo.hi, 'lora-reg-edge');
+
+    // Energy cluster overlays (rendered before RNode so RNode draws on top).
+    if (_clusterEnabled) {
+      for (var ci = 0; ci < _clusterTracked.length; ci++) {
+        var cl = _clusterTracked[ci];
+        if (!cl.visible) continue;
+        if (cl.hiMhz < clip.loMhz || cl.loMhz > clip.hiMhz) continue;
+        var cLo = Math.max(cl.loMhz, clip.loMhz);
+        var cHi = Math.min(cl.hiMhz, clip.hiMhz);
+        var cLeft = _xPct(cLo, clip);
+        var cWidth = _xPct(cHi, clip) - cLeft;
+        var cBox = document.createElement('div');
+        cBox.className = 'lora-energy-cluster';
+        cBox.style.left = cLeft.toFixed(3) + '%';
+        cBox.style.width = Math.max(0.2, cWidth).toFixed(3) + '%';
+        var cLbl = document.createElement('span');
+        cLbl.className = 'lora-energy-cluster-label';
+        cLbl.textContent = cl.centerMhz.toFixed(3) + ' MHz';
+        cBox.appendChild(cLbl);
+        _overlayEl.appendChild(cBox);
+      }
+    }
 
     // Meshtastic channel grid: iterate up to 256 channels max (safety),
     // stop when we exit the viewport.
@@ -923,44 +1179,12 @@
     else ageStr = SC.formatAge(agoSec);
 
     var headerLine = freqMhz.toFixed(3) + ' MHz · ' + dbStr + ' · ' + ageStr;
-    var bandLine = '';
-
-    // 1. Inside our RNode's TX/RX window?
-    if (_ourFreqHz != null && _ourBwHz != null) {
-      var fMhz = _ourFreqHz / 1e6;
-      var bwMhz = _ourBwHz / 1e6;
-      if (freqMhz >= fMhz - bwMhz / 2 && freqMhz <= fMhz + bwMhz / 2) {
-        var rnLbl = '<strong>RNode</strong> · ' + fMhz.toFixed(3) + ' MHz';
-        if (_ourBwHz) rnLbl += ' · BW ' + (_ourBwHz / 1000).toFixed(0) + 'k';
-        if (_ourSf)   rnLbl += ' · SF ' + _ourSf;
-        if (_ourCr)   rnLbl += ' · CR 4/' + _ourCr;
-        bandLine = rnLbl;
-      }
-    }
-
-    // 2. Off the regulatory band edges entirely?
-    if (!bandLine && (freqMhz < _regionInfo.lo || freqMhz > _regionInfo.hi)) {
-      bandLine = '<strong>Out of band</strong> for ' + esc(_regionInfo.label);
-    }
-
-    // 3. Near a CW interference marker?
-    if (!bandLine) {
-      var ca = spec.channel_analysis;
-      var iFlags = ca ? ca.interference_flags : null;
-      if (iFlags) {
-        for (var fi = 0; fi < iFlags.length; fi++) {
-          var fl = iFlags[fi];
-          if (fl.type === 'cw' && fl.freq_mhz != null
-              && Math.abs(freqMhz - fl.freq_mhz) < 0.1) {
-            bandLine = '<strong>CW interference</strong> · '
-              + fl.freq_mhz.toFixed(3) + ' MHz';
-            if (fl.power_db != null) bandLine += ' · ' + fl.power_db.toFixed(1) + ' dB';
-            if (fl.duration_s != null) bandLine += ' · ' + fl.duration_s.toFixed(0) + 's';
-            break;
-          }
-        }
-      }
-    }
+    var bandLine = SC.loraBandLine(freqMhz, {
+      rnode: { freqHz: _ourFreqHz, bwHz: _ourBwHz, sf: _ourSf, cr: _ourCr },
+      region: _regionInfo,
+      interferenceFlags: spec.channel_analysis && spec.channel_analysis.interference_flags,
+      esc: esc
+    });
 
     if (bandLine) {
       _hoverEl.innerHTML = esc(headerLine)
@@ -982,13 +1206,16 @@
   function _setZoom(range, silent) {
     _zoom = range;
     _lastOverlaySig = '';  // overlay bounds depend on zoom
-    try { localStorage.setItem(_LS_ZOOM, range ? JSON.stringify(range) : ''); } catch (e) {}
+    try { localStorage.setItem(_zoomKey(), range ? JSON.stringify(range) : ''); } catch (e) {}
     if (silent) {
       // Hard reset path — called on a generation bump (bin grid changed or
       // WS hello backfill arrived), so peak-hold (per-bin index) no longer
       // aligns to the new axis.  Dropping _lastRenderedSweep re-arms the
       // bulk paint branch on the next tick.
       _peakHoldDb = null;
+      _clusterEmaDb = null;
+      _clusterTracked = [];
+      _clusterVisibleSig = '';
       _lastRenderedSweep = 0;
       if (_wfCtx) {
         _wfCtx.fillStyle = _css.wfBg || '#050810';
@@ -1117,6 +1344,13 @@
     if (_lastData) _renderAll(_lastData);
   }
 
+  function _onClusterToggle() {
+    _clusterEnabled = !_clusterEnabled;
+    _lastOverlaySig = '';
+    try { localStorage.setItem('rpi_lora_clusters', _clusterEnabled ? '1' : '0'); } catch (e) {}
+    if (_lastData) _renderAll(_lastData);
+  }
+
   function _loadWfScaleState() {
     try {
       var v = window.localStorage ? window.localStorage.getItem(_LS_WF_SCALE) : null;
@@ -1148,6 +1382,9 @@
       cell.className = 'lora-ch-cell lora-ch-idle';
       cell.textContent = String(ch.idx);
       cell.setAttribute('data-ch-idx', ch.idx);
+      var badge = document.createElement('span');
+      badge.className = 'lora-ch-det-badge';
+      cell.appendChild(badge);
       cell.addEventListener('click', _onChCellClick);
       cell.addEventListener('mouseenter', _onChCellEnter);
       cell.addEventListener('mouseleave', _onChCellLeave);
@@ -1182,7 +1419,19 @@
         var age = nowSec - ch.last_active_at;
         if (age < 30) cls += ' lora-ch-recent';
       }
+      var det = _detByChannel[ch.idx];
+      if (det && det.count > 0) cls += ' lora-ch-det-active';
       cell.className = cls;
+      var badge = cell.querySelector('.lora-ch-det-badge');
+      if (badge) {
+        if (det && det.count > 0) {
+          badge.textContent = det.count;
+          badge.style.color = SF_COLORS[det.latestSf] || '#fff';
+          badge.style.display = '';
+        } else {
+          badge.style.display = 'none';
+        }
+      }
     }
   }
 
@@ -1194,6 +1443,26 @@
     } else {
       _selectedChannel = idx;
       _showChannelDetail(idx);
+      // Prefill chirp viewer frequency when a channel is selected
+      if (R.chirpSpectrogram && R.chirpSpectrogram.setFreqMhz && _lastData && _lastData.spectrum) {
+        var _ca = _lastData.spectrum.channel_analysis;
+        if (_ca && _ca.channels && _ca.channels[idx]) {
+          R.chirpSpectrogram.setFreqMhz(_ca.channels[idx].center_mhz);
+        }
+      }
+    }
+    // Sync channel filter to chirp waterfall
+    if (R.chirpSpectrogram && R.chirpSpectrogram.setFilterChannel) {
+      if (_selectedChannel == null) {
+        R.chirpSpectrogram.setFilterChannel(null);
+      } else if (_lastData && _lastData.spectrum && _lastData.spectrum.channel_analysis) {
+        var ch = _lastData.spectrum.channel_analysis.channels[_selectedChannel];
+        if (ch) {
+          R.chirpSpectrogram.setFilterChannel({
+            centerMhz: ch.center_mhz, bwKhz: ch.bw_khz, idx: ch.idx,
+          });
+        }
+      }
     }
     if (_lastData) _renderAll(_lastData);
   }
@@ -1418,8 +1687,10 @@
     if (!hist || !hist[idx] || hist[idx].length < 2) {
       _chTimelineSig = '';
       _chTimelineEl.style.display = '';
+      var count = (hist && hist[idx]) ? hist[idx].length : 0;
       _chTimelineEl.innerHTML = '<div class="lora-stats-label">Ch ' + ch.idx
-        + ' Time Series</div><div style="color:' + _css.sublabel + ';font-size:0.7rem">Collecting data...</div>';
+        + ' Time Series</div><div style="color:' + _css.sublabel
+        + ';font-size:0.7rem">Collecting data (' + count + '/2 samples)...</div>';
       return;
     }
     var entries = hist[idx];
@@ -1536,12 +1807,19 @@
     if (!data) return;
     if (!_resolveDom()) return;
 
-    // Prefer dedicated lora_scanner data; fall back to wideband spectrum.
-    if (data.lora_scanner && data.lora_scanner.bins_hz && data.lora_scanner.bins_hz.length) {
+    // Prefer dedicated lora_scanner / lora_chirp_viewer data; fall back to wideband spectrum.
+    var _loraSnap = data.lora_scanner || data.lora_chirp_viewer;
+    if (_loraSnap && _loraSnap.bins_hz && _loraSnap.bins_hz.length) {
       _dedicatedMode = true;
-      data = Object.assign({}, data, { spectrum: data.lora_scanner });
+      data = Object.assign({}, data, { spectrum: _loraSnap });
     } else {
       _dedicatedMode = false;
+    }
+
+    // Show/hide chirp viewer section when lora_chirp_viewer plugin is active
+    if (data.lora_chirp_viewer && R.chirpSpectrogram) {
+      R.chirpSpectrogram.show();
+      R.chirpSpectrogram.handleUpdate(data);
     }
     if (!data.spectrum) return;
 
@@ -1585,8 +1863,77 @@
     if (R.markUpdated) R.markUpdated('lora-spectrum-section');
   }
 
+  // -- Chirp detection aggregation ------------------------------------------
+
+  function _detActualFreqMhz(det) {
+    var centerHz = det.freq_center_hz || 0;
+    if (!centerHz) return null;
+    var offset = det.freq_offset_hz || 0;
+    var bw = det.detection_bw || 125000;
+    if (offset > bw / 2) offset -= bw;
+    return (centerHz + offset) / 1e6;
+  }
+
+  function _mapDetToChannel(det) {
+    if (!_lastData || !_lastData.spectrum) return -1;
+    var ca = _lastData.spectrum.channel_analysis;
+    if (!ca || !ca.channels) return -1;
+    var freqMhz = _detActualFreqMhz(det);
+    if (freqMhz == null) return -1;
+    var channels = ca.channels;
+    for (var i = 0; i < channels.length; i++) {
+      var ch = channels[i];
+      var lo = ch.center_mhz - ch.bw_khz / 2000;
+      var hi = ch.center_mhz + ch.bw_khz / 2000;
+      if (freqMhz >= lo && freqMhz <= hi) return ch.idx;
+    }
+    return -1;
+  }
+
+  function _ingestDetection(det) {
+    var chIdx = _mapDetToChannel(det);
+    if (chIdx < 0) return;
+    _detBandHistory.push(det);
+    if (_detBandHistory.length > _DET_BAND_MAX) _detBandHistory.shift();
+    _detBandTotal++;
+    var entry = _detByChannel[chIdx];
+    if (!entry) {
+      entry = { count: 0, latestTs: 0, latestSf: 0, latestSnr: 0 };
+      _detByChannel[chIdx] = entry;
+    }
+    entry.count++;
+    entry.latestTs = det.timestamp;
+    entry.latestSf = det.sf;
+    entry.latestSnr = det.snr_db;
+  }
+
+  function handleDetection(det) {
+    if (!det) return;
+    _ingestDetection(det);
+    if (_lastData) {
+      var ca = _lastData.spectrum ? _lastData.spectrum.channel_analysis : null;
+      if (ca) _renderChannelGrid(ca);
+    }
+  }
+
+  function handleDetectionHistory(data) {
+    if (!data || !data.length) return;
+    _detByChannel = {};
+    _detBandHistory = [];
+    _detBandTotal = 0;
+    for (var i = 0; i < data.length; i++) {
+      _ingestDetection(data[i]);
+    }
+    if (_lastData) {
+      var ca = _lastData.spectrum ? _lastData.spectrum.channel_analysis : null;
+      if (ca) _renderChannelGrid(ca);
+    }
+  }
+
   R.loraSpectrum = {
     update: update,
+    handleDetection: handleDetection,
+    handleDetectionHistory: handleDetectionHistory,
     loadChannelHistory: function (hist) {
       _channelPowerHistory = hist;
       var _CPH_MAX = 256;
@@ -1597,6 +1944,11 @@
           }
         }
       }
+    },
+    clearChannelSelection: function () {
+      _selectedChannel = null;
+      if (_chDetailEl) _chDetailEl.style.display = 'none';
+      if (_lastData) _renderAll(_lastData);
     },
   };
 })();
