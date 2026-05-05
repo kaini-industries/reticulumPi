@@ -54,6 +54,7 @@ def _make_plugin(config: dict | None = None) -> SpectrumScanner:
     plugin._current_ts = None
     plugin._device_released = False
     plugin._supervisor_alive = False
+    plugin._resolved_index = None
     return plugin
 
 
@@ -70,7 +71,7 @@ class TestValidateConfig:
         assert p._gain_db == 40.0
         assert p._ppm == 0
         assert p._waterfall_rows == 128
-        assert p._device_index == "0"
+        assert p._device_id == "0"
 
     def test_custom_config_overrides_defaults(self):
         p = _make_plugin({
@@ -90,7 +91,7 @@ class TestValidateConfig:
         assert p._gain_db == 29.0
         assert p._ppm == -3
         assert p._waterfall_rows == 256
-        assert p._device_index == "1"
+        assert p._device_id == "1"
 
     def test_null_gain_means_auto(self):
         p = _make_plugin({"gain_db": None})

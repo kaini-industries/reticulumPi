@@ -113,7 +113,7 @@ class SpectrumScanner(PluginBase):
             raise ValueError(f"waterfall_rows must be 8-2048, got {wf_rows}")
         self._waterfall_rows = wf_rows
 
-        self._device_index = str(cfg.get("device_index", "0"))
+        self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
         self._power_command = str(cfg.get("power_command", "rtl_power"))
         self._max_restarts = int(cfg.get("max_restarts", 5))
         self._health_interval = float(cfg.get("health_check_interval", 5.0))
@@ -130,6 +130,7 @@ class SpectrumScanner(PluginBase):
         self._rtl_power_path: str | None = None
         self._last_error: str | None = None
         self._status = "starting"
+        self._resolved_index: int | None = None
         self._event_sweep_topic = EVENT_SPECTRUM_SWEEP
         self._event_status_topic = EVENT_SPECTRUM_STATUS
 
@@ -154,6 +155,12 @@ class SpectrumScanner(PluginBase):
         # segment_start_hz -> (bin_step_hz, [power_db, ...]).
         self._segments: dict[int, tuple[int, list[float | None]]] = {}
         self._current_ts: str | None = None
+
+        try:
+            from reticulumpi.rtlsdr import resolve_device
+            self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+        except (RuntimeError, ValueError) as exc:
+            self.log.error("RTL-SDR device resolution failed: %s", exc)
 
         self._active = True
         self._device_released = False
@@ -403,7 +410,7 @@ class SpectrumScanner(PluginBase):
             self._rtl_power_path,
             "-f", freq_arg,
             "-i", f"{self._sweep_seconds:g}s",
-            "-d", str(self._device_index),
+            "-d", str(self._resolved_index if self._resolved_index is not None else self._device_id),
             "-p", str(self._ppm),
         ]
         if self._gain_db is not None:

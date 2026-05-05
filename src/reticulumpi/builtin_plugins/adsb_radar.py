@@ -30,7 +30,6 @@ Requirements:
 from __future__ import annotations
 
 import math
-import re
 import shutil
 import socket
 import subprocess
@@ -105,7 +104,7 @@ class AdsbRadarPlugin(PluginBase):
     def validate_config(self) -> None:
         cfg = self.config
         self._dump1090_bin = str(cfg.get("dump1090_bin", "dump1090"))
-        self._device_index = str(cfg.get("device_index", "0"))
+        self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
         self._gain = str(cfg.get("gain", "max"))
         self._ppm = int(cfg.get("ppm", 0))
         self._enable_bias_tee = bool(cfg.get("enable_bias_tee", False))
@@ -121,78 +120,6 @@ class AdsbRadarPlugin(PluginBase):
         if lat is not None and lon is not None:
             self._receiver_lat = float(lat)
             self._receiver_lon = float(lon)
-
-    # ── device resolution ────────────────────────────────────────────
-
-    _RTL_DEVICE_RE = re.compile(r"^\s*(\d+):\s+.*SN:\s*(\S+)")
-
-    @staticmethod
-    def resolve_device_index(
-        configured: str,
-        rtl_test_output: str,
-    ) -> int:
-        """Resolve a ``device_index`` config value to a numeric RTL-SDR index.
-
-        *configured* may be a USB serial string (e.g. ``"00000001"``) or a
-        plain numeric index (``"0"``).  We first try to match it against
-        serial numbers reported by ``rtl_test``.  If no serial matches,
-        we fall back to interpreting the value as a literal integer index.
-        """
-        devices: list[tuple[int, str]] = []
-        for line in rtl_test_output.splitlines():
-            m = AdsbRadarPlugin._RTL_DEVICE_RE.match(line)
-            if m:
-                devices.append((int(m.group(1)), m.group(2)))
-
-        # Try serial match first.
-        for idx, serial in devices:
-            if serial == configured:
-                return idx
-
-        # Fall back to numeric index.
-        try:
-            return int(configured)
-        except ValueError:
-            available = ", ".join(f"{i}: SN {s}" for i, s in devices)
-            raise RuntimeError(
-                f"RTL-SDR device '{configured}' not found. "
-                f"Available: [{available}]"
-            ) from None
-
-    def _resolve_device(self) -> None:
-        """Run ``rtl_test`` and resolve configured serial → numeric index."""
-        rtl_test_path = shutil.which("rtl_test")
-        if not rtl_test_path:
-            self.log.warning(
-                "rtl_test not found; using device_index '%s' as-is",
-                self._device_index,
-            )
-            return
-
-        try:
-            result = subprocess.run(
-                [rtl_test_path, "-t"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            output = result.stdout + result.stderr
-        except Exception as exc:
-            self.log.warning("rtl_test failed: %s; using device_index as-is", exc)
-            return
-
-        try:
-            resolved = self.resolve_device_index(self._device_index, output)
-            if str(resolved) != self._device_index:
-                self.log.info(
-                    "Resolved device serial '%s' → index %d",
-                    self._device_index, resolved,
-                )
-            self._resolved_index = resolved
-        except RuntimeError as exc:
-            self._set_status("error", str(exc))
-            self.log.error("%s", exc)
-            raise
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -229,7 +156,7 @@ class AdsbRadarPlugin(PluginBase):
 
         self.log.info(
             "adsb_radar started: device %s, gain %s, ppm %d, SBS port %d",
-            self._device_index, self._gain, self._ppm, self._sbs_port,
+            self._device_id, self._gain, self._ppm, self._sbs_port,
         )
 
     def stop(self) -> None:
@@ -288,8 +215,11 @@ class AdsbRadarPlugin(PluginBase):
             return
 
         try:
-            self._resolve_device()
-        except RuntimeError:
+            from reticulumpi.rtlsdr import resolve_device
+            self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+        except RuntimeError as exc:
+            self._set_status("error", str(exc))
+            self.log.error("%s", exc)
             return
 
         while self._active:
@@ -360,7 +290,7 @@ class AdsbRadarPlugin(PluginBase):
         assert self._dump1090_path is not None
         cmd = [
             self._dump1090_path,
-            "--device-index", str(self._resolved_index if self._resolved_index is not None else self._device_index),
+            "--device-index", str(self._resolved_index if self._resolved_index is not None else self._device_id),
             "--gain", self._gain,
             "--ppm", str(self._ppm),
             "--net",

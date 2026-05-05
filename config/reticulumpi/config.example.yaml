@@ -539,6 +539,22 @@ reticulumpi:
     #  request_timeout_seconds: 15
 
     # --------------------------------------------------------------------
+    # RTL-SDR device mapping
+    #
+    # Each SDR plugin needs its own dedicated RTL-SDR dongle (USB devices
+    # are exclusive — only one process can claim each at a time).  Use
+    # device_serial for stable binding across reboots (USB enumeration
+    # order can change); device_index is a fragile fallback.
+    #
+    # Serials are resolved to numeric indices at plugin start via rtl_test.
+    # Run `rtl_test -t` to list attached devices and their serial numbers.
+    #
+    # Example 3-dongle setup:
+    #   spectrum_scanner:  device_serial: "07143901"  # Nooelec SMArTee XTR (wideband)
+    #   lora_chirp_viewer: device_serial: "14342860"  # Nooelec SMArTee XTR (LoRa band)
+    #   adsb_radar:        device_serial: "00000001"  # RTL-SDR Blog V4 (1090 MHz ADS-B)
+    # --------------------------------------------------------------------
+
     # SDR spectrum scanner — RTL-SDR sweep feeding a waterfall panel in
     # the dashboard.  Publishes a rolling set of FFT sweeps from rtl_power
     # to the web dashboard; read-only (no transmit).
@@ -567,7 +583,8 @@ reticulumpi:
     #  gain_db: 40.0                    # Tuner gain (dB); null = auto
     #  ppm: 0                           # Tuner frequency correction (ppm)
     #  waterfall_rows: 128              # In-memory rolling history depth (8-2048)
-    #  device_index: 0                  # RTL-SDR device index or serial number string (e.g. "07143901")
+    #  device_serial: "07143901"        # RTL-SDR USB serial (stable; run rtl_test -t to find)
+    #  # device_index: 0               # Numeric index fallback (fragile; prefer device_serial)
     #  max_restarts: 5                  # Subprocess crash-restart cap (per plugin session)
 
     # --- LoRa spectrum scanner ------------------------------------------------
@@ -575,7 +592,7 @@ reticulumpi:
     # rtl_power instance on a separate dongle with fine bin resolution
     # (12.5 kHz) for resolving individual LoRa channels.  The dashboard's
     # LoRa Spectrum panel prefers this feed over the wideband scanner.
-    # Requires a SECOND RTL-SDR device — cannot share with spectrum_scanner.
+    # Requires a separate RTL-SDR device — cannot share with spectrum_scanner.
     #lora_scanner:
     #  enabled: false
     #  freq_start_mhz: 902.0              # US LoRa band lower edge
@@ -585,7 +602,8 @@ reticulumpi:
     #  gain_db: 34.0
     #  ppm: 0
     #  waterfall_rows: 256
-    #  device_index: 0                    # Device index or serial number (e.g. "14342860")
+    #  device_serial: "14342860"          # RTL-SDR USB serial (stable; run rtl_test -t to find)
+    #  # device_index: 1                  # Numeric index fallback (fragile; prefer device_serial)
     #  power_command: rtl_power            # Use rtl_power_fftw for faster sweeps (compile from source)
     #  lora_region: US915                  # Channel plan for analysis (US915 supported)
     #  threshold_db: 6                     # Signal detection threshold above noise floor
@@ -598,13 +616,13 @@ reticulumpi:
     # Requires: dump1090 (any fork: dump1090-mutability, dump1090-fa, readsb),
     #           plus an RTL-SDR dongle.  Optional: pip install reticulumpi[adsb]
     #           for pyModeS aircraft-category enrichment.
-    # IMPORTANT: RTL-SDR devices are exclusive — if spectrum_scanner is also
-    # enabled, adsb_radar must use a DIFFERENT device_index (i.e. a second
-    # dongle).
+    # The RTL-SDR Blog V4 (R828D tuner) is recommended for ADS-B — better
+    # 1090 MHz sensitivity than the E4000 (which has an L-band gap nearby).
     #adsb_radar:
     #  enabled: false
     #  dump1090_bin: dump1090              # Binary name or path
-    #  device_index: 1                    # Device index or serial number (e.g. "14342860"); use serial for stable binding
+    #  device_serial: "00000001"          # RTL-SDR USB serial (stable; run rtl_test -t to find)
+    #  # device_index: 2                  # Numeric index fallback (fragile; prefer device_serial)
     #  gain: max                          # Tuner gain (dB or "max")
     #  ppm: 0                             # Frequency correction (ppm)
     #  enable_bias_tee: false             # Enable bias-T power (for active antennas)

@@ -525,7 +525,7 @@ class LoraChirpViewer(LoraScanner):
         cmd = [self._rtl_sdr_path, "-f", str(freq_hz), "-s", str(sr)]
         if self._gain_db is not None:
             cmd += ["-g", f"{self._gain_db:.1f}"]
-        cmd += ["-d", str(self._device_index), "-"]
+        cmd += ["-d", str(self._resolved_index if self._resolved_index is not None else self._device_id), "-"]
         self.log.info("Starting chirp stream: %s", " ".join(cmd))
 
         proc = subprocess.Popen(

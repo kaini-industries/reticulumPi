@@ -46,6 +46,7 @@ def _make_plugin(config: dict | None = None) -> LoraChirpViewer:
     plugin._current_ts = None
     plugin._device_released = False
     plugin._supervisor_alive = False
+    plugin._resolved_index = None
     plugin._active = True
 
     # Continuous streaming state

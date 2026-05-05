@@ -58,7 +58,7 @@ class TestValidateConfig:
     def test_defaults(self):
         p = _make_plugin()
         assert p._dump1090_bin == "dump1090"
-        assert p._device_index == "0"
+        assert p._device_id == "0"
         assert p._gain == "max"
         assert p._ppm == 0
         assert p._enable_bias_tee is False
@@ -80,7 +80,7 @@ class TestValidateConfig:
             "receiver_lon": -74.0060,
         })
         assert p._dump1090_bin == "/opt/dump1090-fa/dump1090-fa"
-        assert p._device_index == "1"
+        assert p._device_id == "1"
         assert p._gain == "40"
         assert p._ppm == -3
         assert p._enable_bias_tee is True
@@ -429,35 +429,11 @@ class TestHaversine:
 
 
 # ---------------------------------------------------------------------------
-# resolve_device_index
+# device resolution (via shared rtlsdr module; full resolver tests in test_rtlsdr.py)
 # ---------------------------------------------------------------------------
 
-_RTL_TEST_OUTPUT = """\
-Found 3 device(s):
-  0:  RTLSDRBlog, Blog V4, SN: 00000001
-  1:  Nooelec, SMArTee XTR v5ee, SN: 07143901
-  2:  Nooelec, SMArTee XTR v5ee, SN: 14342860
 
-Using device 0: Generic RTL2832U OEM
-"""
-
-
-class TestResolveDeviceIndex:
-    def test_serial_match_returns_index(self):
-        assert AdsbRadarPlugin.resolve_device_index("00000001", _RTL_TEST_OUTPUT) == 0
-        assert AdsbRadarPlugin.resolve_device_index("07143901", _RTL_TEST_OUTPUT) == 1
-        assert AdsbRadarPlugin.resolve_device_index("14342860", _RTL_TEST_OUTPUT) == 2
-
-    def test_numeric_fallback(self):
-        assert AdsbRadarPlugin.resolve_device_index("1", _RTL_TEST_OUTPUT) == 1
-
-    def test_numeric_fallback_no_devices(self):
-        assert AdsbRadarPlugin.resolve_device_index("0", "") == 0
-
-    def test_unknown_serial_raises(self):
-        with pytest.raises(RuntimeError, match="not found"):
-            AdsbRadarPlugin.resolve_device_index("NOSUCH", _RTL_TEST_OUTPUT)
-
+class TestDeviceResolution:
     def test_build_cmd_uses_resolved_index(self):
         p = _make_plugin({"device_index": "00000001"})
         p._resolved_index = 0
@@ -471,6 +447,14 @@ class TestResolveDeviceIndex:
         cmd = p._build_cmd()
         idx = cmd.index("--device-index")
         assert cmd[idx + 1] == "2"
+
+    def test_device_serial_takes_precedence(self):
+        p = _make_plugin({"device_serial": "00000001", "device_index": "99"})
+        assert p._device_id == "00000001"
+
+    def test_device_index_fallback(self):
+        p = _make_plugin({"device_index": "14342860"})
+        assert p._device_id == "14342860"
 
 
 # ---------------------------------------------------------------------------
