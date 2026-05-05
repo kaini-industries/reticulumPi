@@ -32,6 +32,8 @@ class TransportHealthPlugin(PluginBase):
     plugin_name = "transport_health"
     plugin_version = "1.0.0"
     plugin_description = "Monitors reliability of transport/relay nodes"
+    broadcast_tier = 1
+    broadcast_keys = "transport_health"
 
     def validate_config(self) -> None:
         interval = self.config.get("check_interval", _DEFAULT_CHECK_INTERVAL)
@@ -96,6 +98,9 @@ class TransportHealthPlugin(PluginBase):
                 key=lambda n: n.get("paths_via", 0),
                 reverse=True,
             )
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_transport_summary()
 
     def get_transport_summary(self) -> dict[str, Any]:
         """Aggregate summary for dashboard WebSocket broadcast."""

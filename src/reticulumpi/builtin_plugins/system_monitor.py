@@ -15,6 +15,8 @@ class SystemMonitor(PluginBase):
     plugin_name = "system_monitor"
     plugin_description = "Collects CPU, temperature, memory, and disk metrics"
     plugin_version = "1.0.0"
+    broadcast_tier = 0
+    broadcast_keys = "metrics"
 
     def start(self) -> None:
         self._active = True
@@ -31,6 +33,9 @@ class SystemMonitor(PluginBase):
 
     def get_status(self) -> dict[str, Any]:
         return {"active": self._active, "metrics": self.latest_metrics}
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.latest_metrics
 
     def _collect_loop(self) -> None:
         interval = self.config.get("collect_interval_seconds", 60)

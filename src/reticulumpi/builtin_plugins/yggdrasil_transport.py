@@ -344,38 +344,37 @@ class YggdrasilTransportPlugin(PluginBase):
 
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(_ADMIN_TIMEOUT)
-            sock.connect(sock_path)
+            try:
+                sock.settimeout(_ADMIN_TIMEOUT)
+                sock.connect(sock_path)
 
-            payload = json.dumps({"request": request}) + "\n"
-            sock.sendall(payload.encode("utf-8"))
+                payload = json.dumps({"request": request}) + "\n"
+                sock.sendall(payload.encode("utf-8"))
 
-            # Read response (accumulate chunks until valid JSON)
-            data = b""
-            while True:
-                try:
-                    chunk = sock.recv(65536)
-                    if not chunk:
-                        break
-                    data += chunk
-                    # Attempt parse — complete JSON means we're done
+                # Read response (accumulate chunks until valid JSON)
+                data = b""
+                while True:
                     try:
-                        parsed = json.loads(data.decode("utf-8"))
-                        self._resolved_socket = sock_path
-                        sock.close()
-                        return self._extract_response(parsed)
-                    except json.JSONDecodeError:
-                        continue
-                except socket.timeout:
-                    break
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                        try:
+                            parsed = json.loads(data.decode("utf-8"))
+                            self._resolved_socket = sock_path
+                            return self._extract_response(parsed)
+                        except json.JSONDecodeError:
+                            continue
+                    except socket.timeout:
+                        break
 
-            sock.close()
-
-            # Final parse attempt with all data received
-            if data:
-                parsed = json.loads(data.decode("utf-8"))
-                self._resolved_socket = sock_path
-                return self._extract_response(parsed)
+                # Final parse attempt with all data received
+                if data:
+                    parsed = json.loads(data.decode("utf-8"))
+                    self._resolved_socket = sock_path
+                    return self._extract_response(parsed)
+            finally:
+                sock.close()
 
         except (OSError, json.JSONDecodeError, KeyError):
             # Socket failed — clear cached path so we retry discovery

@@ -1567,6 +1567,8 @@ class MessagingHubPlugin(PluginBase):
     plugin_name = "messaging_hub"
     plugin_version = "1.1.0"
     plugin_description = "Unified message store and chat hub for LXMF, Meshtastic, and MeshCore"
+    broadcast_tier = 1
+    broadcast_keys = "messaging"
 
     def validate_config(self) -> None:
         limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)
@@ -2363,6 +2365,14 @@ class MessagingHubPlugin(PluginBase):
             "by_transport": stats.get("by_transport", {}),
             "by_direction": stats.get("by_direction", {}),
         }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        result = {}
+        if hasattr(self, "get_transports"):
+            result["transports"] = self.get_transports()
+        if hasattr(self, "get_unread_counts_grouped"):
+            result["unread"] = self.get_unread_counts_grouped()
+        return result or None
 
     # ── Internal ───────────────────────────────────────────────────
 

@@ -647,6 +647,8 @@ class MeshtasticGateway(PluginBase):
     plugin_name = "meshtastic_gateway"
     plugin_description = "Bridges Meshtastic text messages with LXMF over Reticulum"
     plugin_version = "1.2.0"
+    broadcast_tier = 1
+    broadcast_keys = ["meshtastic_device", "meshtastic_status", "meshtastic_nodes", "meshtastic_lora_neighbors"]
 
     # ── Configuration validation ────────────────────────────────────
 
@@ -2547,6 +2549,26 @@ class MeshtasticGateway(PluginBase):
                 }
 
             return status
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        result = {}
+        if hasattr(self, "get_device_info"):
+            d = self.get_device_info()
+            if d:
+                result["meshtastic_device"] = d
+        if hasattr(self, "get_status"):
+            s = self.get_status()
+            if s:
+                result["meshtastic_status"] = s
+        if hasattr(self, "get_meshtastic_nodes"):
+            n = self.get_meshtastic_nodes()
+            if n:
+                result["meshtastic_nodes"] = n
+        if hasattr(self, "get_lora_neighbors"):
+            ln = self.get_lora_neighbors()
+            if ln:
+                result["meshtastic_lora_neighbors"] = ln
+        return result or None
 
     def get_meshtastic_nodes(self) -> list[dict[str, Any]]:
         """Return list of known Meshtastic mesh nodes.

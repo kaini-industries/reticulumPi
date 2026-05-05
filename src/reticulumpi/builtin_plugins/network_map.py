@@ -51,6 +51,8 @@ class NetworkMapPlugin(PluginBase):
     plugin_name = "network_map"
     plugin_version = "1.1.0"
     plugin_description = "Passive network topology mapping via announce monitoring"
+    broadcast_tier = 1
+    broadcast_keys = "mesh"
 
     def validate_config(self) -> None:
         max_days = self.config.get("max_history_days", 30)
@@ -129,6 +131,16 @@ class NetworkMapPlugin(PluginBase):
             "known_nodes": len(self._known_nodes),
             "db_path": getattr(self, "_db_path", None),
         }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        mesh = {}
+        if hasattr(self, "get_node_count"):
+            mesh["node_count"] = self.get_node_count()
+        if hasattr(self, "get_recent_announces"):
+            mesh["recent_announces"] = self.get_recent_announces()
+        if cycle_count % 3 == 0 and hasattr(self, "get_mesh_summary"):
+            mesh["summary"] = self.get_mesh_summary()
+        return mesh or None
 
     def get_known_nodes(self) -> list[dict[str, Any]]:
         """Return all known nodes as a list of dicts (for API consumption)."""

@@ -98,6 +98,10 @@ class AdsbRadarPlugin(PluginBase):
     plugin_name = "adsb_radar"
     plugin_version = "1.0.0"
     plugin_description = "ADS-B aircraft tracker using RTL-SDR and dump1090"
+    broadcast_tier = 2
+    broadcast_keys = "adsb"
+
+    _MAX_SBS_BUF = 1_048_576  # 1 MB
 
     # ── config ────────────────────────────────────────────────────────
 
@@ -164,6 +168,11 @@ class AdsbRadarPlugin(PluginBase):
         self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
         self.event_bus.unsubscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
         self._terminate_process()
+        try:
+            from reticulumpi.rtlsdr import release_device
+            release_device(self._device_id, caller=self.plugin_name)
+        except Exception:
+            pass
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -230,11 +239,7 @@ class AdsbRadarPlugin(PluginBase):
                 self.log.exception("Failed to launch %s", self._dump1090_bin)
                 break
 
-            parser = threading.Thread(
-                target=self._parser_loop,
-                name="adsb-parser",
-            )
-            parser.start()
+            parser = self._start_thread(self._parser_loop, name="adsb-parser")
 
             while self._active and self._process is not None:
                 rc = self._process.poll()
@@ -244,6 +249,7 @@ class AdsbRadarPlugin(PluginBase):
                 self._sleep_while_active(5.0)
 
             parser.join(timeout=3.0)
+            self._remove_thread(parser)
             self._terminate_process()
 
             if not self._active:
@@ -346,6 +352,13 @@ class AdsbRadarPlugin(PluginBase):
                     if not data:
                         break
                     buf += data.decode("utf-8", errors="replace")
+                    if len(buf) > self._MAX_SBS_BUF:
+                        self.log.warning(
+                            "SBS buffer exceeded %d bytes; discarding to resync",
+                            self._MAX_SBS_BUF,
+                        )
+                        buf = ""
+                        continue
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
                         line = line.strip()

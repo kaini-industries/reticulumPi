@@ -22,6 +22,8 @@ class MeshTelemetryPlugin(PluginBase):
     plugin_name = "mesh_telemetry"
     plugin_version = "1.0.0"
     plugin_description = "Distributed mesh telemetry — broadcast and receive node metrics"
+    broadcast_tier = 1
+    broadcast_keys = "mesh_peers"
 
     def validate_config(self) -> None:
         interval = self.config.get("announce_interval", 300)
@@ -69,6 +71,11 @@ class MeshTelemetryPlugin(PluginBase):
             "active": self._active,
             "peer_count": len(self._peer_metrics),
         }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        if hasattr(self, "get_peer_metrics"):
+            return self.get_peer_metrics()
+        return None
 
     def get_peer_metrics(self) -> list[dict[str, Any]]:
         """Return all known peer metrics for API/dashboard consumption."""

@@ -259,6 +259,12 @@ async def handle_interface_add(
         return _error("type field is required", 400)
     if len(iface_name) > 100:
         return _error("name too long", 400)
+    import re
+    if not re.match(r'^[A-Za-z0-9 _-]{1,100}$', iface_name):
+        return _error("Interface name contains invalid characters", 400)
+    for k, v in properties.items():
+        if '\n' in str(k) or '\n' in str(v) or '\r' in str(k) or '\r' in str(v):
+            return _error("Properties must not contain newlines", 400)
 
     # Validate interface type and properties before writing
     validation_err = _validate_interface_config(iface_type, properties)

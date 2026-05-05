@@ -79,6 +79,8 @@ class LoraScanner(SpectrumScanner):
     plugin_name = "lora_scanner"
     plugin_version = "0.2.0"
     plugin_description = "Dedicated RTL-SDR LoRa-band scanner with channel analysis"
+    broadcast_tier = 2
+    broadcast_keys = "lora_scanner"
 
     def validate_config(self) -> None:
         for key, default in _LORA_DEFAULTS.items():

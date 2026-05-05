@@ -98,7 +98,9 @@ class MeshBridge(PluginBase):
     plugin_description = (
         "Relays broadcasts (and optionally DMs) between Meshtastic and MeshCore."
     )
-    plugin_dependencies = ["meshtastic_gateway", "meshcore_gateway", "messaging_hub"]
+    broadcast_tier = 1
+    broadcast_keys = "mesh_bridge"
+    plugin_dependencies = ("meshtastic_gateway", "meshcore_gateway", "messaging_hub")
 
     def validate_config(self) -> None:
         pairs = self.config.get("channel_pairs", [])
@@ -308,6 +310,9 @@ class MeshBridge(PluginBase):
                 "bridge_dms": self._bridge_dms,
                 "stats": dict(self._stats),
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_status()
 
     def set_running(
         self, running: bool, reason: str | None = None,

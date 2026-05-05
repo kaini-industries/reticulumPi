@@ -75,6 +75,8 @@ class SpectrumScanner(PluginBase):
     plugin_name = "spectrum_scanner"
     plugin_version = "0.1.0"
     plugin_description = "RTL-SDR spectrum sweep + waterfall feed"
+    broadcast_tier = 2
+    broadcast_keys = "spectrum"
 
     # --- config validation ---------------------------------------------------
 
@@ -161,6 +163,7 @@ class SpectrumScanner(PluginBase):
             self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
         except (RuntimeError, ValueError) as exc:
             self.log.error("RTL-SDR device resolution failed: %s", exc)
+            self._set_status("error", str(exc))
 
         self._active = True
         self._device_released = False
@@ -198,6 +201,11 @@ class SpectrumScanner(PluginBase):
     def stop(self) -> None:
         self._active = False
         self._terminate_process()
+        try:
+            from reticulumpi.rtlsdr import release_device
+            release_device(self._device_id, caller=self.plugin_name)
+        except Exception:
+            pass
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -328,14 +336,7 @@ class SpectrumScanner(PluginBase):
                 self.log.exception("Failed to launch rtl_power")
                 break
 
-            # Start a parser thread dedicated to this subprocess instance;
-            # it exits when rtl_power closes its stdout.
-            parser = threading.Thread(
-                target=self._parser_loop,
-                name="spectrum-parser",
-                daemon=True,
-            )
-            parser.start()
+            parser = self._start_thread(self._parser_loop, name="spectrum-parser")
 
             # Block until rtl_power exits or we're stopped.
             while self._active and self._process is not None:
@@ -347,6 +348,7 @@ class SpectrumScanner(PluginBase):
 
             # Wait for parser to drain.
             parser.join(timeout=2.0)
+            self._remove_thread(parser)
             self._terminate_process()  # idempotent; cleans up zombies
 
             if not self._active:

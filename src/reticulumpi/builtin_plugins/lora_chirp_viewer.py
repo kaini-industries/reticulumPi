@@ -76,6 +76,8 @@ class LoraChirpViewer(LoraScanner):
     plugin_name = "lora_chirp_viewer"
     plugin_version = "0.2.0"
     plugin_description = "LoRa spectrum scanner with continuous chirp spectrogram waterfall"
+    broadcast_tier = 2
+    broadcast_keys = "lora_chirp_viewer"
 
     def validate_config(self) -> None:
         for key, default in _CHIRP_DEFAULTS.items():
@@ -216,6 +218,9 @@ class LoraChirpViewer(LoraScanner):
             "freq_center_hz": int(self._chirp_freq_mhz * 1e6),
             "sample_rate": self._chirp_sr,
             "detection_bw": det.bw,
+            "confidence": det.confidence,
+            "noise_floor_db": det.noise_floor_db,
+            "threshold_db": det.threshold_db,
         }
 
         with self._state_lock:
@@ -316,6 +321,10 @@ class LoraChirpViewer(LoraScanner):
     def get_capture_status(self) -> dict[str, Any]:
         with self._state_lock:
             det_count = len(self._detection_history)
+        nf_db = -120.0
+        if self._trackers:
+            nf_vals = [t.noise_floor_db() for _, t, _ in self._trackers]
+            nf_db = min(nf_vals) if nf_vals else -120.0
         return {
             "state": self._chirp_status,
             "streaming": self._stream_active,
@@ -326,6 +335,7 @@ class LoraChirpViewer(LoraScanner):
             "waterfall_count": len(self._chirp_waterfall),
             "detection_enabled": self._detection_enabled,
             "detection_count": det_count,
+            "noise_floor_db": nf_db,
         }
 
     def get_snapshot(self) -> dict[str, Any]:
@@ -531,7 +541,7 @@ class LoraChirpViewer(LoraScanner):
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
         with self._stream_lock:
             self._stream_process = proc

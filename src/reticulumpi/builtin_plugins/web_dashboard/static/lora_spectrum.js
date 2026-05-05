@@ -107,6 +107,17 @@
   var _chTooltipEl = null;
   var _channelPowerHistory = null;
 
+  // -- Chirp detection aggregation by channel --------------------------------
+  var _detByChannel = {};        // chIdx → {count, latestTs, latestSf, latestSnr}
+  var _detBandHistory = [];      // ring buffer of raw det objects
+  var _detBandTotal = 0;
+  var _DET_BAND_MAX = 512;
+
+  var SF_COLORS = {
+    7:  '#ff6b9d', 8:  '#ff9f43', 9:  '#ffd93d',
+    10: '#6bff6b', 11: '#43c9ff', 12: '#b67dff',
+  };
+
   // -- Stats panel state ----------------------------------------------------
   var _statsPanelEl = null, _nfTrendEl = null, _chUtilEl = null, _chTimelineEl = null;
   var _nfTrendSig = '', _chUtilSig = '', _chTimelineSig = '';
@@ -966,6 +977,23 @@
       }, fmhz.toFixed(3)));
     }
 
+    // Chirp detection markers on channels
+    if (ca && ca.channels) {
+      for (var di = 0; di < ca.channels.length; di++) {
+        var dch = ca.channels[di];
+        var dentry = _detByChannel[dch.idx];
+        if (!dentry || dentry.count === 0) continue;
+        if (dch.center_mhz < clip.loMhz || dch.center_mhz > clip.hiMhz) continue;
+        var dx = ((dch.center_mhz - clip.loMhz) / (clip.hiMhz - clip.loMhz)) * vbW;
+        var dr = Math.min(5, 2 + Math.log2(dentry.count));
+        var dcolor = SF_COLORS[dentry.latestSf] || '#fff';
+        _lineEl.appendChild(SC.svg('circle', {
+          cx: dx.toFixed(1), cy: 4, r: dr.toFixed(1),
+          fill: dcolor, opacity: 0.8,
+        }));
+      }
+    }
+
     // Live drag preview rect (if dragging right now).
     if (_dragState) {
       var a = Math.min(_dragState.startFrac, _dragState.curFrac);
@@ -1354,6 +1382,9 @@
       cell.className = 'lora-ch-cell lora-ch-idle';
       cell.textContent = String(ch.idx);
       cell.setAttribute('data-ch-idx', ch.idx);
+      var badge = document.createElement('span');
+      badge.className = 'lora-ch-det-badge';
+      cell.appendChild(badge);
       cell.addEventListener('click', _onChCellClick);
       cell.addEventListener('mouseenter', _onChCellEnter);
       cell.addEventListener('mouseleave', _onChCellLeave);
@@ -1388,7 +1419,19 @@
         var age = nowSec - ch.last_active_at;
         if (age < 30) cls += ' lora-ch-recent';
       }
+      var det = _detByChannel[ch.idx];
+      if (det && det.count > 0) cls += ' lora-ch-det-active';
       cell.className = cls;
+      var badge = cell.querySelector('.lora-ch-det-badge');
+      if (badge) {
+        if (det && det.count > 0) {
+          badge.textContent = det.count;
+          badge.style.color = SF_COLORS[det.latestSf] || '#fff';
+          badge.style.display = '';
+        } else {
+          badge.style.display = 'none';
+        }
+      }
     }
   }
 
@@ -1405,6 +1448,19 @@
         var _ca = _lastData.spectrum.channel_analysis;
         if (_ca && _ca.channels && _ca.channels[idx]) {
           R.chirpSpectrogram.setFreqMhz(_ca.channels[idx].center_mhz);
+        }
+      }
+    }
+    // Sync channel filter to chirp waterfall
+    if (R.chirpSpectrogram && R.chirpSpectrogram.setFilterChannel) {
+      if (_selectedChannel == null) {
+        R.chirpSpectrogram.setFilterChannel(null);
+      } else if (_lastData && _lastData.spectrum && _lastData.spectrum.channel_analysis) {
+        var ch = _lastData.spectrum.channel_analysis.channels[_selectedChannel];
+        if (ch) {
+          R.chirpSpectrogram.setFilterChannel({
+            centerMhz: ch.center_mhz, bwKhz: ch.bw_khz, idx: ch.idx,
+          });
         }
       }
     }
@@ -1807,8 +1863,77 @@
     if (R.markUpdated) R.markUpdated('lora-spectrum-section');
   }
 
+  // -- Chirp detection aggregation ------------------------------------------
+
+  function _detActualFreqMhz(det) {
+    var centerHz = det.freq_center_hz || 0;
+    if (!centerHz) return null;
+    var offset = det.freq_offset_hz || 0;
+    var bw = det.detection_bw || 125000;
+    if (offset > bw / 2) offset -= bw;
+    return (centerHz + offset) / 1e6;
+  }
+
+  function _mapDetToChannel(det) {
+    if (!_lastData || !_lastData.spectrum) return -1;
+    var ca = _lastData.spectrum.channel_analysis;
+    if (!ca || !ca.channels) return -1;
+    var freqMhz = _detActualFreqMhz(det);
+    if (freqMhz == null) return -1;
+    var channels = ca.channels;
+    for (var i = 0; i < channels.length; i++) {
+      var ch = channels[i];
+      var lo = ch.center_mhz - ch.bw_khz / 2000;
+      var hi = ch.center_mhz + ch.bw_khz / 2000;
+      if (freqMhz >= lo && freqMhz <= hi) return ch.idx;
+    }
+    return -1;
+  }
+
+  function _ingestDetection(det) {
+    var chIdx = _mapDetToChannel(det);
+    if (chIdx < 0) return;
+    _detBandHistory.push(det);
+    if (_detBandHistory.length > _DET_BAND_MAX) _detBandHistory.shift();
+    _detBandTotal++;
+    var entry = _detByChannel[chIdx];
+    if (!entry) {
+      entry = { count: 0, latestTs: 0, latestSf: 0, latestSnr: 0 };
+      _detByChannel[chIdx] = entry;
+    }
+    entry.count++;
+    entry.latestTs = det.timestamp;
+    entry.latestSf = det.sf;
+    entry.latestSnr = det.snr_db;
+  }
+
+  function handleDetection(det) {
+    if (!det) return;
+    _ingestDetection(det);
+    if (_lastData) {
+      var ca = _lastData.spectrum ? _lastData.spectrum.channel_analysis : null;
+      if (ca) _renderChannelGrid(ca);
+    }
+  }
+
+  function handleDetectionHistory(data) {
+    if (!data || !data.length) return;
+    _detByChannel = {};
+    _detBandHistory = [];
+    _detBandTotal = 0;
+    for (var i = 0; i < data.length; i++) {
+      _ingestDetection(data[i]);
+    }
+    if (_lastData) {
+      var ca = _lastData.spectrum ? _lastData.spectrum.channel_analysis : null;
+      if (ca) _renderChannelGrid(ca);
+    }
+  }
+
   R.loraSpectrum = {
     update: update,
+    handleDetection: handleDetection,
+    handleDetectionHistory: handleDetectionHistory,
     loadChannelHistory: function (hist) {
       _channelPowerHistory = hist;
       var _CPH_MAX = 256;
@@ -1819,6 +1944,11 @@
           }
         }
       }
+    },
+    clearChannelSelection: function () {
+      _selectedChannel = null;
+      if (_chDetailEl) _chDetailEl.style.display = 'none';
+      if (_lastData) _renderAll(_lastData);
     },
   };
 })();

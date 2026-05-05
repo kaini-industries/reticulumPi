@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from reticulumpi.rtlsdr import enumerate_devices, reset_cache, resolve_device
+from reticulumpi.rtlsdr import enumerate_devices, release_device, reset_cache, resolve_device
 
 _RTL_TEST_OUTPUT = """\
 Found 3 device(s):
@@ -27,13 +27,16 @@ def _clear_cache():
 
 
 def _mock_rtl_test(output: str = _RTL_TEST_OUTPUT, which: str = "/usr/bin/rtl_test"):
-    """Patch shutil.which and subprocess.run to return canned rtl_test output."""
+    """Patch shutil.which and _run_rtl_test to return canned device list."""
+    from reticulumpi.rtlsdr import _DEVICE_RE
+    devices = []
+    for line in output.splitlines():
+        m = _DEVICE_RE.match(line)
+        if m:
+            devices.append((int(m.group(1)), m.group(2)))
     return [
         patch("reticulumpi.rtlsdr.shutil.which", return_value=which),
-        patch(
-            "reticulumpi.rtlsdr.subprocess.run",
-            return_value=type("R", (), {"stdout": output, "stderr": ""})(),
-        ),
+        patch("reticulumpi.rtlsdr._run_rtl_test", return_value=devices),
     ]
 
 
@@ -57,7 +60,7 @@ class TestEnumerateDevices:
     def test_empty_when_rtl_test_fails(self):
         with (
             patch("reticulumpi.rtlsdr.shutil.which", return_value="/usr/bin/rtl_test"),
-            patch("reticulumpi.rtlsdr.subprocess.run", side_effect=OSError("fail")),
+            patch("reticulumpi.rtlsdr._run_rtl_test", side_effect=OSError("fail")),
         ):
             assert enumerate_devices() == []
 
@@ -91,16 +94,32 @@ class TestResolveDevice:
             with pytest.raises(RuntimeError, match="not found"):
                 resolve_device("abc")
 
-    def test_duplicate_serial_warning(self, caplog):
+    def test_duplicate_serial_raises(self):
         patches = _mock_rtl_test()
-        with patches[0], patches[1], caplog.at_level(logging.WARNING, logger="reticulumpi.rtlsdr"):
+        with patches[0], patches[1]:
             resolve_device("00000001", caller="adsb_radar")
-            resolve_device("00000001", caller="spectrum_scanner")
-        assert "claimed by both" in caplog.text
+            with pytest.raises(RuntimeError, match="already claimed by 'adsb_radar'"):
+                resolve_device("00000001", caller="spectrum_scanner")
 
-    def test_same_caller_no_warning(self, caplog):
+    def test_same_caller_no_error(self):
         patches = _mock_rtl_test()
-        with patches[0], patches[1], caplog.at_level(logging.WARNING, logger="reticulumpi.rtlsdr"):
+        with patches[0], patches[1]:
             resolve_device("00000001", caller="adsb_radar")
+            idx = resolve_device("00000001", caller="adsb_radar")
+        assert idx == 0
+
+    def test_release_then_reclaim(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
             resolve_device("00000001", caller="adsb_radar")
-        assert "claimed by both" not in caplog.text
+            release_device("00000001", caller="adsb_radar")
+            idx = resolve_device("00000001", caller="spectrum_scanner")
+        assert idx == 0
+
+    def test_release_wrong_caller_is_noop(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            resolve_device("00000001", caller="adsb_radar")
+            release_device("00000001", caller="other_plugin")
+            with pytest.raises(RuntimeError, match="already claimed"):
+                resolve_device("00000001", caller="spectrum_scanner")

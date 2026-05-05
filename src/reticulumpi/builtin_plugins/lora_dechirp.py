@@ -56,6 +56,9 @@ class Detection:
     snr_db: float
     sample_offset: int
     bw: int = _LORA_BW_HZ
+    confidence: float = 0.0
+    noise_floor_db: float = -120.0
+    threshold_db: float = 12.0
 
 
 class ChirpReference:
@@ -242,6 +245,13 @@ class PreambleTracker:
         self._state: dict[int, _SfState] = {sf: _SfState() for sf in self.sfs}
         self._chunk_sample_offset = 0
 
+    def noise_floor_db(self) -> float:
+        """Best-estimate noise floor in dB across all tracked SFs."""
+        emas = [st.noise_ema for st in self._state.values() if st.noise_ema > 1e-10]
+        if not emas:
+            return -120.0
+        return round(20.0 * np.log10(min(emas)), 1)
+
     def reset(self) -> None:
         for sf in self.sfs:
             self._state[sf] = _SfState()
@@ -361,15 +371,28 @@ class PreambleTracker:
         # peak to exceed noise_ema by snr_margin_db.  Otherwise fall back
         # to the fixed snr_threshold_db.
         if st.noise_ema > 1e-10:
+            effective_threshold_db = self.snr_margin_db
             adaptive_peak = st.noise_ema * 10.0 ** (self.snr_margin_db / 20.0)
             if mean_peak < adaptive_peak:
                 return None
-        elif snr_db < self.snr_threshold_db:
-            return None
+        else:
+            effective_threshold_db = self.snr_threshold_db
+            if snr_db < self.snr_threshold_db:
+                return None
 
         bw = self.chirp_ref.bw
         n_bins = 2**sf
-        freq_offset_hz = st.last_bin * bw / n_bins
+        mean_frac = float(np.mean(st.peak_bins))
+        freq_offset_hz = mean_frac * bw / n_bins
+
+        threshold_range = max(effective_threshold_db - self.snr_floor_db, 1.0)
+        confidence = min(1.0, max(0.0,
+            (snr_db - self.snr_floor_db) / threshold_range,
+        ))
+
+        nf_db = -120.0
+        if st.noise_ema > 1e-10:
+            nf_db = round(20.0 * np.log10(st.noise_ema), 1)
 
         return Detection(
             timestamp=timestamp,
@@ -379,6 +402,9 @@ class PreambleTracker:
             snr_db=round(snr_db, 1),
             sample_offset=st.first_sample_offset,
             bw=bw,
+            confidence=round(confidence, 2),
+            noise_floor_db=nf_db,
+            threshold_db=round(effective_threshold_db, 1),
         )
 
 
@@ -671,10 +697,13 @@ class PacketExtractor:
         self, bin0: int, bin1: int, sf: int,
     ) -> int | None:
         tol = self.sync_tolerance
+        n_bins = 1 << sf
         for sw in self.sync_words:
             expected = sync_word_bins(sw, sf)
-            if (abs(bin0 - expected[0]) <= tol
-                    and abs(bin1 - expected[1]) <= tol):
+            d0 = abs(bin0 - expected[0])
+            d1 = abs(bin1 - expected[1])
+            if (min(d0, n_bins - d0) <= tol
+                    and min(d1, n_bins - d1) <= tol):
                 return sw
         return None
 

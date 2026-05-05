@@ -39,6 +39,8 @@ class EmergencyBroadcastPlugin(PluginBase):
     plugin_name = "emergency_broadcast"
     plugin_version = "1.0.0"
     plugin_description = "Mesh-wide emergency broadcast with flood propagation"
+    broadcast_tier = 1
+    broadcast_keys = "emergency"
 
     def validate_config(self) -> None:
         max_ttl = self.config.get("max_ttl", 5)
@@ -107,6 +109,9 @@ class EmergencyBroadcastPlugin(PluginBase):
             "messages_rebroadcast": self._messages_rebroadcast,
             "stored_messages": len(self._messages),
         }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_status()
 
     def get_messages(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return stored emergency messages, most recent first."""

@@ -1236,11 +1236,17 @@
           if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleDetection) {
             RPI.chirpSpectrogram.handleDetection(msg.data);
           }
+          if (RPI.loraSpectrum && RPI.loraSpectrum.handleDetection) {
+            RPI.loraSpectrum.handleDetection(msg.data);
+          }
           return;
         }
         if (msg.type === 'chirp_detection_history' && msg.data) {
           if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleDetectionHistory) {
             RPI.chirpSpectrogram.handleDetectionHistory(msg.data);
+          }
+          if (RPI.loraSpectrum && RPI.loraSpectrum.handleDetectionHistory) {
+            RPI.loraSpectrum.handleDetectionHistory(msg.data);
           }
           return;
         }

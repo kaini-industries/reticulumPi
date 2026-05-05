@@ -30,6 +30,8 @@ class MeshCoreGateway(PluginBase):
     plugin_name = "meshcore_gateway"
     plugin_description = "Bridges MeshCore LoRa mesh with ReticulumPi"
     plugin_version = "1.0.0"
+    broadcast_tier = 1
+    broadcast_keys = ["meshcore_status", "meshcore_device", "meshcore_contacts"]
 
     # ── Configuration validation ────────────────────────────────────
 
@@ -835,6 +837,22 @@ class MeshCoreGateway(PluginBase):
                 "last_msg_time": self._last_msg_time,
                 "contacts": len(self._contact_cache),
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        result = {}
+        if hasattr(self, "get_status"):
+            s = self.get_status()
+            if s:
+                result["meshcore_status"] = s
+        if hasattr(self, "get_device_info"):
+            d = self.get_device_info()
+            if d:
+                result["meshcore_device"] = d
+        if hasattr(self, "get_contacts"):
+            c = self.get_contacts()
+            if c is not None:
+                result["meshcore_contacts"] = c
+        return result or None
 
     def get_device_info(self) -> dict[str, Any]:
         """Return MeshCore device hardware and firmware info."""

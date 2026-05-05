@@ -52,6 +52,8 @@
   var _detections = [];          // ring buffer of detection payloads (newest first)
   var MAX_DETECTIONS = 256;
   var _detCount = 0;
+  var _rateHistory = [];         // last N rate samples for sparkline
+  var MAX_RATE_SAMPLES = 12;
 
   // -- Decoded packet state ------------------------------------------------
   var _packets = [];             // ring buffer of decoded packets (newest first)
@@ -64,6 +66,8 @@
   var _ourFreqHz = null, _ourBwHz = null, _ourSf = null, _ourCr = null;
   var _channelAnalysis = null;
   var _band = null;              // { lo, hi, label } for current center freq
+  var _noiseFloorDb = null;      // most recent noise floor from status
+  var _filterChannel = null;     // {centerMhz, bwKhz, idx} or null
 
   var _css = {};
 
@@ -672,6 +676,10 @@
           + ((st.sample_rate || 250000) / 1000).toFixed(0) + ' kHz';
       }
       _band = SC.findLoraRegion(st.freq_mhz || 0);
+      if (st.noise_floor_db != null && st.noise_floor_db > -120) {
+        _noiseFloorDb = st.noise_floor_db;
+        _updateDetIndicator();
+      }
     }
 
     // RNode radio params — same scan as lora_spectrum._detectRNode
@@ -733,17 +741,18 @@
     for (var i = 0; i < _detections.length; i++) _linkDetectionToPacket(_detections[i]);
   }
 
-  function _paintDetectionMarkerAt(ctx, det, y) {
+  function _paintDetectionMarkerAt(ctx, det, y, alphaScale) {
     var x = _detFreqToX(det);
     if (x < 0) return;
     var color = SF_COLORS[det.sf] || '#ffffff';
     var sz = 10;
     var pkt = det._pkt;
+    var a = alphaScale || 1.0;
 
     ctx.save();
 
     // Full-height vertical line
-    ctx.globalAlpha = 0.55;
+    ctx.globalAlpha = 0.55 * a;
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
     ctx.shadowColor = color;
@@ -755,7 +764,7 @@
     ctx.shadowBlur = 0;
 
     // Triangle fill
-    ctx.globalAlpha = 0.9;
+    ctx.globalAlpha = 0.9 * a;
     ctx.fillStyle = color;
     ctx.shadowColor = color;
     ctx.shadowBlur = 8;
@@ -771,7 +780,7 @@
     if (pkt && pkt.sync_word != null) {
       ctx.strokeStyle = SYNC_COLORS[pkt.sync_word] || '#888';
       ctx.lineWidth = 2;
-      ctx.globalAlpha = 1.0;
+      ctx.globalAlpha = 1.0 * a;
       ctx.beginPath();
       ctx.moveTo(x - sz, y);
       ctx.lineTo(x + sz, y);
@@ -785,7 +794,7 @@
     if (pkt) {
       var crcColor = pkt.crc_ok === true ? '#4f4'
                    : pkt.crc_ok === false ? '#f44' : '#888';
-      ctx.globalAlpha = 0.9;
+      ctx.globalAlpha = 0.9 * a;
       ctx.fillStyle = crcColor;
       ctx.beginPath();
       ctx.arc(x + sz + 6, y + sz * 0.7, 4, 0, 2 * Math.PI);
@@ -794,7 +803,7 @@
     }
 
     // Label: SF + frequency + SNR
-    ctx.globalAlpha = 1.0;
+    ctx.globalAlpha = 1.0 * a;
     ctx.font = 'bold 11px monospace';
     ctx.fillStyle = color;
     var freqHz = _detActualFreqHz(det);
@@ -819,9 +828,12 @@
     for (var i = _detections.length - 1; i >= 0; i--) {
       var det = _detections[i];
       if (det._arrivalRow == null) continue;
+      if (!_detMatchesFilter(det)) continue;
       var y = _detRowOffset - det._arrivalRow;
       if (y < 0 || y >= _canvasH) continue;
-      _paintDetectionMarkerAt(_detCtx, det, y);
+      var ageFrac = _canvasH > 0 ? Math.max(0.25, 1.0 - y / _canvasH) : 1.0;
+      var conf = det.confidence != null ? 0.4 + 0.6 * det.confidence : 1.0;
+      _paintDetectionMarkerAt(_detCtx, det, y, ageFrac * conf);
     }
   }
 
@@ -928,6 +940,40 @@
     return _detRowOffset - best;
   }
 
+  function _detMatchesFilter(det) {
+    if (!_filterChannel) return true;
+    var freqHz = _detActualFreqHz(det);
+    if (freqHz == null) return true;
+    var freqMhz = freqHz / 1e6;
+    var lo = _filterChannel.centerMhz - _filterChannel.bwKhz / 2000;
+    var hi = _filterChannel.centerMhz + _filterChannel.bwKhz / 2000;
+    return freqMhz >= lo && freqMhz <= hi;
+  }
+
+  function _filteredDetections() {
+    if (!_filterChannel) return _detections;
+    var out = [];
+    for (var i = 0; i < _detections.length; i++) {
+      if (_detMatchesFilter(_detections[i])) out.push(_detections[i]);
+    }
+    return out;
+  }
+
+  function setFilterChannel(info) {
+    _filterChannel = info;
+    _repaintDetections();
+    _updateDetIndicator();
+  }
+
+  function _clearFilter() {
+    _filterChannel = null;
+    if (R.loraSpectrum && R.loraSpectrum.clearChannelSelection) {
+      R.loraSpectrum.clearChannelSelection();
+    }
+    _repaintDetections();
+    _updateDetIndicator();
+  }
+
   function _detectionRate() {
     if (_detections.length < 2) return null;
     var now = Date.now() / 1000;
@@ -947,25 +993,99 @@
     return (count / span) * 60;
   }
 
+  function _buildSparkline(values) {
+    if (values.length < 2) return '';
+    var w = 60, h = 16;
+    var max = 0;
+    for (var i = 0; i < values.length; i++) { if (values[i] > max) max = values[i]; }
+    if (max <= 0) return '';
+    var pts = [];
+    for (var j = 0; j < values.length; j++) {
+      var x = (j / (values.length - 1)) * w;
+      var y = h - (values[j] / max) * (h - 2) - 1;
+      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    return ' <svg class="det-sparkline" width="' + w + '" height="' + h +
+      '" viewBox="0 0 ' + w + ' ' + h + '">' +
+      '<polyline points="' + pts.join(' ') + '" fill="none" stroke="var(--accent,#43c9ff)" ' +
+      'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
+
+  function _buildSfChips(detections) {
+    var counts = {};
+    for (var i = 0; i < detections.length; i++) {
+      var sf = detections[i].sf;
+      counts[sf] = (counts[sf] || 0) + 1;
+    }
+    if (detections.length === 0) return '';
+    var html = '<div class="det-sf-chips">';
+    var sfs = [7, 8, 9, 10, 11, 12];
+    for (var j = 0; j < sfs.length; j++) {
+      var s = sfs[j];
+      var n = counts[s] || 0;
+      if (n === 0) continue;
+      var color = SF_COLORS[s] || '#fff';
+      html += '<span class="det-sf-chip" style="border-color:' + color +
+        ';color:' + color + '">SF' + s +
+        ' <span class="det-sf-chip-n">×' + n + '</span></span>';
+    }
+    html += '</div>';
+    return html;
+  }
+
   function _updateDetIndicator() {
     if (!_detIndicator) return;
-    if (_detCount === 0) {
+    var dets = _filteredDetections();
+    var count = dets.length;
+    if (count === 0 && !_filterChannel) {
       _detIndicator.style.display = 'none';
       return;
     }
     _detIndicator.style.display = '';
-    var recent = _detections.length > 0 ? _detections[0] : null;
-    var sfText = recent ? 'SF' + recent.sf : '';
-    var snrText = recent ? recent.snr_db.toFixed(1) + ' dB' : '';
+
+    var filterHtml = '';
+    if (_filterChannel) {
+      filterHtml = '<span class="det-filter-chip" id="det-filter-clear">Ch ' +
+        esc(String(_filterChannel.idx)) + ' · ' +
+        esc(_filterChannel.centerMhz.toFixed(3)) + ' MHz ✕</span>';
+    }
+
+    if (count === 0) {
+      _detIndicator.innerHTML = filterHtml +
+        '<span class="det-count">0 detections</span>';
+      return;
+    }
+
+    var recent = dets[0];
+    var sfText = 'SF' + recent.sf;
+    var snrText = recent.snr_db.toFixed(1) + ' dB';
     var rate = _detectionRate();
+    if (rate != null) {
+      _rateHistory.push(rate);
+      if (_rateHistory.length > MAX_RATE_SAMPLES) _rateHistory.shift();
+    }
     var rateText = rate != null ? rate.toFixed(1) + '/min' : '';
-    _detIndicator.innerHTML =
-      '<span class="det-count">' + esc(String(_detCount)) + ' detection' +
-      (_detCount === 1 ? '' : 's') + '</span>' +
-      (sfText ? ' <span class="det-latest" style="color:' +
+    var totalCount = _filterChannel ? _detections.length : _detCount;
+    var countLabel = String(count) + (totalCount > count ? ' of ' + totalCount : '') +
+      ' detection' + (count === 1 ? '' : 's');
+    var nfHtml = '';
+    if (_noiseFloorDb != null) {
+      var nfColor = _noiseFloorDb > -30 ? '#f44' : _noiseFloorDb > -50 ? '#ff9f43' : '#6bff6b';
+      nfHtml = ' <span class="det-nf" style="color:' + nfColor + '">NF ' +
+        esc(_noiseFloorDb.toFixed(0) + ' dB') + '</span>';
+    }
+    _detIndicator.innerHTML = filterHtml +
+      '<span class="det-count">' + esc(countLabel) + '</span>' +
+      ' <span class="det-latest" style="color:' +
         (SF_COLORS[recent.sf] || '#fff') + '">' +
-        esc(sfText) + ' · ' + esc(snrText) + '</span>' : '') +
-      (rateText ? ' <span class="det-rate">' + esc(rateText) + '</span>' : '');
+        esc(sfText) + ' · ' + esc(snrText) + '</span>' +
+      (rateText ? ' <span class="det-rate">' + esc(rateText) + '</span>' : '') +
+      _buildSparkline(_rateHistory) +
+      nfHtml +
+      _buildSfChips(dets);
+
+    var clearBtn = document.getElementById('det-filter-clear');
+    if (clearBtn) clearBtn.addEventListener('click', _clearFilter);
   }
 
   function handleDetection(det) {
@@ -1033,12 +1153,15 @@
     _packets.unshift(pkt);
     if (_packets.length > MAX_PACKETS) _packets.length = MAX_PACKETS;
     _pktCount++;
+    var linked = false;
     for (var i = 0; i < _detections.length; i++) {
-      if (_detections[i].timestamp === pkt.timestamp && _detections[i].sf === pkt.sf) {
+      if (!_detections[i]._pkt && _detections[i].timestamp === pkt.timestamp && _detections[i].sf === pkt.sf) {
         _detections[i]._pkt = pkt;
+        linked = true;
         break;
       }
     }
+    if (linked) _repaintDetections();
     _updatePktIndicator();
     if (_pktExpanded && _pktTbody) {
       var now = Date.now() / 1000;
@@ -1138,5 +1261,6 @@
     handlePacketDecoded: handlePacketDecoded,
     handlePacketHistory: handlePacketHistory,
     setFreqMhz: setFreqMhz,
+    setFilterChannel: setFilterChannel,
   };
 })();

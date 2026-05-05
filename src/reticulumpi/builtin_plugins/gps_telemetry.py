@@ -23,6 +23,8 @@ class GpsTelemetry(PluginBase):
     plugin_name = "gps_telemetry"
     plugin_description = "NMEA GPS receiver telemetry"
     plugin_version = "1.0.0"
+    broadcast_tier = 2
+    broadcast_keys = "gps"
 
     # ── Configuration validation ────────────────────────────────────────
 

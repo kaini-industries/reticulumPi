@@ -31,6 +31,8 @@ class LoraLinkTester(PluginBase):
     plugin_name = "lora_link_tester"
     plugin_version = "0.1.0"
     plugin_description = "Meshtastic LoRa link quality tester (dedicated radio)"
+    broadcast_tier = 2
+    broadcast_keys = "link_tester"
 
     # ── Config validation ──────────────────────────────────────────
 

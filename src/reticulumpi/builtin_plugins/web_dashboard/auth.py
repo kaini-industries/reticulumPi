@@ -166,6 +166,7 @@ class SqliteSessionStore:
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        os.chmod(db_path, 0o600)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("

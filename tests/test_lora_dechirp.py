@@ -505,6 +505,31 @@ class TestSyncWordBins:
         assert sync_word_bins(0xFF, 7) == (15 * 8, 15 * 8)
 
 
+class TestMatchSyncWordWrapAround:
+    """_match_sync_word must handle wrap-around at the [0, 2^SF) boundary."""
+
+    def _make_extractor(self, sync_words=(0x00,), tol=2):
+        cref = ChirpReference(SAMPLE_RATE, BW)
+        ext = PacketExtractor(cref, known_sync_words=sync_words)
+        ext.sync_tolerance = tol
+        return ext
+
+    def test_wrap_around_matches(self):
+        ext = self._make_extractor(sync_words=(0x00,), tol=2)
+        # sync 0x00 at SF7 → bins (0, 0); bin 127 is distance 1 from 0
+        assert ext._match_sync_word(127, 127, 7) == 0x00
+
+    def test_wrap_around_exceeds_tolerance(self):
+        ext = self._make_extractor(sync_words=(0x00,), tol=2)
+        # bin 124 is distance 4 from 0 at SF7 (128 bins) — exceeds tol=2
+        assert ext._match_sync_word(124, 124, 7) is None
+
+    def test_non_wrap_still_works(self):
+        ext = self._make_extractor(sync_words=(0x34,), tol=2)
+        # 0x34 at SF7 → bins (24, 32); exact match
+        assert ext._match_sync_word(24, 32, 7) == 0x34
+
+
 # ===========================================================================
 # Synthetic LoRa packet generator
 # ===========================================================================

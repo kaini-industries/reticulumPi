@@ -70,7 +70,9 @@ class MeshCoreObserver(PluginBase):
     plugin_name = "meshcore_observer"
     plugin_description = "MeshCore companion observer for letsmesh.net analyzer"
     plugin_version = "1.0.0"
-    plugin_dependencies = ["meshcore_gateway"]
+    broadcast_tier = 1
+    broadcast_keys = "meshcore_observer"
+    plugin_dependencies = ("meshcore_gateway",)
 
     # ── Configuration validation ────────────────────────────────────
 
@@ -249,6 +251,10 @@ class MeshCoreObserver(PluginBase):
                     and self._ws_ping_thread.is_alive()
                 ),
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        s = self.get_status()
+        return {"available": True, **s} if s else None
 
     # ── Asyncio event loop (standalone mode) ───────────────────────
 
