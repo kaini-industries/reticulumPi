@@ -276,10 +276,6 @@ class AdsbRadarPlugin(PluginBase):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
         )
         self._pid = self._process.pid
         self._start_log_reader(self._process, prefix="dump1090")
