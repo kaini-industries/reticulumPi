@@ -161,6 +161,7 @@ class SpectrumScanner(PluginBase):
             self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
         except (RuntimeError, ValueError) as exc:
             self.log.error("RTL-SDR device resolution failed: %s", exc)
+            self._set_status("error", str(exc))
 
         self._active = True
         self._device_released = False
