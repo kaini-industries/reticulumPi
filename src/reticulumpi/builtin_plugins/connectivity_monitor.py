@@ -180,6 +180,11 @@ class ConnectivityMonitorPlugin(PluginBase):
             "connectivity": {
                 "rnsd_reachable": h.get("rnsd_reachable"),
                 "interfaces_online": h.get("interfaces_online"),
+                "interfaces_total": h.get("interfaces_total", 0),
+                "i2p_status": h.get("i2p_status", "unknown"),
+                "i2p_peers": h.get("i2p_peers", 0),
+                "sam_reachable": h.get("sam_reachable", False),
+                "path_count": h.get("path_count", 0),
                 "issues": h.get("issues", []),
             },
             "routing": {
