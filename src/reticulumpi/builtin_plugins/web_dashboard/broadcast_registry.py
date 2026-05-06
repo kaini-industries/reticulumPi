@@ -22,6 +22,39 @@ class BroadcastRegistry:
 
     def __init__(self, metrics_interval: float = 5.0) -> None:
         self._budget = metrics_interval * 0.75
+        self._tier1_budget = self._budget * 0.70
+
+    def _run_plugin(
+        self,
+        name: str,
+        p: Any,
+        cycle_count: int,
+        data: dict[str, Any],
+    ) -> None:
+        t = time.monotonic()
+        try:
+            result = p.broadcast_snapshot(cycle_count=cycle_count)
+        except Exception:
+            result = None
+        elapsed = time.monotonic() - t
+        if elapsed > _SLOW_THRESHOLD:
+            log.warning(
+                "Slow broadcast plugin %s: %.0fms", name, elapsed * 1000,
+            )
+
+        if result is None:
+            return
+
+        keys = getattr(p, "broadcast_keys", None)
+        if keys is None:
+            return
+
+        if isinstance(keys, str):
+            data[keys] = result
+        elif isinstance(keys, (list, tuple)):
+            for key in keys:
+                if key in result:
+                    data[key] = result[key]
 
     def collect(
         self,
@@ -39,35 +72,16 @@ class BroadcastRegistry:
                 by_tier[tier].append((name, p))
 
         for tier in (0, 1, 2):
+            cutoff = (
+                float("inf") if tier == 0
+                else self._tier1_budget if tier == 1
+                else self._budget
+            )
             for name, p in by_tier[tier]:
-                if tier > 0 and (time.monotonic() - t0) >= self._budget:
+                if (time.monotonic() - t0) >= cutoff:
                     skipped.append(name)
                     continue
-
-                t = time.monotonic()
-                try:
-                    result = p.broadcast_snapshot(cycle_count=cycle_count)
-                except Exception:
-                    result = None
-                elapsed = time.monotonic() - t
-                if elapsed > _SLOW_THRESHOLD:
-                    log.warning(
-                        "Slow broadcast plugin %s: %.0fms", name, elapsed * 1000,
-                    )
-
-                if result is None:
-                    continue
-
-                keys = getattr(p, "broadcast_keys", None)
-                if keys is None:
-                    continue
-
-                if isinstance(keys, str):
-                    data[keys] = result
-                elif isinstance(keys, (list, tuple)):
-                    for key in keys:
-                        if key in result:
-                            data[key] = result[key]
+                self._run_plugin(name, p, cycle_count, data)
 
         if skipped:
             log.info(

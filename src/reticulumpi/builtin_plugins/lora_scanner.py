@@ -57,6 +57,9 @@ _LORA_DEFAULTS: dict[str, object] = {
     "sweep_seconds": 1,
     "gain_db": 34.0,
     "waterfall_rows": 256,
+    "capture_trigger_threshold_db": 10.0,
+    "capture_trigger_consecutive_sweeps": 3,
+    "capture_cooldown_s": 5.0,
 }
 
 # Signal detection threshold above noise floor (dB).
@@ -87,12 +90,25 @@ class LoraScanner(SpectrumScanner):
             self.config.setdefault(key, default)
         self._threshold_db = float(self.config.get("threshold_db", _DEFAULT_THRESHOLD_DB))
         self._lora_region = str(self.config.get("lora_region", "US915"))
+        self._lora_snapshot_cache: tuple[int, dict[str, Any]] | None = None
         super().validate_config()
 
     def start(self) -> None:
         super().start()
         self._event_sweep_topic = events.LORA_SCANNER_SWEEP
         self._event_status_topic = events.LORA_SCANNER_STATUS
+        self._lora_snapshot_cache: tuple[int, dict[str, Any]] | None = None
+
+        # Capture trigger config
+        self._capture_trigger_threshold_db = float(
+            self.config.get("capture_trigger_threshold_db", 10.0),
+        )
+        self._capture_trigger_consec = int(
+            self.config.get("capture_trigger_consecutive_sweeps", 3),
+        )
+        self._capture_cooldown_s = float(
+            self.config.get("capture_cooldown_s", 5.0),
+        )
 
         # Channel plan
         self._channels = _REGION_CHANNELS.get(self._lora_region, _REGION_CHANNELS["US915"])
@@ -115,6 +131,8 @@ class LoraScanner(SpectrumScanner):
             }
             for _ in range(num_ch)
         ]
+        self._capture_consec_counts: list[int] = [0] * num_ch
+        self._capture_last_trigger_ts: list[float] = [0.0] * num_ch
         self._channel_power_history: list[deque[tuple[float, float | None]]] = [
             deque(maxlen=_CH_POWER_HISTORY_LEN) for _ in range(num_ch)
         ]
@@ -158,6 +176,7 @@ class LoraScanner(SpectrumScanner):
 
     def _flush_current_sweep(self) -> None:
         super()._flush_current_sweep()
+        self._lora_snapshot_cache = None
 
         if not getattr(self, "_channel_bin_ranges", None) and not getattr(self, "_last_bin_count", None):
             return
@@ -257,6 +276,54 @@ class LoraScanner(SpectrumScanner):
                 if prev_peak is None or ch_power > prev_peak:
                     stats["peak_db"] = round(ch_power, 1)
 
+        self._check_capture_triggers(now)
+
+    # ------------------------------------------------------------------
+    # Sweep-triggered I/Q capture
+    # ------------------------------------------------------------------
+
+    def _check_capture_triggers(self, now: float) -> None:
+        nf = self._noise_floor_db
+        if nf is None:
+            return
+        threshold = nf + self._capture_trigger_threshold_db
+
+        for ci, ch in enumerate(self._channels):
+            power = self._channel_powers[ci]
+            if power is not None and power > threshold:
+                self._capture_consec_counts[ci] += 1
+            else:
+                self._capture_consec_counts[ci] = 0
+                continue
+
+            if self._capture_consec_counts[ci] < self._capture_trigger_consec:
+                continue
+
+            if now - self._capture_last_trigger_ts[ci] < self._capture_cooldown_s:
+                continue
+
+            self._capture_last_trigger_ts[ci] = now
+            self._capture_consec_counts[ci] = 0
+
+            payload = {
+                "channel_idx": ch.idx,
+                "center_hz": ch.center_hz,
+                "bw_hz": ch.bw_hz,
+                "direction": ch.direction,
+                "power_db": round(power, 1),
+                "noise_floor_db": round(nf, 1),
+                "excess_db": round(power - nf, 1),
+                "timestamp": round(now, 3),
+            }
+            self.log.info(
+                "Capture trigger: ch%d %.4f MHz, %.1f dB above noise",
+                ch.idx, ch.center_hz / 1e6, power - nf,
+            )
+            try:
+                self.event_bus.publish(events.LORA_CAPTURE_TRIGGER, payload)
+            except Exception:
+                self.log.debug("capture trigger publish failed", exc_info=True)
+
     # ------------------------------------------------------------------
     # Interference classification
     # ------------------------------------------------------------------
@@ -310,14 +377,18 @@ class LoraScanner(SpectrumScanner):
     # ------------------------------------------------------------------
 
     def get_snapshot(self) -> dict[str, Any]:
+        cached = self._lora_snapshot_cache
+        if cached is not None and cached[0] == self._sweep_count:
+            return cached[1]
+
         snap = super().get_snapshot()
 
         if not getattr(self, "_channel_bin_ranges", None):
+            self._lora_snapshot_cache = (self._sweep_count, snap)
             return snap
 
         nf = self._noise_floor_db
 
-        # Channel analysis
         channels_out = []
         active_count = 0
         for ci, ch in enumerate(self._channels):
@@ -342,7 +413,6 @@ class LoraScanner(SpectrumScanner):
                 "last_active_at": stats["last_active_at"],
             })
 
-        # Noise floor trend (last 30 for sparkline)
         nf_trend = [
             {"t": round(t, 3), "db": round(db, 1)}
             for t, db in list(self._noise_floor_history)[-30:]
@@ -358,6 +428,7 @@ class LoraScanner(SpectrumScanner):
             "interference_flags": self._build_interference_flags(),
         }
 
+        self._lora_snapshot_cache = (self._sweep_count, snap)
         return snap
 
     def get_history(self) -> dict[str, Any]:

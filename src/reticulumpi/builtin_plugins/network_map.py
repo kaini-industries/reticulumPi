@@ -51,7 +51,7 @@ class NetworkMapPlugin(PluginBase):
     plugin_name = "network_map"
     plugin_version = "1.1.0"
     plugin_description = "Passive network topology mapping via announce monitoring"
-    broadcast_tier = 1
+    broadcast_tier = 2
     broadcast_keys = "mesh"
 
     def validate_config(self) -> None:
@@ -109,6 +109,9 @@ class NetworkMapPlugin(PluginBase):
             self.announce_dispatcher.subscribe(None, _on_wildcard)
         )
 
+        self._broadcast_cache: tuple[float, int, dict] | None = None
+        self._broadcast_cache_ttl = 4.0
+
         # Background thread for periodic interface stats and DB pruning
         self._start_thread(self._maintenance_loop, "network-map")
 
@@ -133,14 +136,27 @@ class NetworkMapPlugin(PluginBase):
         }
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        now = time.monotonic()
+        want_summary = cycle_count % 3 == 0
+        cached = self._broadcast_cache
+        if cached is not None:
+            age = now - cached[0]
+            had_summary = cached[1]
+            if age < self._broadcast_cache_ttl and (not want_summary or had_summary):
+                return cached[2]
+
         mesh = {}
         if hasattr(self, "get_node_count"):
             mesh["node_count"] = self.get_node_count()
         if hasattr(self, "get_recent_announces"):
             mesh["recent_announces"] = self.get_recent_announces()
-        if cycle_count % 3 == 0 and hasattr(self, "get_mesh_summary"):
+        has_summary = False
+        if want_summary and hasattr(self, "get_mesh_summary"):
             mesh["summary"] = self.get_mesh_summary()
-        return mesh or None
+            has_summary = True
+        result = mesh or None
+        self._broadcast_cache = (now, has_summary, result)
+        return result
 
     def get_known_nodes(self) -> list[dict[str, Any]]:
         """Return all known nodes as a list of dicts (for API consumption)."""

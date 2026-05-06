@@ -38,6 +38,7 @@ back-off up to ``max_restarts`` attempts.
 from __future__ import annotations
 
 import math
+import select
 import shutil
 import subprocess
 import threading
@@ -120,6 +121,10 @@ class SpectrumScanner(PluginBase):
         self._max_restarts = int(cfg.get("max_restarts", 5))
         self._health_interval = float(cfg.get("health_check_interval", 5.0))
 
+        self._snapshot_cache: tuple[int, dict[str, Any]] | None = None
+        self._snapshot_bins_version = -1
+        self._bins_version = 0
+
     # --- lifecycle -----------------------------------------------------------
 
     def start(self) -> None:
@@ -138,20 +143,16 @@ class SpectrumScanner(PluginBase):
 
         # Rolling in-memory state the dashboard reads via get_snapshot().
         self._bins_hz: list[int] = []
-        # Power arrays carry None for bins rtl_power couldn't sample
-        # (nan/inf from the CSV, filtered in _handle_csv_line).  The
-        # snapshot serializer already passes None straight through to
-        # JSON null, which the dashboard treats as "no reading".
+        self._bins_version = 0
         self._latest_powers_db: list[float | None] = []
-        # Each waterfall entry is (flush_timestamp, powers).  Carrying the
-        # timestamp alongside the power row lets the dashboard report a
-        # real wall-clock age per row instead of the drift-prone
-        # rowIdx * sweep_seconds approximation — which is wrong whenever a
-        # wide-span sweep takes longer than sweep_seconds, the scanner
-        # restarts mid-history, or the tab was paused.
         self._waterfall: deque[tuple[float, list[float | None]]] = deque(
             maxlen=self._waterfall_rows
         )
+
+        # Snapshot cache — avoids re-rounding and re-copying on every
+        # broadcast cycle when the sweep hasn't changed.
+        self._snapshot_cache: tuple[int, dict[str, Any]] | None = None
+        self._snapshot_bins_version = -1
 
         # Parser-local accumulator (flushed per sweep).  Maps
         # segment_start_hz -> (bin_step_hz, [power_db, ...]).
@@ -166,7 +167,7 @@ class SpectrumScanner(PluginBase):
             self._set_status("error", str(exc))
 
         self._active = True
-        self._device_released = False
+        self._device_released = getattr(self, '_device_released', False)
         self._supervisor_alive = True
         self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
@@ -236,19 +237,18 @@ class SpectrumScanner(PluginBase):
     def get_snapshot(self) -> dict[str, Any]:
         """Return a WebSocket-ready snapshot of the current sweep state.
 
-        Sent every WebSocket broadcast tick (~5s).  To keep the wire
-        payload bounded, we include only the most recent few sweeps
-        (``waterfall_tail``) plus a monotonic ``sweep_count``; the client
-        uses the count to dedupe and appends new tail rows to its own
-        in-browser scrolling history.
+        Cached on ``_sweep_count`` — repeat calls within the same sweep
+        return the cached dict in ~0 ms.  Powers are pre-rounded on
+        ingest so no per-call rounding is needed.  ``bins_hz`` is only
+        included when the bin grid changes (tracked via ``bins_version``).
         """
         with self._state_lock:
+            cached = self._snapshot_cache
+            if cached is not None and cached[0] == self._sweep_count:
+                return cached[1]
+
             tail = list(self._waterfall)[-self._SNAPSHOT_TAIL_ROWS:]
-            # Decompose (ts, powers) tuples into two parallel lists kept in
-            # lock-step on the wire.  `waterfall_tail` is unchanged for
-            # backward-compat with older clients; `waterfall_tail_times` is
-            # the new sibling field the dashboard uses for honest per-row age.
-            return {
+            snap: dict[str, Any] = {
                 "status": self._status,
                 "error": self._last_error,
                 "freq_start_hz": int(self._freq_start_mhz * 1_000_000),
@@ -260,17 +260,17 @@ class SpectrumScanner(PluginBase):
                 "sweep_count": self._sweep_count,
                 "last_sweep_at": self._last_sweep_at,
                 "waterfall_rows": self._waterfall_rows,
-                "bins_hz": list(self._bins_hz),
-                "latest_powers_db": [
-                    round(v, 1) if v is not None else None
-                    for v in self._latest_powers_db
-                ],
-                "waterfall_tail": [
-                    [round(v, 1) if v is not None else None for v in powers]
-                    for _, powers in tail
-                ],
+                "bins_version": self._bins_version,
+                "latest_powers_db": list(self._latest_powers_db),
+                "waterfall_tail": [list(powers) for _, powers in tail],
                 "waterfall_tail_times": [round(ts, 3) for ts, _ in tail],
             }
+            if self._bins_version != self._snapshot_bins_version:
+                snap["bins_hz"] = list(self._bins_hz)
+                self._snapshot_bins_version = self._bins_version
+
+            self._snapshot_cache = (self._sweep_count, snap)
+            return snap
 
     def get_history(self) -> dict[str, Any]:
         """Return the full in-memory waterfall buffer for one-shot backfill.
@@ -290,11 +290,10 @@ class SpectrumScanner(PluginBase):
                 "available": True,
                 "sweep_count": self._sweep_count,
                 "bin_count": len(self._bins_hz),
+                "bins_hz": list(self._bins_hz),
+                "bins_version": self._bins_version,
                 "waterfall_rows": self._waterfall_rows,
-                "rows": [
-                    [round(v, 1) if v is not None else None for v in powers]
-                    for _, powers in self._waterfall
-                ],
+                "rows": [list(powers) for _, powers in self._waterfall],
                 "row_timestamps": [
                     round(ts, 3) for ts, _ in self._waterfall
                 ],
@@ -338,11 +337,14 @@ class SpectrumScanner(PluginBase):
 
             parser = self._start_thread(self._parser_loop, name="spectrum-parser")
 
-            # Block until rtl_power exits or we're stopped.
+            # Block until rtl_power exits, parser dies, or we're stopped.
             while self._active and self._process is not None:
                 rc = self._process.poll()
                 if rc is not None:
                     self.log.warning("rtl_power exited (code %s)", rc)
+                    break
+                if not parser.is_alive():
+                    self.log.warning("Parser thread exited unexpectedly")
                     break
                 self._sleep_while_active(self._health_interval)
 
@@ -458,7 +460,8 @@ class SpectrumScanner(PluginBase):
         self._restart_count = 0
         self._segments = {}
         self._current_ts = None
-        self._device_released = False
+        with self._state_lock:
+            self._device_released = False
         if not self._supervisor_alive:
             self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
@@ -469,11 +472,15 @@ class SpectrumScanner(PluginBase):
         proc = self._process
         if proc is None or proc.stdout is None:
             return
+        fd = proc.stdout.fileno()
         try:
-            for raw in proc.stdout:
-                if not self._active:
+            while self._active:
+                ready, _, _ = select.select([fd], [], [], 0.5)
+                if not ready:
+                    continue
+                raw = proc.stdout.readline()
+                if not raw:
                     break
-                # text=True on Popen yields str rows already.
                 line = raw.strip() if isinstance(raw, str) else raw.decode(
                     "utf-8", errors="replace"
                 ).strip()
@@ -481,14 +488,10 @@ class SpectrumScanner(PluginBase):
                     continue
                 self._handle_csv_line(line)
         except (ValueError, OSError):
-            # stdout closed — process exited.
             pass
         except Exception:
             self.log.exception("Parser loop crashed")
 
-        # Final flush — rtl_power may have been killed mid-sweep, but if
-        # we have at least some segments, emit them so the last
-        # waterfall row isn't lost.
         self._flush_current_sweep()
 
     def _handle_csv_line(self, line: str) -> None:
@@ -541,18 +544,21 @@ class SpectrumScanner(PluginBase):
             step, dbs = segs[freq_lo]
             for i, db in enumerate(dbs):
                 freqs.append(freq_lo + i * step)
-                powers.append(db)
+                powers.append(round(db, 1) if db is not None else None)
 
         if not freqs:
             return
 
         now = time.time()
         with self._state_lock:
-            self._bins_hz = freqs
+            if freqs != self._bins_hz:
+                self._bins_hz = freqs
+                self._bins_version += 1
             self._latest_powers_db = powers
             self._waterfall.append((now, powers))
             self._sweep_count += 1
             self._last_sweep_at = now
+            self._snapshot_cache = None
 
         # Fire-and-forget event bus notification for any subscribers
         # (the dashboard pulls via get_snapshot() so it doesn't rely on

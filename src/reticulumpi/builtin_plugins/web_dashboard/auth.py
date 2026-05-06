@@ -116,6 +116,8 @@ def verify_password(password: str, stored_hash: str) -> bool:
 class RateLimiter:
     """Per-IP sliding window rate limiter."""
 
+    MAX_TRACKED_IPS = 10_000
+
     def __init__(self, max_attempts: int = 5, window_seconds: int = 60):
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
@@ -145,6 +147,36 @@ class RateLimiter:
         oldest = attempts[0]
         remaining = self.window_seconds - (time.monotonic() - oldest)
         return max(1, int(remaining))
+
+    def cleanup_all_expired(self) -> int:
+        """Sweep all IPs and remove entries with no unexpired attempts.
+
+        Returns the number of IP entries removed.
+        """
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        expired_ips: list[str] = []
+        for ip, timestamps in self._attempts.items():
+            fresh = [t for t in timestamps if t > cutoff]
+            if fresh:
+                self._attempts[ip] = fresh
+            else:
+                expired_ips.append(ip)
+        for ip in expired_ips:
+            del self._attempts[ip]
+
+        removed_by_cap = 0
+        if len(self._attempts) > self.MAX_TRACKED_IPS:
+            by_newest = sorted(
+                self._attempts.items(),
+                key=lambda kv: max(kv[1]),
+            )
+            excess = len(self._attempts) - self.MAX_TRACKED_IPS
+            for ip, _ in by_newest[:excess]:
+                del self._attempts[ip]
+                removed_by_cap += 1
+
+        return len(expired_ips) + removed_by_cap
 
     def _cleanup(self, ip: str, now: float) -> None:
         if ip in self._attempts:
@@ -344,6 +376,7 @@ class AuthManager:
         ]
         for token in expired:
             del self.sessions[token]
+        self.rate_limiter.cleanup_all_expired()
         return len(expired)
 
     def logout(self, token: str) -> None:

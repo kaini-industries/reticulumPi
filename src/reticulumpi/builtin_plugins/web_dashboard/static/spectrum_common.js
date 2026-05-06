@@ -342,6 +342,7 @@
       rowTimestamps: [],
       sweepCount: 0,
       binCount: 0,
+      binsHz: null,
       generation: 0,
 
       loadHistory: function (payload) {
@@ -349,7 +350,7 @@
         this.rowTimestamps = [];
         this.sweepCount = 0;
         this.binCount = 0;
-        if (payload && payload.available && payload.rows && payload.rows.length) {
+        if (payload && payload.available && Array.isArray(payload.rows) && payload.rows.length) {
           var times = payload.row_timestamps || [];
           for (var i = 0; i < payload.rows.length; i++) {
             var row = payload.rows[i];
@@ -365,6 +366,9 @@
           this.sweepCount = payload.sweep_count || 0;
           this.binCount = payload.bin_count
             || (this.rows[0] ? this.rows[0].length : 0);
+        }
+        if (payload && payload.bins_hz) {
+          this.binsHz = payload.bins_hz;
         }
         this.generation += 1;
       },

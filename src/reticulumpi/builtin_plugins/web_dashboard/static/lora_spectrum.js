@@ -73,6 +73,7 @@
   var _needsBulkPaint = false;
   var _lastOverlaySig = '';    // "<region>|<freq>|<bw>|<zoom>" for overlay rebuild
   var _lastData = null;
+  var _cachedBinsHz = null;
   // Zoom: null = full clipped region; else [loMhz, hiMhz] user-selected window.
   var _zoom = null;
   var _dragState = null;       // {startFrac, curFrac, rectEl} during a drag
@@ -1506,25 +1507,25 @@
     _chDetailEl.innerHTML = ''
       + '<span class="lora-channel-detail-close" data-action="close">&times;</span>'
       + '<div class="lora-channel-detail-header">'
-      +   'Ch ' + esc(String(ch.idx)) + ' · '
-      +   ch.center_mhz.toFixed(3) + ' MHz · '
-      +   ch.bw_khz + ' kHz ' + (ch.dir === 'dn' ? 'Downlink' : 'Uplink')
+      +   'Ch ' + esc(String(ch.idx)) + ' &middot; '
+      +   esc(ch.center_mhz.toFixed(3)) + ' MHz &middot; '
+      +   esc(String(ch.bw_khz)) + ' kHz ' + (ch.dir === 'dn' ? 'Downlink' : 'Uplink')
       + '</div>'
-      + 'Power: ' + (ch.power_db != null ? ch.power_db.toFixed(1) + ' dB' : '—')
-      + ' · Avg: ' + (ch.avg_db != null ? ch.avg_db.toFixed(1) + ' dB' : '—')
-      + ' · Peak: ' + (ch.peak_db != null ? ch.peak_db.toFixed(1) + ' dB' : '—')
-      + '<br>Duty cycle: ' + ch.duty_pct.toFixed(1) + '%'
-      + ' · Detections: ' + ch.det_count;
+      + 'Power: ' + (ch.power_db != null ? esc(ch.power_db.toFixed(1)) + ' dB' : '&#x2014;')
+      + ' &middot; Avg: ' + (ch.avg_db != null ? esc(ch.avg_db.toFixed(1)) + ' dB' : '&#x2014;')
+      + ' &middot; Peak: ' + (ch.peak_db != null ? esc(ch.peak_db.toFixed(1)) + ' dB' : '&#x2014;')
+      + '<br>Duty cycle: ' + esc(ch.duty_pct.toFixed(1)) + '%'
+      + ' &middot; Detections: ' + esc(String(ch.det_count));
     var sc = (_lastData.spectrum && _lastData.spectrum.sweep_count) ? _lastData.spectrum.sweep_count : 0;
     if (sc > 0 && ch.det_count > 0) {
-      _chDetailEl.innerHTML += ' (' + (ch.det_count / sc * 100).toFixed(1) + '% of sweeps)';
+      _chDetailEl.innerHTML += ' (' + esc((ch.det_count / sc * 100).toFixed(1)) + '% of sweeps)';
     }
     var closeBtn = _chDetailEl.querySelector('[data-action="close"]');
-    if (closeBtn) closeBtn.addEventListener('click', function () {
+    if (closeBtn) closeBtn.onclick = function () {
       _selectedChannel = null;
       _chDetailEl.style.display = 'none';
       if (_lastData) _renderAll(_lastData);
-    });
+    };
   }
 
   // -- Interference alerts in meta strip ------------------------------------
@@ -1809,7 +1810,22 @@
 
     // Prefer dedicated lora_scanner / lora_chirp_viewer data; fall back to wideband spectrum.
     var _loraSnap = data.lora_scanner || data.lora_chirp_viewer;
-    if (_loraSnap && _loraSnap.bins_hz && _loraSnap.bins_hz.length) {
+    if (_loraSnap) {
+      if (_loraSnap.bins_hz) {
+        _cachedBinsHz = _loraSnap.bins_hz;
+      } else if (_cachedBinsHz) {
+        _loraSnap.bins_hz = _cachedBinsHz;
+      } else {
+        var _hs = SC.loraHistoryStore || SC.historyStore;
+        if (_hs && _hs.binsHz) {
+          _cachedBinsHz = _hs.binsHz;
+          _loraSnap.bins_hz = _cachedBinsHz;
+        }
+      }
+    }
+    var _hasSweepData = _loraSnap && _loraSnap.bins_hz && _loraSnap.bins_hz.length
+      && _loraSnap.sweep_count > 0;
+    if (_hasSweepData) {
       _dedicatedMode = true;
       data = Object.assign({}, data, { spectrum: _loraSnap });
     } else {

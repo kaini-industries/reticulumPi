@@ -40,6 +40,7 @@
   var _legendExpanded = false;
   var _placeholderEl = null;
   var _hasReceivedData = false;
+  var _cachedBinsHz = null;
   var _css = {};
 
   // -- Zoom state -----------------------------------------------------------
@@ -847,6 +848,14 @@
       _setZoom(null, true);
     }
 
+    if (data.bins_hz) {
+      _cachedBinsHz = data.bins_hz;
+    } else if (_cachedBinsHz) {
+      data.bins_hz = _cachedBinsHz;
+    } else if (SC.historyStore && SC.historyStore.binsHz) {
+      _cachedBinsHz = SC.historyStore.binsHz;
+      data.bins_hz = _cachedBinsHz;
+    }
     _lastData = data;
     var clip = _clip(data, _zoom);
 

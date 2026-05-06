@@ -122,6 +122,50 @@ class TestRateLimiter:
         rl.record_attempt("1.1.1.1")
         assert rl.retry_after("1.1.1.1") > 0
 
+    def test_cleanup_all_expired_removes_stale_ips(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
+
+        rl = RateLimiter(max_attempts=5, window_seconds=0.01)
+        rl.record_attempt("1.1.1.1")
+        rl.record_attempt("2.2.2.2")
+        rl.record_attempt("3.3.3.3")
+        time.sleep(0.02)
+        removed = rl.cleanup_all_expired()
+        assert removed == 3
+        assert len(rl._attempts) == 0
+
+    def test_cleanup_all_expired_keeps_fresh_ips(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
+
+        rl = RateLimiter(max_attempts=5, window_seconds=60)
+        rl.record_attempt("1.1.1.1")
+        rl.record_attempt("2.2.2.2")
+        removed = rl.cleanup_all_expired()
+        assert removed == 0
+        assert len(rl._attempts) == 2
+
+    def test_cleanup_all_expired_enforces_max_tracked_ips(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
+
+        rl = RateLimiter(max_attempts=5, window_seconds=60)
+        rl.MAX_TRACKED_IPS = 5
+        for i in range(10):
+            rl.record_attempt(f"10.0.0.{i}")
+        removed = rl.cleanup_all_expired()
+        assert removed == 5
+        assert len(rl._attempts) == 5
+
+    def test_gc_loop_cleans_rate_limiter(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="test", session_timeout=60)
+        mgr.rate_limiter.window_seconds = 0.01
+        mgr.rate_limiter.record_attempt("10.0.0.1")
+        mgr.rate_limiter.record_attempt("10.0.0.2")
+        time.sleep(0.02)
+        mgr.cleanup_expired_sessions()
+        assert len(mgr.rate_limiter._attempts) == 0
+
 
 class TestAuthManager:
     def _make_manager(self, password="testpass"):

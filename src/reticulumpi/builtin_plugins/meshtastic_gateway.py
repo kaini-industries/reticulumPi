@@ -854,6 +854,9 @@ class MeshtasticGateway(PluginBase):
         self._channels_cache_time: float = 0.0  # monotonic; 0 = never populated
         self._cache_ttl: float = float(self.config.get("cache_ttl", 600))
 
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl: float = 4.0
+
         # Packet dedup — same message can arrive via both MQTT and serial,
         # and MQTT bridges can replay packets many minutes apart. Keep a
         # bounded TTL cache of seen packet IDs.
@@ -2551,6 +2554,11 @@ class MeshtasticGateway(PluginBase):
             return status
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+
         result = {}
         if hasattr(self, "get_device_info"):
             d = self.get_device_info()
@@ -2568,7 +2576,9 @@ class MeshtasticGateway(PluginBase):
             ln = self.get_lora_neighbors()
             if ln:
                 result["meshtastic_lora_neighbors"] = ln
-        return result or None
+        snapshot = result or None
+        self._broadcast_cache = (now, snapshot)
+        return snapshot
 
     def get_meshtastic_nodes(self) -> list[dict[str, Any]]:
         """Return list of known Meshtastic mesh nodes.

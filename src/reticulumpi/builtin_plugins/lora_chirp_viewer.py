@@ -64,6 +64,8 @@ _CHIRP_DEFAULTS: dict[str, object] = {
     "chirp_detection_cooldown_s": 0.5,
     "chirp_detection_history_depth": 256,
     "chirp_packet_history_depth": 128,
+    "chirp_triggered_capture_enabled": True,
+    "chirp_triggered_capture_duration_s": 2.0,
 }
 
 _VALID_SAMPLE_RATES = (250_000, 1_024_000, 2_048_000)
@@ -108,10 +110,19 @@ class LoraChirpViewer(LoraScanner):
         self._detection_history_depth = int(self.config["chirp_detection_history_depth"])
         self._packet_history_depth = int(self.config["chirp_packet_history_depth"])
 
+        self._triggered_capture_enabled = bool(self.config["chirp_triggered_capture_enabled"])
+        self._triggered_capture_duration_s = float(self.config["chirp_triggered_capture_duration_s"])
+        self._triggered_capture_active = False
+        self._chirp_snapshot_cache: tuple[tuple[int, int], dict[str, Any]] | None = None
+
+        if self._continuous_enabled:
+            self._device_released = True
+
         super().validate_config()
 
     def start(self) -> None:
         super().start()
+        self._chirp_snapshot_cache: tuple[tuple[int, int], dict[str, Any]] | None = None
 
         if self._continuous_enabled:
             self._device_released = True
@@ -150,13 +161,21 @@ class LoraChirpViewer(LoraScanner):
         if self._detection_enabled:
             self._init_detection()
 
+        self._triggered_capture_active = False
+        self._triggered_capture_lock = threading.Lock()
+        if self._triggered_capture_enabled and not self._continuous_enabled:
+            self.event_bus.subscribe_offloaded(
+                events.LORA_CAPTURE_TRIGGER, self._on_capture_trigger,
+            )
+
         if self._continuous_enabled:
             self._start_continuous()
 
         self.log.info(
-            "Chirp viewer ready (rtl_sdr=%s, continuous=%s, %.3f MHz / %d Hz)",
+            "Chirp viewer ready (rtl_sdr=%s, continuous=%s, triggered=%s, %.3f MHz / %d Hz)",
             self._rtl_sdr_path or "NOT FOUND",
             self._continuous_enabled,
+            self._triggered_capture_enabled and not self._continuous_enabled,
             self._chirp_freq_mhz,
             self._chirp_sr,
         )
@@ -336,20 +355,34 @@ class LoraChirpViewer(LoraScanner):
             "detection_enabled": self._detection_enabled,
             "detection_count": det_count,
             "noise_floor_db": nf_db,
+            "triggered_capture_enabled": self._triggered_capture_enabled and not self._continuous_enabled,
+            "triggered_capture_active": self._triggered_capture_active,
         }
 
     def get_snapshot(self) -> dict[str, Any]:
+        cache_key = (self._sweep_count, self._chirp_sweep_count)
+        cached = self._chirp_snapshot_cache
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
         snap = super().get_snapshot()
+
+        with self._state_lock:
+            dev_released = self._device_released
+        if dev_released and not snap.get("bins_hz"):
+            bin_step = int(self._bin_khz * 1000)
+            start_hz = int(self._freq_start_mhz * 1_000_000)
+            stop_hz = int(self._freq_stop_mhz * 1_000_000)
+            snap["bins_hz"] = list(range(start_hz, stop_hz, bin_step))
+            snap["bins_version"] = 0
+
         snap["chirp_status"] = self.get_capture_status()
 
         with self._state_lock:
             tail = list(self._chirp_waterfall)[-_SNAPSHOT_TAIL_ROWS:]
         snap["chirp_detection"] = self.get_detection_stats()
         snap["chirp_waterfall_tail"] = {
-            "rows": [
-                [round(v, 1) if v is not None else None for v in row]
-                for _, row in tail
-            ],
+            "rows": [list(row) for _, row in tail],
             "timestamps": [round(ts, 3) for ts, _ in tail],
             "sweep_count": self._chirp_sweep_count,
             "cols": self._fft_size_for_sr(self._chirp_sr),
@@ -358,6 +391,7 @@ class LoraChirpViewer(LoraScanner):
             "db_min": round(self._db_lo, 1) if self._db_lo is not None else -90,
             "db_max": round(self._db_hi, 1) if self._db_hi is not None else -30,
         }
+        self._chirp_snapshot_cache = (cache_key, snap)
         return snap
 
     def get_chirp_waterfall_history(self) -> dict[str, Any]:
@@ -440,6 +474,169 @@ class LoraChirpViewer(LoraScanner):
                 self._init_detection()
             if self._stream_active:
                 self._restart_continuous()
+
+    # ------------------------------------------------------------------
+    # Sweep-triggered I/Q capture
+    # ------------------------------------------------------------------
+
+    def _on_capture_trigger(self, _event: str, data: dict[str, Any]) -> None:
+        if not self._active or self._continuous_enabled:
+            return
+        with self._triggered_capture_lock:
+            if self._triggered_capture_active:
+                return
+            self._triggered_capture_active = True
+
+        center_hz = data["center_hz"]
+        freq_mhz = center_hz / 1e6
+        channel_idx = data["channel_idx"]
+
+        self.log.info(
+            "Triggered capture: ch%d @ %.4f MHz (%.1f dB above noise)",
+            channel_idx, freq_mhz, data["excess_db"],
+        )
+        try:
+            self._run_triggered_capture(freq_mhz, channel_idx, data)
+        except Exception:
+            self.log.exception("Triggered capture failed")
+        finally:
+            with self._triggered_capture_lock:
+                self._triggered_capture_active = False
+
+    def _run_triggered_capture(
+        self, freq_mhz: float, channel_idx: int, trigger_data: dict[str, Any],
+    ) -> None:
+        if not self._rtl_sdr_path:
+            return
+
+        self._device_released = True
+        self._terminate_process()
+        time.sleep(0.3)
+
+        saved_freq = self._chirp_freq_mhz
+        self._chirp_freq_mhz = freq_mhz
+        if self._detection_enabled:
+            self._init_detection()
+
+        try:
+            self.event_bus.publish(events.CHIRP_CAPTURE_STARTING, {
+                "trigger": trigger_data,
+                "freq_mhz": freq_mhz,
+                "sample_rate": self._chirp_sr,
+                "duration_s": self._triggered_capture_duration_s,
+            })
+        except Exception:
+            self.log.debug("capture starting publish failed", exc_info=True)
+
+        self._chirp_status = "triggered_capture"
+        captured_rows = 0
+        try:
+            captured_rows = self._bounded_capture(freq_mhz)
+        finally:
+            self._chirp_freq_mhz = saved_freq
+            if self._detection_enabled:
+                self._init_detection()
+            self._chirp_status = "idle"
+            self._restart_sweep()
+
+            try:
+                self.event_bus.publish(events.CHIRP_CAPTURE_DONE, {
+                    "trigger": trigger_data,
+                    "freq_mhz": freq_mhz,
+                    "rows_captured": captured_rows,
+                })
+            except Exception:
+                self.log.debug("capture done publish failed", exc_info=True)
+
+    def _bounded_capture(self, freq_mhz: float) -> int:
+        freq_hz = int(freq_mhz * 1e6)
+        sr = self._chirp_sr
+        fft_size = self._fft_size_for_sr(sr)
+        hop = max(1, fft_size // self._chirp_hop_div)
+        window = self._window
+
+        duration = self._triggered_capture_duration_s
+        total_samples = int(sr * duration)
+
+        cmd = [self._rtl_sdr_path, "-f", str(freq_hz), "-s", str(sr)]
+        if self._gain_db is not None:
+            cmd += ["-g", f"{self._gain_db:.1f}"]
+        cmd += [
+            "-d", str(self._resolved_index if self._resolved_index is not None else self._device_id),
+            "-n", str(total_samples),
+            "-",
+        ]
+
+        self.log.info("Bounded capture: %s", " ".join(cmd))
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+        raw_fps = sr / hop
+        pool_factor = max(1, int(raw_fps / self._display_rows_per_s))
+        samples_per_batch = int(sr * self._batch_interval) * 2
+        if samples_per_batch < fft_size * 2:
+            samples_per_batch = fft_size * 4
+
+        captured_rows = 0
+        leftover = b""
+        overlap_samples = fft_size - hop
+        overlap_bytes = overlap_samples * 2
+
+        try:
+            while True:
+                new_raw = proc.stdout.read(samples_per_batch)
+                if not new_raw:
+                    break
+
+                stft_raw = (leftover + new_raw) if leftover else new_raw
+                if len(stft_raw) < fft_size * 2:
+                    leftover = stft_raw
+                    continue
+
+                if overlap_bytes > 0 and len(stft_raw) > overlap_bytes:
+                    leftover = stft_raw[-overlap_bytes:]
+                else:
+                    leftover = b""
+
+                now = time.time()
+                display_rows = self._process_chunk(
+                    stft_raw, fft_size, hop, window, pool_factor,
+                )
+
+                if display_rows is not None and len(display_rows) > 0:
+                    self._ingest_rows(display_rows, now)
+                    self._publish_batch(
+                        display_rows, now, fft_size, freq_hz, sr,
+                        round((hop * pool_factor / sr) * 1000, 4),
+                        round(sr / fft_size, 2),
+                        pool_factor, hop,
+                    )
+                    captured_rows += len(display_rows)
+
+                if self._trackers:
+                    self._run_detection(new_raw, now)
+        except Exception:
+            self.log.exception("Bounded capture read error")
+        finally:
+            if proc.stdout:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2)
+            except Exception:
+                pass
+
+        self.log.info("Bounded capture done: %d display rows from %.3f MHz", captured_rows, freq_mhz)
+        return captured_rows
 
     # ------------------------------------------------------------------
     # Continuous streaming
@@ -674,11 +871,11 @@ class LoraChirpViewer(LoraScanner):
             self._db_lo = self._db_lo * (1 - alpha) + p5 * alpha
             self._db_hi = self._db_hi * (1 - alpha) + p95 * alpha
 
+        rounded = np.round(rows, 1)
         with self._state_lock:
             for i in range(n_rows):
                 ts = base_ts + i * (self._batch_interval / max(n_rows, 1))
-                row_list = rows[i].tolist()
-                self._chirp_waterfall.append((ts, row_list))
+                self._chirp_waterfall.append((ts, rounded[i].tolist()))
                 self._chirp_sweep_count += 1
 
     def _publish_batch(

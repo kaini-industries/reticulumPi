@@ -159,6 +159,9 @@ CHIRP_CAPTURE_DONE = "chirp.capture_done"
 # LoRa chirp viewer — continuous streaming waterfall
 CHIRP_WATERFALL_ROWS = "chirp.waterfall_rows"
 
+# LoRa scanner — sweep-triggered I/Q capture request
+LORA_CAPTURE_TRIGGER = "lora.capture_trigger"
+
 # LoRa chirp detection — preamble / packet detection from dechirp
 CHIRP_DETECTION = "chirp.detection"
 CHIRP_PACKET_DECODED = "chirp.packet_decoded"
