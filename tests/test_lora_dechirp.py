@@ -1079,3 +1079,92 @@ class TestAdaptiveSNRThreshold:
         preamble = make_preamble(sf, n_symbols=8, snr_db=3.0)
         dets = tracker.feed_chunk(preamble, timestamp=1000.0)
         assert len(dets) == 0, "Post-dechirp ~28 dB should be rejected by 35 dB floor"
+
+
+# ===========================================================================
+# DC offset rejection
+# ===========================================================================
+
+
+class TestDCOffsetRejection:
+    def test_dc_offset_does_not_trigger_detection(self):
+        """A strong DC offset (RTL-SDR bias) should not produce false preambles."""
+        sf = 11
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, snr_threshold_db=6.0,
+            snr_floor_db=3.0,
+        )
+        sym_len = cr.symbol_length(sf)
+        rng = np.random.default_rng(42)
+        noise = (rng.standard_normal(sym_len * 20).astype(np.float32) * 0.01
+                 + 1j * rng.standard_normal(sym_len * 20).astype(np.float32) * 0.01)
+        dc_offset = np.complex64(10.0 + 5.0j)
+        iq = noise.astype(np.complex64) + dc_offset
+        dets = tracker.feed_chunk(iq, timestamp=1000.0)
+        assert len(dets) == 0, "DC offset should not trigger false preamble"
+
+    def test_signal_still_detected_with_dc_offset(self):
+        """A real preamble with a DC offset should still be detected."""
+        sf = 7
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, snr_threshold_db=0.0,
+        )
+        preamble = make_preamble(sf, n_symbols=8)
+        dc_offset = np.complex64(5.0 + 3.0j)
+        iq = preamble + dc_offset
+        dets = tracker.feed_chunk(iq, timestamp=1000.0)
+        assert len(dets) == 1, "Real preamble should survive DC removal"
+        assert dets[0].sf == sf
+
+    @pytest.mark.parametrize("sf", [7, 10, 12])
+    def test_dc_rejection_across_sfs(self, sf: int):
+        """DC-only input must not fire at any spreading factor."""
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, snr_threshold_db=6.0,
+            snr_floor_db=3.0,
+        )
+        sym_len = cr.symbol_length(sf)
+        rng = np.random.default_rng(42)
+        noise_power = 0.01
+        noise = np.sqrt(noise_power / 2) * (
+            rng.standard_normal(sym_len * 20).astype(np.float32)
+            + 1j * rng.standard_normal(sym_len * 20).astype(np.float32)
+        )
+        iq = noise.astype(np.complex64) + np.complex64(8.0 + 8.0j)
+        dets = tracker.feed_chunk(iq, timestamp=1000.0)
+        assert len(dets) == 0, f"DC-only should not trigger at SF{sf}"
+
+
+# ===========================================================================
+# Bin spread quality check
+# ===========================================================================
+
+
+class TestBinSpreadRejection:
+    def test_tight_bins_accepted(self):
+        """A clean preamble with zero bin spread should always pass."""
+        sf = 7
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, snr_threshold_db=0.0,
+            max_bin_spread=0.6,
+        )
+        iq = make_preamble(sf, n_symbols=8, symbol=42)
+        dets = tracker.feed_chunk(iq, timestamp=1000.0)
+        assert len(dets) == 1
+
+    def test_high_spread_rejected(self):
+        """A very tight spread threshold should reject even mild alternation."""
+        sf = 7
+        cr = ChirpReference(SAMPLE_RATE, BW)
+        tracker = PreambleTracker(
+            cr, sfs=(sf,), preamble_len=8, snr_threshold_db=0.0,
+            bin_tolerance=1, max_bin_spread=0.05,
+        )
+        chirps = [make_upchirp(sf, symbol=10 + (i % 2)) for i in range(8)]
+        iq = np.concatenate(chirps)
+        dets = tracker.feed_chunk(iq, timestamp=1000.0)
+        assert len(dets) == 0, "Alternating bins with tight spread should be rejected"

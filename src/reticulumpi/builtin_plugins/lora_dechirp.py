@@ -174,6 +174,9 @@ class SymbolDetector:
             )
 
         usable = iq[: n_symbols * sym_len].reshape(n_symbols, sym_len)
+        # Remove per-symbol DC offset — RTL-SDR hardware DC bias creates a
+        # consistent peak after dechirp that triggers false preambles at high SFs.
+        usable = usable - usable.mean(axis=1, keepdims=True)
         dechirped = usable * ref
         spectra = np.fft.fft(dechirped, axis=1)
         mag = np.abs(spectra[:, :n_bins])
@@ -197,7 +200,8 @@ class SymbolDetector:
 
 _DEFAULT_SNR_MARGIN_DB = 10.0
 _DEFAULT_SNR_FLOOR_DB = 6.0
-_DEFAULT_NOISE_EMA_ALPHA = 0.01
+_DEFAULT_NOISE_EMA_ALPHA = 0.05
+_DEFAULT_MAX_BIN_SPREAD = 0.6
 
 
 @dataclass
@@ -233,6 +237,7 @@ class PreambleTracker:
         snr_margin_db: float = _DEFAULT_SNR_MARGIN_DB,
         snr_floor_db: float = _DEFAULT_SNR_FLOOR_DB,
         noise_ema_alpha: float = _DEFAULT_NOISE_EMA_ALPHA,
+        max_bin_spread: float = _DEFAULT_MAX_BIN_SPREAD,
     ) -> None:
         self.chirp_ref = chirp_ref
         self.sfs = tuple(sfs)
@@ -242,6 +247,7 @@ class PreambleTracker:
         self.snr_margin_db = snr_margin_db
         self.snr_floor_db = snr_floor_db
         self._noise_ema_alpha = noise_ema_alpha
+        self.max_bin_spread = max_bin_spread
         self._state: dict[int, _SfState] = {sf: _SfState() for sf in self.sfs}
         self._chunk_sample_offset = 0
 
@@ -358,6 +364,15 @@ class PreambleTracker:
         st: _SfState,
         timestamp: float,
     ) -> Detection | None:
+        if len(st.peak_bins) >= 2:
+            bins_arr = np.array(st.peak_bins)
+            n_bins = 2**sf
+            ref_bin = bins_arr[0]
+            deltas = (bins_arr - ref_bin + n_bins / 2) % n_bins - n_bins / 2
+            bin_spread = float(np.std(deltas))
+            if bin_spread > self.max_bin_spread:
+                return None
+
         mean_peak = float(np.mean(st.peak_mags))
         mean_noise = float(np.mean(st.noise_floors))
         if mean_noise < 1e-10:

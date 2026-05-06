@@ -69,6 +69,7 @@ _CHIRP_DEFAULTS: dict[str, object] = {
 }
 
 _VALID_SAMPLE_RATES = (250_000, 1_024_000, 2_048_000)
+_VALID_DETECTION_BWS = (62_500, 125_000, 250_000, 500_000)
 _LORA_BW_HZ = 125_000
 
 _SNAPSHOT_TAIL_ROWS = 32
@@ -100,7 +101,13 @@ class LoraChirpViewer(LoraScanner):
         if not isinstance(raw_bws, list):
             raw_bws = [raw_bws]
         self._detection_bws: list[int] = [int(b) for b in raw_bws]
+        for b in self._detection_bws:
+            if b not in _VALID_DETECTION_BWS:
+                raise ValueError(f"chirp_detection_bws: {b} not in {_VALID_DETECTION_BWS}")
         self._detection_sfs = [int(s) for s in self.config["chirp_detection_sfs"]]
+        for s in self._detection_sfs:
+            if s not in range(7, 13):
+                raise ValueError(f"chirp_detection_sfs: SF must be 7–12, got {s}")
         self._detection_preamble_len = int(self.config["chirp_detection_preamble_len"])
         self._detection_snr_threshold_db = float(self.config["chirp_detection_snr_threshold_db"])
         self._detection_snr_margin_db = float(self.config["chirp_detection_snr_margin_db"])
@@ -246,8 +253,9 @@ class LoraChirpViewer(LoraScanner):
             self._detection_history.append(payload)
 
         self.log.info(
-            "LoRa preamble: SF%d, offset=%.1f Hz, SNR=%.1f dB",
-            det.sf, det.freq_offset_hz, det.snr_db,
+            "LoRa preamble: SF%d BW=%dk, offset=%.1f Hz, SNR=%.1f dB, conf=%.2f, nf=%.1f dB",
+            det.sf, det.bw // 1000, det.freq_offset_hz, det.snr_db,
+            det.confidence, det.noise_floor_db,
         )
 
         try:
@@ -283,6 +291,10 @@ class LoraChirpViewer(LoraScanner):
         )
         for det, extractor in self._pending_extractions:
             if det.sample_offset < oldest:
+                self.log.debug(
+                    "Extraction expired: SF%d @ offset %d (ring oldest=%d)",
+                    det.sf, det.sample_offset, oldest,
+                )
                 continue
             pkt = extractor.try_extract(
                 det, self._iq_ring_buffer, self._detection_preamble_len,
@@ -354,6 +366,9 @@ class LoraChirpViewer(LoraScanner):
             "waterfall_count": len(self._chirp_waterfall),
             "detection_enabled": self._detection_enabled,
             "detection_count": det_count,
+            "detection_sfs": list(self._detection_sfs),
+            "detection_bws": list(self._detection_bws),
+            "detection_snr_threshold_db": self._detection_snr_threshold_db,
             "noise_floor_db": nf_db,
             "triggered_capture_enabled": self._triggered_capture_enabled and not self._continuous_enabled,
             "triggered_capture_active": self._triggered_capture_active,
@@ -474,6 +489,55 @@ class LoraChirpViewer(LoraScanner):
                 self._init_detection()
             if self._stream_active:
                 self._restart_continuous()
+
+    def get_detection_params(self) -> dict[str, Any]:
+        return {
+            "detection_enabled": self._detection_enabled,
+            "detection_sfs": list(self._detection_sfs),
+            "detection_bws": list(self._detection_bws),
+            "detection_snr_threshold_db": self._detection_snr_threshold_db,
+            "sample_rate": self._chirp_sr,
+        }
+
+    def set_detection_params(
+        self,
+        enabled: bool | None = None,
+        sfs: list[int] | None = None,
+        bws: list[int] | None = None,
+        snr_threshold_db: float | None = None,
+    ) -> None:
+        if sfs is not None:
+            for s in sfs:
+                if s not in range(7, 13):
+                    raise ValueError(f"SF must be 7–12, got {s}")
+            self._detection_sfs = [int(s) for s in sfs]
+        if bws is not None:
+            for b in bws:
+                if b not in _VALID_DETECTION_BWS:
+                    raise ValueError(f"BW must be one of {_VALID_DETECTION_BWS}, got {b}")
+                if b >= self._chirp_sr:
+                    raise ValueError(f"BW {b} must be < sample_rate {self._chirp_sr}")
+            self._detection_bws = [int(b) for b in bws]
+        if snr_threshold_db is not None:
+            self._detection_snr_threshold_db = max(0.0, min(40.0, float(snr_threshold_db)))
+        if enabled is not None:
+            self._detection_enabled = bool(enabled)
+
+        if self._detection_enabled and (not self._detection_sfs or not self._detection_bws):
+            raise ValueError("Detection enabled but SFs or BWs empty")
+
+        if self._detection_enabled:
+            self._init_detection()
+        else:
+            self._trackers = []
+            self._channel_filters = {}
+
+        self._chirp_snapshot_cache = None
+        self.log.info(
+            "Detection params updated: enabled=%s sfs=%s bws=%s snr=%.1f",
+            self._detection_enabled, self._detection_sfs,
+            self._detection_bws, self._detection_snr_threshold_db,
+        )
 
     # ------------------------------------------------------------------
     # Sweep-triggered I/Q capture

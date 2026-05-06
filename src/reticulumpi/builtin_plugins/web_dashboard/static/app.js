@@ -1262,6 +1262,12 @@
           }
           return;
         }
+        if (msg.type === 'chirp_detection_params' && msg.data) {
+          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleDetectionParams) {
+            RPI.chirpSpectrogram.handleDetectionParams(msg.data);
+          }
+          return;
+        }
         if (msg.type === 'message' && msg.data) {
           if (RPI.onMessagingEvent) RPI.onMessagingEvent(msg.data);
           if (RPI.onMqttFeedMessage) RPI.onMqttFeedMessage(msg.data);

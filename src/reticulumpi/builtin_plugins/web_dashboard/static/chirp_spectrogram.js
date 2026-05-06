@@ -71,6 +71,11 @@
 
   var _css = {};
 
+  // -- Detection settings state -------------------------------------------
+  var _detParams = { enabled: true, sfs: [7,8,9,10,11,12], bws: [125000], snr_threshold_db: 12.0, sample_rate: 250000 };
+  var _ALL_DET_BWS = [62500, 125000, 250000, 500000];
+  var _detSettingsToggle, _detSettingsPanel;
+
   // -- DOM setup ----------------------------------------------------------
 
   function _resolveDom() {
@@ -147,8 +152,227 @@
       _onParamChange();
     });
 
+    _buildDetSettings();
+
     _resolved = true;
     return true;
+  }
+
+  function _buildDetSettings() {
+    var container = $('chirp-det-settings-container');
+    if (!container) return;
+
+    // Toggle row — shows summary, click to expand
+    _detSettingsToggle = document.createElement('div');
+    _detSettingsToggle.className = 'chirp-det-toggle';
+    _detSettingsToggle.addEventListener('click', function () {
+      var open = _detSettingsPanel.style.display !== 'none';
+      _detSettingsPanel.style.display = open ? 'none' : '';
+      _detSettingsToggle.classList.toggle('open', !open);
+    });
+    container.appendChild(_detSettingsToggle);
+
+    // Expandable panel
+    _detSettingsPanel = document.createElement('div');
+    _detSettingsPanel.className = 'chirp-det-panel';
+    _detSettingsPanel.style.display = 'none';
+
+    // Enable checkbox
+    var enableRow = document.createElement('div');
+    enableRow.className = 'chirp-det-row';
+    var enableLabel = document.createElement('label');
+    enableLabel.className = 'chirp-det-label';
+    var enableCb = document.createElement('input');
+    enableCb.type = 'checkbox';
+    enableCb.id = 'chirp-det-enable';
+    enableCb.checked = _detParams.enabled;
+    enableCb.addEventListener('change', _onDetParamChange);
+    enableLabel.appendChild(enableCb);
+    enableLabel.appendChild(document.createTextNode(' Detection enabled'));
+    enableRow.appendChild(enableLabel);
+    _detSettingsPanel.appendChild(enableRow);
+
+    // SF checkboxes
+    var sfRow = document.createElement('div');
+    sfRow.className = 'chirp-det-row';
+    sfRow.appendChild(_spanText('SFs: '));
+    for (var sf = 7; sf <= 12; sf++) {
+      var sfLabel = document.createElement('label');
+      sfLabel.className = 'chirp-det-sf-cb';
+      sfLabel.style.color = SF_COLORS[sf] || '#fff';
+      var sfCb = document.createElement('input');
+      sfCb.type = 'checkbox';
+      sfCb.setAttribute('data-sf', sf);
+      sfCb.checked = _detParams.sfs.indexOf(sf) >= 0;
+      sfCb.addEventListener('change', _onDetParamChange);
+      sfLabel.appendChild(sfCb);
+      sfLabel.appendChild(document.createTextNode(String(sf)));
+      sfRow.appendChild(sfLabel);
+    }
+    _detSettingsPanel.appendChild(sfRow);
+
+    // BW checkboxes
+    var bwRow = document.createElement('div');
+    bwRow.className = 'chirp-det-row';
+    bwRow.id = 'chirp-det-bw-row';
+    bwRow.appendChild(_spanText('BWs: '));
+    _buildDetBwCheckboxes(bwRow);
+    _detSettingsPanel.appendChild(bwRow);
+
+    // SNR threshold
+    var snrRow = document.createElement('div');
+    snrRow.className = 'chirp-det-row';
+    snrRow.appendChild(_spanText('SNR threshold: '));
+    var snrInput = document.createElement('input');
+    snrInput.type = 'number';
+    snrInput.id = 'chirp-det-snr';
+    snrInput.className = 'chirp-det-snr-input';
+    snrInput.min = '0';
+    snrInput.max = '40';
+    snrInput.step = '0.5';
+    snrInput.value = _detParams.snr_threshold_db;
+    snrInput.addEventListener('change', _onDetParamChange);
+    snrInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); snrInput.blur(); }
+    });
+    snrRow.appendChild(snrInput);
+    snrRow.appendChild(_spanText(' dB'));
+    _detSettingsPanel.appendChild(snrRow);
+
+    container.appendChild(_detSettingsPanel);
+    _updateDetToggleSummary();
+  }
+
+  function _spanText(txt) {
+    var s = document.createElement('span');
+    s.textContent = txt;
+    return s;
+  }
+
+  function _buildDetBwCheckboxes(row) {
+    // Remove existing BW checkboxes (keep the "BWs: " label span)
+    while (row.children.length > 1) row.removeChild(row.lastChild);
+    var sr = _detParams.sample_rate || 250000;
+    for (var i = 0; i < _ALL_DET_BWS.length; i++) {
+      var bw = _ALL_DET_BWS[i];
+      if (bw >= sr) continue;
+      var label = document.createElement('label');
+      label.className = 'chirp-det-bw-cb';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.setAttribute('data-bw', bw);
+      cb.checked = _detParams.bws.indexOf(bw) >= 0;
+      cb.addEventListener('change', _onDetParamChange);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode((bw / 1000) + 'k'));
+      row.appendChild(label);
+    }
+  }
+
+  function _updateDetBwCheckboxes() {
+    var row = $('chirp-det-bw-row');
+    if (!row) return;
+    var sr = _detParams.sample_rate || 250000;
+    var invalidBws = [];
+    for (var i = 0; i < _detParams.bws.length; i++) {
+      if (_detParams.bws[i] >= sr) invalidBws.push(_detParams.bws[i]);
+    }
+    if (invalidBws.length > 0) {
+      _detParams.bws = _detParams.bws.filter(function (b) { return b < sr; });
+      _onDetParamChange();
+    }
+    _buildDetBwCheckboxes(row);
+  }
+
+  function _onDetParamChange() {
+    var enableCb = $('chirp-det-enable');
+    var enabled = enableCb ? enableCb.checked : _detParams.enabled;
+
+    var sfs = [];
+    var sfCbs = _detSettingsPanel ? _detSettingsPanel.querySelectorAll('[data-sf]') : [];
+    for (var i = 0; i < sfCbs.length; i++) {
+      if (sfCbs[i].checked) sfs.push(parseInt(sfCbs[i].getAttribute('data-sf')));
+    }
+
+    var bws = [];
+    var bwCbs = _detSettingsPanel ? _detSettingsPanel.querySelectorAll('[data-bw]') : [];
+    for (var j = 0; j < bwCbs.length; j++) {
+      if (bwCbs[j].checked) bws.push(parseInt(bwCbs[j].getAttribute('data-bw')));
+    }
+
+    var snrInput = $('chirp-det-snr');
+    var snr = snrInput ? parseFloat(snrInput.value) : _detParams.snr_threshold_db;
+    if (isNaN(snr)) snr = _detParams.snr_threshold_db;
+
+    _detParams.enabled = enabled;
+    _detParams.sfs = sfs;
+    _detParams.bws = bws;
+    _detParams.snr_threshold_db = snr;
+    _updateDetToggleSummary();
+
+    var ws = R.ws;
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        action: 'chirp_set_detection_params',
+        enabled: enabled,
+        sfs: sfs,
+        bws: bws,
+        snr_threshold_db: snr,
+      }));
+    }
+  }
+
+  function _syncDetSettingsToState(params) {
+    if (!params) return;
+    if (params.detection_enabled != null) _detParams.enabled = params.detection_enabled;
+    if (params.detection_sfs) _detParams.sfs = params.detection_sfs;
+    if (params.detection_bws) _detParams.bws = params.detection_bws;
+    if (params.detection_snr_threshold_db != null) _detParams.snr_threshold_db = params.detection_snr_threshold_db;
+    if (params.sample_rate) _detParams.sample_rate = params.sample_rate;
+
+    var enableCb = $('chirp-det-enable');
+    if (enableCb) enableCb.checked = _detParams.enabled;
+
+    if (_detSettingsPanel) {
+      var sfCbs = _detSettingsPanel.querySelectorAll('[data-sf]');
+      for (var i = 0; i < sfCbs.length; i++) {
+        var sf = parseInt(sfCbs[i].getAttribute('data-sf'));
+        sfCbs[i].checked = _detParams.sfs.indexOf(sf) >= 0;
+      }
+    }
+
+    _updateDetBwCheckboxes();
+
+    var snrInput = $('chirp-det-snr');
+    if (snrInput) snrInput.value = _detParams.snr_threshold_db;
+
+    _updateDetToggleSummary();
+  }
+
+  function _updateDetToggleSummary() {
+    if (!_detSettingsToggle) return;
+    var chevron = _detSettingsToggle.classList.contains('open') ? '▾' : '▸';
+    if (!_detParams.enabled) {
+      _detSettingsToggle.innerHTML = chevron + ' Detection: <span class="chirp-det-off">OFF</span>';
+      return;
+    }
+    var sfList = _detParams.sfs.slice().sort(function (a, b) { return a - b; });
+    var sfStr;
+    if (sfList.length === 6 && sfList[0] === 7 && sfList[5] === 12) {
+      sfStr = 'SF7–12';
+    } else if (sfList.length === 0) {
+      sfStr = 'no SFs';
+    } else {
+      sfStr = sfList.map(function (s) { return 'SF' + s; }).join(',');
+    }
+    var bwStr = _detParams.bws.map(function (b) { return (b / 1000) + 'k'; }).join(',') || 'no BWs';
+    _detSettingsToggle.innerHTML = chevron + ' Detection: <span class="chirp-det-on">ON</span> · ' +
+      esc(sfStr) + ' · ' + esc(bwStr) + ' · SNR ' + esc(_detParams.snr_threshold_db.toFixed(1)) + ' dB';
+  }
+
+  function handleDetectionParams(data) {
+    if (!_resolveDom()) return;
+    _syncDetSettingsToState(data);
   }
 
   function _resizeCanvas() {
@@ -316,6 +540,10 @@
       if (freqMhz) cmd.freq_mhz = freqMhz;
       if (sampleRate) cmd.sample_rate = sampleRate;
       ws.send(JSON.stringify(cmd));
+    }
+    if (sampleRate && sampleRate !== _detParams.sample_rate) {
+      _detParams.sample_rate = sampleRate;
+      _updateDetBwCheckboxes();
     }
     // Clear local state — new data will arrive with different bins
     _rows = [];
@@ -697,6 +925,13 @@
     }
 
     _channelAnalysis = (cs && cs.channel_analysis) ? cs.channel_analysis : null;
+
+    if (cs && cs.chirp_status) {
+      var st = cs.chirp_status;
+      if (st.detection_sfs || st.detection_bws || st.detection_snr_threshold_db != null) {
+        _syncDetSettingsToState(st);
+      }
+    }
   }
 
   // -- Detection handling -------------------------------------------------
@@ -1262,5 +1497,6 @@
     handlePacketHistory: handlePacketHistory,
     setFreqMhz: setFreqMhz,
     setFilterChannel: setFilterChannel,
+    handleDetectionParams: handleDetectionParams,
   };
 })();

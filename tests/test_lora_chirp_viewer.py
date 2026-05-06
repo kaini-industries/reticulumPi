@@ -643,6 +643,121 @@ class TestPendingExtractionRetry:
         assert len(calls) >= 1
 
 
+class TestGetDetectionParams:
+    def test_returns_expected_keys(self):
+        plugin = _make_plugin()
+        params = plugin.get_detection_params()
+        assert "detection_enabled" in params
+        assert "detection_sfs" in params
+        assert "detection_bws" in params
+        assert "detection_snr_threshold_db" in params
+        assert "sample_rate" in params
+
+    def test_defaults_match_config(self):
+        plugin = _make_plugin()
+        params = plugin.get_detection_params()
+        assert params["detection_enabled"] is True
+        assert params["sample_rate"] == plugin._chirp_sr
+
+    def test_reflects_changes(self):
+        plugin = _make_plugin()
+        plugin.set_detection_params(sfs=[7, 8], snr_threshold_db=20.0)
+        params = plugin.get_detection_params()
+        assert params["detection_sfs"] == [7, 8]
+        assert params["detection_snr_threshold_db"] == 20.0
+
+
+class TestSetDetectionParams:
+    def test_update_sfs(self):
+        plugin = _make_plugin()
+        plugin.set_detection_params(sfs=[7, 10, 12])
+        assert plugin._detection_sfs == [7, 10, 12]
+
+    def test_update_bws(self):
+        plugin = _make_plugin()
+        plugin.set_detection_params(bws=[125000])
+        assert plugin._detection_bws == [125000]
+
+    def test_update_snr_threshold(self):
+        plugin = _make_plugin()
+        plugin.set_detection_params(snr_threshold_db=5.5)
+        assert plugin._detection_snr_threshold_db == 5.5
+
+    def test_snr_clamped_low(self):
+        plugin = _make_plugin()
+        plugin.set_detection_params(snr_threshold_db=-10.0)
+        assert plugin._detection_snr_threshold_db == 0.0
+
+    def test_snr_clamped_high(self):
+        plugin = _make_plugin()
+        plugin.set_detection_params(snr_threshold_db=100.0)
+        assert plugin._detection_snr_threshold_db == 40.0
+
+    def test_disable_clears_trackers(self):
+        plugin = _make_plugin({"chirp_detection_sfs": [7]})
+        assert len(plugin._trackers) > 0
+        plugin.set_detection_params(enabled=False)
+        assert plugin._trackers == []
+
+    def test_enable_reinits_trackers(self):
+        plugin = _make_plugin({"chirp_detection_sfs": [7]})
+        plugin.set_detection_params(enabled=False)
+        assert plugin._trackers == []
+        plugin.set_detection_params(enabled=True)
+        assert len(plugin._trackers) > 0
+
+    def test_reject_invalid_sf(self):
+        plugin = _make_plugin()
+        with pytest.raises(ValueError, match="SF must be 7"):
+            plugin.set_detection_params(sfs=[6])
+
+    def test_reject_sf_too_high(self):
+        plugin = _make_plugin()
+        with pytest.raises(ValueError, match="SF must be 7"):
+            plugin.set_detection_params(sfs=[13])
+
+    def test_reject_unknown_bw(self):
+        plugin = _make_plugin()
+        with pytest.raises(ValueError, match="BW must be one of"):
+            plugin.set_detection_params(bws=[100000])
+
+    def test_reject_bw_ge_sample_rate(self):
+        plugin = _make_plugin()
+        with pytest.raises(ValueError, match="must be < sample_rate"):
+            plugin.set_detection_params(bws=[250000])
+
+    def test_reject_enable_with_empty_sfs(self):
+        plugin = _make_plugin()
+        with pytest.raises(ValueError, match="SFs or BWs empty"):
+            plugin.set_detection_params(sfs=[], enabled=True)
+
+    def test_reject_enable_with_empty_bws(self):
+        plugin = _make_plugin()
+        with pytest.raises(ValueError, match="SFs or BWs empty"):
+            plugin.set_detection_params(bws=[], enabled=True)
+
+    def test_invalidates_snapshot_cache(self):
+        plugin = _make_plugin()
+        plugin._chirp_snapshot_cache = {"old": "data"}
+        plugin.set_detection_params(snr_threshold_db=15.0)
+        assert plugin._chirp_snapshot_cache is None
+
+    def test_tracker_reinitialized_on_sf_change(self):
+        plugin = _make_plugin({"chirp_detection_sfs": [7]})
+        old_trackers = plugin._trackers
+        plugin.set_detection_params(sfs=[7, 8])
+        assert plugin._trackers is not old_trackers
+
+
+class TestDetectionParamsInStatus:
+    def test_capture_status_includes_det_params(self):
+        plugin = _make_plugin({"chirp_detection_sfs": [7, 8], "chirp_detection_bws": [125000]})
+        status = plugin.get_capture_status()
+        assert status["detection_sfs"] == [7, 8]
+        assert status["detection_bws"] == [125000]
+        assert "detection_snr_threshold_db" in status
+
+
 class TestExpiredDetectionPruning:
     def test_expired_detection_pruned(self):
         from reticulumpi.builtin_plugins.lora_dechirp import Detection
@@ -664,3 +779,25 @@ class TestExpiredDetectionPruning:
         stale_offsets = [d.sample_offset for d, _e in plugin._pending_extractions
                          if d.sample_offset == 0]
         assert len(stale_offsets) == 0
+
+
+class TestConfigValidation:
+    def test_reject_invalid_bw_in_config(self):
+        with pytest.raises(ValueError, match="not in"):
+            _make_plugin({"chirp_detection_bws": [200_000]})
+
+    def test_reject_invalid_sf_in_config(self):
+        with pytest.raises(ValueError, match="SF must be 7"):
+            _make_plugin({"chirp_detection_sfs": [5, 7, 8]})
+
+    def test_reject_sf_above_range_in_config(self):
+        with pytest.raises(ValueError, match="SF must be 7"):
+            _make_plugin({"chirp_detection_sfs": [7, 13]})
+
+    def test_valid_config_accepted(self):
+        plugin = _make_plugin({
+            "chirp_detection_bws": [62_500, 125_000],
+            "chirp_detection_sfs": [7, 10, 12],
+        })
+        assert plugin._detection_bws == [62_500, 125_000]
+        assert plugin._detection_sfs == [7, 10, 12]

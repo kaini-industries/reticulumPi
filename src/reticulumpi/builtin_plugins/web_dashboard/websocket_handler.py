@@ -371,6 +371,20 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             except Exception:
                 log.debug("Failed to send chirp packet history hello", exc_info=True)
 
+    if chirp_viewer and hasattr(chirp_viewer, "get_detection_params"):
+        try:
+            det_params = chirp_viewer.get_detection_params()
+        except Exception:
+            det_params = {}
+        if det_params:
+            try:
+                await ws.send_str(json.dumps({
+                    "type": "chirp_detection_params",
+                    "data": det_params,
+                }))
+            except Exception:
+                log.debug("Failed to send chirp detection params hello", exc_info=True)
+
     link_tester = plugin.app.get_plugin("lora_link_tester")
     if link_tester and hasattr(link_tester, "get_history"):
         try:
@@ -416,7 +430,9 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
                 log.debug("WebSocket error: %s", ws.exception())
                 break
             if msg.type == aiohttp.WSMsgType.TEXT:
-                _handle_ws_command(msg.data, plugin)
+                resp = _handle_ws_command(msg.data, plugin)
+                if resp is not None:
+                    await ws.send_str(json.dumps(resp))
     finally:
         _ws_clients.discard(ws)
         _ws_last_activity.pop(ws, None)
@@ -785,8 +801,11 @@ def _on_chirp_packet_decoded(event_type: str, data: dict) -> None:
         pass
 
 
-def _handle_ws_command(raw: str, plugin: Any) -> None:
-    """Process a JSON command from a WebSocket client."""
+def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
+    """Process a JSON command from a WebSocket client.
+
+    Returns an optional response dict to send back to the caller.
+    """
     try:
         cmd = json.loads(raw)
     except Exception:
@@ -813,6 +832,21 @@ def _handle_ws_command(raw: str, plugin: Any) -> None:
                 )
             except Exception:
                 log.debug("Chirp set_params command failed", exc_info=True)
+    elif action == "chirp_set_detection_params":
+        viewer = plugin.app.plugins.get("lora_chirp_viewer")
+        if viewer and hasattr(viewer, "set_detection_params"):
+            try:
+                viewer.set_detection_params(
+                    enabled=bool(cmd["enabled"]) if "enabled" in cmd else None,
+                    sfs=[int(s) for s in cmd["sfs"]] if "sfs" in cmd else None,
+                    bws=[int(b) for b in cmd["bws"]] if "bws" in cmd else None,
+                    snr_threshold_db=float(cmd["snr_threshold_db"]) if "snr_threshold_db" in cmd else None,
+                )
+            except ValueError as exc:
+                log.debug("Chirp set_detection_params rejected: %s", exc)
+                return {"type": "chirp_detection_params_error", "error": str(exc)}
+            except Exception:
+                log.debug("Chirp set_detection_params command failed", exc_info=True)
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
