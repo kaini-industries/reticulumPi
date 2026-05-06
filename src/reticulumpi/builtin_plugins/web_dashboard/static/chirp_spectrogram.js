@@ -773,46 +773,52 @@
       slopesByBw = slopesMap;
     }
 
+    var activeSfs = _detParams.sfs;
+    var labelGap = 12;
+    var nextLabelBottom = 2;
+
     for (var bi = 0; bi < bws.length; bi++) {
       var bw = bws[bi];
       var slopes = slopesByBw[bw];
       if (!slopes) continue;
       var isDimmed = bi > 0;
 
-    for (var si = 0; si < slopes.length; si++) {
-      var s = slopes[si];
-      var sf = s.sf;
-      var tSymMs = s.t_symbol_ms;
+      for (var si = 0; si < slopes.length; si++) {
+        var s = slopes[si];
+        var sf = s.sf;
+        if (activeSfs.indexOf(sf) < 0) continue;
+        var tSymMs = s.t_symbol_ms;
 
-      var rowsPerSym = tSymMs / timeResMs;
-      var pixPerSym = rowsPerSym * (cH / _canvasH);
-      var bwFrac = bw / (m.sample_rate || 250000);
-      var chirpWidthPx = cW * bwFrac;
-      var angleDeg = Math.atan2(pixPerSym, chirpWidthPx) * (180 / Math.PI);
+        var rowsPerSym = tSymMs / timeResMs;
+        var pixPerSym = rowsPerSym * (cH / _canvasH);
+        var bwFrac = bw / (m.sample_rate || 250000);
+        var chirpWidthPx = cW * bwFrac;
+        var angleDeg = Math.atan2(pixPerSym, chirpWidthPx) * (180 / Math.PI);
 
-      var color = SF_COLORS[sf] || '#ffffff';
-      var lineLen = Math.sqrt(chirpWidthPx * chirpWidthPx + pixPerSym * pixPerSym);
+        var color = SF_COLORS[sf] || '#ffffff';
+        var lineLen = Math.sqrt(chirpWidthPx * chirpWidthPx + pixPerSym * pixPerSym);
 
-      var opacity = isDimmed ? '0.4' : '0.7';
+        var opacity = isDimmed ? '0.4' : '0.7';
 
-      var guide = document.createElement('div');
-      guide.className = 'chirp-sf-line';
-      guide.style.cssText =
-        'left:0;bottom:0;width:' + lineLen.toFixed(0) + 'px;' +
-        'border-color:' + color + ';opacity:' + opacity + ';' +
-        'transform:rotate(-' + angleDeg.toFixed(1) + 'deg);';
-      _overlayEl.appendChild(guide);
+        var guide = document.createElement('div');
+        guide.className = 'chirp-sf-line';
+        guide.style.cssText =
+          'left:0;bottom:0;width:' + lineLen.toFixed(0) + 'px;' +
+          'border-color:' + color + ';opacity:' + opacity + ';' +
+          'transform:rotate(-' + angleDeg.toFixed(1) + 'deg);';
+        _overlayEl.appendChild(guide);
 
-      var bwKhz = bw / 1000;
-      var bwStr = bws.length > 1 ? ' ' + bwKhz + 'k' : '';
-      var label = document.createElement('div');
-      label.className = 'chirp-sf-label';
-      label.style.cssText =
-        'left:4px;bottom:' + (pixPerSym + 2).toFixed(0) + 'px;color:' + color +
-        ';opacity:' + opacity + ';';
-      label.textContent = 'SF' + sf + bwStr;
-      _overlayEl.appendChild(label);
-    }
+        var bwKhz = bw / 1000;
+        var bwStr = bws.length > 1 ? ' ' + bwKhz + 'k' : '';
+        var label = document.createElement('div');
+        label.className = 'chirp-sf-label';
+        label.style.cssText =
+          'left:4px;bottom:' + nextLabelBottom.toFixed(0) + 'px;color:' + color +
+          ';opacity:' + opacity + ';';
+        label.textContent = 'SF' + sf + bwStr;
+        _overlayEl.appendChild(label);
+        nextLabelBottom += labelGap;
+      }
     } // end bws loop
   }
 
