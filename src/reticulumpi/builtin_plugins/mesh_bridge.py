@@ -228,7 +228,7 @@ class MeshBridge(PluginBase):
         self._auto_pause_threshold = int(
             self.config.get("auto_pause_threshold", _DEFAULT_AUTO_PAUSE_THRESHOLD)
         )
-        self._recent_relays: deque[float] = deque()
+        self._recent_relays: deque[float] = deque(maxlen=10_000)
 
         # Startup grace — MeshCore's auto_message_fetching drains queued
         # messages from the device on connect, and MQTT may deliver recent

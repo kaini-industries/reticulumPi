@@ -129,6 +129,10 @@ class LoraChirpViewer(LoraScanner):
 
     def start(self) -> None:
         super().start()
+        self.log.warning(
+            "lora_chirp_viewer is deprecated — use chirp_detector instead "
+            "(standalone plugin, no scanner inheritance, waterfall optional)",
+        )
         self._chirp_snapshot_cache: tuple[tuple[int, int], dict[str, Any]] | None = None
 
         if self._continuous_enabled:
@@ -496,6 +500,7 @@ class LoraChirpViewer(LoraScanner):
             "detection_sfs": list(self._detection_sfs),
             "detection_bws": list(self._detection_bws),
             "detection_snr_threshold_db": self._detection_snr_threshold_db,
+            "detection_preamble_len": self._detection_preamble_len,
             "sample_rate": self._chirp_sr,
         }
 
@@ -505,6 +510,7 @@ class LoraChirpViewer(LoraScanner):
         sfs: list[int] | None = None,
         bws: list[int] | None = None,
         snr_threshold_db: float | None = None,
+        preamble_len: int | None = None,
     ) -> None:
         if sfs is not None:
             for s in sfs:
@@ -520,6 +526,11 @@ class LoraChirpViewer(LoraScanner):
             self._detection_bws = [int(b) for b in bws]
         if snr_threshold_db is not None:
             self._detection_snr_threshold_db = max(0.0, min(40.0, float(snr_threshold_db)))
+        if preamble_len is not None:
+            p = int(preamble_len)
+            if p < 4 or p > 32:
+                raise ValueError(f"preamble_len must be 4–32, got {p}")
+            self._detection_preamble_len = p
         if enabled is not None:
             self._detection_enabled = bool(enabled)
 
@@ -534,9 +545,10 @@ class LoraChirpViewer(LoraScanner):
 
         self._chirp_snapshot_cache = None
         self.log.info(
-            "Detection params updated: enabled=%s sfs=%s bws=%s snr=%.1f",
+            "Detection params updated: enabled=%s sfs=%s bws=%s snr=%.1f preamble=%d",
             self._detection_enabled, self._detection_sfs,
             self._detection_bws, self._detection_snr_threshold_db,
+            self._detection_preamble_len,
         )
 
     # ------------------------------------------------------------------

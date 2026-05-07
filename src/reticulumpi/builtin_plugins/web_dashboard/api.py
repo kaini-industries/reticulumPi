@@ -166,10 +166,14 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/plugins/{name}", handle_plugin_detail)
     app.router.add_post("/api/services/restart", handle_services_restart)
     app.router.add_get("/api/config", handle_config)
-    # Chirp capture
+    # Spectrum presets
+    app.router.add_get("/api/spectrum/presets", handle_spectrum_presets)
+    app.router.add_post("/api/spectrum/preset", handle_spectrum_switch_preset)
+    # Chirp capture / detector
     app.router.add_post("/api/chirp/capture", handle_chirp_capture)
     app.router.add_get("/api/chirp/status", handle_chirp_status)
     app.router.add_get("/api/chirp/history", handle_chirp_history)
+    app.router.add_post("/api/chirp/waterfall", handle_chirp_waterfall_toggle)
     # Domain sub-modules
     setup_interface_routes(app)
     setup_mesh_routes(app)
@@ -255,6 +259,8 @@ async def handle_form_login(request: aiohttp.web.Request) -> aiohttp.web.Respons
 
     if not password:
         raise aiohttp.web.HTTPFound("/login.html?error=empty")
+    if len(password) > 256:
+        raise aiohttp.web.HTTPFound("/login.html?error=too_long")
 
     token = auth.login(password, remote_ip)
     if not token:
@@ -418,6 +424,53 @@ async def handle_services_restart(
     return _ok({"message": "Restarting services..."})
 
 
+async def handle_spectrum_presets(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/spectrum/presets — list available frequency presets."""
+    plugin = _get_plugin(request)
+    scanner = plugin.app.plugins.get("spectrum_scanner")
+    if not scanner or not hasattr(scanner, "get_presets"):
+        return _error("spectrum_scanner plugin not enabled", 404)
+    return _ok(scanner.get_presets())
+
+
+async def handle_spectrum_switch_preset(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/spectrum/preset — switch the active frequency preset."""
+    if not request.get("token"):
+        return _error("Authentication required", 401)
+
+    plugin = _get_plugin(request)
+    scanner = plugin.app.plugins.get("spectrum_scanner")
+    if not scanner or not hasattr(scanner, "switch_preset"):
+        return _error("spectrum_scanner plugin not enabled", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+
+    preset_name = body.get("preset")
+    if not preset_name:
+        return _error("'preset' field required", 400)
+
+    try:
+        result = scanner.switch_preset(preset_name)
+        return _ok(result)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+
+def _get_chirp_plugin(request: aiohttp.web.Request):
+    plugin = _get_plugin(request)
+    return (
+        plugin.app.plugins.get("chirp_detector")
+        or plugin.app.plugins.get("lora_chirp_viewer")
+    )
+
+
 async def handle_chirp_capture(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
@@ -425,10 +478,19 @@ async def handle_chirp_capture(
     if not request.get("token"):
         return _error("Authentication required", 401)
 
-    plugin = _get_plugin(request)
-    viewer = plugin.app.plugins.get("lora_chirp_viewer")
+    viewer = _get_chirp_plugin(request)
     if not viewer:
-        return _error("lora_chirp_viewer plugin not enabled", 404)
+        return _error("chirp plugin not enabled", 404)
+
+    if viewer.plugin_name == "chirp_detector":
+        return _error(
+            "chirp_detector uses continuous detection — "
+            "on-demand capture is not supported; use the streaming waterfall instead",
+            409,
+        )
+
+    if not hasattr(viewer, "capture_chirps"):
+        return _error("chirp plugin does not support on-demand capture", 404)
 
     try:
         body = await request.json()
@@ -453,22 +515,52 @@ async def handle_chirp_status(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     """GET /api/chirp/status — current capture state."""
-    plugin = _get_plugin(request)
-    viewer = plugin.app.plugins.get("lora_chirp_viewer")
+    viewer = _get_chirp_plugin(request)
     if not viewer:
-        return _error("lora_chirp_viewer plugin not enabled", 404)
-    return _ok(viewer.get_capture_status())
+        return _error("chirp plugin not enabled", 404)
+    status_fn = (
+        getattr(viewer, "get_capture_status", None)
+        or getattr(viewer, "get_snapshot", None)
+    )
+    if not status_fn:
+        return _error("chirp plugin has no status method", 404)
+    return _ok(status_fn())
 
 
 async def handle_chirp_history(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     """GET /api/chirp/history — chirp waterfall buffer."""
+    viewer = _get_chirp_plugin(request)
+    hist_fn = (
+        getattr(viewer, "get_waterfall_history", None)
+        or getattr(viewer, "get_chirp_waterfall_history", None)
+    ) if viewer else None
+    if not hist_fn:
+        return _error("chirp plugin not enabled", 404)
+    return _ok(hist_fn())
+
+
+async def handle_chirp_waterfall_toggle(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """POST /api/chirp/waterfall — toggle chirp waterfall on/off."""
+    if not request.get("token"):
+        return _error("Authentication required", 401)
+
     plugin = _get_plugin(request)
-    viewer = plugin.app.plugins.get("lora_chirp_viewer")
-    if not viewer or not hasattr(viewer, "get_chirp_waterfall_history"):
-        return _error("lora_chirp_viewer plugin not enabled", 404)
-    return _ok(viewer.get_chirp_waterfall_history())
+    detector = plugin.app.plugins.get("chirp_detector")
+    if not detector or not hasattr(detector, "set_waterfall_enabled"):
+        return _error("chirp_detector plugin not enabled", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("JSON body required", 400)
+
+    enabled = bool(body.get("enabled", False))
+    detector.set_waterfall_enabled(enabled)
+    return _ok({"waterfall_enabled": detector._waterfall_enabled})
 
 
 async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:

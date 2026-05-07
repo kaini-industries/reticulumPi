@@ -147,6 +147,8 @@ SPACE_WEATHER_UPDATED = "space.weather.updated"
 # Spectrum scanner — RTL-SDR sweep-based waterfall / spectrum
 SPECTRUM_SWEEP = "spectrum.sweep"         # one complete sweep ready
 SPECTRUM_STATUS = "spectrum.status"       # status change (running/error/unavailable)
+SPECTRUM_PRESET_SWITCHING = "spectrum.preset_switching"
+SPECTRUM_PRESET_ACTIVE = "spectrum.preset_active"
 
 # LoRa scanner — dedicated RTL-SDR LoRa band sweep
 LORA_SCANNER_SWEEP = "lora_scanner.sweep"

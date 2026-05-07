@@ -468,7 +468,7 @@ class TestEnrichTransportTraffic:
 # ── WebSocket auth & connection tests ──────────────────────────────
 
 
-def _make_ws_request(token=None, cookie_token=None, max_clients=10, auth_valid=True):
+def _make_ws_request(token=None, cookie_token=None, bearer_token=None, max_clients=10, auth_valid=True):
     """Create a mock aiohttp request for WebSocket tests."""
     request = MagicMock()
     request.query = {}
@@ -478,6 +478,11 @@ def _make_ws_request(token=None, cookie_token=None, max_clients=10, auth_valid=T
     request.cookies = {}
     if cookie_token:
         request.cookies["session"] = cookie_token
+
+    headers = {}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    request.headers = headers
 
     plugin = MagicMock()
     plugin.config = {"max_websocket_clients": max_clients}
@@ -542,6 +547,20 @@ class TestWebsocketAuth:
 
         # Should have validated the cookie token
         request.app["plugin"]._auth.validate_token.assert_called_with("cookie_token")
+        ws_mock.close.assert_not_called()
+
+    def test_accepts_bearer_token(self):
+        """Authenticates via Authorization: Bearer header."""
+        request = _make_ws_request(bearer_token="bearer_token", auth_valid=True)
+
+        ws_mock = MagicMock()
+        ws_mock.prepare = AsyncMock()
+        ws_mock.__aiter__ = lambda self: _empty_async_iter()
+
+        with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
+            result = asyncio.run(websocket_metrics(request))
+
+        request.app["plugin"]._auth.validate_token.assert_called_with("bearer_token")
         ws_mock.close.assert_not_called()
 
     def test_rejects_when_max_clients_reached(self):

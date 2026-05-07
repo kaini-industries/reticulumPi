@@ -116,7 +116,7 @@ class _RateLimiter:
         self._lock = threading.Lock()
         self._last_request_ts: float = 0.0          # wall-clock epoch seconds
         self._failures: int = 0
-        self._recent: deque[float] = deque()        # successful request timestamps
+        self._recent: deque[float] = deque(maxlen=3600)
 
     # -- state (de)serialisation ---------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -131,7 +131,7 @@ class _RateLimiter:
         with self._lock:
             self._last_request_ts = float(data.get("last_request_ts", 0.0))
             self._failures = int(data.get("failures", 0))
-            self._recent = deque(float(t) for t in data.get("recent", []))
+            self._recent = deque((float(t) for t in data.get("recent", [])), maxlen=3600)
             self._trim_recent(time.time())
 
     # -- quota math ----------------------------------------------------------

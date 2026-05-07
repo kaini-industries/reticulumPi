@@ -136,6 +136,9 @@ class RateLimiter:
         ip = _normalize_ip(ip)
         now = time.monotonic()
         self._cleanup(ip, now)
+        if ip not in self._attempts and len(self._attempts) >= self.MAX_TRACKED_IPS:
+            log.warning("Rate limiter at IP cap (%d), new IPs bypassing", self.MAX_TRACKED_IPS)
+            return
         self._attempts.setdefault(ip, []).append(now)
 
     def retry_after(self, ip: str) -> int:

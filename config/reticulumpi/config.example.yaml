@@ -550,14 +550,25 @@ reticulumpi:
     # Run `rtl_test -t` to list attached devices and their serial numbers.
     #
     # Example 3-dongle setup:
-    #   spectrum_scanner:  device_serial: "07143901"  # Nooelec SMArTee XTR (wideband)
-    #   lora_chirp_viewer: device_serial: "14342860"  # Nooelec SMArTee XTR (LoRa band)
+    #   spectrum_scanner:  device_serial: "07143901"  # Nooelec SMArTee XTR (wideband + LoRa presets)
+    #   chirp_detector:    device_serial: "14342860"  # Nooelec SMArTee XTR (always-on LoRa chirp)
     #   adsb_radar:        device_serial: "00000001"  # RTL-SDR Blog V4 (1090 MHz ADS-B)
     # --------------------------------------------------------------------
 
     # SDR spectrum scanner — RTL-SDR sweep feeding a waterfall panel in
     # the dashboard.  Publishes a rolling set of FFT sweeps from rtl_power
     # to the web dashboard; read-only (no transmit).
+    #
+    # Supports runtime frequency switching via presets.  The user picks a
+    # preset in the dashboard; the scanner kills rtl_power, reconfigures
+    # freq/bin/gain, and relaunches (1-3 s gap).  Three built-in presets
+    # ship by default (FM Broadcast, LoRa US915, Aviation) and custom
+    # presets can be added under the `presets:` key.
+    #
+    # When the active preset has `analysis: lora_us915`, the scanner runs
+    # LoRa channel-level analysis (per-channel power, duty cycle, activity
+    # detection, CW interference flags) — the same analysis that the old
+    # standalone lora_scanner plugin provided.
     #
     # Requires:
     #   * rtl_power, rtl_test on PATH (apt install rtl-sdr)
@@ -566,48 +577,63 @@ reticulumpi:
     #   * The reticulumpi user must be in the plugdev group
     #     (the rtl-sdr udev rule grants device access to plugdev).
     #
-    # Default span (88-108 MHz, FM broadcast) is chosen so obvious signal
-    # peaks appear immediately and confirm the antenna + gain settings.
-    # Other useful spans:
-    #   * 118-137 MHz  (aviation AM)         * 144-148 MHz  (2m ham)
-    #   * 420-450 MHz  (70cm ham)            * 462-467 MHz  (FRS/GMRS)
-    #   * 902-928 MHz  (33cm / US ISM)
     # The Elonics E4000 tuner (shipped in some NESDR SMArTee XTR units) has
     # a local-oscillator dead zone at 1101-1234 MHz — avoid spans there.
     #spectrum_scanner:
     #  enabled: false
-    #  freq_start_mhz: 88.0             # Lower bound (MHz); tuner min ~24-52 MHz
-    #  freq_stop_mhz: 108.0             # Upper bound (MHz); tuner max ~1.7-2.2 GHz
-    #  bin_khz: 25.0                    # FFT bin width (1-1000 kHz)
-    #  sweep_seconds: 2                 # Integration time per sweep (1-60 s)
-    #  gain_db: 40.0                    # Tuner gain (dB); null = auto
+    #  gain_db: 40.0                    # Default tuner gain (dB); overridden per preset
     #  ppm: 0                           # Tuner frequency correction (ppm)
-    #  waterfall_rows: 128              # In-memory rolling history depth (8-2048)
+    #  waterfall_rows: 256              # In-memory rolling history depth (8-2048)
     #  device_serial: "07143901"        # RTL-SDR USB serial (stable; run rtl_test -t to find)
     #  # device_index: 0               # Numeric index fallback (fragile; prefer device_serial)
     #  max_restarts: 5                  # Subprocess crash-restart cap (per plugin session)
+    #  default_preset: fm_broadcast     # Preset to activate on startup
+    #
+    #  # Custom presets (merged with built-in fm_broadcast, lora_us915, aviation):
+    #  presets:
+    #    lora_us915:
+    #      gain_db: 34.0               # Override gain for LoRa band
+    #      threshold_db: 6             # Signal detection threshold above noise floor
+    #    two_meter_ham:
+    #      freq_start_mhz: 144.0
+    #      freq_stop_mhz: 148.0
+    #      bin_khz: 12.5
+    #      sweep_seconds: 1
+    #    frs_gmrs:
+    #      freq_start_mhz: 462.0
+    #      freq_stop_mhz: 467.5
+    #      bin_khz: 6.25
+    #      sweep_seconds: 1
+    #
+    #  # Flat keys (freq_start_mhz, freq_stop_mhz, etc.) still work for
+    #  # backward compatibility — they become a single-preset scanner.
 
-    # --- LoRa spectrum scanner ------------------------------------------------
-    # Dedicated RTL-SDR scanner for the LoRa/ISM band.  Runs a second
-    # rtl_power instance on a separate dongle with fine bin resolution
-    # (12.5 kHz) for resolving individual LoRa channels.  The dashboard's
-    # LoRa Spectrum panel prefers this feed over the wideband scanner.
-    # Requires a separate RTL-SDR device — cannot share with spectrum_scanner.
-    #lora_scanner:
+    # --- LoRa chirp detector --------------------------------------------------
+    # Always-on LoRa chirp detector using a dedicated RTL-SDR dongle.
+    # Streams raw I/Q from rtl_sdr and feeds the dechirp-based preamble
+    # detector.  The STFT waterfall is optional (off by default) — when
+    # disabled, I/Q flows directly to detection saving ~30% CPU.
+    #chirp_detector:
     #  enabled: false
-    #  freq_start_mhz: 902.0              # US LoRa band lower edge
-    #  freq_stop_mhz: 928.0               # US LoRa band upper edge
-    #  bin_khz: 12.5                      # Fine bins for LoRa channel resolution
-    #  sweep_seconds: 1                   # Float 0.1-60; sub-second needs rtl_power_fftw
-    #  gain_db: 34.0
-    #  ppm: 0
-    #  waterfall_rows: 256
-    #  device_serial: "14342860"          # RTL-SDR USB serial (stable; run rtl_test -t to find)
-    #  # device_index: 1                  # Numeric index fallback (fragile; prefer device_serial)
-    #  power_command: rtl_power            # Use rtl_power_fftw for faster sweeps (compile from source)
-    #  lora_region: US915                  # Channel plan for analysis (US915 supported)
-    #  threshold_db: 6                     # Signal detection threshold above noise floor
+    #  freq_mhz: 903.9                    # Center frequency for I/Q capture
+    #  sample_rate: 250000                 # 250k (1 ch), 1024k (4 ch), 2048k (16 ch)
+    #  gain_db: 34.0                       # Tuner gain (dB)
+    #  ppm: 0                              # Frequency correction
+    #  device_serial: "14342860"           # RTL-SDR USB serial
     #  max_restarts: 5
+    #  waterfall_enabled: false            # STFT waterfall (CPU intensive)
+    #  waterfall_depth: 1024
+    #  fft_size: 256                       # FFT size (SR <= 500 kHz)
+    #  hop_divisor: 4                      # hop = fft_size / this
+    #  display_rows_per_s: 32
+    #  batch_interval_s: 0.5
+    #  detection_enabled: true
+    #  detection_bws: [125000]             # LoRa bandwidths to scan
+    #  detection_sfs: [7, 8, 9, 10, 11, 12]
+    #  detection_preamble_len: 8
+    #  detection_snr_threshold_db: 12.0
+    #  detection_history_depth: 256
+    #  packet_history_depth: 128
 
     # --- ADS-B radar ----------------------------------------------------------
     # Tracks nearby aircraft via an RTL-SDR dongle + dump1090.  Launches

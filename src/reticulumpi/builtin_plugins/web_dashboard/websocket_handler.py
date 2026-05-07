@@ -23,6 +23,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+def _get_chirp_plugin(plugin: Any) -> Any:
+    """Resolve chirp_detector (preferred) or lora_chirp_viewer fallback."""
+    return (
+        plugin.app.plugins.get("chirp_detector")
+        or plugin.app.plugins.get("lora_chirp_viewer")
+    )
+
+
 # ── RNode config cache ──────────────────────────────────────────────
 _rnode_config_cache: dict[str, dict] | None = None
 _rnode_config_mtime: float = 0
@@ -276,7 +285,8 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     max_clients = plugin.config.get("max_websocket_clients", 10)
 
     # Authenticate via cookie or Authorization header
-    token = request.cookies.get("session")
+    _auth_hdr = request.headers.get("Authorization", "")
+    token = _auth_hdr[7:] if _auth_hdr.startswith("Bearer ") else request.cookies.get("session")
 
     if not token or not plugin._auth.validate_token(token):
         ws = aiohttp.web.WebSocketResponse()
@@ -329,10 +339,14 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         except Exception:
             log.debug("Failed to send lora_scanner history hello", exc_info=True)
 
-    chirp_viewer = plugin.app.get_plugin("lora_chirp_viewer")
-    if chirp_viewer and hasattr(chirp_viewer, "get_chirp_waterfall_history"):
+    chirp_viewer = _get_chirp_plugin(plugin)
+    _chirp_hist_fn = (
+        getattr(chirp_viewer, "get_waterfall_history", None)
+        or getattr(chirp_viewer, "get_chirp_waterfall_history", None)
+    ) if chirp_viewer else None
+    if _chirp_hist_fn:
         try:
-            chirp_hist = chirp_viewer.get_chirp_waterfall_history()
+            chirp_hist = _chirp_hist_fn()
         except Exception:
             chirp_hist = {"available": False}
         try:
@@ -811,8 +825,28 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
     except Exception:
         return
     action = cmd.get("action")
-    if action == "chirp_capture":
-        viewer = plugin.app.plugins.get("lora_chirp_viewer")
+    if action == "spectrum_switch_preset":
+        scanner = plugin.app.plugins.get("spectrum_scanner")
+        if scanner and hasattr(scanner, "switch_preset"):
+            preset_name = cmd.get("preset", "")
+            try:
+                result = scanner.switch_preset(preset_name)
+                return {"type": "spectrum_preset_switched", **result}
+            except ValueError as exc:
+                return {"type": "spectrum_preset_error", "error": str(exc)}
+            except Exception:
+                log.debug("Spectrum preset switch failed", exc_info=True)
+    elif action == "spectrum_list_presets":
+        scanner = plugin.app.plugins.get("spectrum_scanner")
+        if scanner and hasattr(scanner, "get_presets"):
+            return {"type": "spectrum_presets", **scanner.get_presets()}
+    elif action == "chirp_capture":
+        viewer = _get_chirp_plugin(plugin)
+        if viewer and getattr(viewer, "plugin_name", None) == "chirp_detector":
+            return {
+                "type": "chirp_capture_error",
+                "error": "chirp_detector uses continuous detection; on-demand capture not supported",
+            }
         if viewer and hasattr(viewer, "capture_chirps"):
             try:
                 viewer.capture_chirps(
@@ -823,7 +857,7 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
             except Exception:
                 log.debug("Chirp capture command failed", exc_info=True)
     elif action == "chirp_set_params":
-        viewer = plugin.app.plugins.get("lora_chirp_viewer")
+        viewer = _get_chirp_plugin(plugin)
         if viewer and hasattr(viewer, "set_continuous_params"):
             try:
                 viewer.set_continuous_params(
@@ -833,7 +867,7 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
             except Exception:
                 log.debug("Chirp set_params command failed", exc_info=True)
     elif action == "chirp_set_detection_params":
-        viewer = plugin.app.plugins.get("lora_chirp_viewer")
+        viewer = _get_chirp_plugin(plugin)
         if viewer and hasattr(viewer, "set_detection_params"):
             try:
                 viewer.set_detection_params(
@@ -841,12 +875,21 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
                     sfs=[int(s) for s in cmd["sfs"]] if "sfs" in cmd else None,
                     bws=[int(b) for b in cmd["bws"]] if "bws" in cmd else None,
                     snr_threshold_db=float(cmd["snr_threshold_db"]) if "snr_threshold_db" in cmd else None,
+                    preamble_len=int(cmd["preamble_len"]) if "preamble_len" in cmd else None,
                 )
-            except ValueError as exc:
+            except (ValueError, TypeError) as exc:
                 log.debug("Chirp set_detection_params rejected: %s", exc)
                 return {"type": "chirp_detection_params_error", "error": str(exc)}
             except Exception:
                 log.debug("Chirp set_detection_params command failed", exc_info=True)
+    elif action == "chirp_set_waterfall":
+        detector = plugin.app.plugins.get("chirp_detector")
+        if detector and hasattr(detector, "set_waterfall_enabled"):
+            try:
+                detector.set_waterfall_enabled(bool(cmd.get("enabled", False)))
+                return {"type": "chirp_waterfall_toggled", "enabled": detector._waterfall_enabled}
+            except Exception:
+                log.debug("Chirp set_waterfall command failed", exc_info=True)
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
@@ -897,3 +940,4 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
     for ws, ok in zip(clients, results):
         if not ok:
             _ws_clients.discard(ws)
+            _ws_last_activity.pop(ws, None)

@@ -72,7 +72,7 @@
   var _css = {};
 
   // -- Detection settings state -------------------------------------------
-  var _detParams = { enabled: true, sfs: [7,8,9,10,11,12], bws: [125000], snr_threshold_db: 12.0, sample_rate: 250000 };
+  var _detParams = { enabled: true, sfs: [7,8,9,10,11,12], bws: [125000], snr_threshold_db: 12.0, preamble_len: 8, sample_rate: 250000 };
   var _ALL_DET_BWS = [62500, 125000, 250000, 500000];
   var _detSettingsToggle, _detSettingsPanel;
 
@@ -239,6 +239,26 @@
     snrRow.appendChild(_spanText(' dB'));
     _detSettingsPanel.appendChild(snrRow);
 
+    // Preamble length
+    var preRow = document.createElement('div');
+    preRow.className = 'chirp-det-row';
+    preRow.appendChild(_spanText('Preamble: '));
+    var preInput = document.createElement('input');
+    preInput.type = 'number';
+    preInput.id = 'chirp-det-preamble';
+    preInput.className = 'chirp-det-snr-input';
+    preInput.min = '4';
+    preInput.max = '32';
+    preInput.step = '1';
+    preInput.value = _detParams.preamble_len;
+    preInput.addEventListener('change', _onDetParamChange);
+    preInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); preInput.blur(); }
+    });
+    preRow.appendChild(preInput);
+    preRow.appendChild(_spanText(' symbols'));
+    _detSettingsPanel.appendChild(preRow);
+
     container.appendChild(_detSettingsPanel);
     _updateDetToggleSummary();
   }
@@ -304,10 +324,15 @@
     var snr = snrInput ? parseFloat(snrInput.value) : _detParams.snr_threshold_db;
     if (isNaN(snr)) snr = _detParams.snr_threshold_db;
 
+    var preInput = $('chirp-det-preamble');
+    var preamble = preInput ? parseInt(preInput.value) : _detParams.preamble_len;
+    if (isNaN(preamble)) preamble = _detParams.preamble_len;
+
     _detParams.enabled = enabled;
     _detParams.sfs = sfs;
     _detParams.bws = bws;
     _detParams.snr_threshold_db = snr;
+    _detParams.preamble_len = preamble;
     _updateDetToggleSummary();
 
     var ws = R.ws;
@@ -318,6 +343,7 @@
         sfs: sfs,
         bws: bws,
         snr_threshold_db: snr,
+        preamble_len: preamble,
       }));
     }
   }
@@ -328,6 +354,7 @@
     if (params.detection_sfs) _detParams.sfs = params.detection_sfs;
     if (params.detection_bws) _detParams.bws = params.detection_bws;
     if (params.detection_snr_threshold_db != null) _detParams.snr_threshold_db = params.detection_snr_threshold_db;
+    if (params.detection_preamble_len != null) _detParams.preamble_len = params.detection_preamble_len;
     if (params.sample_rate) _detParams.sample_rate = params.sample_rate;
 
     var enableCb = $('chirp-det-enable');
@@ -345,6 +372,9 @@
 
     var snrInput = $('chirp-det-snr');
     if (snrInput) snrInput.value = _detParams.snr_threshold_db;
+
+    var preInput = $('chirp-det-preamble');
+    if (preInput) preInput.value = _detParams.preamble_len;
 
     _updateDetToggleSummary();
   }
@@ -367,7 +397,7 @@
     }
     var bwStr = _detParams.bws.map(function (b) { return (b / 1000) + 'k'; }).join(',') || 'no BWs';
     _detSettingsToggle.innerHTML = chevron + ' Detection: <span class="chirp-det-on">ON</span> · ' +
-      esc(sfStr) + ' · ' + esc(bwStr) + ' · SNR ' + esc(_detParams.snr_threshold_db.toFixed(1)) + ' dB';
+      esc(sfStr) + ' · ' + esc(bwStr) + ' · P' + esc(_detParams.preamble_len) + ' · SNR ' + esc(_detParams.snr_threshold_db.toFixed(1)) + ' dB';
   }
 
   function handleDetectionParams(data) {
@@ -900,10 +930,10 @@
 
   function handleUpdate(data) {
     if (!_resolveDom()) return;
-    var cs = data.lora_chirp_viewer;
-    if (cs && cs.chirp_status) {
+    var cs = data.chirp_detector || data.lora_chirp_viewer;
+    var st = cs ? (cs.chirp_status || cs) : null;
+    if (st && (st.streaming != null || st.status)) {
       show();
-      var st = cs.chirp_status;
       if (st.streaming && _statusLabel) {
         _statusLabel.textContent = 'Streaming · '
           + (st.freq_mhz || 0).toFixed(3) + ' MHz · '

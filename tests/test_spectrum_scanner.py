@@ -496,3 +496,292 @@ class TestModuleConstants:
         # Hardware reports 1101-1234 MHz (see `rtl_test -t` output).
         assert 1090 <= lo <= 1120
         assert 1220 <= hi <= 1260
+
+
+# ---------------------------------------------------------------------------
+# Preset system
+# ---------------------------------------------------------------------------
+class TestPresets:
+    def test_builtin_presets_available_by_default(self):
+        p = _make_plugin()
+        info = p.get_presets()
+        names = [pr["name"] for pr in info["presets"]]
+        assert "fm_broadcast" in names
+        assert "lora_us915" in names
+        assert "aviation" in names
+
+    def test_default_preset_applies_on_construction(self):
+        p = _make_plugin({"default_preset": "lora_us915"})
+        assert p._active_preset == "lora_us915"
+        assert p._freq_start_mhz == 902.0
+        assert p._freq_stop_mhz == 928.0
+
+    def test_no_default_preset_uses_flat_config(self):
+        p = _make_plugin({"freq_start_mhz": 144.0, "freq_stop_mhz": 148.0})
+        assert p._active_preset is None
+        assert p._freq_start_mhz == 144.0
+
+    def test_user_preset_merges_with_builtins(self):
+        p = _make_plugin({"presets": {"my_band": {"freq_start_mhz": 200.0, "freq_stop_mhz": 210.0}}})
+        info = p.get_presets()
+        names = [pr["name"] for pr in info["presets"]]
+        assert "my_band" in names
+        assert "fm_broadcast" in names
+
+    def test_user_preset_overrides_builtin(self):
+        p = _make_plugin({"presets": {"fm_broadcast": {"freq_start_mhz": 87.5, "freq_stop_mhz": 108.0}}})
+        preset = p._presets["fm_broadcast"]
+        assert preset["freq_start_mhz"] == 87.5
+
+    def test_get_presets_shape(self):
+        p = _make_plugin({"default_preset": "aviation"})
+        info = p.get_presets()
+        assert "active_preset" in info
+        assert "presets" in info
+        assert info["active_preset"] == "aviation"
+        for pr in info["presets"]:
+            assert "name" in pr
+            assert "has_analysis" in pr
+
+    def test_lora_preset_has_analysis_flag(self):
+        p = _make_plugin()
+        info = p.get_presets()
+        lora = [pr for pr in info["presets"] if pr["name"] == "lora_us915"][0]
+        assert lora["has_analysis"] is True
+        fm = [pr for pr in info["presets"] if pr["name"] == "fm_broadcast"][0]
+        assert fm["has_analysis"] is False
+
+
+class TestSwitchPreset:
+    def test_switch_changes_frequency(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        result = p.switch_preset("lora_us915")
+        assert result["preset"] == "lora_us915"
+        assert p._freq_start_mhz == 902.0
+        assert p._freq_stop_mhz == 928.0
+        assert result["has_analysis"] is True
+
+    def test_switch_clears_sweep_state(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        p._bins_hz = [88e6, 89e6, 90e6]
+        p._latest_powers_db = [-80, -75, -70]
+        p._sweep_count = 42
+        old_version = p._bins_version
+
+        p.switch_preset("aviation")
+
+        assert p._bins_hz == []
+        assert p._latest_powers_db == []
+        assert p._sweep_count == 0
+        assert p._bins_version > old_version
+
+    def test_switch_activates_lora_analyzer(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        assert p._analyzer is None
+        p.switch_preset("lora_us915")
+        assert p._analyzer is not None
+
+    def test_switch_deactivates_analyzer_on_non_lora(self):
+        p = _make_plugin({"default_preset": "lora_us915"})
+        p._activate_analyzer_for_preset(p._presets["lora_us915"])
+        assert p._analyzer is not None
+        p.switch_preset("fm_broadcast")
+        assert p._analyzer is None
+
+    def test_switch_unknown_preset_raises(self):
+        p = _make_plugin()
+        with pytest.raises(ValueError, match="Unknown preset"):
+            p.switch_preset("nonexistent")
+
+    def test_switch_resets_restart_count(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        p._restart_count = 3
+        p.switch_preset("aviation")
+        assert p._restart_count == 0
+
+    def test_switch_restores_base_gain_when_preset_has_no_gain(self):
+        p = _make_plugin({"gain_db": 40.0, "default_preset": "lora_us915"})
+        assert p._gain_db == 34.0  # lora preset overrides
+        p.switch_preset("fm_broadcast")
+        assert p._gain_db == 40.0  # restored to base
+
+    def test_switch_return_shape(self):
+        p = _make_plugin()
+        result = p.switch_preset("aviation")
+        assert "preset" in result
+        assert "freq_start_mhz" in result
+        assert "freq_stop_mhz" in result
+        assert "has_analysis" in result
+
+    def test_snapshot_includes_preset_info(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        snap = p.get_snapshot()
+        assert snap["active_preset"] == "fm_broadcast"
+        assert "available_presets" in snap
+        assert snap["switching"] is False
+
+    def test_snapshot_includes_channel_analysis_in_lora_mode(self):
+        p = _make_plugin({"default_preset": "lora_us915"})
+        p._activate_analyzer_for_preset(p._presets["lora_us915"])
+        p._bins_hz = [int(902e6 + i * 12500) for i in range(2080)]
+        snap = p.get_snapshot()
+        assert "channel_analysis" in snap
+
+    def test_history_includes_channel_power_in_lora_mode(self):
+        p = _make_plugin({"default_preset": "lora_us915"})
+        p._activate_analyzer_for_preset(p._presets["lora_us915"])
+        hist = p.get_history()
+        assert "channel_power_history" in hist
+
+    def test_history_omits_channel_power_in_non_lora_mode(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        hist = p.get_history()
+        assert "channel_power_history" not in hist
+
+    def test_switch_starts_supervisor_if_dead(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        p._supervisor_alive = False
+        with patch.object(p, "_start_thread") as mock_start:
+            p.switch_preset("aviation")
+            mock_start.assert_called_once()
+
+    def test_switch_skips_supervisor_if_alive(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        p._supervisor_alive = True
+        with patch.object(p, "_start_thread") as mock_start:
+            p.switch_preset("aviation")
+            mock_start.assert_not_called()
+
+
+class TestPresetValidation:
+    def test_preset_rejects_invalid_freq_range(self):
+        with pytest.raises(ValueError, match="freq_stop_mhz"):
+            _make_plugin({
+                "default_preset": "bad",
+                "presets": {"bad": {"freq_start_mhz": 200.0, "freq_stop_mhz": 100.0}},
+            })
+
+    def test_preset_rejects_bin_khz_out_of_range(self):
+        with pytest.raises(ValueError, match="bin_khz"):
+            _make_plugin({
+                "default_preset": "bad",
+                "presets": {"bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "bin_khz": 0.5}},
+            })
+
+    def test_preset_rejects_sweep_out_of_range(self):
+        with pytest.raises(ValueError, match="sweep_seconds"):
+            _make_plugin({
+                "default_preset": "bad",
+                "presets": {"bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "sweep_seconds": 120}},
+            })
+
+    def test_preset_rejects_gain_out_of_range(self):
+        with pytest.raises(ValueError, match="gain_db"):
+            _make_plugin({
+                "default_preset": "bad",
+                "presets": {"bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "gain_db": 200.0}},
+            })
+
+    def test_switch_preset_validates_values(self):
+        p = _make_plugin()
+        p._presets["bad"] = {"freq_start_mhz": 200.0, "freq_stop_mhz": 100.0}
+        with pytest.raises(ValueError, match="freq_stop_mhz"):
+            p.switch_preset("bad")
+
+    def test_switch_respects_cooldown(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        p._last_preset_switch = 0.0
+        p.switch_preset("aviation")
+        with pytest.raises(ValueError, match="cooldown"):
+            p.switch_preset("fm_broadcast")
+
+
+class TestPresetAnalyzerIntegration:
+    """End-to-end: switch to lora_us915, feed CSV data, verify channel_analysis."""
+
+    def _make_lora_plugin(self):
+        p = _make_plugin({"default_preset": "lora_us915"})
+        # _make_plugin skips start() — activate the analyzer manually.
+        if p._active_preset and p._active_preset in p._presets:
+            p._activate_analyzer_for_preset(p._presets[p._active_preset])
+        return p
+
+    def _make_csv_line(self, freq_lo_hz, freq_hi_hz, bin_step_hz, powers_db):
+        """Construct an rtl_power CSV line."""
+        n_bins = len(powers_db)
+        parts = ["2026-01-01", "00:00:00", str(freq_lo_hz), str(freq_hi_hz),
+                 str(bin_step_hz), str(n_bins)]
+        parts += [f"{p:.1f}" for p in powers_db]
+        return ", ".join(parts)
+
+    def test_lora_preset_produces_channel_analysis(self):
+        p = self._make_lora_plugin()
+        assert p._analyzer is not None
+
+        # Feed a sweep covering 902-928 MHz at 12.5 kHz bins (same as preset)
+        bin_step = 12500
+        freq_lo = 902_000_000
+        freq_hi = 928_000_000
+        n_bins = (freq_hi - freq_lo) // bin_step
+        powers = [-80.0] * n_bins
+        # Elevate channel 0 bins (centered at 902.3 MHz, BW 125 kHz)
+        for i in range(n_bins):
+            f = freq_lo + i * bin_step
+            if 902_237_500 <= f < 902_362_500:
+                powers[i] = -50.0
+
+        line = self._make_csv_line(freq_lo, freq_hi, bin_step, powers)
+        p._handle_csv_line(line)
+        p._flush_current_sweep()
+
+        snap = p.get_snapshot()
+        assert "channel_analysis" in snap
+        ca = snap["channel_analysis"]
+        assert len(ca["channels"]) == 72
+        assert ca["noise_floor_db"] is not None
+        ch0 = ca["channels"][0]
+        assert ch0["power_db"] is not None
+        assert ch0["power_db"] > -60.0
+
+    def test_capture_triggers_published_in_lora_mode(self):
+        p = self._make_lora_plugin()
+        assert p._analyzer is not None
+
+        bin_step = 12500
+        freq_lo = 902_000_000
+        freq_hi = 928_000_000
+        n_bins = (freq_hi - freq_lo) // bin_step
+        powers = [-90.0] * n_bins
+        for i in range(n_bins):
+            f = freq_lo + i * bin_step
+            if 902_237_500 <= f < 902_362_500:
+                powers[i] = -40.0
+
+        line = self._make_csv_line(freq_lo, freq_hi, bin_step, powers)
+
+        # Feed enough sweeps to exceed capture_trigger_consec (default 3)
+        for sweep in range(5):
+            p._current_ts = f"2026-01-01 00:00:0{sweep}"
+            p._handle_csv_line(line)
+            p._flush_current_sweep()
+
+        publish_calls = p.app.event_bus.publish.call_args_list
+        trigger_calls = [c for c in publish_calls
+                         if c[0][0] == "lora.capture_trigger"]
+        assert len(trigger_calls) >= 1
+        payload = trigger_calls[0][0][1]
+        assert payload["channel_idx"] == 0
+
+    def test_no_channel_analysis_in_non_lora_preset(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        assert p._analyzer is None
+        snap = p.get_snapshot()
+        assert "channel_analysis" not in snap
+
+    def test_switch_from_lora_to_fm_removes_analysis(self):
+        p = self._make_lora_plugin()
+        assert p._analyzer is not None
+        p.switch_preset("fm_broadcast")
+        assert p._analyzer is None
+        snap = p.get_snapshot()
+        assert "channel_analysis" not in snap

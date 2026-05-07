@@ -151,9 +151,11 @@ class TestRateLimiter:
         rl.MAX_TRACKED_IPS = 5
         for i in range(10):
             rl.record_attempt(f"10.0.0.{i}")
-        removed = rl.cleanup_all_expired()
-        assert removed == 5
+        # Inline cap in record_attempt blocks new IPs beyond MAX_TRACKED_IPS
         assert len(rl._attempts) == 5
+        # Existing IPs still tracked correctly
+        assert rl._attempts.get("10.0.0.0") is not None
+        assert rl._attempts.get("10.0.0.9") is None
 
     def test_gc_loop_cleans_rate_limiter(self):
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager

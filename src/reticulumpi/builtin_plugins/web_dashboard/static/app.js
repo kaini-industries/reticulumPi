@@ -1268,6 +1268,12 @@
           }
           return;
         }
+        if (msg.type === 'spectrum_preset_error') {
+          if (RPI.spectrum && RPI.spectrum.handlePresetError) {
+            RPI.spectrum.handlePresetError(msg.error || 'Preset switch failed');
+          }
+          return;
+        }
         if (msg.type === 'message' && msg.data) {
           if (RPI.onMessagingEvent) RPI.onMessagingEvent(msg.data);
           if (RPI.onMqttFeedMessage) RPI.onMqttFeedMessage(msg.data);
