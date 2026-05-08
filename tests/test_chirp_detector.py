@@ -445,6 +445,12 @@ class TestSetContinuousParams:
         d.set_continuous_params(sample_rate=1_024_000)
         assert d._sample_rate == 1_024_000
 
+    def test_prunes_bws_on_sample_rate_downgrade(self):
+        d = _make_detector({"sample_rate": 2_048_000, "detection_bws": [125_000, 250_000, 500_000]})
+        d.set_continuous_params(sample_rate=250_000)
+        assert d._sample_rate == 250_000
+        assert d._detection_bws == [125_000]
+
     def test_rejects_invalid_sample_rate(self):
         d = _make_detector()
         with pytest.raises(ValueError, match="sample_rate"):

@@ -82,10 +82,12 @@ class ChirpDetector(PluginBase):
         self._batch_interval = float(cfg.get("batch_interval_s", 0.5))
 
         self._detection_enabled = bool(cfg.get("detection_enabled", True))
-        bws = cfg.get("detection_bws", [125_000])
+        bws = cfg.get("detection_bws", [b for b in _VALID_DETECTION_BWS if b < self._sample_rate])
         for b in bws:
             if int(b) not in _VALID_DETECTION_BWS:
                 raise ValueError(f"detection BW must be one of {_VALID_DETECTION_BWS}, got {b}")
+            if int(b) >= self._sample_rate:
+                raise ValueError(f"detection BW {b} must be < sample_rate {self._sample_rate}")
         self._detection_bws: list[int] = [int(b) for b in bws]
         sfs = cfg.get("detection_sfs", [7, 8, 9, 10, 11, 12])
         for s in sfs:
@@ -476,6 +478,13 @@ class ChirpDetector(PluginBase):
             if sample_rate not in _VALID_SAMPLE_RATES:
                 raise ValueError(f"sample_rate must be one of {_VALID_SAMPLE_RATES}")
             self._sample_rate = int(sample_rate)
+            valid = [b for b in self._detection_bws if b < self._sample_rate]
+            if len(valid) < len(self._detection_bws):
+                self.log.warning(
+                    "Pruned BWs exceeding new sample rate: %s → %s",
+                    self._detection_bws, valid,
+                )
+                self._detection_bws = valid
             fft_size = self._fft_size_for_sr(self._sample_rate)
             self._window = np.hanning(fft_size).astype(np.float32)
             restart = True
