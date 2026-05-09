@@ -8,6 +8,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from reticulumpi import events
+
 if TYPE_CHECKING:
     from reticulumpi.app import ReticulumPiApp
 
@@ -42,6 +44,9 @@ class PluginBase(ABC):
         self._stop_event = threading.Event()
         self._stop_event.set()  # starts "stopped"
         self._threads: list[threading.Thread] = []
+        self._internet_available: bool = True
+        self.event_bus.subscribe(events.INTERNET_ONLINE, self._on_internet_event)
+        self.event_bus.subscribe(events.INTERNET_OFFLINE, self._on_internet_event)
         self.validate_config()
 
     @property
@@ -62,6 +67,34 @@ class PluginBase(ABC):
     @abstractmethod
     def stop(self) -> None:
         """Called on shutdown. Clean up resources, deregister handlers."""
+
+    @property
+    def internet_available(self) -> bool:
+        """Whether internet is currently available."""
+        return self._internet_available
+
+    def _on_internet_event(self, event_type: str, data: dict[str, Any]) -> None:
+        was = self._internet_available
+        now = event_type == events.INTERNET_ONLINE
+        self._internet_available = now
+        if not self._active:
+            return
+        if now and not was:
+            try:
+                self.on_internet_available()
+            except Exception:
+                self.log.exception("Error in on_internet_available")
+        elif not now and was:
+            try:
+                self.on_internet_lost()
+            except Exception:
+                self.log.exception("Error in on_internet_lost")
+
+    def on_internet_available(self) -> None:
+        """Called when internet connectivity is restored. Override to react."""
+
+    def on_internet_lost(self) -> None:
+        """Called when internet connectivity is lost. Override to react."""
 
     def validate_config(self) -> None:
         """Validate plugin config at construction time. Override to add checks."""
@@ -102,6 +135,7 @@ class PluginBase(ABC):
             if thread.is_alive():
                 self.log.warning("Thread '%s' did not exit in time", thread.name)
         self._threads.clear()
+        self.event_bus.unsubscribe_all(self._on_internet_event)
         with PluginBase._global_thread_lock:
             PluginBase._global_thread_count = max(
                 0, PluginBase._global_thread_count - thread_count,

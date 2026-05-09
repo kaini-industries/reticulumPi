@@ -17,6 +17,7 @@ from reticulumpi.announce_dispatcher import AnnounceDispatcher
 from reticulumpi.config import AppConfig
 from reticulumpi.event_bus import EventBus
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.internet_probe import InternetProbe
 from reticulumpi.plugin_loader import PluginLoader
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class ReticulumPiApp:
         self._plugin_loader = PluginLoader()
         self.event_bus = EventBus()
         self.announce_dispatcher = AnnounceDispatcher()
+        self.internet_probe: InternetProbe | None = None
 
     def start(self) -> None:
         """Initialize Reticulum, load identity, start plugins, and enter the run loop."""
@@ -60,6 +62,12 @@ class ReticulumPiApp:
         log.info("Node identity hash: %s", RNS.prettyhexrep(self.identity.hash))
 
         self.announce_dispatcher.start()
+
+        self.internet_probe = InternetProbe(self.event_bus, self.config.internet)
+        self.internet_probe.start()
+        log.info(
+            "Internet: %s", "online" if self.internet_probe.is_online else "offline"
+        )
 
         PluginBase.set_thread_budget(self.config.thread_budget)
 
@@ -147,6 +155,9 @@ class ReticulumPiApp:
                 self._stop_plugin_with_timeout(name, plugin, timeout)
             except Exception:
                 log.exception("Error stopping plugin: %s", name)
+
+        if self.internet_probe:
+            self.internet_probe.stop()
 
         self.announce_dispatcher.stop()
 

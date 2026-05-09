@@ -103,7 +103,10 @@ reticulumpi:
     #   Reset:    delete ~/.config/reticulumpi/dashboard_secret and restart
     #web_dashboard:
     #  enabled: false
-    #  host: "127.0.0.1"          # Bind to localhost only (change to 0.0.0.0 to expose)
+    #  host: "127.0.0.1"          # Bind to localhost only
+    #                              # Set to "0.0.0.0" to allow access from the hotspot/LAN.
+    #                              # With avahi-daemon installed, clients can reach the
+    #                              # dashboard at http://<hostname>.local:8080
     #  port: 8080
     #  # password_hash: "scrypt:..."  # Optional — overrides auto-generated password
     #  session_timeout: 86400      # Session lifetime in seconds (default: 24h)
@@ -337,6 +340,9 @@ reticulumpi:
     #  health_check_interval: 15       # Seconds between health checks
     #  reconnect_delay: 10             # Seconds between reconnect attempts
     #  max_reconnect_attempts: 10      # 0 = unlimited
+    #  serial_retry_interval: 30       # Seconds between serial open retries (faster than probe)
+    #  send_queue_size: 10             # Max rate-limited messages to queue (0=drop immediately)
+    #  send_queue_ttl: 60              # Seconds before queued messages expire
     #  # Firmware watchdog — detects hung firmware where the USB serial
     #  # port stays open but the MCU is frozen.  Activates whenever a
     #  # physical device is connected (device_probe_port or serial mode).
@@ -464,8 +470,9 @@ reticulumpi:
     #  # Set to 0 to disable (not recommended on a live mesh).
     #  startup_grace_seconds: 30
 
-    # Meshtastic Responder — auto-replies to Meshtastic DMs with commands.
-    # Requires: meshtastic_gateway enabled.
+    # Meshtastic Responder — auto-replies to Meshtastic and MeshCore
+    # messages with commands.
+    # Requires: meshtastic_gateway and/or meshcore_gateway enabled.
     # Built-in commands: help, ping, time, uptime, nodes, weather, fortune,
     #                    dice, flip, calc.
     #meshtastic_responder:

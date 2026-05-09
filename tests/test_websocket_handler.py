@@ -724,6 +724,7 @@ class TestBroadcastDataCollection:
         plugin.app.reticulum = MagicMock()
         plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
         plugin.app.plugins = plugins or {}
+        plugin.app.internet_probe = None
         return plugin
 
     def test_broadcasts_to_clients(self):

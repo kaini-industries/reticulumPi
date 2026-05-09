@@ -1,7 +1,7 @@
 [Unit]
 Description=ReticulumPi Network Node
-After=network-online.target rnsd.service gpsd.service
-Wants=network-online.target rnsd.service gpsd.service
+After=network.target rnsd.service gpsd.service
+Wants=rnsd.service gpsd.service
 
 [Service]
 Type=simple

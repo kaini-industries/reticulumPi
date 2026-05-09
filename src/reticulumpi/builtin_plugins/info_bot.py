@@ -514,7 +514,7 @@ class InfoBot(PluginBase):
                 return f"No definition found for: {word}"
             return f"Dictionary lookup failed (HTTP {exc.code})."
         except urllib.error.URLError:
-            return "Dictionary lookup failed (network error)."
+            return "Dictionary lookup unavailable — node is offline."
         except (KeyError, TypeError, ValueError):
             return f"Could not parse definition for: {word}"
 
@@ -552,7 +552,7 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch news (network error)."
+            return "News unavailable — node is offline."
         except Exception:
             return "Could not parse news feed."
 
@@ -587,7 +587,7 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch ISS position (network error)."
+            return "ISS position unavailable — node is offline."
         except (KeyError, TypeError, ValueError):
             return "Could not parse ISS data."
 
@@ -644,7 +644,7 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch crypto price (network error)."
+            return "Crypto prices unavailable — node is offline."
         except (KeyError, TypeError, ValueError):
             return f"Could not parse price data for: {symbol}"
 
@@ -720,7 +720,7 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch solar data (network error)."
+            return "Solar data unavailable — node is offline."
         except (KeyError, TypeError, ValueError, IndexError):
             return "Could not parse solar data."
 
@@ -1065,7 +1065,7 @@ class InfoBot(PluginBase):
 
         except urllib.error.URLError as exc:
             self.log.warning("Weather fetch failed for %r: %s", location, exc)
-            return "Could not fetch weather (network error). Try again later."
+            return "Weather unavailable — node is offline."
         except (KeyError, TypeError, ValueError) as exc:
             self.log.warning("Weather parse error for %r: %s", location, exc)
             return f"Could not parse weather data for: {location}"
@@ -1120,8 +1120,16 @@ class InfoBot(PluginBase):
 
         return lat, lon
 
+    def on_internet_lost(self) -> None:
+        self.log.warning("Internet lost — API commands will return offline messages")
+
+    def on_internet_available(self) -> None:
+        self.log.info("Internet restored — API commands operational")
+
     def _fetch_json(self, url: str) -> dict:
         """Fetch a URL and parse the JSON response."""
+        if not self.internet_available:
+            raise urllib.error.URLError("Internet unavailable")
         req = urllib.request.Request(
             url, headers={"User-Agent": "ReticulumPi-InfoBot/1.0"}
         )

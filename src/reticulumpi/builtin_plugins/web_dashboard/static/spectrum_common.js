@@ -378,7 +378,7 @@
           this.binCount = payload.bin_count
             || (this.rows[0] ? this.rows[0].length : 0);
         }
-        if (payload && payload.bins_hz) {
+        if (payload && payload.bins_hz && payload.bins_hz.length) {
           this.binsHz = payload.bins_hz;
         }
         this.generation += 1;
@@ -391,8 +391,11 @@
           this.rows = [];
           this.rowTimestamps = [];
           this.binCount = binCount;
+          this.binsHz = spec.bins_hz;
           this.sweepCount = 0;
           this.generation += 1;
+        } else if (binCount > 0 && (!this.binsHz || !this.binsHz.length)) {
+          this.binsHz = spec.bins_hz;
         }
         var sc = spec.sweep_count || 0;
         if (sc <= this.sweepCount) return;

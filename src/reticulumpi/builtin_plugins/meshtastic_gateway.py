@@ -13,6 +13,7 @@ Modes:
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import re
@@ -734,6 +735,18 @@ class MeshtasticGateway(PluginBase):
         if not isinstance(dpi, (int, float)) or dpi < 60:
             raise ValueError("device_probe_interval must be >= 60 seconds")
 
+        sri = self.config.get("serial_retry_interval", 30)
+        if not isinstance(sri, (int, float)) or sri < 5:
+            raise ValueError("serial_retry_interval must be >= 5 seconds")
+
+        sqs = self.config.get("send_queue_size", 10)
+        if not isinstance(sqs, int) or sqs < 0:
+            raise ValueError("send_queue_size must be a non-negative integer")
+
+        sqt = self.config.get("send_queue_ttl", 60)
+        if not isinstance(sqt, (int, float)) or sqt <= 0:
+            raise ValueError("send_queue_ttl must be > 0 seconds")
+
         # Firmware watchdog
         fw_wd = self.config.get("firmware_watchdog", {})
         if not isinstance(fw_wd, dict):
@@ -799,6 +812,13 @@ class MeshtasticGateway(PluginBase):
             self._send_min_interval = 0  # No limit
         self._last_send_time = 0.0
 
+        # Bounded outbound queue — rate-limited LXMF messages are queued
+        # instead of dropped, then drained at the rate-limit interval.
+        self._send_queue_max = int(self.config.get("send_queue_size", 10))
+        self._send_queue_ttl: float = float(self.config.get("send_queue_ttl", 60))
+        self._send_queue: collections.deque[tuple[float, str, int]] = collections.deque()
+        self._send_queue_dropped = 0
+
         # Meshtastic state
         self._mesh_interface: Any = None
         self._connected = False
@@ -837,6 +857,9 @@ class MeshtasticGateway(PluginBase):
         self._device_probe_port: str = self.config.get("device_probe_port", "")
         self._device_probe_interval: float = self.config.get(
             "device_probe_interval", 300
+        )
+        self._serial_retry_interval: float = self.config.get(
+            "serial_retry_interval", 30
         )
         # Bounded wait on the blocking SerialInterface() constructor.  If the
         # radio never returns config_complete_id the probe thread would
@@ -930,6 +953,10 @@ class MeshtasticGateway(PluginBase):
             except ValueError:
                 self.log.warning("Skipping invalid LXMF recipient hash: %s", h)
 
+        self._pending_lxmf: collections.deque[tuple[float, bytes, str]] = collections.deque()
+        self._pending_lxmf_max = 20
+        self._pending_lxmf_ttl: float = 120.0
+
         self._lxmf_allow_set: set[str] = {
             h.lower() for h in self.config.get("lxmf_allow_list", [])
         }
@@ -992,6 +1019,20 @@ class MeshtasticGateway(PluginBase):
         self._close_mesh_interface()
         self._join_threads()
 
+    def on_internet_available(self) -> None:
+        if self._mode != MODE_MQTT:
+            return
+        with self._lock:
+            if self._mqtt_suspended:
+                self._mqtt_suspended = False
+                self._reconnect_failures = 0
+        self.log.info("Internet restored — MQTT reconnection enabled")
+
+    def on_internet_lost(self) -> None:
+        if self._mode != MODE_MQTT:
+            return
+        self.log.warning("Internet lost — MQTT reconnection paused")
+
     # ── Device connection management ────────────────────────────────
 
     def _connection_loop(self) -> None:
@@ -1013,6 +1054,10 @@ class MeshtasticGateway(PluginBase):
         grace_period = self.config.get("reconnect_grace_period", 90)
 
         while self._active:
+            if self._mode == MODE_MQTT and not self.internet_available:
+                self._sleep_while_active(30)
+                continue
+
             if not self._connected:
                 # ── Grace period: paho may be auto-reconnecting ────────
                 with self._lock:
@@ -1085,6 +1130,8 @@ class MeshtasticGateway(PluginBase):
 
             # Health check
             self._sleep_while_active(health_check_interval)
+            self._drain_send_queue()
+            self._retry_pending_lxmf()
             if self._connected and not self._check_mesh_health():
                 self.log.warning("Meshtastic health check failed, reconnecting")
                 self._close_mesh_interface()
@@ -1422,7 +1469,7 @@ class MeshtasticGateway(PluginBase):
         while self._active:
             iface = self._open_serial_interface_with_timeout()
             if iface is None:
-                self._sleep_while_active(self._device_probe_interval)
+                self._sleep_while_active(self._serial_retry_interval)
                 continue
 
             # Publish the listener reference before the first probe so
@@ -2106,6 +2153,74 @@ class MeshtasticGateway(PluginBase):
             self._msgs_rate_limited += 1
             return False
 
+    def _enqueue_lxmf_send(self, message: Any) -> None:
+        """Enqueue a rate-limited LXMF message for later delivery."""
+        with self._lock:
+            if len(self._send_queue) >= self._send_queue_max:
+                self._send_queue_dropped += 1
+                self.log.info(
+                    "LXMF->Meshtastic send queue full (%d), dropping oldest",
+                    self._send_queue_max,
+                )
+                self._send_queue.popleft()
+            try:
+                sender_hash = RNS.prettyhexrep(message.source_hash)
+                content = message.content_as_string()
+                sender_hex = message.source_hash.hex()
+
+                if self._lxmf_allow_set and sender_hex.lower() not in self._lxmf_allow_set:
+                    return
+
+                prefix = self.config.get("lxmf_prefix", DEFAULT_LXMF_PREFIX)
+                header = f"{prefix} {sender_hash}:\n"
+                formatted = truncate_for_mtu(header, content, MESHTASTIC_MTU)
+                channel = self.config.get("meshtastic_channel", 0)
+            except Exception:
+                self.log.exception("Error formatting LXMF message for queue")
+                return
+            self._send_queue.append((time.time(), formatted, channel))
+            self.log.debug(
+                "LXMF message queued (%d pending)", len(self._send_queue),
+            )
+
+    def _drain_send_queue(self) -> None:
+        """Send queued messages, skipping expired ones, until rate-limited."""
+        while self._send_queue:
+            with self._lock:
+                if not self._send_queue:
+                    return
+                enqueued_at, formatted, channel = self._send_queue[0]
+                if time.time() - enqueued_at > self._send_queue_ttl:
+                    self._send_queue.popleft()
+                    self.log.debug("Queued message expired (%.0fs TTL)", self._send_queue_ttl)
+                    continue
+
+            if not self._check_send_rate_limit():
+                return
+
+            with self._lock:
+                if not self._send_queue:
+                    return
+                enqueued_at, formatted, channel = self._send_queue.popleft()
+                if time.time() - enqueued_at > self._send_queue_ttl:
+                    continue
+                if self._connected and self._mesh_interface is not None:
+                    iface = self._mesh_interface
+                elif self._serial_listener is not None:
+                    iface = self._serial_listener
+                else:
+                    return
+
+            try:
+                iface.sendText(formatted, channelIndex=channel, hopLimit=MESHTASTIC_HOP_LIMIT)
+                with self._lock:
+                    self._msgs_lxmf_to_mesh += 1
+                    self._last_lxmf_msg_time = time.time()
+                self.log.debug("Sent queued LXMF message on ch%d", channel)
+            except Exception:
+                self.log.exception("Error sending queued message to Meshtastic")
+            return
+
     # ── Meshtastic pubsub callbacks ─────────────────────────────────
 
     def _on_mesh_text(self, packet: dict, interface: Any = None) -> None:
@@ -2302,7 +2417,7 @@ class MeshtasticGateway(PluginBase):
     def _handle_lxmf_message(self, message: Any) -> None:
         """Handle incoming LXMF message and forward to Meshtastic."""
         if not self._check_send_rate_limit():
-            self.log.info("LXMF->Meshtastic message rate-limited, dropping")
+            self._enqueue_lxmf_send(message)
             return
 
         with self._lock:
@@ -2402,43 +2517,80 @@ class MeshtasticGateway(PluginBase):
 
     def _forward_to_lxmf(self, text: str) -> None:
         """Send formatted text to each configured LXMF recipient."""
-        import LXMF
-
         if not self._recipient_hashes:
             self.log.debug("No LXMF recipients configured, Meshtastic message not forwarded")
             return
 
         for recipient_hash in self._recipient_hashes:
-            try:
-                dest_identity = RNS.Identity.recall(recipient_hash)
-                if dest_identity is None:
-                    RNS.Transport.request_path(recipient_hash)
+            if not self._try_send_lxmf(recipient_hash, text):
+                with self._lock:
+                    if len(self._pending_lxmf) >= self._pending_lxmf_max:
+                        self._pending_lxmf.popleft()
+                    self._pending_lxmf.append((time.time(), recipient_hash, text))
+
+    def _try_send_lxmf(self, recipient_hash: bytes, text: str) -> bool:
+        """Attempt to send an LXMF message. Returns True on success."""
+        import LXMF
+
+        try:
+            dest_identity = RNS.Identity.recall(recipient_hash)
+            if dest_identity is None:
+                RNS.Transport.request_path(recipient_hash)
+                self.log.debug(
+                    "Path requested for %s, message deferred",
+                    RNS.prettyhexrep(recipient_hash),
+                )
+                return False
+
+            dest = RNS.Destination(
+                dest_identity,
+                RNS.Destination.OUT,
+                RNS.Destination.SINGLE,
+                "lxmf",
+                "delivery",
+            )
+            msg = LXMF.LXMessage(
+                dest,
+                self.local_lxmf_destination,
+                text,
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+            )
+            self.lxmf_router.handle_outbound(msg)
+            self.log.debug("Forwarded to LXMF %s", RNS.prettyhexrep(recipient_hash))
+            return True
+        except Exception:
+            self.log.exception(
+                "Failed to forward to LXMF recipient %s",
+                RNS.prettyhexrep(recipient_hash),
+            )
+            return False
+
+    def _retry_pending_lxmf(self) -> None:
+        """Retry deferred LXMF messages whose paths may now be resolved."""
+        with self._lock:
+            retries = len(self._pending_lxmf)
+        now = time.time()
+        for _ in range(retries):
+            with self._lock:
+                if not self._pending_lxmf:
+                    break
+                enqueued_at, recipient_hash, text = self._pending_lxmf[0]
+                if now - enqueued_at > self._pending_lxmf_ttl:
+                    self._pending_lxmf.popleft()
                     self.log.debug(
-                        "Path requested for %s, message deferred",
+                        "Pending LXMF to %s expired",
                         RNS.prettyhexrep(recipient_hash),
                     )
                     continue
-
-                dest = RNS.Destination(
-                    dest_identity,
-                    RNS.Destination.OUT,
-                    RNS.Destination.SINGLE,
-                    "lxmf",
-                    "delivery",
-                )
-                msg = LXMF.LXMessage(
-                    dest,
-                    self.local_lxmf_destination,
-                    text,
-                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                )
-                self.lxmf_router.handle_outbound(msg)
-                self.log.debug("Forwarded to LXMF %s", RNS.prettyhexrep(recipient_hash))
-            except Exception:
-                self.log.exception(
-                    "Failed to forward to LXMF recipient %s",
-                    RNS.prettyhexrep(recipient_hash),
-                )
+            if self._try_send_lxmf(recipient_hash, text):
+                with self._lock:
+                    if self._pending_lxmf:
+                        self._pending_lxmf.popleft()
+            else:
+                with self._lock:
+                    if self._pending_lxmf:
+                        self._pending_lxmf.rotate(-1)
+                break
 
     def _handle_propagation_announce(
         self, destination_hash: bytes, announced_identity: Any, app_data: bytes

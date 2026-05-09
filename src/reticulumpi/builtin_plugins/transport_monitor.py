@@ -365,8 +365,16 @@ class TransportMonitorPlugin(PluginBase):
             except Exception:
                 self.log.debug("Error in transport monitor loop", exc_info=True)
 
+    def on_internet_available(self) -> None:
+        self.log.info("Internet restored — scheduling immediate hub health check")
+
+    def on_internet_lost(self) -> None:
+        self.log.warning("Internet lost — hub probes paused, status frozen")
+
     def _check_health(self) -> None:
         """Probe all primary hubs and evaluate failover."""
+        if not self.internet_available:
+            return
         any_online = False
         now = time.monotonic()
 
@@ -598,6 +606,9 @@ class TransportMonitorPlugin(PluginBase):
         self._load_hub_pool()
 
         while self._active:
+            if not self.internet_available:
+                self._sleep_while_active(30)
+                continue
             try:
                 self._auto_discovery_tick()
             except Exception:

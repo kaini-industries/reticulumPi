@@ -1,11 +1,12 @@
-"""Auto-reply to Meshtastic direct messages with configurable commands.
+"""Auto-reply to Meshtastic and MeshCore messages with configurable commands.
 
-Subscribes to ``MESHTASTIC_MESSAGE_RECEIVED`` events on the event bus and
-sends replies through the gateway's ``send_message()`` API.  Supports
-prefix-based commands (``!ping``, ``!weather Austin``, etc.) and custom
-keyword-to-response mappings.
+Subscribes to ``MESHTASTIC_MESSAGE_RECEIVED`` and ``MESHCORE_MESSAGE_RECEIVED``
+events on the event bus and sends replies through the appropriate gateway's
+``send_message()`` API.  Supports prefix-based commands (``!ping``,
+``!weather Austin``, etc.) and custom keyword-to-response mappings.
 
-Requires the ``meshtastic_gateway`` plugin to be enabled.
+Requires the ``meshtastic_gateway`` and/or ``meshcore_gateway`` plugin to be
+enabled.
 """
 
 from __future__ import annotations
@@ -211,6 +212,7 @@ class MeshtasticResponder(PluginBase):
         self._msgs_cooldown_skipped = 0
         self._start_time = time.monotonic()
         self._own_node_id: str | None = None
+        self._own_meshcore_key: str | None = None
         self._commands: dict[str, tuple[Callable[..., str], str]] = {}
         self._custom_responses: dict[str, str] = {}
 
@@ -233,12 +235,15 @@ class MeshtasticResponder(PluginBase):
         enabled = self.config.get("commands", [])
         self._commands = self._build_command_registry(enabled)
 
-        self.event_bus.subscribe(
+        self.event_bus.subscribe_offloaded(
             events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message
+        )
+        self.event_bus.subscribe_offloaded(
+            events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_message
         )
         self._active = True
         self.log.info(
-            "Meshtastic responder active — %d commands, %d custom responses",
+            "Mesh responder active — %d commands, %d custom responses",
             len(self._commands),
             len(self._custom_responses),
         )
@@ -248,6 +253,9 @@ class MeshtasticResponder(PluginBase):
         try:
             self.event_bus.unsubscribe(
                 events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message
+            )
+            self.event_bus.unsubscribe(
+                events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_message
             )
         except Exception:
             self.log.debug("unsubscribe during stop() failed", exc_info=True)
@@ -329,7 +337,8 @@ class MeshtasticResponder(PluginBase):
                 return
 
             if not self._check_cooldown(from_id):
-                self._msgs_cooldown_skipped += 1
+                with self._lock:
+                    self._msgs_cooldown_skipped += 1
                 self.log.info(
                     "Cooldown skipped reply to %s (%.0fs window)",
                     from_id,
@@ -341,7 +350,8 @@ class MeshtasticResponder(PluginBase):
             if not response:
                 return
 
-            self._msgs_handled += 1
+            with self._lock:
+                self._msgs_handled += 1
             truncated = _truncate_response(response)
             self._send_reply(truncated, from_id)
         except Exception:
@@ -440,6 +450,60 @@ class MeshtasticResponder(PluginBase):
         handler, _description = handler_entry
         return handler(args)
 
+    def _on_meshcore_message(self, event_type: str, data: dict[str, Any]) -> None:
+        """Event bus callback for incoming MeshCore messages."""
+        try:
+            from_key = data.get("from_key", "")
+            msg_type = data.get("msg_type", "direct")
+            text = data.get("text", "").strip()
+
+            if not text or not from_key:
+                return
+            is_broadcast = msg_type == "broadcast"
+            if is_broadcast and not self._respond_to_broadcast:
+                return
+
+            if self._is_own_meshcore_node(from_key):
+                return
+
+            if not self._is_trigger(text):
+                return
+
+            if not self._check_cooldown(from_key):
+                with self._lock:
+                    self._msgs_cooldown_skipped += 1
+                return
+
+            response = self._match_and_respond(text)
+            if not response:
+                return
+
+            with self._lock:
+                self._msgs_handled += 1
+            truncated = _truncate_response(response)
+            self._send_meshcore_reply(truncated, from_key if not is_broadcast else None)
+        except Exception:
+            self.log.exception("Error handling MeshCore message")
+
+    def _is_own_meshcore_node(self, from_key: str) -> bool:
+        """Check if *from_key* belongs to our own MeshCore device."""
+        if self._own_meshcore_key:
+            return from_key == self._own_meshcore_key
+        try:
+            gw = self.app.get_plugin("meshcore_gateway")
+            if gw is None:
+                return False
+            mc = getattr(gw, "_mc", None)
+            if mc is not None and hasattr(mc, "self_info"):
+                info = mc.self_info
+                own_key = info.get("public_key", "") if isinstance(info, dict) else ""
+                if own_key:
+                    self._own_meshcore_key = own_key
+                    return from_key == own_key
+        except Exception:
+            self.log.debug("MeshCore self-key lookup failed", exc_info=True)
+        return False
+
     def _send_reply(self, text: str, destination_id: str) -> None:
         """Send a reply through the Meshtastic gateway."""
         try:
@@ -462,6 +526,28 @@ class MeshtasticResponder(PluginBase):
                 )
         except Exception:
             self.log.exception("Error sending reply to %s", destination_id)
+
+    def _send_meshcore_reply(self, text: str, destination: str | None) -> None:
+        """Send a reply through the MeshCore gateway."""
+        try:
+            gw = self.app.get_plugin("meshcore_gateway")
+            if not gw or not hasattr(gw, "send_message"):
+                self.log.warning(
+                    "Cannot send reply — meshcore_gateway plugin not available"
+                )
+                return
+            result = gw.send_message(text, destination=destination)
+            label = destination or "channel"
+            if result.get("sent"):
+                self.log.debug("MeshCore reply sent to %s (%d bytes)", label, len(text))
+            else:
+                self.log.warning(
+                    "MeshCore reply to %s failed: %s",
+                    label,
+                    result.get("reason", "unknown"),
+                )
+        except Exception:
+            self.log.exception("Error sending MeshCore reply")
 
     # ── Commands ──────────────────────────────────────────────────
 
@@ -549,6 +635,8 @@ class MeshtasticResponder(PluginBase):
 
     def _cmd_weather(self, args: str = "") -> str:
         """Fetch current weather for a location via Open-Meteo."""
+        if not self.internet_available:
+            return "Weather unavailable (offline)"
         location = args.strip()
         if not location:
             return f"Usage: {self._prefix}weather <city>\nExample: {self._prefix}weather London"

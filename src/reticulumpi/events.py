@@ -37,6 +37,10 @@ HUB_OFFLINE = "hub.offline"
 FALLBACK_ACTIVATED = "transport.fallback_activated"
 FALLBACK_DEACTIVATED = "transport.fallback_deactivated"
 
+# Internet connectivity
+INTERNET_ONLINE = "internet.online"
+INTERNET_OFFLINE = "internet.offline"
+
 # Connectivity monitoring
 RNSD_DOWN = "connectivity.rnsd_down"
 RNSD_RECOVERED = "connectivity.rnsd_recovered"

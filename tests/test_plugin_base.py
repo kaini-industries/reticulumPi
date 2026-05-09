@@ -5,6 +5,8 @@ import time
 
 import pytest
 
+from reticulumpi import events
+from reticulumpi.event_bus import EventBus
 from reticulumpi.plugin_base import PluginBase
 
 
@@ -186,3 +188,95 @@ def test_thread_count_never_negative(mock_app):
     plugin = FakePlugin(mock_app, {"enabled": True})
     plugin._join_threads()
     assert PluginBase.get_thread_count() == 0
+
+
+# ── Internet connectivity hooks ──────────────────────────────────
+
+
+class InternetHookPlugin(PluginBase):
+    plugin_name = "internet_hook_test"
+    plugin_version = "1.0.0"
+
+    def __init__(self, *args, **kwargs):
+        self.internet_available_calls = 0
+        self.internet_lost_calls = 0
+        super().__init__(*args, **kwargs)
+
+    def start(self):
+        self._active = True
+
+    def stop(self):
+        self._active = False
+
+    def on_internet_available(self):
+        self.internet_available_calls += 1
+
+    def on_internet_lost(self):
+        self.internet_lost_calls += 1
+
+
+@pytest.fixture
+def real_event_bus_app(mock_app):
+    """Mock app with a real EventBus for testing event subscriptions."""
+    mock_app.event_bus = EventBus()
+    return mock_app
+
+
+def test_internet_available_default_true(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    assert plugin.internet_available is True
+
+
+def test_internet_available_set_on_offline_event(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    plugin.start()
+    real_event_bus_app.event_bus.publish(events.INTERNET_OFFLINE, {})
+    assert plugin.internet_available is False
+
+
+def test_internet_available_set_on_online_event(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    plugin.start()
+    plugin._internet_available = False
+    real_event_bus_app.event_bus.publish(events.INTERNET_ONLINE, {})
+    assert plugin.internet_available is True
+
+
+def test_on_internet_available_called(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    plugin.start()
+    plugin._internet_available = False
+    real_event_bus_app.event_bus.publish(events.INTERNET_ONLINE, {})
+    assert plugin.internet_available_calls == 1
+
+
+def test_on_internet_lost_called(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    plugin.start()
+    real_event_bus_app.event_bus.publish(events.INTERNET_OFFLINE, {})
+    assert plugin.internet_lost_calls == 1
+
+
+def test_hooks_not_called_when_stopped(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    # Don't call start() — _active remains False
+    real_event_bus_app.event_bus.publish(events.INTERNET_OFFLINE, {})
+    assert plugin.internet_lost_calls == 0
+    assert plugin.internet_available is False
+
+
+def test_no_duplicate_hook_calls(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    plugin.start()
+    real_event_bus_app.event_bus.publish(events.INTERNET_OFFLINE, {})
+    real_event_bus_app.event_bus.publish(events.INTERNET_OFFLINE, {})
+    assert plugin.internet_lost_calls == 1
+
+
+def test_cleanup_unsubscribes(real_event_bus_app):
+    plugin = InternetHookPlugin(real_event_bus_app, {"enabled": True})
+    plugin.start()
+    plugin._join_threads()
+    plugin._internet_available = True
+    real_event_bus_app.event_bus.publish(events.INTERNET_OFFLINE, {})
+    assert plugin.internet_available is True

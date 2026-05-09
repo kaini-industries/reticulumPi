@@ -432,6 +432,8 @@ def _collect_broadcast_data(
 
     data["plugins"] = plugin_statuses
     data["interfaces"] = interfaces
+    probe = getattr(plugin.app, "internet_probe", None)
+    data["internet"] = probe.get_status() if probe else {"online": True, "wan_ip": None, "lan_ip": None}
 
     if "transport" in data:
         try:
@@ -610,6 +612,8 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
         event_bus.subscribe(_events.MESSAGE_REACTION_RECEIVED, _on_reaction_event)
         event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
+        event_bus.subscribe(_events.INTERNET_ONLINE, _on_internet_event)
+        event_bus.subscribe(_events.INTERNET_OFFLINE, _on_internet_event)
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -623,6 +627,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_status_event)
             event_bus.unsubscribe_all(_on_reaction_event)
             event_bus.unsubscribe_all(_on_alert_event)
+            event_bus.unsubscribe_all(_on_internet_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _broadcast_task:
@@ -810,6 +815,21 @@ def _on_alert_event(event_type: str, data: dict) -> None:
         return
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "alert", data)
+    except RuntimeError:
+        pass
+
+
+def _on_internet_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for INTERNET_ONLINE/OFFLINE — push to WS clients."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    payload = {
+        "online": event_type == "internet.online",
+        "wan_ip": data.get("wan_ip"),
+        "lan_ip": data.get("lan_ip"),
+    }
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "internet_status", payload)
     except RuntimeError:
         pass
 

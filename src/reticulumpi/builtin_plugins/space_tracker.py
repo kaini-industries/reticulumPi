@@ -590,7 +590,17 @@ class SpaceTrackerPlugin(PluginBase):
             # ensures we never actually fire more than once per min_interval.
             self._sleep_while_active(60)
 
+    def on_internet_available(self) -> None:
+        for limiter in self._limiters.values():
+            limiter._failures = 0
+        self.log.info("Internet restored — rate limiters reset")
+
+    def on_internet_lost(self) -> None:
+        self.log.warning("Internet lost — fetch loops paused")
+
     def _refresh_due_groups(self) -> None:
+        if not self.internet_available:
+            return
         now = time.time()
         for group in self._groups:
             last = self._tle_last_fetch.get(group, 0.0)
@@ -672,6 +682,8 @@ class SpaceTrackerPlugin(PluginBase):
             self._sleep_while_active(60)
 
     def _fetch_launches(self) -> None:
+        if not self.internet_available:
+            return
         if not self._limiters["launchlibrary"].can_request():
             return
         url = self._LAUNCH_LIBRARY_URL.format(limit=self._launch_limit)
@@ -735,6 +747,8 @@ class SpaceTrackerPlugin(PluginBase):
             self._sleep_while_active(60)
 
     def _fetch_weather(self) -> None:
+        if not self.internet_available:
+            return
         if not self._limiters["swpc"].can_request():
             return
         status, body, _ = self._http.get(self._SWPC_KP_URL, self._limiters["swpc"], accept="application/json")

@@ -38,7 +38,7 @@ echo "=== ReticulumPi Bootstrap ==="
 # 1. System packages
 echo "[1/7] Installing system packages..."
 sudo apt-get update
-PACKAGES="python3 python3-venv python3-pip git"
+PACKAGES="python3 python3-venv python3-pip git avahi-daemon avahi-utils"
 if [ "$WITH_MESHCHAT" = true ]; then
     PACKAGES="$PACKAGES nodejs npm"
 fi
@@ -367,6 +367,16 @@ if sudo visudo -cf /etc/sudoers.d/reticulumpi-services >/dev/null 2>&1; then
 else
     echo "  WARNING: sudoers syntax check failed — removing to prevent lockout"
     sudo rm -f /etc/sudoers.d/reticulumpi-services
+fi
+
+# 7c. Sudoers rule for offline simulation script
+echo "  Installing sudoers rule for offline simulation..."
+sudo install -m 0440 "$INSTALL_DIR/config/sudoers.d/reticulumpi-offline" /etc/sudoers.d/reticulumpi-offline
+if sudo visudo -cf /etc/sudoers.d/reticulumpi-offline >/dev/null 2>&1; then
+    echo "  Sudoers rule installed and validated"
+else
+    echo "  WARNING: sudoers syntax check failed — removing to prevent lockout"
+    sudo rm -f /etc/sudoers.d/reticulumpi-offline
 fi
 
 echo ""

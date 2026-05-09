@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
+  <div id="internet-status-banner" class="offline-banner" style="display:none">Internet Unavailable — some features are limited</div>
   <div class="dashboard">
     <!-- Header -->
     <div class="header">
@@ -17,6 +18,9 @@
           <span class="badge badge-version" id="version"></span>
           <span class="badge badge-hash" id="identity-hash"></span>
           <span class="uptime" id="uptime"></span>
+          <span class="badge badge-inet" id="inet-status" title="Internet connectivity"><span class="inet-dot"></span><span class="inet-label">--</span></span>
+          <span class="badge badge-ip" id="wan-ip" title="WAN IP"></span>
+          <span class="badge badge-ip" id="lan-ip" title="LAN IP"></span>
           <span class="conn-status conn-wait" id="conn-status" title="Connection status"><span class="conn-dot"></span><span class="conn-label">waiting…</span></span>
         </div>
       </div>
@@ -61,6 +65,34 @@
           <div class="value" id="m-disk">--<span class="unit">%</span></div>
         </div>
         <div class="metric-spark" id="spark-disk"></div>
+      </div>
+    </div>
+
+    <!-- Wi-Fi Hotspot (collapsed by default) -->
+    <div class="section svc-hotspot awaiting-data" id="hotspot-section" style="display:none">
+      <div class="section-header collapsible" id="hotspot-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Wi-Fi Hotspot <span class="svc-tag svc-tag-hotspot">AP</span></span>
+        <span class="count" id="hotspot-status"></span>
+      </div>
+      <div class="section-body hidden" id="hotspot-body">
+        <div class="hotspot-overview">
+          <div class="connectivity-indicators">
+            <span class="conn-indicator" id="hi-status">Status: --</span>
+            <span class="conn-indicator" id="hi-ssid">SSID: --</span>
+            <span class="conn-indicator" id="hi-channel">Channel: --</span>
+            <span class="conn-indicator" id="hi-security">Security: --</span>
+            <span class="conn-indicator" id="hi-ip">IP: --</span>
+            <span class="conn-indicator" id="hi-clients">Clients: --</span>
+          </div>
+        </div>
+        <div class="table-scroll" id="hotspot-clients-wrap" style="display:none">
+          <table class="data-table">
+            <thead>
+              <tr><th>Client</th><th>IP</th><th>Connected</th><th>Traffic</th></tr>
+            </thead>
+            <tbody id="hotspot-clients-table"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -1085,10 +1117,11 @@
   <script src="/static/space.js?v=2"></script>
   <script src="/static/spectrum_common.js?v=1"></script>
   <script src="/static/spectrum.js?v=9"></script>
-  <script src="/static/lora_spectrum.js?v=17"></script>
+  <script src="/static/lora_spectrum.js?v=18"></script>
   <script src="/static/adsb.js?v=1"></script>
   <script src="/static/radio.js?v=1"></script>
   <script src="/static/ntp.js?v=1"></script>
   <script src="/static/link_tester.js?v=1"></script>
+  <script src="/static/hotspot.js?v=1"></script>
 </body>
 </html>

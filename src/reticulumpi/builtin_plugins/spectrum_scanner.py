@@ -499,11 +499,9 @@ class SpectrumScanner(PluginBase):
             # Same decomposition pattern as get_snapshot: parallel arrays
             # (rows / row_timestamps) stay in lock-step.  rows shape is
             # unchanged for backward-compat; row_timestamps is the new sibling.
-            hist = {
+            hist: dict[str, Any] = {
                 "available": True,
                 "sweep_count": self._sweep_count,
-                "bin_count": len(self._bins_hz),
-                "bins_hz": list(self._bins_hz),
                 "bins_version": self._bins_version,
                 "waterfall_rows": self._waterfall_rows,
                 "rows": [list(powers) for _, powers in self._waterfall],
@@ -511,6 +509,9 @@ class SpectrumScanner(PluginBase):
                     round(ts, 3) for ts, _ in self._waterfall
                 ],
             }
+            if self._bins_hz:
+                hist["bin_count"] = len(self._bins_hz)
+                hist["bins_hz"] = list(self._bins_hz)
             if self._analyzer is not None:
                 hist["channel_power_history"] = self._analyzer.get_channel_power_history()
             return hist

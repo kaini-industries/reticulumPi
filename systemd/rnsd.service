@@ -1,7 +1,6 @@
 [Unit]
 Description=Reticulum Network Stack Daemon
-After=network-online.target i2pd.service
-Wants=network-online.target
+After=network.target i2pd.service
 # If i2pd is installed, wait for it to start (SAM API needs to be ready)
 # This is a soft dependency — rnsd still starts without i2pd
 After=i2pd.service

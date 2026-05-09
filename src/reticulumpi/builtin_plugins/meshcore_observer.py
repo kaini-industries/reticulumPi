@@ -280,6 +280,12 @@ class MeshCoreObserver(PluginBase):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
 
+    def on_internet_available(self) -> None:
+        self.log.info("Internet restored — MQTT reconnection enabled")
+
+    def on_internet_lost(self) -> None:
+        self.log.warning("Internet lost — MQTT reconnection paused, packets queued")
+
     # ── Standalone device connection ───────────────────────────────
 
     def _device_connection_loop(self) -> None:
@@ -651,6 +657,10 @@ class MeshCoreObserver(PluginBase):
             self._sleep_while_active(2)
 
         while self._active:
+            if not self.internet_available:
+                self._sleep_while_active(30)
+                continue
+
             if not self._connected_mqtt:
                 try:
                     self._connect_mqtt()

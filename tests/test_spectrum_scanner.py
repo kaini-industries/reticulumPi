@@ -360,13 +360,14 @@ class TestHistory:
         p = _make_plugin()
         h = p.get_history()
         for key in (
-            "available", "sweep_count", "bin_count", "waterfall_rows",
+            "available", "sweep_count", "waterfall_rows",
             "rows", "row_timestamps",
         ):
             assert key in h
         assert h["available"] is True
         assert h["sweep_count"] == 0
-        assert h["bin_count"] == 0
+        assert "bin_count" not in h
+        assert "bins_hz" not in h
         assert h["rows"] == []
         # Sibling array stays in lock-step with rows.
         assert h["row_timestamps"] == []

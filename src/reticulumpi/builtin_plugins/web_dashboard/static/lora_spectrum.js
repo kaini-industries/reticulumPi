@@ -1747,13 +1747,13 @@
 
     var _loraSnap = data.lora_scanner;
     if (_loraSnap) {
-      if (_loraSnap.bins_hz) {
+      if (_loraSnap.bins_hz && _loraSnap.bins_hz.length) {
         _cachedBinsHz = _loraSnap.bins_hz;
-      } else if (_cachedBinsHz) {
+      } else if (_cachedBinsHz && _cachedBinsHz.length) {
         _loraSnap.bins_hz = _cachedBinsHz;
       } else {
         var _hs = SC.loraHistoryStore || SC.historyStore;
-        if (_hs && _hs.binsHz) {
+        if (_hs && _hs.binsHz && _hs.binsHz.length) {
           _cachedBinsHz = _hs.binsHz;
           _loraSnap.bins_hz = _cachedBinsHz;
         }
@@ -1770,13 +1770,23 @@
 
     if (!data.spectrum) return;
 
+    var spec = data.spectrum;
+    if (spec.bins_hz && spec.bins_hz.length) {
+      _cachedBinsHz = spec.bins_hz;
+    } else if (_cachedBinsHz && _cachedBinsHz.length) {
+      spec.bins_hz = _cachedBinsHz;
+    } else if (SC.historyStore && SC.historyStore.binsHz && SC.historyStore.binsHz.length) {
+      _cachedBinsHz = SC.historyStore.binsHz;
+      spec.bins_hz = _cachedBinsHz;
+    }
+
     // Show scanner status in placeholder when not yet producing sweeps
-    var specStatus = data.spectrum.status;
+    var specStatus = spec.status;
     if (specStatus === 'unavailable' || specStatus === 'error') {
       if (_placeholderEl) {
         _placeholderEl.textContent = specStatus === 'unavailable'
           ? 'RTL-SDR scanner unavailable'
-          : 'Scanner error: ' + (data.spectrum.error || 'unknown');
+          : 'Scanner error: ' + (spec.error || 'unknown');
         _placeholderEl.style.display = '';
       }
       return;

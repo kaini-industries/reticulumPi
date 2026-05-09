@@ -248,6 +248,65 @@ body {
   50% { opacity: 0.4; box-shadow: 0 0 2px var(--green); }
 }
 
+/* Internet status badge */
+.badge-inet {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: rgba(0, 255, 159, 0.08);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.inet-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.badge-inet.inet-online {
+  background: rgba(0, 255, 159, 0.12);
+  color: var(--green);
+  border-color: rgba(0, 255, 159, 0.25);
+}
+.badge-inet.inet-online .inet-dot {
+  background: var(--green);
+  box-shadow: 0 0 4px var(--green);
+}
+.badge-inet.inet-offline {
+  background: rgba(255, 23, 68, 0.1);
+  color: var(--red);
+  border-color: rgba(255, 23, 68, 0.2);
+}
+.badge-inet.inet-offline .inet-dot {
+  background: var(--red);
+  box-shadow: 0 0 4px var(--red);
+}
+
+/* IP address badges */
+.badge-ip {
+  font-size: 0.7rem;
+  font-family: var(--mono);
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  padding: 0.12rem 0.45rem;
+  letter-spacing: 0.03em;
+}
+.badge-ip:empty { display: none; }
+.badge-ip::before {
+  color: var(--cyan, var(--accent));
+  opacity: 0.5;
+  margin-right: 0.2rem;
+  font-size: 0.65rem;
+}
+#wan-ip::before { content: 'WAN '; }
+#lan-ip::before { content: 'LAN '; }
+
 /* Alert banner */
 .alert {
   background: rgba(255, 23, 68, 0.12);
@@ -597,6 +656,8 @@ body {
 .section.svc-gps::after { border-color: var(--cyan); }
 .section.svc-ntp::before,
 .section.svc-ntp::after { border-color: var(--purple); }
+.section.svc-hotspot::before,
+.section.svc-hotspot::after { border-color: #4dd0e1; }
 
 .section-header {
   display: flex;
@@ -738,6 +799,7 @@ body {
 .section.svc-meshcore   { border-left: 3px solid var(--yellow); }
 .section.svc-gps        { border-left: 3px solid var(--gps, #00e5ff); }
 .section.svc-ntp        { border-left: 3px solid var(--purple); }
+.section.svc-hotspot    { border-left: 3px solid #4dd0e1; }
 
 .section.svc-reticulum > .section-header {
   background: linear-gradient(90deg, rgba(255, 45, 123, 0.06) 0%, transparent 50%);
@@ -753,6 +815,9 @@ body {
 }
 .section.svc-ntp > .section-header {
   background: linear-gradient(90deg, rgba(191, 90, 242, 0.06) 0%, transparent 50%);
+}
+.section.svc-hotspot > .section-header {
+  background: linear-gradient(90deg, rgba(77, 208, 225, 0.06) 0%, transparent 50%);
 }
 
 /* ── Service tag pills ────────────────────────────────────────────── */
@@ -772,6 +837,9 @@ body {
 .svc-tag-mc  { background: rgba(255, 182, 39, 0.15); color: var(--yellow); }
 .svc-tag-gps { background: rgba(0, 229, 255, 0.15); color: var(--gps, #00e5ff); }
 .svc-tag-ntp { background: rgba(191, 90, 242, 0.15); color: var(--purple); }
+.svc-tag-hotspot { background: rgba(77, 208, 225, 0.15); color: #4dd0e1; }
+
+.hotspot-overview { padding: 0.75rem 1rem; }
 
 /* Tables */
 .data-table {
@@ -2770,6 +2838,8 @@ body {
   .header h1 { font-size: 1.1rem; }
   .header .node-info { gap: 0.5rem; }
   .badge { font-size: 0.65rem; padding: 0.1rem 0.35rem; }
+  .badge-inet { font-size: 0.62rem; padding: 0.1rem 0.35rem; }
+  .badge-ip { font-size: 0.6rem; padding: 0.08rem 0.3rem; }
   .header .uptime { font-size: 0.75rem; }
   #logout-btn { font-size: 0.7rem; padding: 0.25rem 0.5rem; }
   .header h1 { animation: none; }
@@ -4662,3 +4732,16 @@ body {
 .lt-log th { position: sticky; top: 0; background: var(--bg-secondary); }
 .lt-log td { font-size: 0.75rem; font-family: var(--mono); }
 tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
+
+/* Internet offline banner */
+.offline-banner {
+  background: #e74c3c;
+  color: #fff;
+  text-align: center;
+  padding: 6px 12px;
+  font-size: 0.85em;
+  font-weight: 500;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+}

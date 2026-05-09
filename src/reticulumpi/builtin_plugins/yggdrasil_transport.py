@@ -261,10 +261,16 @@ class YggdrasilTransportPlugin(PluginBase):
         if len(peers) == 0:
             elapsed = time.monotonic() - self._start_time
             if elapsed > _BOOTSTRAP_GRACE:
-                issues.append(
-                    "Yggdrasil has 0 peers — "
-                    "add public peers in /etc/yggdrasil.conf"
-                )
+                if not self.internet_available:
+                    issues.append(
+                        "Yggdrasil has 0 peers — "
+                        "internet is currently unavailable"
+                    )
+                else:
+                    issues.append(
+                        "Yggdrasil has 0 peers — "
+                        "add public peers in /etc/yggdrasil.conf"
+                    )
 
         # 4. State transition events
         if not self._was_online:

@@ -1043,6 +1043,37 @@
     }
   }
 
+  function updateInternetStatus(info) {
+    var online, wanIp, lanIp;
+    if (typeof info === 'boolean') {
+      online = info;
+      wanIp = null;
+      lanIp = null;
+    } else if (info && typeof info === 'object') {
+      online = info.online;
+      wanIp = info.wan_ip || null;
+      lanIp = info.lan_ip || null;
+    } else {
+      return;
+    }
+
+    var banner = document.getElementById('internet-status-banner');
+    if (banner) banner.style.display = online ? 'none' : 'block';
+
+    var badge = $('inet-status');
+    if (badge) {
+      badge.className = 'badge badge-inet ' + (online ? 'inet-online' : 'inet-offline');
+      var lbl = badge.querySelector('.inet-label');
+      if (lbl) lbl.textContent = online ? 'online' : 'offline';
+      badge.title = 'Internet: ' + (online ? 'online' : 'offline');
+    }
+
+    var wanEl = $('wan-ip');
+    if (wanEl) wanEl.textContent = wanIp || '';
+    var lanEl = $('lan-ip');
+    if (lanEl) lanEl.textContent = lanIp || '';
+  }
+
   // --- Config ---
 
   function fetchConfig() {
@@ -1193,6 +1224,9 @@
   // --- WebSocket ---
 
   function _applyUpdate(d) {
+    if (d.internet !== undefined) {
+      updateInternetStatus(d.internet);
+    }
     if (d.metrics) updateMetrics(d.metrics);
     if (d.interfaces) {
       updateInterfaces(d.interfaces);
@@ -1241,6 +1275,7 @@
     if (d.gps && d.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(d.gps.last_fix);
     if (d.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(d.adsb);
     if (d.ntp && RPI.updateNtp) RPI.updateNtp(d.ntp);
+    if (d.hotspot && RPI.updateHotspot) RPI.updateHotspot(d.hotspot);
     if (d.fm_receiver && RPI.updateRadio) RPI.updateRadio(d.fm_receiver);
     if (d.link_tester && RPI.updateLinkTester) RPI.updateLinkTester(d.link_tester);
   }
@@ -1306,6 +1341,10 @@
         }
         if (msg.type === 'reaction' && msg.data) {
           if (RPI.onMessagingReaction) RPI.onMessagingReaction(msg.data);
+          return;
+        }
+        if (msg.type === 'internet_status' && msg.data) {
+          updateInternetStatus(msg.data);
           return;
         }
         if (msg.type === 'update' && msg.data) {
@@ -1390,7 +1429,7 @@
   function registerDeferredSection(name, fn) { _sectionFirstExpand[name] = fn; }
   RPI.registerDeferredSection = registerDeferredSection;
 
-  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section'].forEach(function(name) {
+  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot'].forEach(function(name) {
     var toggle = $(name + '-toggle');
     var body = $(name + '-body');
     if (toggle && body) {
