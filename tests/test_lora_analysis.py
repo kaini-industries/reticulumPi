@@ -6,7 +6,6 @@ import math
 
 from reticulumpi.builtin_plugins.lora_analysis import (
     REGION_CHANNELS,
-    Channel,
     LoraChannelAnalyzer,
     bisect_left_hz,
 )

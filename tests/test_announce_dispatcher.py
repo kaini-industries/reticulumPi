@@ -1,9 +1,8 @@
 """Tests for the AnnounceDispatcher centralized announce multiplexer."""
 
-import queue
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -253,7 +252,7 @@ class TestCircuitBreaker:
             if call_count["n"] == 3:
                 tripped.set()
 
-        sub_id = dispatcher.subscribe(None, slow_cb)
+        dispatcher.subscribe(None, slow_cb)
         for _ in range(3):
             dispatcher._enqueue(DEST_HASH, IDENTITY, APP_DATA)
         _wait_for_event(tripped)

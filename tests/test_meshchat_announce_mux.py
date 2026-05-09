@@ -9,10 +9,8 @@ signature dispatch, path-response gating, and lazy RNS registration.
 from __future__ import annotations
 
 import queue
-import threading
 import time
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -98,10 +96,10 @@ def mux_classes():
                 / "scripts"
                 / "meshchat_launcher.py"
             )
-            source = launcher_path.read_text()
+            launcher_path.read_text()
         else:
             import inspect
-            source = inspect.getsource(importlib.import_module("meshchat_launcher"))
+            inspect.getsource(importlib.import_module("meshchat_launcher"))
     finally:
         if saved is None:
             sys.modules.pop("RNS", None)
@@ -408,7 +406,6 @@ class TestLazyRegistration:
     def test_first_register_call_registers_mux_with_rns(self, mock_rns):
         """Simulate the patched register flow: first call registers the
         multiplexer with the original RNS function, subsequent calls don't."""
-        import inspect as _inspect
         import threading as _threading
 
         mux = MagicMock()

@@ -1205,7 +1205,7 @@ def _bisect_horizon(
         if (el_mid < 0) == (el_lo < 0):
             t_lo, el_lo = t_mid, el_mid
         else:
-            t_hi, el_hi = t_mid, el_mid
+            t_hi = t_mid
     return 0.5 * (t_lo + t_hi)
 
 

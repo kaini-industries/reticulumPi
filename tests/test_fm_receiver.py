@@ -10,16 +10,13 @@ from __future__ import annotations
 import math
 import struct
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from reticulumpi.builtin_plugins.fm_receiver import (
-    _BUILTIN_PRESETS,
     _CHUNK_BYTES,
-    _E4000_LO_GAP_MHZ,
     _MODE_DEFAULTS,
-    _VALID_MODES,
     FMReceiver,
 )
 

@@ -37,7 +37,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
 async def _empty_async_iter():
     """Async iterator that yields nothing — simulates an idle WebSocket."""
     return
-    yield  # noqa: unreachable — makes this an async generator
+    yield  # makes this an async generator
 
 
 @pytest.fixture(autouse=True)
@@ -502,7 +502,7 @@ class TestWebsocketAuth:
         ws_mock.close = AsyncMock()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         ws_mock.close.assert_called_once()
         call_kwargs = ws_mock.close.call_args
@@ -517,7 +517,7 @@ class TestWebsocketAuth:
         ws_mock.close = AsyncMock()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         ws_mock.close.assert_called_once()
 
@@ -530,7 +530,7 @@ class TestWebsocketAuth:
         ws_mock.close = AsyncMock()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         ws_mock.close.assert_called_once()
 
@@ -543,7 +543,7 @@ class TestWebsocketAuth:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         # Should have validated the cookie token
         request.app["plugin"]._auth.validate_token.assert_called_with("cookie_token")
@@ -558,7 +558,7 @@ class TestWebsocketAuth:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         request.app["plugin"]._auth.validate_token.assert_called_with("bearer_token")
         ws_mock.close.assert_not_called()
@@ -580,7 +580,7 @@ class TestWebsocketAuth:
 
         try:
             with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-                result = asyncio.run(websocket_metrics(request))
+                asyncio.run(websocket_metrics(request))
 
             ws_mock.close.assert_called_once()
             call_args = ws_mock.close.call_args
@@ -598,7 +598,7 @@ class TestWebsocketAuth:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         # After disconnect, client should be removed
         assert ws_mock not in _ws_clients
@@ -618,7 +618,7 @@ class TestWebsocketAuth:
             return ws
 
         with patch("aiohttp.web.WebSocketResponse", side_effect=capture_ws):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         # The authenticated WS (second call) should have heartbeat=60.0
         # First call is for auth failure/max clients, second for success

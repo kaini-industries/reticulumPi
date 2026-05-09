@@ -353,7 +353,7 @@ class NtpServerPlugin(PluginBase):
         pps_precision = gps_cfg.get("pps_precision", "1e-9")
 
         lines = [
-            f"# ReticulumPi GPS refclock — managed by ntp_server plugin",
+            "# ReticulumPi GPS refclock — managed by ntp_server plugin",
             f"refclock SHM {shm_segment} refid GPS precision {precision} "
             f"offset {offset} delay {delay}",
         ]

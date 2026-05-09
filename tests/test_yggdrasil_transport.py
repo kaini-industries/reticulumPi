@@ -6,16 +6,13 @@ import json
 import os
 import tempfile
 import time
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.yggdrasil_transport import (
     YggdrasilTransportPlugin,
-    _DEFAULT_ADMIN_SOCKET,
-    _DEFAULT_CHECK_INTERVAL,
-    _DEFAULT_RNS_PORT,
     _RNS_INTERFACE_NAME,
     _BOOTSTRAP_GRACE,
 )

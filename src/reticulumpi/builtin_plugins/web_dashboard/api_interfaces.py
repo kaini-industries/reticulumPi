@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok

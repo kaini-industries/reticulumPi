@@ -242,8 +242,8 @@ class TestAuthManager:
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
 
         mgr = AuthManager(plaintext_password="test", session_timeout=0.01)
-        t1 = mgr.login("test", "10.0.0.1")
-        t2 = mgr.login("test", "10.0.0.2")
+        mgr.login("test", "10.0.0.1")
+        mgr.login("test", "10.0.0.2")
         assert len(mgr.sessions) == 2
         time.sleep(0.05)
         removed = mgr.cleanup_expired_sessions()
@@ -254,8 +254,8 @@ class TestAuthManager:
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
 
         mgr = AuthManager(plaintext_password="test", session_timeout=60)
-        t1 = mgr.login("test", "10.0.0.1")
-        t2 = mgr.login("test", "10.0.0.2")
+        mgr.login("test", "10.0.0.1")
+        mgr.login("test", "10.0.0.2")
         removed = mgr.cleanup_expired_sessions()
         assert removed == 0
         assert len(mgr.sessions) == 2
@@ -404,7 +404,7 @@ class TestAuthManagerPersistent:
         )
         t1 = mgr.login("test", "10.0.0.1")
         time.sleep(0.01)
-        t2 = mgr.login("test", "10.0.0.2")
+        mgr.login("test", "10.0.0.2")
         time.sleep(0.01)
         t3 = mgr.login("test", "10.0.0.3")
 
