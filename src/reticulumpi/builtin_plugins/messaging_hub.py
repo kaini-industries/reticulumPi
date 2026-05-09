@@ -1567,7 +1567,7 @@ class MessagingHubPlugin(PluginBase):
     plugin_name = "messaging_hub"
     plugin_version = "1.1.0"
     plugin_description = "Unified message store and chat hub for LXMF, Meshtastic, and MeshCore"
-    broadcast_tier = 1
+    broadcast_tier = 0
     broadcast_keys = "messaging"
 
     def validate_config(self) -> None:
@@ -1600,6 +1600,8 @@ class MessagingHubPlugin(PluginBase):
             "message_history_limit", _DEFAULT_HISTORY_LIMIT
         )
         self._last_prune_ts = 0.0
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl: float = 10.0
 
         # Register built-in LXMF adapter
         lxmf_cfg = self.config.get("lxmf", {})
@@ -1628,6 +1630,15 @@ class MessagingHubPlugin(PluginBase):
         )
 
         self._active = True
+        self.event_bus.subscribe(
+            events.MESSAGE_RECEIVED, self._invalidate_broadcast_cache
+        )
+        self.event_bus.subscribe(
+            events.MESSAGE_SENT, self._invalidate_broadcast_cache
+        )
+        self.event_bus.subscribe(
+            events.MESSAGE_STATUS_CHANGED, self._invalidate_broadcast_cache
+        )
         self._delivery_timeout = float(
             self.config.get("delivery_timeout", 300)
         )
@@ -1645,6 +1656,10 @@ class MessagingHubPlugin(PluginBase):
             self.event_bus.unsubscribe_all(self._on_transport_connected)
         except Exception:
             self.log.debug("Error unsubscribing connected handler", exc_info=True)
+        try:
+            self.event_bus.unsubscribe_all(self._invalidate_broadcast_cache)
+        except Exception:
+            self.log.debug("Error unsubscribing cache invalidator", exc_info=True)
         for adapter in list(self._adapters.values()):
             try:
                 adapter.stop()
@@ -2333,7 +2348,10 @@ class MessagingHubPlugin(PluginBase):
 
     def mark_read(self, contact_id: str) -> int:
         """Mark all unread messages from a contact as read."""
-        return self._store.mark_read(contact_id)
+        count = self._store.mark_read(contact_id)
+        if count > 0:
+            self._broadcast_cache = None
+        return count
 
     def delete_conversation(self, contact_id: str) -> int:
         """Delete all stored messages for a conversation."""
@@ -2366,13 +2384,22 @@ class MessagingHubPlugin(PluginBase):
             "by_direction": stats.get("by_direction", {}),
         }
 
+    def _invalidate_broadcast_cache(self, event_type: str, data: dict) -> None:
+        self._broadcast_cache = None
+
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
         result = {}
         if hasattr(self, "get_transports"):
             result["transports"] = self.get_transports()
         if hasattr(self, "get_unread_counts_grouped"):
             result["unread"] = self.get_unread_counts_grouped()
-        return result or None
+        snapshot = result or None
+        self._broadcast_cache = (now, snapshot)
+        return snapshot
 
     # ── Internal ───────────────────────────────────────────────────
 
