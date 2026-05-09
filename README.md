@@ -7,14 +7,16 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **22 built-in plugins** -- heartbeat, LXMF echo, info bot, system metrics, NomadNet, MeshChat, web dashboard, network map, mesh telemetry, remote control, alerts, file transfer, sensor framework, emergency broadcast, transport monitor, connectivity monitor, path warmer, transport health, Meshtastic gateway, messaging hub, Yggdrasil transport, example scaffold
-- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, interface management, routing table visualization, mesh topology, sensor sparklines, chat messaging, and LoRa radio telemetry
+- **37 built-in plugins** -- messaging, mesh networking, LoRa diagnostics, RTL-SDR radio, ADS-B aircraft tracking, satellite tracking, GPS telemetry, NTP time sync, spectrum analysis, FM receiver, MeshCore bridging, and more
+- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, interface management, routing table visualization, mesh topology, sensor sparklines, chat messaging, spectrum waterfall, ADS-B radar, GPS map, and satellite tracking
+- **RTL-SDR radio** -- spectrum waterfall, LoRa band scanning, ADS-B aircraft tracking, and FM/AM receiver using cheap USB SDR dongles
+- **Multi-mesh bridging** -- bidirectional relay between Meshtastic and MeshCore networks with loop prevention and rate limiting
 - **Interface management** -- enable/disable Reticulum network interfaces from the dashboard with one-click service restart
 - **Server-side pagination** -- mesh network table with 11,000+ nodes paginated at the SQLite layer; targeted reachability scoring for visible nodes only
 - **Auto-discovery** -- automatically maintains a pool of community hub connections with health probing, exponential backoff, regional diversity, and peer-to-peer hub exchange
 - **Mesh-aware** -- passively maps network topology, shares telemetry with peers, broadcasts emergencies across the mesh
 - **Remote management** -- manage nodes over Reticulum Links with zero IP dependency (SSH not required)
-- **Event bus** -- decoupled inter-plugin communication via publish/subscribe
+- **Event bus** -- 60+ event types for decoupled inter-plugin communication via publish/subscribe
 - **Plugin hot-reload** -- enable/disable plugins at runtime without restarting
 - **Persistent identity** -- stable cryptographic identity across restarts
 - **Shared or standalone mode** -- coexists with `rnsd` or runs interfaces directly
@@ -26,10 +28,11 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 
 | Guide | Description |
 |-------|-------------|
-| **[Built-in Plugins](docs/plugins.md)** | All 22 plugins with configuration options |
+| **[Built-in Plugins](docs/plugins.md)** | All 37 plugins with configuration options |
 | **[Plugin Development](docs/plugin-development.md)** | Write your own plugin (lifecycle, events, LXMF, SQLite, testing) |
 | **[API Reference](docs/api-reference.md)** | REST API and WebSocket endpoint documentation |
 | **[Connectivity Guide](docs/connectivity-guide.md)** | LoRa, serial, packet radio, I2P hardware and setup |
+| **[Solar Power Build](docs/solar-power-build.md)** | Off-grid solar-powered node hardware guide |
 | **[Troubleshooting](docs/troubleshooting.md)** | Common problems and solutions |
 | **[Install Layout](docs/install-layout.md)** | How files move from git clone to running system |
 | **[Contributing](CONTRIBUTING.md)** | How to contribute code, plugins, and docs |
@@ -37,9 +40,62 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 
 ## Requirements
 
+### Core
+
 - Python 3.9+
 - Raspberry Pi 5 (or any Linux/macOS system) running 64-bit OS
-- Optional: LoRa radio hardware for long-range mesh (see [Connectivity Guide](docs/connectivity-guide.md) -- boards from ~$15)
+- System packages: `python3`, `python3-venv`, `python3-pip`, `git`
+
+> **Note:** The bootstrap script (`scripts/bootstrap.sh`) installs all required system packages automatically. Manual installs are only needed if setting up without the bootstrap script.
+
+### Optional Hardware
+
+- LoRa radio hardware for long-range mesh (see [Connectivity Guide](docs/connectivity-guide.md) -- boards from ~$15)
+- RTL-SDR USB dongle (~$25) for spectrum analysis, ADS-B aircraft tracking, FM radio, and LoRa band scanning
+- USB GPS receiver for telemetry, node mapping, and GPS-disciplined NTP time sync
+- Meshtastic LoRa radio ($20--60) for Meshtastic mesh network bridging
+- MeshCore LoRa radio ($20--60) for MeshCore mesh network bridging
+
+### Optional System Packages
+
+These are installed automatically by the bootstrap script when the corresponding `--with-*` flag is used:
+
+| Package | Bootstrap Flag | Purpose |
+|---------|---------------|---------|
+| `nodejs`, `npm` | `--with-meshchat` | MeshChat frontend build |
+| `i2pd` | `--with-i2p` | I2P anonymous network router (SAM API) |
+| `yggdrasil` | `--with-yggdrasil` | Encrypted IPv6 overlay network |
+| `aiohttp` (pip) | `--with-dashboard` | Web dashboard HTTP server |
+| `rnodeconf` (pip) | `--with-lora` | RNode firmware flashing |
+
+### External Tools (per plugin)
+
+Some plugins invoke external binaries at runtime. These must be installed separately and available on `PATH`:
+
+| Tool | Package | Used By |
+|------|---------|---------|
+| `rtl_fm`, `rtl_test`, `rtl_power` | `rtl-sdr` | spectrum_scanner, fm_receiver, lora_scanner, adsb_radar |
+| `dump1090` (or `dump1090-fa`, `readsb`) | `dump1090-mutability` / `dump1090-fa` | adsb_radar |
+| `chronyc` | `chrony` | ntp_server (requires passwordless sudo) |
+| `gpsd` | `gpsd` | gps_telemetry (alternative to direct serial) |
+
+For RTL-SDR plugins, the default DVB-T kernel driver must be blacklisted:
+
+```bash
+echo 'blacklist dvb_usb_rtl28xxu' | sudo tee /etc/modprobe.d/blacklist-rtlsdr.conf
+sudo modprobe -r dvb_usb_rtl28xxu
+```
+
+### Hardware Access Groups
+
+The bootstrap script adds the `reticulumpi` service user to these groups for hardware access:
+
+| Group | Devices |
+|-------|---------|
+| `dialout` | Serial ports (GPS, Meshtastic, RNode) |
+| `gpio` | Raspberry Pi GPIO pins |
+| `spi` | SPI interface |
+| `i2c` | I2C bus (BME280 sensors) |
 
 ## Quick Start (Development)
 
@@ -180,15 +236,29 @@ The web dashboard provides real-time monitoring and management of your Reticulum
 | **Connectivity Health** | rnsd, I2P, SAM, interface, and path diagnostics |
 | **Routing** | Interactive path table with pagination, hop distribution and interface breakdown charts, path freshness stats |
 | **Transport Hubs** | Hub connection status, live throughput rates, auto-discovery pool |
-| **LoRa Nodes** | Discovered LoRa radio nodes with signal metrics |
+| **Path Warming** | Proactive path refresh status for known nodes |
 | **Mesh Network** | Server-side paginated topology view with sorting, filtering, reachability scores |
+| **Mesh Bridge** | Meshtastic ↔ MeshCore relay status with pause/resume control |
 | **Peer Telemetry** | Distributed node metrics from mesh peers |
+| **Messages** | Tabbed chat UI with LXMF, Meshtastic, MeshCore, and MQTT feed views |
+| **Meshtastic Gateway** | Meshtastic node list, channels, device info, SNR metrics |
+| **MeshCore Gateway** | MeshCore device status and contact list |
+| **MeshCore Observer** | MeshCore letsmesh.net analyzer companion |
+| **LoRa Diagnostics** | LoRa peer tracking, announce beaconing, signal stats |
+| **LoRa Link Tester** | RF link quality probe/ACK measurements to Meshtastic peers |
+| **SDR Spectrum** | RTL-SDR waterfall sweep with configurable presets |
+| **LoRa Spectrum** | Dedicated LoRa-band spectrum scanner |
+| **ADS-B Radar** | Aircraft tracking with position, altitude, and heading (RTL-SDR + dump1090) |
+| **VHF Radio** | FM/AM radio receiver with tuning, squelch, and audio streaming |
+| **GPS Telemetry** | Live GPS fix, satellite count, and accuracy metrics |
+| **Node Map** | Leaflet map showing node position from GPS |
+| **Space Tracker** | Satellite positions, upcoming passes, launches, space weather |
+| **NTP / Time Sync** | GPS-disciplined NTP status and chrony source monitoring |
 | **Alerts** | Threshold-based alerts for CPU, disk, crashes |
+| **Emergency Broadcasts** | Mesh-wide priority message log |
 | **Shared Files** | Files available via RNS.Resource transfer |
 | **Sensors** | Live sensor readings with sparkline trend charts |
-| **Messages** | Unified chat UI for LXMF and Meshtastic messages |
-| **Meshtastic Gateway** | Meshtastic node list with SNR and hardware info |
-| **Emergency Broadcasts** | Mesh-wide priority message log |
+| **Plugins** | Enabled plugin list with status |
 | **Configuration** | Read-only view of current config |
 
 ### Interface Management
@@ -469,6 +539,9 @@ Reticulum can communicate over virtually any medium -- WiFi, Ethernet, LoRa radi
 | WiFi/Ethernet (Auto) | Free | LAN | Getting started |
 | TCP Client/Server | Free | Global | Internet gateway |
 | RNode LoRa | $15--150 | 1--100+ km | Off-grid mesh |
+| Meshtastic | $20--60 | 1--50+ km | LoRa mesh with existing Meshtastic network |
+| MeshCore | $20--60 | 1--50+ km | LoRa mesh with MeshCore network |
+| RTL-SDR | $25--35 | Receive only | Spectrum analysis, ADS-B, FM radio |
 | Serial / HC-12 | $5--50 | Varies | Cheap radio links |
 | KISS TNC | $35--500 | 10--50 km | Amateur radio |
 | I2P | Free | Global | Anonymous networking |
@@ -480,7 +553,9 @@ For complete hardware recommendations, configuration examples, frequency guides,
 
 ## Built-in Plugins
 
-ReticulumPi ships with 22 built-in plugins. Enable any combination in your `config.yaml`:
+ReticulumPi ships with 37 built-in plugins. Enable any combination in your `config.yaml`:
+
+**Core & Messaging**
 
 | Plugin | Description |
 |--------|-------------|
@@ -488,22 +563,57 @@ ReticulumPi ships with 22 built-in plugins. Enable any combination in your `conf
 | **message_echo** | LXMF echo responder + auto propagation node selection |
 | **info_bot** | LXMF command bot (`!weather`, `!mesh`, `!help`) |
 | **system_monitor** | CPU, temp, memory, disk metric collection |
-| **nomadnet_server** | NomadNet page server (subprocess manager) |
-| **meshchat_server** | MeshChat web UI (subprocess manager) |
-| **web_dashboard** | Real-time monitoring web UI with auth + WebSocket + interface management |
+| **messaging_hub** | Unified message store + chat UI (LXMF + Meshtastic + MeshCore) |
+| **alert_system** | LXMF threshold alerts (CPU, disk, crashes) |
+| **emergency_broadcast** | Flood-style mesh-wide priority messaging |
+| **file_transfer** | File sharing via RNS.Resource |
+| **remote_control** | Remote management over RNS Links (no SSH needed) |
+
+**Mesh Networking**
+
+| Plugin | Description |
+|--------|-------------|
 | **network_map** | Passive mesh topology mapper (SQLite, server-side pagination) |
 | **mesh_telemetry** | Distributed node metrics sharing |
-| **remote_control** | Remote management over RNS Links (no SSH needed) |
-| **alert_system** | LXMF threshold alerts (CPU, disk, crashes) |
-| **file_transfer** | File sharing via RNS.Resource |
-| **sensor_framework** | DS18B20, BME280, ADC, command sensors + logging |
-| **emergency_broadcast** | Flood-style mesh-wide priority messaging |
 | **transport_monitor** | TCP hub failover + auto-discovery + hub exchange |
 | **connectivity_monitor** | Transport health + routing diagnostics |
 | **path_warmer** | Proactive path refreshing for known nodes |
 | **transport_health** | Transport relay node reliability tracking |
 | **meshtastic_gateway** | Meshtastic LoRa mesh bridge (serial + MQTT) |
-| **messaging_hub** | Unified message store + chat UI (LXMF + Meshtastic) |
+| **meshtastic_responder** | Auto-replies to Meshtastic DMs with configurable commands |
+| **meshcore_gateway** | MeshCore LoRa mesh bridge with MQTT |
+| **meshcore_observer** | MeshCore companion observer for letsmesh.net analyzer |
+| **mesh_bridge** | Bidirectional relay between Meshtastic and MeshCore networks |
+
+**LoRa & Radio (RTL-SDR)**
+
+| Plugin | Description |
+|--------|-------------|
+| **lora_diagnostics** | LoRa traffic monitoring, announce beaconing, and peer tracking |
+| **lora_scanner** | Dedicated RTL-SDR LoRa-band scanner with channel analysis |
+| **lora_link_tester** | Meshtastic LoRa link quality tester (dedicated radio) |
+| **lora_decode** | LoRa PHY-layer codec -- Gray, interleave, Hamming FEC, whiten, CRC |
+| **lora_analysis** | LoRaWAN-aware signal processing utilities |
+| **spectrum_scanner** | RTL-SDR spectrum sweep + waterfall feed |
+| **fm_receiver** | FM/AM radio receiver via RTL-SDR |
+| **adsb_radar** | ADS-B aircraft tracker using RTL-SDR and dump1090 |
+
+**Hardware & Sensors**
+
+| Plugin | Description |
+|--------|-------------|
+| **sensor_framework** | DS18B20, BME280, ADC, command sensors + logging |
+| **gps_telemetry** | NMEA GPS receiver telemetry |
+| **ntp_server** | GPS-disciplined NTP time synchronization via chrony |
+| **space_tracker** | Satellite tracking, launch schedule, and space weather |
+
+**Infrastructure**
+
+| Plugin | Description |
+|--------|-------------|
+| **web_dashboard** | Real-time monitoring web UI with auth + WebSocket + interface management |
+| **nomadnet_server** | NomadNet page server (subprocess manager) |
+| **meshchat_server** | MeshChat web UI (subprocess manager) |
 | **yggdrasil_transport** | Yggdrasil IPv6 overlay monitoring + auto-RNS interface setup |
 | **example_plugin** | Scaffold -- copy to start your own plugin |
 
@@ -591,13 +701,13 @@ For the complete guide covering LXMF messaging, SQLite storage, background threa
 
 ## REST API
 
-The web dashboard exposes a REST API and WebSocket endpoint. All endpoints require authentication via session cookie (obtained from `POST /api/login`).
+The web dashboard exposes 70+ REST API endpoints and a WebSocket endpoint. All endpoints require authentication via session cookie (obtained from `POST /api/auth/login`).
 
 ### Key Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/login` | Authenticate and receive session cookie |
+| `POST` | `/api/auth/login` | Authenticate and receive session cookie |
 | `GET` | `/api/status` | Node status, metrics, plugins, interfaces |
 | `GET` | `/api/interfaces/config` | List all Reticulum interfaces from config file |
 | `POST` | `/api/interfaces/{name}/toggle` | Toggle interface enabled/disabled in config |
@@ -605,13 +715,25 @@ The web dashboard exposes a REST API and WebSocket endpoint. All endpoints requi
 | `POST` | `/api/services/restart` | Restart rnsd + reticulumpi (requires sudoers) |
 | `GET` | `/api/mesh/nodes` | Paginated mesh node list (`page`, `per_page`, `sort`, `order`, `search`) |
 | `GET` | `/api/reachability` | Node reachability scores (`hashes` for targeted, or paginated) |
-| `GET` | `/api/routing/table` | Paginated routing table with sort/filter |
-| `GET` | `/api/routing/stats` | Hop distribution and interface breakdown |
+| `GET` | `/api/routing` | Paginated routing table with sort/filter |
 | `GET` | `/api/sensors/history` | Time-series sensor data |
 | `GET` | `/api/messages` | Message history with transport/direction filters |
-| `POST` | `/api/messages/send` | Send a message via LXMF or Meshtastic |
+| `POST` | `/api/messages/send` | Send a message via LXMF, Meshtastic, or MeshCore |
+| `GET` | `/api/messages/conversations` | Conversation threads with unread counts |
+| `GET` | `/api/meshtastic/status` | Meshtastic connection status and node list |
+| `GET` | `/api/meshcore/status` | MeshCore connection status and contacts |
+| `GET,POST` | `/api/mesh_bridge/{status,running}` | Mesh bridge relay status and pause/resume |
+| `GET` | `/api/lora` | LoRa diagnostics (peers, stats, announce mode) |
+| `GET,POST` | `/api/link_tester` | LoRa link quality test start/stop/results |
+| `GET` | `/api/gps` | GPS fix, satellite count, accuracy |
+| `GET` | `/api/ntp` | NTP sync status and chrony sources |
+| `GET` | `/api/adsb` | ADS-B aircraft positions |
+| `GET` | `/api/space` | Satellite positions, launches, space weather |
+| `POST` | `/api/radio/tune` | Tune FM/AM radio to frequency |
+| `GET` | `/api/radio/audio` | Audio stream from FM receiver |
+| `GET` | `/api/spectrum/presets` | Spectrum scanner preset list |
 | `GET` | `/api/config` | Sanitized read-only config view |
-| `WS` | `/ws` | WebSocket for real-time updates (metrics, mesh deltas, messages) |
+| `WS` | `/ws` | WebSocket for real-time updates (metrics, mesh deltas, messages, spectrum) |
 
 For complete API documentation, see **[docs/api-reference.md](docs/api-reference.md)**.
 
@@ -627,12 +749,13 @@ reticulumPi/
 ├── CONTRIBUTING.md                 # How to contribute
 ├── SECURITY.md                     # Security policy and best practices
 ├── docs/
-│   ├── install-layout.md           # Detailed install directory & file flow docs
-│   ├── plugins.md                  # Built-in plugin reference (all 21 plugins)
+│   ├── plugins.md                  # Built-in plugin reference (all 37 plugins)
 │   ├── plugin-development.md       # Plugin development guide (full walkthrough)
 │   ├── api-reference.md            # REST API & WebSocket documentation
 │   ├── connectivity-guide.md       # Hardware, radio, and interface guide
-│   └── troubleshooting.md          # FAQ and common issues
+│   ├── install-layout.md           # Detailed install directory & file flow docs
+│   ├── troubleshooting.md          # FAQ and common issues
+│   └── solar-power-build.md        # Off-grid solar-powered node hardware guide
 ├── config/
 │   ├── nomadnet/
 │   │   └── pages/                  # NomadNet pages (.mu files)
@@ -648,17 +771,21 @@ reticulumPi/
 │       └── reticulumpi-services    # Sudoers rule for dashboard service restart
 ├── src/reticulumpi/
 │   ├── __init__.py                 # Package version
+│   ├── _paths.py                   # Path resolution utilities
+│   ├── announce_dispatcher.py      # Centralized announce handler multiplexer
 │   ├── app.py                      # Core orchestrator (plugin hot-reload)
 │   ├── cli.py                      # CLI entry point (+ remote control client)
 │   ├── config.py                   # YAML config loader with validation
 │   ├── event_bus.py                # Thread-safe publish/subscribe event bus
-│   ├── events.py                   # Event type constants
+│   ├── events.py                   # Event type constants (60+ event types)
 │   ├── identity_manager.py         # Persistent identity
+│   ├── mtu.py                      # MTU calculation for different interfaces
 │   ├── plugin_base.py              # Abstract plugin base class
 │   ├── plugin_loader.py            # Plugin discovery
 │   ├── reachability.py             # Path discovery and scoring
 │   ├── remote_client.py            # Remote control CLI client
 │   ├── rns_config.py               # Reticulum config parser (line-preserving)
+│   ├── rtlsdr.py                   # RTL-SDR device enumeration + serial resolver
 │   ├── data/
 │   │   └── community_hubs.yaml     # Curated community TCP hub list for auto-discovery
 │   └── builtin_plugins/            # Built-in plugins (shipped with package)
@@ -666,31 +793,75 @@ reticulumPi/
 │       ├── message_echo.py         # LXMF echo responder
 │       ├── info_bot.py             # LXMF command bot (weather, etc.)
 │       ├── system_monitor.py       # System metrics collector
-│       ├── nomadnet_server.py      # NomadNet page server manager
-│       ├── meshchat_server.py      # MeshChat web UI manager
+│       ├── messaging_hub.py        # Unified messaging store + adapters
+│       ├── alert_system.py         # LXMF threshold alerts
+│       ├── emergency_broadcast.py  # Mesh-wide flood-style messaging
+│       ├── file_transfer.py        # File transfer via RNS.Resource
+│       ├── remote_control.py       # Remote management over RNS Links
 │       ├── network_map.py          # Passive mesh topology mapper
 │       ├── mesh_telemetry.py       # Distributed node metrics sharing
-│       ├── remote_control.py       # Remote management over RNS Links
-│       ├── alert_system.py         # LXMF threshold alerts
-│       ├── file_transfer.py        # File transfer via RNS.Resource
-│       ├── sensor_framework.py     # Config-driven sensor reading + logging
-│       ├── emergency_broadcast.py  # Mesh-wide flood-style messaging
 │       ├── transport_monitor.py    # TCP hub health + failover + auto-discovery
 │       ├── connectivity_monitor.py # Transport health + routing diagnostics
 │       ├── path_warmer.py          # Proactive path refreshing for known nodes
 │       ├── transport_health.py     # Transport relay node reliability tracking
 │       ├── meshtastic_gateway.py   # Meshtastic LoRa ↔ LXMF bridge
-│       ├── messaging_hub.py        # Unified messaging store + adapters
+│       ├── meshtastic_responder.py # Meshtastic DM auto-reply bot
+│       ├── meshcore_gateway.py     # MeshCore LoRa mesh bridge (MQTT)
+│       ├── meshcore_observer.py    # MeshCore letsmesh.net observer
+│       ├── mesh_bridge.py          # Meshtastic ↔ MeshCore bidirectional relay
+│       ├── lora_diagnostics.py     # LoRa peer tracking + announce beaconing
+│       ├── lora_scanner.py         # RTL-SDR LoRa-band spectrum scanner
+│       ├── lora_link_tester.py     # RF link quality probe/ACK measurements
+│       ├── lora_decode.py          # LoRa PHY-layer codec (Gray/Hamming/CRC)
+│       ├── lora_analysis.py        # LoRaWAN-aware signal processing
+│       ├── spectrum_scanner.py     # RTL-SDR sweep-based waterfall
+│       ├── fm_receiver.py          # FM/AM radio receiver via rtl_fm
+│       ├── adsb_radar.py           # ADS-B aircraft tracker (dump1090)
+│       ├── gps_telemetry.py        # NMEA GPS receiver telemetry
+│       ├── space_tracker.py        # Satellite tracking + space weather (SGP4)
+│       ├── ntp_server.py           # GPS-disciplined NTP via chrony
+│       ├── sensor_framework.py     # Config-driven sensor reading + logging
+│       ├── nomadnet_server.py      # NomadNet page server manager
+│       ├── meshchat_server.py      # MeshChat web UI manager
 │       ├── yggdrasil_transport.py  # Yggdrasil IPv6 overlay monitor + auto-RNS setup
 │       ├── web_dashboard/          # Secure web dashboard (aiohttp)
-│       │   ├── __init__.py         # Plugin class + aiohttp server lifecycle
-│       │   ├── api.py              # REST API handlers (36+ endpoints)
+│       │   ├── plugin.py           # Plugin class + aiohttp server lifecycle
+│       │   ├── server.py           # Server initialization + middleware
+│       │   ├── auth.py             # Session auth + scrypt password hashing
+│       │   ├── api.py              # Core REST API handlers
+│       │   ├── api_services.py     # Service API handlers (LoRa, messaging, alerts, sensors)
+│       │   ├── api_mesh.py         # Mesh network API (nodes, routing, reachability)
+│       │   ├── api_interfaces.py   # Interface management API (toggle, add)
+│       │   ├── api_radio.py        # Radio API (FM tuning, audio stream)
 │       │   ├── websocket_handler.py # WebSocket broadcast (delta mode)
+│       │   ├── broadcast_registry.py # Tiered plugin data collection for WebSocket
+│       │   ├── ssl_utils.py        # SSL/TLS certificate utilities
 │       │   └── static/             # Frontend assets
-│       │       ├── index.html      # Dashboard layout
+│       │       ├── index.html      # Dashboard layout (30+ sections)
+│       │       ├── app.js          # Core dashboard logic (~1700 lines)
+│       │       ├── mesh.js         # Mesh network panel
+│       │       ├── routing.js      # Routing table panel
+│       │       ├── lora.js         # LoRa diagnostics panel
+│       │       ├── lora_spectrum.js # LoRa spectrum panel
+│       │       ├── spectrum.js     # SDR spectrum waterfall panel
+│       │       ├── spectrum_common.js # Shared spectrum rendering
+│       │       ├── meshtastic.js   # Meshtastic panel
+│       │       ├── meshcore.js     # MeshCore panel
+│       │       ├── mesh_bridge_panel.js # Mesh bridge panel
+│       │       ├── messages_panel.js # Messages tab controller
+│       │       ├── messages_lxmf.js # LXMF messages tab
+│       │       ├── messages_meshtastic_lora.js # Meshtastic messages tab
+│       │       ├── messages_meshcore.js # MeshCore messages tab
+│       │       ├── mqtt_feed.js    # MQTT feed tab
+│       │       ├── link_tester.js  # LoRa link tester panel
+│       │       ├── adsb.js         # ADS-B radar panel
+│       │       ├── gps.js          # GPS telemetry panel
+│       │       ├── map.js          # Leaflet node map
+│       │       ├── space.js        # Space tracker panel
+│       │       ├── radio.js        # FM radio panel
+│       │       ├── ntp.js          # NTP time sync panel
 │       │       ├── login.html      # Login page
 │       │       ├── login.js        # Login form handler (CSP-compliant)
-│       │       ├── app.js          # Dashboard logic (~2600 lines vanilla JS)
 │       │       └── style.css       # Dashboard styles
 │       └── example_plugin.py       # Scaffold — copy to start your own plugin
 ├── plugins/
@@ -707,7 +878,7 @@ reticulumPi/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh              # Container entrypoint (starts rnsd + reticulumpi)
-└── tests/                          # 683 tests across 31 files (pytest)
+└── tests/                          # 1,676 tests across 52 files (pytest)
     ├── conftest.py
     ├── test_app.py                  # App orchestrator tests
     ├── test_cli.py                  # CLI entry point tests
@@ -716,6 +887,10 @@ reticulumPi/
     ├── test_plugin_base.py          # Base class helper tests
     ├── test_plugin_loader.py
     ├── test_event_bus.py            # Event bus thread-safety tests
+    ├── test_announce_dispatcher.py  # Announce dispatcher tests
+    ├── test_reachability.py         # Path discovery + scoring tests
+    ├── test_rns_config.py           # Config parser round-trip tests
+    ├── test_rtlsdr.py              # RTL-SDR device enumeration tests
     ├── test_message_echo.py         # LXMF echo + propagation selection tests
     ├── test_info_bot.py             # Info bot command + weather tests
     ├── test_nomadnet_server.py      # NomadNet plugin tests
@@ -734,20 +909,38 @@ reticulumPi/
     ├── test_path_warmer.py          # Path warming + ensure_path tests
     ├── test_transport_health.py     # Transport node tracking + SQLite tests
     ├── test_meshtastic_gateway.py   # Meshtastic gateway serial + MQTT tests
+    ├── test_meshtastic_responder.py # Meshtastic auto-reply tests
+    ├── test_meshchat_announce_mux.py # MeshChat announce mux tests
     ├── test_messaging_hub.py        # Messaging hub + adapters tests
-    ├── test_yggdrasil_transport.py  # Yggdrasil transport monitor + auto-config tests
+    ├── test_meshcore_gateway.py     # MeshCore gateway tests
+    ├── test_meshcore_observer.py    # MeshCore observer tests
+    ├── test_mesh_bridge.py          # Mesh bridge relay + loop prevention tests
+    ├── test_lora_diagnostics.py     # LoRa peer tracking tests
+    ├── test_lora_scanner.py         # LoRa scanner tests
+    ├── test_lora_link_tester.py     # Link tester probe/ACK tests
+    ├── test_lora_decode.py          # LoRa codec (Gray/Hamming/CRC) tests
+    ├── test_lora_analysis.py        # LoRa signal analysis tests
+    ├── test_spectrum_scanner.py     # Spectrum scanner tests
+    ├── test_fm_receiver.py          # FM receiver tests
+    ├── test_adsb_radar.py           # ADS-B radar tests
+    ├── test_gps_telemetry.py        # GPS telemetry tests
+    ├── test_space_tracker.py        # Satellite tracking tests
+    ├── test_yggdrasil_transport.py  # Yggdrasil transport tests
     ├── test_routing_api.py          # Routing API endpoint tests
-    ├── test_rns_config.py           # Config parser round-trip tests
-    └── test_web_dashboard.py        # Dashboard auth + API + WebSocket tests
+    ├── test_web_dashboard.py        # Dashboard auth + API tests
+    ├── test_websocket_handler.py    # WebSocket broadcast + delta tests
+    ├── test_api_write_endpoints.py  # API write endpoint tests
+    └── test_server_middleware.py    # Server middleware + auth bypass tests
 ```
 
 ## CLI Usage
 
 ```
 reticulumpi [--version] [--config PATH] [--reticulum-config DIR] [--log-level 0-7]
-            [--check] [--list-plugins]
+            [--log-format {text,json}] [--check] [--list-plugins]
             [--remote HASH] [--command CMD] [--timeout SECS]
             [--backup-identity PATH] [--restore-identity PATH] [--hash-password]
+            [--mesh-bridge {status,pause,resume}]
 ```
 
 | Flag | Description |
@@ -756,6 +949,7 @@ reticulumpi [--version] [--config PATH] [--reticulum-config DIR] [--log-level 0-
 | `--config`, `-c` | Path to app config YAML (default: `~/.config/reticulumpi/config.yaml`) |
 | `--reticulum-config` | Override Reticulum config directory |
 | `--log-level` | Override log level: 0=critical, 1=error, 2-3=warning, 4=info, 5-7=debug |
+| `--log-format` | Log output format: `text` (default) or `json` for structured logging |
 | `--check` | Validate configuration and plugin discovery without starting (dry run) |
 | `--list-plugins` | List all discoverable plugins and exit |
 | `--remote HASH` | Connect to a remote node's `remote_control` plugin over Reticulum |
@@ -764,6 +958,7 @@ reticulumpi [--version] [--config PATH] [--reticulum-config DIR] [--log-level 0-
 | `--backup-identity PATH` | Back up the node identity file to the given path |
 | `--restore-identity PATH` | Restore a node identity from the given path |
 | `--hash-password` | Hash a password for use in web_dashboard config (interactive) |
+| `--mesh-bridge` | Control the Meshtastic ↔ MeshCore bridge: `status`, `pause`, or `resume` |
 
 ## Architecture
 
@@ -790,9 +985,17 @@ Plugins can be enabled/disabled at runtime via `app.enable_plugin(name)` / `app.
 
 - **Line-preserving config parser** (`rns_config.py`): Reticulum uses an INI-like format with `[[double brackets]]` for interfaces. Python's `configparser` can't represent this and drops comments on round-trip. ReticulumPi uses a custom line-based parser that preserves every byte of the original file except the specific values it modifies. Config writes are atomic (write to temp file, then `os.replace`).
 
+- **Announce dispatcher** (`announce_dispatcher.py`): A centralized announce handler multiplexer that replaces per-plugin callback registration. It registers a single wildcard handler with RNS, queues incoming announces, and dispatches them to plugin subscribers from a single worker thread -- eliminating the per-callback thread overhead that caused memory fragmentation with large networks. Includes a circuit breaker that disables misbehaving subscribers after consecutive timeouts.
+
+- **Broadcast registry** (`broadcast_registry.py`): A declarative plugin data collection system for WebSocket broadcasting. Each plugin sets `broadcast_tier` and `broadcast_keys` class attributes and optionally overrides `broadcast_snapshot()`. The registry iterates plugins by tier while respecting a configurable time budget, keeping the broadcast loop responsive even as plugins grow.
+
 - **WebSocket delta broadcasting**: The mesh network can have 10,000+ known nodes. Instead of broadcasting the full list every cycle, the WebSocket sends `{known_nodes: count, version: N, recent_announces: [...]}`. The frontend re-fetches the current page only when the version changes.
 
 - **Targeted reachability scoring**: Instead of scoring all known nodes (expensive path lookups), the frontend sends only the hashes of nodes currently visible on screen. The API scores just those, keeping response times fast even with large networks.
+
+- **Modular frontend**: The dashboard frontend is split into 23 panel-specific JavaScript modules (mesh.js, routing.js, adsb.js, spectrum.js, etc.) loaded from a core `app.js` coordinator, enabling independent development and lazy initialization of each dashboard section.
+
+- **Shared RTL-SDR management** (`rtlsdr.py`): A device enumeration and serial-to-index resolver shared across all SDR-using plugins (spectrum scanner, LoRa scanner, FM receiver, ADS-B radar), supporting multi-SDR setups where each plugin is assigned a different dongle by serial number.
 
 ## License
 
