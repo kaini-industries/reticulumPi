@@ -45,6 +45,15 @@ def _mock_urlopen(json_data):
     return mock_cm
 
 
+def _wait_for_call(mock, timeout=2.0, poll=0.01):
+    """Poll until *mock* has been called, or *timeout* expires."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if mock.call_count:
+            return
+        time.sleep(poll)
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 
@@ -344,12 +353,7 @@ class TestEventFlow:
         # Publish via the real event bus — callback is offloaded to a
         # background thread, so we need a short wait.
         mock_app.event_bus.publish(events.MESHTASTIC_MESSAGE_RECEIVED, data)
-        import time
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if mock_gateway.send_message.call_count:
-                break
-            time.sleep(0.01)
+        _wait_for_call(mock_gateway.send_message)
         mock_gateway.send_message.assert_called_once()
         args = mock_gateway.send_message.call_args
         assert "Pong!" in args[0][0]  # first positional arg is text
@@ -383,12 +387,7 @@ class TestEventFlow:
         mock_app.get_plugin.return_value = mock_gateway
         data = _make_event(text="hello")
         mock_app.event_bus.publish(events.MESHTASTIC_MESSAGE_RECEIVED, data)
-        import time
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if mock_gateway.send_message.call_count:
-                break
-            time.sleep(0.01)
+        _wait_for_call(mock_gateway.send_message)
         mock_gateway.send_message.assert_called_once()
         sent_text = mock_gateway.send_message.call_args[0][0]
         assert sent_text == "Hi from the mesh!"

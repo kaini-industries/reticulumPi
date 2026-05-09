@@ -161,19 +161,23 @@ class InternetProbe:
 
         with self._lock:
             was_online = self._is_online
+            if reachable:
+                self._consecutive_failures = 0
+                consecutive = 0
+            else:
+                self._consecutive_failures += 1
+                consecutive = self._consecutive_failures
 
         if reachable:
-            self._consecutive_failures = 0
             if not was_online:
                 self._set_state(True)
                 log.info("Internet connectivity restored")
         else:
-            self._consecutive_failures += 1
-            if was_online and self._consecutive_failures >= self._offline_threshold:
+            if was_online and consecutive >= self._offline_threshold:
                 self._set_state(False)
                 log.warning(
                     "Internet connectivity lost (%d consecutive failures)",
-                    self._consecutive_failures,
+                    consecutive,
                 )
 
     def _set_state(self, online: bool) -> None:

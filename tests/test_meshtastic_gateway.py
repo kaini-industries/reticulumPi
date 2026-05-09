@@ -1329,3 +1329,198 @@ class TestLoadOrCreateNodeNum:
             f.write("not-valid-hex\n")
         num = _load_or_create_node_num(path)
         assert 0x10000000 <= num <= 0x7FFFFFFF
+
+
+# ---------------------------------------------------------------------------
+# TestDrainSendQueue
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_lxmf_message(source_hex="aabbccdd" + "0" * 24, content="hello"):
+    msg = MagicMock()
+    msg.source_hash = bytes.fromhex(source_hex)
+    msg.content_as_string.return_value = content
+    return msg
+
+
+def _init_queue_state(plugin):
+    """Set up the queue/lock attributes that start() normally initializes."""
+    import collections
+    import threading
+    plugin._lock = threading.Lock()
+    plugin._active = True
+    plugin._connected = True
+    plugin._mesh_interface = MagicMock()
+    plugin._serial_listener = None
+    plugin._send_min_interval = 0
+    plugin._last_send_time = 0.0
+    plugin._send_queue_max = int(plugin.config.get("send_queue_size", 10))
+    plugin._send_queue_ttl = float(plugin.config.get("send_queue_ttl", 60))
+    plugin._send_queue = collections.deque()
+    plugin._send_queue_dropped = 0
+    plugin._msgs_rate_limited = 0
+    plugin._msgs_lxmf_to_mesh = 0
+    plugin._last_lxmf_msg_time = None
+    plugin._pending_lxmf = collections.deque()
+    plugin._pending_lxmf_max = int(plugin.config.get("pending_lxmf_size", 20))
+    plugin._pending_lxmf_ttl = float(plugin.config.get("pending_lxmf_ttl", 120))
+    plugin._lxmf_allow_set = set()
+    return plugin
+
+
+class TestDrainSendQueue:
+    """Tests for _drain_send_queue — the rate-limited outbound queue."""
+
+    def _setup_plugin(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        return _init_queue_state(plugin)
+
+    def test_drains_multiple_messages(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        now = time.time()
+        for i in range(3):
+            plugin._send_queue.append((now, f"msg{i}", 0))
+        plugin._drain_send_queue()
+        assert plugin._mesh_interface.sendText.call_count == 3
+        assert len(plugin._send_queue) == 0
+
+    def test_skips_expired_messages(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        expired = time.time() - plugin._send_queue_ttl - 10
+        now = time.time()
+        plugin._send_queue.append((expired, "old", 0))
+        plugin._send_queue.append((now, "fresh1", 0))
+        plugin._send_queue.append((now, "fresh2", 0))
+        plugin._drain_send_queue()
+        assert plugin._mesh_interface.sendText.call_count == 2
+        assert len(plugin._send_queue) == 0
+
+    def test_stops_when_rate_limited(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._send_min_interval = 9999
+        plugin._last_send_time = time.time()
+        plugin._send_queue.append((time.time(), "msg", 0))
+        plugin._drain_send_queue()
+        plugin._mesh_interface.sendText.assert_not_called()
+        assert len(plugin._send_queue) == 1
+
+    def test_no_interface_returns(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._connected = False
+        plugin._mesh_interface = None
+        plugin._serial_listener = None
+        plugin._send_queue.append((time.time(), "msg", 0))
+        plugin._drain_send_queue()
+        assert len(plugin._send_queue) == 0
+
+    def test_empty_queue_no_op(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._drain_send_queue()
+        plugin._mesh_interface.sendText.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestEnqueueLxmfSend
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueLxmfSend:
+    """Tests for _enqueue_lxmf_send — queuing rate-limited LXMF messages."""
+
+    def _setup_plugin(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        return _init_queue_state(plugin)
+
+    def test_enqueues_message(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        msg = _make_mock_lxmf_message()
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 1
+
+    def test_drops_oldest_when_full(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._send_queue_max = 2
+        for i in range(3):
+            msg = _make_mock_lxmf_message(content=f"msg{i}")
+            plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 2
+        assert plugin._send_queue_dropped == 1
+
+    def test_allow_list_blocks(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._lxmf_allow_set = {"aaaa" + "0" * 28}
+        msg = _make_mock_lxmf_message(source_hex="bbbbccdd" + "0" * 24)
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 0
+
+    def test_allow_list_permits(self, mock_app, gw_config):
+        source = "aabbccdd" + "0" * 24
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._lxmf_allow_set = {source}
+        msg = _make_mock_lxmf_message(source_hex=source)
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 1
+
+    def test_formatting_error_no_crash(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        msg = _make_mock_lxmf_message()
+        msg.content_as_string.side_effect = RuntimeError("boom")
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestRetryPendingLxmf
+# ---------------------------------------------------------------------------
+
+
+class TestRetryPendingLxmf:
+    """Tests for _retry_pending_lxmf — retrying deferred LXMF messages."""
+
+    def _setup_plugin(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        return _init_queue_state(plugin)
+
+    def test_retries_all_items(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        now = time.time()
+        for i in range(3):
+            plugin._pending_lxmf.append((now, bytes(16), f"text{i}"))
+        with patch.object(plugin, "_try_send_lxmf", return_value=True) as mock_send:
+            plugin._retry_pending_lxmf()
+        assert mock_send.call_count == 3
+        assert len(plugin._pending_lxmf) == 0
+
+    def test_continues_past_failure(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        now = time.time()
+        hash_a, hash_b, hash_c = bytes(16), bytes(range(16)), bytes([0xFF] * 16)
+        plugin._pending_lxmf.append((now, hash_a, "a"))
+        plugin._pending_lxmf.append((now, hash_b, "b"))
+        plugin._pending_lxmf.append((now, hash_c, "c"))
+
+        def side_effect(h, _text):
+            return h != hash_a
+
+        with patch.object(plugin, "_try_send_lxmf", side_effect=side_effect) as mock_send:
+            plugin._retry_pending_lxmf()
+        assert mock_send.call_count == 3
+        assert len(plugin._pending_lxmf) == 1
+        assert plugin._pending_lxmf[0][1] == hash_a
+
+    def test_expired_items_removed(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        expired = time.time() - plugin._pending_lxmf_ttl - 10
+        now = time.time()
+        plugin._pending_lxmf.append((expired, bytes(16), "old"))
+        plugin._pending_lxmf.append((now, bytes(range(16)), "fresh"))
+        with patch.object(plugin, "_try_send_lxmf", return_value=True) as mock_send:
+            plugin._retry_pending_lxmf()
+        assert mock_send.call_count == 1
+        assert len(plugin._pending_lxmf) == 0
+
+    def test_empty_queue_no_op(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        with patch.object(plugin, "_try_send_lxmf") as mock_send:
+            plugin._retry_pending_lxmf()
+        mock_send.assert_not_called()

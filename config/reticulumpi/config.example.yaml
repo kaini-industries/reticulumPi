@@ -343,6 +343,8 @@ reticulumpi:
     #  serial_retry_interval: 30       # Seconds between serial open retries (faster than probe)
     #  send_queue_size: 10             # Max rate-limited messages to queue (0=drop immediately)
     #  send_queue_ttl: 60              # Seconds before queued messages expire
+    #  pending_lxmf_size: 20           # Max deferred LXMF messages awaiting path resolution
+    #  pending_lxmf_ttl: 120           # Seconds before deferred LXMF messages expire
     #  # Firmware watchdog — detects hung firmware where the USB serial
     #  # port stays open but the MCU is frozen.  Activates whenever a
     #  # physical device is connected (device_probe_port or serial mode).

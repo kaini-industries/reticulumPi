@@ -747,6 +747,14 @@ class MeshtasticGateway(PluginBase):
         if not isinstance(sqt, (int, float)) or sqt <= 0:
             raise ValueError("send_queue_ttl must be > 0 seconds")
 
+        pls = self.config.get("pending_lxmf_size", 20)
+        if not isinstance(pls, int) or pls < 0:
+            raise ValueError("pending_lxmf_size must be a non-negative integer")
+
+        plt = self.config.get("pending_lxmf_ttl", 120)
+        if not isinstance(plt, (int, float)) or plt <= 0:
+            raise ValueError("pending_lxmf_ttl must be > 0 seconds")
+
         # Firmware watchdog
         fw_wd = self.config.get("firmware_watchdog", {})
         if not isinstance(fw_wd, dict):
@@ -954,8 +962,8 @@ class MeshtasticGateway(PluginBase):
                 self.log.warning("Skipping invalid LXMF recipient hash: %s", h)
 
         self._pending_lxmf: collections.deque[tuple[float, bytes, str]] = collections.deque()
-        self._pending_lxmf_max = 20
-        self._pending_lxmf_ttl: float = 120.0
+        self._pending_lxmf_max = int(self.config.get("pending_lxmf_size", 20))
+        self._pending_lxmf_ttl: float = float(self.config.get("pending_lxmf_ttl", 120))
 
         self._lxmf_allow_set: set[str] = {
             h.lower() for h in self.config.get("lxmf_allow_list", [])
@@ -1031,7 +1039,7 @@ class MeshtasticGateway(PluginBase):
     def on_internet_lost(self) -> None:
         if self._mode != MODE_MQTT:
             return
-        self.log.warning("Internet lost — MQTT reconnection paused")
+        self.log.warning("Internet lost — MQTT reconnection will pause")
 
     # ── Device connection management ────────────────────────────────
 
@@ -2155,6 +2163,21 @@ class MeshtasticGateway(PluginBase):
 
     def _enqueue_lxmf_send(self, message: Any) -> None:
         """Enqueue a rate-limited LXMF message for later delivery."""
+        try:
+            sender_hash = RNS.prettyhexrep(message.source_hash)
+            content = message.content_as_string()
+            sender_hex = message.source_hash.hex()
+
+            if self._lxmf_allow_set and sender_hex.lower() not in self._lxmf_allow_set:
+                return
+
+            prefix = self.config.get("lxmf_prefix", DEFAULT_LXMF_PREFIX)
+            header = f"{prefix} {sender_hash}:\n"
+            formatted = truncate_for_mtu(header, content, MESHTASTIC_MTU)
+            channel = self.config.get("meshtastic_channel", 0)
+        except Exception:
+            self.log.exception("Error formatting LXMF message for queue")
+            return
         with self._lock:
             if len(self._send_queue) >= self._send_queue_max:
                 self._send_queue_dropped += 1
@@ -2163,21 +2186,6 @@ class MeshtasticGateway(PluginBase):
                     self._send_queue_max,
                 )
                 self._send_queue.popleft()
-            try:
-                sender_hash = RNS.prettyhexrep(message.source_hash)
-                content = message.content_as_string()
-                sender_hex = message.source_hash.hex()
-
-                if self._lxmf_allow_set and sender_hex.lower() not in self._lxmf_allow_set:
-                    return
-
-                prefix = self.config.get("lxmf_prefix", DEFAULT_LXMF_PREFIX)
-                header = f"{prefix} {sender_hash}:\n"
-                formatted = truncate_for_mtu(header, content, MESHTASTIC_MTU)
-                channel = self.config.get("meshtastic_channel", 0)
-            except Exception:
-                self.log.exception("Error formatting LXMF message for queue")
-                return
             self._send_queue.append((time.time(), formatted, channel))
             self.log.debug(
                 "LXMF message queued (%d pending)", len(self._send_queue),
@@ -2219,7 +2227,6 @@ class MeshtasticGateway(PluginBase):
                 self.log.debug("Sent queued LXMF message on ch%d", channel)
             except Exception:
                 self.log.exception("Error sending queued message to Meshtastic")
-            return
 
     # ── Meshtastic pubsub callbacks ─────────────────────────────────
 
@@ -2590,7 +2597,7 @@ class MeshtasticGateway(PluginBase):
                 with self._lock:
                     if self._pending_lxmf:
                         self._pending_lxmf.rotate(-1)
-                break
+                continue
 
     def _handle_propagation_announce(
         self, destination_hash: bytes, announced_identity: Any, app_data: bytes

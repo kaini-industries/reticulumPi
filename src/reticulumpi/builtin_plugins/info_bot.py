@@ -136,6 +136,12 @@ _WMO_CODES = {
 
 _HTTP_TIMEOUT = 10  # seconds
 
+_FALLBACK_JOKES = [
+    ("Why do programmers prefer dark mode?", "Because light attracts bugs."),
+    ("Why did the packet cross the network?", "To get to the other site."),
+    ("What's a mesh network's favorite dance?", "The hop."),
+    ("How do routers greet each other?", "With a SYN!"),
+]
 
 
 class InfoBot(PluginBase):
@@ -514,12 +520,16 @@ class InfoBot(PluginBase):
                 return f"No definition found for: {word}"
             return f"Dictionary lookup failed (HTTP {exc.code})."
         except urllib.error.URLError:
-            return "Dictionary lookup unavailable — node is offline."
+            if not self.internet_available:
+                return "Dictionary lookup unavailable — node is offline."
+            return "Dictionary lookup unavailable — network error."
         except (KeyError, TypeError, ValueError):
             return f"Could not parse definition for: {word}"
 
     def _cmd_news(self, args: str = "") -> str:
         """Fetch latest headlines from Wikinews RSS."""
+        if not self.internet_available:
+            return "News unavailable — node is offline."
         try:
             # Use Wikinews Atom feed — no API key needed
             url = "https://en.wikinews.org/w/api.php?" + urllib.parse.urlencode({
@@ -552,7 +562,9 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "News unavailable — node is offline."
+            if not self.internet_available:
+                return "News unavailable — node is offline."
+            return "News unavailable — network error."
         except Exception:
             return "Could not parse news feed."
 
@@ -587,7 +599,9 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "ISS position unavailable — node is offline."
+            if not self.internet_available:
+                return "ISS position unavailable — node is offline."
+            return "ISS position unavailable — network error."
         except (KeyError, TypeError, ValueError):
             return "Could not parse ISS data."
 
@@ -644,12 +658,17 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Crypto prices unavailable — node is offline."
+            if not self.internet_available:
+                return "Crypto prices unavailable — node is offline."
+            return "Crypto prices unavailable — network error."
         except (KeyError, TypeError, ValueError):
             return f"Could not parse price data for: {symbol}"
 
     def _cmd_joke(self, _args: str = "") -> str:
         """Fetch a random joke."""
+        if not self.internet_available:
+            setup, punchline = random.choice(_FALLBACK_JOKES)
+            return f"{setup}\n\n{punchline}"
         try:
             req = urllib.request.Request(
                 "https://official-joke-api.appspot.com/random_joke",
@@ -661,14 +680,7 @@ class InfoBot(PluginBase):
             punchline = data.get("punchline", "")
             return f"{setup}\n\n{punchline}"
         except Exception:
-            # Fallback to a local joke
-            jokes = [
-                ("Why do programmers prefer dark mode?", "Because light attracts bugs."),
-                ("Why did the packet cross the network?", "To get to the other site."),
-                ("What's a mesh network's favorite dance?", "The hop."),
-                ("How do routers greet each other?", "With a SYN!"),
-            ]
-            setup, punchline = random.choice(jokes)
+            setup, punchline = random.choice(_FALLBACK_JOKES)
             return f"{setup}\n\n{punchline}"
 
     def _cmd_solar(self, _args: str = "") -> str:
@@ -720,7 +732,9 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Solar data unavailable — node is offline."
+            if not self.internet_available:
+                return "Solar data unavailable — node is offline."
+            return "Solar data unavailable — network error."
         except (KeyError, TypeError, ValueError, IndexError):
             return "Could not parse solar data."
 
@@ -1065,7 +1079,9 @@ class InfoBot(PluginBase):
 
         except urllib.error.URLError as exc:
             self.log.warning("Weather fetch failed for %r: %s", location, exc)
-            return "Weather unavailable — node is offline."
+            if not self.internet_available:
+                return "Weather unavailable — node is offline."
+            return "Weather unavailable — network error."
         except (KeyError, TypeError, ValueError) as exc:
             self.log.warning("Weather parse error for %r: %s", location, exc)
             return f"Could not parse weather data for: {location}"
