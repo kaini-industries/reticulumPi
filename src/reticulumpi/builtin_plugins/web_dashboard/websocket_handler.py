@@ -23,13 +23,18 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_prev_broadcast_data: dict[str, Any] = {}
 
-def _get_chirp_plugin(plugin: Any) -> Any:
-    """Resolve chirp_detector (preferred) or lora_chirp_viewer fallback."""
-    return (
-        plugin.app.plugins.get("chirp_detector")
-        or plugin.app.plugins.get("lora_chirp_viewer")
-    )
+
+def _diff_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Return only keys whose value object changed since last broadcast."""
+    global _prev_broadcast_data
+    result = {}
+    for key, value in data.items():
+        if value is not _prev_broadcast_data.get(key):
+            result[key] = value
+    _prev_broadcast_data = data
+    return result
 
 
 # ── RNode config cache ──────────────────────────────────────────────
@@ -322,10 +327,7 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         except Exception:
             log.debug("Failed to send spectrum history hello", exc_info=True)
 
-    lora_scanner = (
-        plugin.app.get_plugin("lora_scanner")
-        or plugin.app.get_plugin("lora_chirp_viewer")
-    )
+    lora_scanner = plugin.app.get_plugin("lora_scanner")
     if lora_scanner and hasattr(lora_scanner, "get_history"):
         try:
             lora_hist = lora_scanner.get_history()
@@ -338,66 +340,6 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             }))
         except Exception:
             log.debug("Failed to send lora_scanner history hello", exc_info=True)
-
-    chirp_viewer = _get_chirp_plugin(plugin)
-    _chirp_hist_fn = (
-        getattr(chirp_viewer, "get_waterfall_history", None)
-        or getattr(chirp_viewer, "get_chirp_waterfall_history", None)
-    ) if chirp_viewer else None
-    if _chirp_hist_fn:
-        try:
-            chirp_hist = _chirp_hist_fn()
-        except Exception:
-            chirp_hist = {"available": False}
-        try:
-            await ws.send_str(json.dumps({
-                "type": "chirp_waterfall_history",
-                "data": chirp_hist,
-            }))
-        except Exception:
-            log.debug("Failed to send chirp waterfall history hello", exc_info=True)
-
-    if chirp_viewer and hasattr(chirp_viewer, "get_detection_history"):
-        try:
-            det_hist = chirp_viewer.get_detection_history()
-        except Exception:
-            det_hist = []
-        if det_hist:
-            try:
-                await ws.send_str(json.dumps({
-                    "type": "chirp_detection_history",
-                    "data": det_hist,
-                }))
-            except Exception:
-                log.debug("Failed to send chirp detection history hello", exc_info=True)
-
-    if chirp_viewer and hasattr(chirp_viewer, "get_packet_history"):
-        try:
-            pkt_hist = chirp_viewer.get_packet_history()
-        except Exception:
-            pkt_hist = []
-        if pkt_hist:
-            try:
-                await ws.send_str(json.dumps({
-                    "type": "chirp_packet_history",
-                    "data": pkt_hist,
-                }))
-            except Exception:
-                log.debug("Failed to send chirp packet history hello", exc_info=True)
-
-    if chirp_viewer and hasattr(chirp_viewer, "get_detection_params"):
-        try:
-            det_params = chirp_viewer.get_detection_params()
-        except Exception:
-            det_params = {}
-        if det_params:
-            try:
-                await ws.send_str(json.dumps({
-                    "type": "chirp_detection_params",
-                    "data": det_params,
-                }))
-            except Exception:
-                log.debug("Failed to send chirp detection params hello", exc_info=True)
 
     link_tester = plugin.app.get_plugin("lora_link_tester")
     if link_tester and hasattr(link_tester, "get_history"):
@@ -580,9 +522,13 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
             collect_elapsed = time.monotonic() - t_collect
 
+            diff_data = _diff_payload(data)
+            if not diff_data:
+                continue
+
             message = json.dumps({
                 "type": "update",
-                "data": data,
+                "data": diff_data,
                 "timestamp": time.time(),
             })
 
@@ -628,9 +574,12 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             # Periodic health log (~every 60s at default interval).
             if _cycle_count % 30 == 0:
                 log.info(
-                    "WS broadcast: collect=%.0fms payload=%dB clients=%d",
+                    "WS broadcast: collect=%.0fms payload=%dB"
+                    " diff=%d/%d clients=%d",
                     collect_elapsed * 1000,
                     len(message),
+                    len(diff_data),
+                    len(data),
                     len(clients),
                 )
 
@@ -641,10 +590,14 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             await asyncio.sleep(1)
 
 
+_push_sem: asyncio.Semaphore | None = None
+
+
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor
+    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor, _push_sem
     _ws_loop = asyncio.get_running_loop()
     _ws_plugin = app["plugin"]
+    _push_sem = asyncio.Semaphore(8)
     _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="ws-broadcast",
     )
@@ -657,10 +610,6 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
         event_bus.subscribe(_events.MESSAGE_REACTION_RECEIVED, _on_reaction_event)
         event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
-        event_bus.subscribe(_events.CHIRP_CAPTURE_DONE, _on_chirp_capture_done)
-        event_bus.subscribe(_events.CHIRP_WATERFALL_ROWS, _on_chirp_waterfall_rows)
-        event_bus.subscribe(_events.CHIRP_DETECTION, _on_chirp_detection)
-        event_bus.subscribe(_events.CHIRP_PACKET_DECODED, _on_chirp_packet_decoded)
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -674,10 +623,6 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_status_event)
             event_bus.unsubscribe_all(_on_reaction_event)
             event_bus.unsubscribe_all(_on_alert_event)
-            event_bus.unsubscribe_all(_on_chirp_capture_done)
-            event_bus.unsubscribe_all(_on_chirp_waterfall_rows)
-            event_bus.unsubscribe_all(_on_chirp_detection)
-            event_bus.unsubscribe_all(_on_chirp_packet_decoded)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _broadcast_task:
@@ -775,46 +720,6 @@ def _on_reaction_event(event_type: str, data: dict) -> None:
         pass
 
 
-def _on_chirp_capture_done(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_CAPTURE_DONE — push spectrogram to WS clients."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_result", data)
-    except RuntimeError:
-        pass
-
-
-def _on_chirp_waterfall_rows(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_WATERFALL_ROWS — push streaming batch."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_waterfall_rows", data)
-    except RuntimeError:
-        pass
-
-
-def _on_chirp_detection(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_DETECTION — push detection to WS clients."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_detection", data)
-    except RuntimeError:
-        pass
-
-
-def _on_chirp_packet_decoded(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_PACKET_DECODED — push decoded packet to WS."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_packet_decoded", data)
-    except RuntimeError:
-        pass
-
-
 def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
     """Process a JSON command from a WebSocket client.
 
@@ -840,56 +745,63 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
         scanner = plugin.app.plugins.get("spectrum_scanner")
         if scanner and hasattr(scanner, "get_presets"):
             return {"type": "spectrum_presets", **scanner.get_presets()}
-    elif action == "chirp_capture":
-        viewer = _get_chirp_plugin(plugin)
-        if viewer and getattr(viewer, "plugin_name", None) == "chirp_detector":
-            return {
-                "type": "chirp_capture_error",
-                "error": "chirp_detector uses continuous detection; on-demand capture not supported",
-            }
-        if viewer and hasattr(viewer, "capture_chirps"):
+    elif action == "radio_tune":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "tune"):
+            freq_mhz = cmd.get("frequency_mhz")
+            if freq_mhz is None:
+                return {"type": "radio_error", "error": "frequency_mhz required"}
             try:
-                viewer.capture_chirps(
-                    freq_hz=int(cmd["freq_hz"]) if "freq_hz" in cmd else None,
-                    sample_rate=int(cmd["sample_rate"]) if "sample_rate" in cmd else None,
-                    duration_s=float(cmd["duration_s"]) if "duration_s" in cmd else None,
-                )
-            except Exception:
-                log.debug("Chirp capture command failed", exc_info=True)
-    elif action == "chirp_set_params":
-        viewer = _get_chirp_plugin(plugin)
-        if viewer and hasattr(viewer, "set_continuous_params"):
+                result = fm.tune(int(float(freq_mhz) * 1_000_000), mode=cmd.get("mode"))
+                return {"type": "radio_tuned", **result}
+            except ValueError as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_play":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "play"):
             try:
-                viewer.set_continuous_params(
-                    freq_mhz=float(cmd["freq_mhz"]) if "freq_mhz" in cmd else None,
-                    sample_rate=int(cmd["sample_rate"]) if "sample_rate" in cmd else None,
-                )
-            except Exception:
-                log.debug("Chirp set_params command failed", exc_info=True)
-    elif action == "chirp_set_detection_params":
-        viewer = _get_chirp_plugin(plugin)
-        if viewer and hasattr(viewer, "set_detection_params"):
+                result = fm.play()
+                return {"type": "radio_play", **result}
+            except Exception as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_stop":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "stop_playback"):
             try:
-                viewer.set_detection_params(
-                    enabled=bool(cmd["enabled"]) if "enabled" in cmd else None,
-                    sfs=[int(s) for s in cmd["sfs"]] if "sfs" in cmd else None,
-                    bws=[int(b) for b in cmd["bws"]] if "bws" in cmd else None,
-                    snr_threshold_db=float(cmd["snr_threshold_db"]) if "snr_threshold_db" in cmd else None,
-                    preamble_len=int(cmd["preamble_len"]) if "preamble_len" in cmd else None,
-                )
+                result = fm.stop_playback()
+                return {"type": "radio_stop", **result}
+            except Exception as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_gain":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "set_gain"):
+            try:
+                gain = cmd.get("gain_db")
+                if gain is not None:
+                    gain = float(gain)
+                result = fm.set_gain(gain)
+                return {"type": "radio_gain", **result}
             except (ValueError, TypeError) as exc:
-                log.debug("Chirp set_detection_params rejected: %s", exc)
-                return {"type": "chirp_detection_params_error", "error": str(exc)}
-            except Exception:
-                log.debug("Chirp set_detection_params command failed", exc_info=True)
-    elif action == "chirp_set_waterfall":
-        detector = plugin.app.plugins.get("chirp_detector")
-        if detector and hasattr(detector, "set_waterfall_enabled"):
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_squelch":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "set_squelch"):
             try:
-                detector.set_waterfall_enabled(bool(cmd.get("enabled", False)))
-                return {"type": "chirp_waterfall_toggled", "enabled": detector._waterfall_enabled}
-            except Exception:
-                log.debug("Chirp set_waterfall command failed", exc_info=True)
+                result = fm.set_squelch(int(cmd.get("level", 0)))
+                return {"type": "radio_squelch", **result}
+            except (ValueError, TypeError) as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_volume":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "set_volume"):
+            try:
+                vol = float(cmd.get("volume", 0.75))
+                if not 0.0 <= vol <= 1.0:
+                    return {"type": "radio_error", "error": "volume must be 0.0-1.0"}
+                result = fm.set_volume(vol)
+                return {"type": "radio_volume", **result}
+            except (ValueError, TypeError) as exc:
+                return {"type": "radio_error", "error": str(exc)}
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
@@ -917,27 +829,37 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
     Fans out sends concurrently so a single slow peer (congested link,
     large TCP send-queue) can't block other subscribers from getting
     status updates during the same event.
+
+    Bounded by ``_push_sem`` so message storms can't accumulate
+    unbounded tasks on the event loop.
     """
-    if not _ws_clients:
-        return
-    message = json.dumps({
-        "type": push_type,
-        "data": payload,
-        "timestamp": time.time(),
-    })
-    clients = list(_ws_clients)
+    sem = _push_sem
+    if sem is not None:
+        await sem.acquire()
+    try:
+        if not _ws_clients:
+            return
+        message = json.dumps({
+            "type": push_type,
+            "data": payload,
+            "timestamp": time.time(),
+        })
+        clients = list(_ws_clients)
 
-    async def _send_one(ws: aiohttp.web.WebSocketResponse) -> bool:
-        try:
-            await ws.send_str(message)
-            return True
-        except Exception:
-            return False
+        async def _send_one(ws: aiohttp.web.WebSocketResponse) -> bool:
+            try:
+                await ws.send_str(message)
+                return True
+            except Exception:
+                return False
 
-    results = await asyncio.gather(
-        *(_send_one(ws) for ws in clients), return_exceptions=False,
-    )
-    for ws, ok in zip(clients, results):
-        if not ok:
-            _ws_clients.discard(ws)
-            _ws_last_activity.pop(ws, None)
+        results = await asyncio.gather(
+            *(_send_one(ws) for ws in clients), return_exceptions=False,
+        )
+        for ws, ok in zip(clients, results):
+            if not ok:
+                _ws_clients.discard(ws)
+                _ws_last_activity.pop(ws, None)
+    finally:
+        if sem is not None:
+            sem.release()

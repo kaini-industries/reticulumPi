@@ -750,26 +750,50 @@ class TestConnectionManagement:
         assert gateway_plugin._connected is False
 
     def test_on_mesh_disconnect_sets_flag(self, gateway_plugin):
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = True
-        gateway_plugin._on_mesh_disconnect()
+        gateway_plugin._on_mesh_disconnect(interface=iface)
         assert gateway_plugin._connected is False
 
     def test_on_mesh_disconnect_records_time(self, gateway_plugin):
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = True
         gateway_plugin._last_disconnect_time = 0.0
-        gateway_plugin._on_mesh_disconnect()
+        gateway_plugin._on_mesh_disconnect(interface=iface)
         assert gateway_plugin._last_disconnect_time > 0
+
+    def test_on_mesh_disconnect_ignores_none_interface(self, gateway_plugin):
+        """Pubsub event with interface=None must not falsely disconnect."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
+        gateway_plugin._connected = True
+        gateway_plugin._on_mesh_disconnect(interface=None)
+        assert gateway_plugin._connected is True
 
     def test_on_mesh_connect_restores_connected(self, gateway_plugin):
         """When paho auto-reconnects, _on_mesh_connect must set _connected = True."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = False
-        gateway_plugin._on_mesh_connect()
+        gateway_plugin._on_mesh_connect(interface=iface)
         assert gateway_plugin._connected is True
+
+    def test_on_mesh_connect_ignores_none_interface(self, gateway_plugin):
+        """Pubsub event with interface=None must not falsely connect."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
+        gateway_plugin._connected = False
+        gateway_plugin._on_mesh_connect(interface=None)
+        assert gateway_plugin._connected is False
 
     def test_on_mesh_connect_publishes_event_on_reconnect(self, gateway_plugin):
         """Auto-reconnect fires MESHTASTIC_CONNECTED event."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = False
-        gateway_plugin._on_mesh_connect()
+        gateway_plugin._on_mesh_connect(interface=iface)
         gateway_plugin.event_bus.publish.assert_called()
         # Find the MESHTASTIC_CONNECTED call
         from reticulumpi import events
@@ -781,9 +805,11 @@ class TestConnectionManagement:
 
     def test_on_mesh_connect_no_event_when_already_connected(self, gateway_plugin):
         """No duplicate event when _on_mesh_connect fires while already connected."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = True
         gateway_plugin.event_bus.publish.reset_mock()
-        gateway_plugin._on_mesh_connect()
+        gateway_plugin._on_mesh_connect(interface=iface)
         # Should NOT publish MESHTASTIC_CONNECTED
         from reticulumpi import events
         connected_calls = [

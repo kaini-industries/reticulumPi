@@ -802,6 +802,7 @@ class MeshtasticGateway(PluginBase):
         # Meshtastic state
         self._mesh_interface: Any = None
         self._connected = False
+        self._mqtt_suspended = False
         self._last_disconnect_time: float = 0.0
 
         # Firmware watchdog — monitors the physical USB device for hangs.
@@ -936,6 +937,16 @@ class MeshtasticGateway(PluginBase):
             nid.lower() for nid in self.config.get("meshtastic_allow_list", [])
         }
 
+        # ── Subscribe to Meshtastic pubsub ONCE at plugin start ─────
+        # Owned by plugin lifecycle (start/stop), NOT by MQTT connection
+        # lifecycle, so the serial LoRa listener keeps delivering messages
+        # even when MQTT is reconnecting or suspended.
+        from pubsub import pub
+
+        pub.subscribe(self._on_mesh_text, "meshtastic.receive.text")
+        pub.subscribe(self._on_mesh_connect, "meshtastic.connection.established")
+        pub.subscribe(self._on_mesh_disconnect, "meshtastic.connection.lost")
+
         # ── Start device connection thread ──────────────────────────
         self._active = True
         self._start_thread(self._connection_loop, "meshtastic-connect")
@@ -969,6 +980,15 @@ class MeshtasticGateway(PluginBase):
             self.lxmf_router.register_delivery_callback(None)
         except Exception:
             self.log.debug("Error clearing LXMF delivery callback", exc_info=True)
+        # Unsubscribe from Meshtastic pubsub (owned by plugin lifecycle)
+        try:
+            from pubsub import pub
+
+            pub.unsubscribe(self._on_mesh_text, "meshtastic.receive.text")
+            pub.unsubscribe(self._on_mesh_connect, "meshtastic.connection.established")
+            pub.unsubscribe(self._on_mesh_disconnect, "meshtastic.connection.lost")
+        except Exception:
+            self.log.debug("Error unsubscribing from Meshtastic pubsub", exc_info=True)
         self._close_mesh_interface()
         self._join_threads()
 
@@ -1042,10 +1062,18 @@ class MeshtasticGateway(PluginBase):
                     })
                     if max_attempts > 0 and self._reconnect_failures >= max_attempts:
                         self.log.error(
-                            "Max reconnect attempts (%d) reached, giving up", max_attempts
+                            "MQTT suspended after %d failures — LoRa reception continues",
+                            max_attempts,
                         )
-                        self._active = False
-                        break
+                        with self._lock:
+                            self._mqtt_suspended = True
+                        self.event_bus.publish(events.MESHTASTIC_DISCONNECTED, {
+                            "reason": "mqtt_suspended",
+                        })
+                        self._sleep_while_active(600)
+                        with self._lock:
+                            self._reconnect_failures = 0
+                        continue
                     # Exponential backoff: 10 → 20 → 40 → 80 → 160 → cap 300 s
                     backoff = min(
                         reconnect_delay * (2 ** min(self._reconnect_failures - 1, 5)),
@@ -1090,25 +1118,18 @@ class MeshtasticGateway(PluginBase):
 
     def _connect_mesh_device(self) -> None:
         """Open connection to the Meshtastic network (serial or MQTT)."""
-        from pubsub import pub
-
         if self._mode == MODE_MQTT:
             iface = self._create_mqtt_interface()
         else:
             iface = self._create_serial_interface()
 
-        # Assign interface before subscribing so callbacks can see it immediately
         with self._lock:
             self._mesh_interface = iface
             self._connected = True
+            self._mqtt_suspended = False
             self._connect_count += 1
             self._last_device_activity = time.monotonic()
             self._fw_hang_detected = False
-
-        # Register pubsub callbacks (after interface is assigned)
-        pub.subscribe(self._on_mesh_text, "meshtastic.receive.text")
-        pub.subscribe(self._on_mesh_connect, "meshtastic.connection.established")
-        pub.subscribe(self._on_mesh_disconnect, "meshtastic.connection.lost")
 
         # Identify ourselves
         node_id = self._get_own_node_id(iface)
@@ -1225,25 +1246,21 @@ class MeshtasticGateway(PluginBase):
         return f"port={self.config.get('serial_port', 'auto')}"
 
     def _close_mesh_interface(self) -> None:
-        """Tear down the Meshtastic connection and unsubscribe from pubsub."""
+        """Tear down the Meshtastic MQTT/serial connection.
+
+        Pubsub subscriptions are NOT touched here — they are owned by the
+        plugin lifecycle (start/stop) so the serial LoRa listener keeps
+        delivering messages even while MQTT is reconnecting.
+        """
         with self._lock:
             if self._mesh_interface is None:
                 return
-            try:
-                from pubsub import pub
-
-                pub.unsubscribe(self._on_mesh_text, "meshtastic.receive.text")
-                pub.unsubscribe(self._on_mesh_connect, "meshtastic.connection.established")
-                pub.unsubscribe(self._on_mesh_disconnect, "meshtastic.connection.lost")
-            except Exception:
-                self.log.debug("Error unsubscribing from Meshtastic pubsub", exc_info=True)
             try:
                 self._mesh_interface.close()
             except Exception:
                 self.log.debug("Error closing Meshtastic interface", exc_info=True)
             self._mesh_interface = None
             self._connected = False
-            # Invalidate serial-mode caches on disconnect
             if self._mode == MODE_SERIAL:
                 self._cached_device_info = None
                 self._cached_lora_neighbors = []
@@ -1477,8 +1494,8 @@ class MeshtasticGateway(PluginBase):
                     self._sleep_while_active(self._device_probe_interval)
             finally:
                 # Close BEFORE clearing _serial_listener so the identity
-                # check in _on_mesh_disconnect (interface is
-                # self._serial_listener) correctly suppresses the pubsub
+                # check in _on_mesh_disconnect (interface is not
+                # self._mesh_interface) correctly suppresses the pubsub
                 # event fired by close().
                 try:
                     iface.close()
@@ -2097,144 +2114,128 @@ class MeshtasticGateway(PluginBase):
         Fires for messages from both the MQTT client and the persistent
         serial listener.  Packet-level dedup ensures a message arriving
         via both sources is only processed once.
+
+        The lock is held only for the dedup check and counter updates so
+        that MQTT message processing cannot block LoRa reception.
         """
-        _reaction: dict | None = None
+        # ── Lock: dedup + capture shared refs ──────────────────────
         with self._lock:
             if not self._active:
                 return
-            try:
-                # ── Packet dedup ─────────────────────────────────────
-                packet_id = packet.get("id", 0)
-                now = time.time()
-                if packet_id:
-                    cutoff = now - self._dedup_ttl_seconds
-                    if packet_id in self._seen_packet_ids:
-                        return  # Already processed via the other source
-                    self._seen_packet_ids[packet_id] = now
-                    self._dedup_inserts_since_cleanup += 1
-                    # Amortized cleanup: drop expired + enforce cap every
-                    # N inserts (or when exceeded), not every packet.
-                    if (
-                        self._dedup_inserts_since_cleanup
-                        >= self._dedup_cleanup_interval
-                        or len(self._seen_packet_ids) > self._dedup_max_entries
-                    ):
-                        self._dedup_inserts_since_cleanup = 0
-                        self._seen_packet_ids = {
-                            k: v for k, v in self._seen_packet_ids.items()
-                            if v > cutoff
-                        }
-                        if len(self._seen_packet_ids) > self._dedup_max_entries:
-                            # Drop oldest half rather than thrashing one-
-                            # at-a-time on subsequent inserts.
-                            items = sorted(
-                                self._seen_packet_ids.items(),
-                                key=lambda kv: kv[1],
-                            )
-                            self._seen_packet_ids = dict(
-                                items[self._dedup_max_entries // 2:]
-                            )
-
-                from_id = packet.get("fromId", "?")
-                from_num = packet.get("from", 0)
-                to_num = packet.get("to", 0)
-                to_id = packet.get("toId", "")
-                is_broadcast = (to_num == _MESH_BROADCAST)
-                # Channel identity.  On LoRa the local radio translates
-                # hash→index before dispatch, so packet["channel"] is a
-                # valid local slot.  On MQTT there's no local translation
-                # — but the gateway only subscribes to a single root
-                # topic (its configured channel), so every inbound MQTT
-                # packet is on that same local slot.  Keying both paths
-                # by the configured local index keeps inbound MQTT and
-                # outbound MQTT (which uses the same configured index)
-                # on one broadcast thread instead of diverging between
-                # a name-keyed and an index-keyed row.
-                channel_name = packet.get("channelName")
-                if channel_name:
-                    channel_idx: Any = self.config.get(
-                        "meshtastic_channel", 0,
-                    )
-                else:
-                    channel_idx = packet.get("channel", 0)
-
-                decoded = packet.get("decoded", {})
-
-                # ── Emoji reaction detection ───────────────────
-                emoji_codepoint = decoded.get("emoji")
-                if emoji_codepoint:
-                    reply_to = decoded.get("replyId", 0)
-                    node_name = self._resolve_mesh_node_name(from_num)
-                    is_serial = (interface is not None
-                                 and interface is self._serial_listener)
-                    source_tag = "LoRa" if is_serial else "MQTT"
-                    text_payload = decoded.get("text", "")
-                    if text_payload and text_payload.strip():
-                        emoji_char = text_payload.strip()[:16]
-                    else:
-                        try:
-                            emoji_char = chr(emoji_codepoint)
-                            if not emoji_char.isprintable():
-                                emoji_char = "\U0001F44D"
-                        except (ValueError, OverflowError):
-                            emoji_char = "\U0001F44D"
-                    self.log.info(
-                        "Meshtastic reaction [%s] from %s: %s (target=%d)",
-                        source_tag, from_id, emoji_char, reply_to,
-                    )
-                    self._last_device_activity = time.monotonic()
-                    _reaction = {
-                        "from_id": from_id,
-                        "from_name": node_name,
-                        "emoji": emoji_char,
-                        "reply_to_packet_id": reply_to,
-                        "source": source_tag,
-                        "channel": channel_idx,
+            packet_id = packet.get("id", 0)
+            now = time.time()
+            if packet_id:
+                cutoff = now - self._dedup_ttl_seconds
+                if packet_id in self._seen_packet_ids:
+                    return
+                self._seen_packet_ids[packet_id] = now
+                self._dedup_inserts_since_cleanup += 1
+                if (
+                    self._dedup_inserts_since_cleanup
+                    >= self._dedup_cleanup_interval
+                    or len(self._seen_packet_ids) > self._dedup_max_entries
+                ):
+                    self._dedup_inserts_since_cleanup = 0
+                    self._seen_packet_ids = {
+                        k: v for k, v in self._seen_packet_ids.items()
+                        if v > cutoff
                     }
+                    if len(self._seen_packet_ids) > self._dedup_max_entries:
+                        items = sorted(
+                            self._seen_packet_ids.items(),
+                            key=lambda kv: kv[1],
+                        )
+                        self._seen_packet_ids = dict(
+                            items[self._dedup_max_entries // 2:]
+                        )
+            serial_listener = self._serial_listener
+        # ── Lock released — all parsing runs without contention ────
+
+        try:
+            from_id = packet.get("fromId", "?")
+            from_num = packet.get("from", 0)
+            to_num = packet.get("to", 0)
+            to_id = packet.get("toId", "")
+            is_broadcast = (to_num == _MESH_BROADCAST)
+            channel_name = packet.get("channelName")
+            if channel_name:
+                channel_idx: Any = self.config.get(
+                    "meshtastic_channel", 0,
+                )
+            else:
+                channel_idx = packet.get("channel", 0)
+
+            decoded = packet.get("decoded", {})
+            is_serial = (interface is not None
+                         and interface is serial_listener)
+            source_tag = "LoRa" if is_serial else "MQTT"
+
+            # ── Emoji reaction detection ───────────────────
+            emoji_codepoint = decoded.get("emoji")
+            if emoji_codepoint:
+                reply_to = decoded.get("replyId", 0)
+                node_name = self._resolve_mesh_node_name(from_num)
+                text_payload = decoded.get("text", "")
+                if text_payload and text_payload.strip():
+                    emoji_char = text_payload.strip()[:16]
                 else:
-                    # ── Regular text message ───────────────────
-                    payload = decoded.get("payload", b"")
-                    text = (
-                        payload.decode("utf-8", errors="replace")
-                        if isinstance(payload, bytes)
-                        else str(payload)
-                    )
-
-                    if not text.strip():
-                        return
-
-                    if self._mesh_allow_set and from_id.lower() not in self._mesh_allow_set:
-                        self.log.debug("Ignoring Meshtastic msg from %s (not in allow list)", from_id)
-                        return
-
-                    node_name = self._resolve_mesh_node_name(from_num)
-                    sender_label = f"{node_name} ({from_id})" if node_name else from_id
-
-                    is_serial = (interface is not None
-                                 and interface is self._serial_listener)
-                    source_tag = "LoRa" if is_serial else "MQTT"
-
-                    prefix = self.config.get("meshtastic_prefix", DEFAULT_MESH_PREFIX)
-                    formatted = f"{prefix} {sender_label}:\n{text}"
-
-                    self.log.info(
-                        "Meshtastic msg [%s] from %s: %s",
-                        source_tag, sender_label, text[:80],
-                    )
-
-                    self._msgs_mesh_to_lxmf += 1
-                    self._last_mesh_msg_time = time.time()
+                    try:
+                        emoji_char = chr(emoji_codepoint)
+                        if not emoji_char.isprintable():
+                            emoji_char = "\U0001F44D"
+                    except (ValueError, OverflowError):
+                        emoji_char = "\U0001F44D"
+                self.log.info(
+                    "Meshtastic reaction [%s] from %s: %s (target=%d)",
+                    source_tag, from_id, emoji_char, reply_to,
+                )
+                with self._lock:
                     self._last_device_activity = time.monotonic()
-
-            except Exception:
-                self.log.exception("Error parsing Meshtastic text message")
+                self.event_bus.publish(events.MESHTASTIC_REACTION_RECEIVED, {
+                    "from_id": from_id,
+                    "from_name": node_name,
+                    "emoji": emoji_char,
+                    "reply_to_packet_id": reply_to,
+                    "source": source_tag,
+                    "channel": channel_idx,
+                })
                 return
 
-        if _reaction is not None:
-            self.event_bus.publish(events.MESHTASTIC_REACTION_RECEIVED, _reaction)
+            # ── Regular text message ───────────────────────
+            payload = decoded.get("payload", b"")
+            text = (
+                payload.decode("utf-8", errors="replace")
+                if isinstance(payload, bytes)
+                else str(payload)
+            )
+
+            if not text.strip():
+                return
+
+            if self._mesh_allow_set and from_id.lower() not in self._mesh_allow_set:
+                self.log.debug("Ignoring Meshtastic msg from %s (not in allow list)", from_id)
+                return
+
+            node_name = self._resolve_mesh_node_name(from_num)
+            sender_label = f"{node_name} ({from_id})" if node_name else from_id
+
+            prefix = self.config.get("meshtastic_prefix", DEFAULT_MESH_PREFIX)
+            formatted = f"{prefix} {sender_label}:\n{text}"
+
+            self.log.info(
+                "Meshtastic msg [%s] from %s: %s",
+                source_tag, sender_label, text[:80],
+            )
+
+            with self._lock:
+                self._msgs_mesh_to_lxmf += 1
+                self._last_mesh_msg_time = time.time()
+                self._last_device_activity = time.monotonic()
+
+        except Exception:
+            self.log.exception("Error parsing Meshtastic text message")
             return
 
-        # Forward outside the lock to avoid holding it during LXMF send
         try:
             self._forward_to_lxmf(formatted)
         except Exception:
@@ -2255,24 +2256,19 @@ class MeshtasticGateway(PluginBase):
     def _on_mesh_connect(self, interface: Any = None, topic: Any = None) -> None:
         """Pubsub callback when Meshtastic connection is (re-)established.
 
-        Paho-mqtt auto-reconnects with exponential backoff.  When it succeeds,
-        this callback fires — set ``_connected = True`` so the connection loop
-        knows the link is healthy again and does NOT tear everything down.
-
-        Ignores connect events from the serial listener — those track the
-        LoRa message receiver, not the primary MQTT connection.
+        Only reacts to connect events from the main mesh interface.
+        Ignores serial listener connections AND any interface events
+        that fire before _mesh_interface is assigned.
         """
-        # Ignore serial listener connection events — they must not affect
-        # the MQTT connection state that the dashboard reports.
-        if interface is not None and interface is self._serial_listener:
-            self.log.debug("Serial listener connected (ignored for MQTT state)")
-            return
-
         was_disconnected = False
         with self._lock:
+            if interface is None or interface is not self._mesh_interface:
+                self.log.debug("Connect from non-primary interface ignored")
+                return
             if not self._connected:
                 was_disconnected = True
                 self._connected = True
+                self._mqtt_suspended = False
                 self._last_device_activity = time.monotonic()
                 self._fw_hang_detected = False
         if was_disconnected:
@@ -2287,55 +2283,60 @@ class MeshtasticGateway(PluginBase):
     def _on_mesh_disconnect(self, interface: Any = None, topic: Any = None) -> None:
         """Pubsub callback when Meshtastic connection is lost.
 
-        Ignores disconnect events from the serial listener.
+        Only reacts to disconnects from the main mesh interface.
+        Ignores serial listener disconnects AND failed serial opens
+        that fire pubsub events before _serial_listener is assigned.
         """
-        # Ignore serial listener disconnects
-        if interface is not None and interface is self._serial_listener:
-            self.log.debug("Serial listener disconnected (ignored for MQTT state)")
-            return
-
-        self.log.warning("Meshtastic connection lost")
         with self._lock:
+            if interface is None or interface is not self._mesh_interface:
+                self.log.debug("Disconnect from non-primary interface ignored")
+                return
             self._connected = False
             self._last_disconnect_time = time.monotonic()
+
+        self.log.warning("Meshtastic connection lost")
         self.event_bus.publish(events.MESHTASTIC_DISCONNECTED, {"reason": "connection_lost"})
 
     # ── LXMF delivery callback ──────────────────────────────────────
 
     def _handle_lxmf_message(self, message: Any) -> None:
         """Handle incoming LXMF message and forward to Meshtastic."""
-        # Rate limit check BEFORE acquiring main lock (avoids nesting)
         if not self._check_send_rate_limit():
             self.log.info("LXMF->Meshtastic message rate-limited, dropping")
             return
 
         with self._lock:
-            if not self._active or not self._connected or self._mesh_interface is None:
+            if not self._active:
                 return
             try:
                 sender_hash = RNS.prettyhexrep(message.source_hash)
                 content = message.content_as_string()
                 sender_hex = message.source_hash.hex()
 
-                # Filter by allow list
                 if self._lxmf_allow_set and sender_hex.lower() not in self._lxmf_allow_set:
                     self.log.debug("Ignoring LXMF msg from %s (not in allow list)", sender_hash)
                     return
 
-                # Build formatted message with MTU handling
                 prefix = self.config.get("lxmf_prefix", DEFAULT_LXMF_PREFIX)
                 header = f"{prefix} {sender_hash}:\n"
                 formatted = truncate_for_mtu(header, content, MESHTASTIC_MTU)
                 channel = self.config.get("meshtastic_channel", 0)
 
-                # Capture interface reference — sendText runs outside lock
-                iface = self._mesh_interface
+                # Prefer MQTT interface; fall back to serial listener
+                # so outbound messages still reach the mesh when MQTT
+                # is down but the LoRa radio is available.
+                if self._connected and self._mesh_interface is not None:
+                    iface = self._mesh_interface
+                elif self._serial_listener is not None:
+                    iface = self._serial_listener
+                else:
+                    self.log.debug("LXMF message dropped — no Meshtastic interface available")
+                    return
 
             except Exception:
                 self.log.exception("Error processing LXMF message for Meshtastic")
                 return
 
-        # Send outside the lock to avoid blocking during I/O
         try:
             iface.sendText(formatted, channelIndex=channel, hopLimit=MESHTASTIC_HOP_LIMIT)
         except Exception:
@@ -2492,6 +2493,7 @@ class MeshtasticGateway(PluginBase):
                 "active": self._active,
                 "mode": self._mode,
                 "connected": connected,
+                "mqtt_suspended": self._mqtt_suspended,
                 "meshtastic_channel": self.config.get("meshtastic_channel", 0),
                 "msgs_mesh_to_lxmf": self._msgs_mesh_to_lxmf,
                 "msgs_lxmf_to_mesh": self._msgs_lxmf_to_mesh,
@@ -3010,11 +3012,12 @@ class MeshtasticGateway(PluginBase):
             return {"sent": False, "reason": "rate_limited"}
 
         with self._lock:
-            # Prefer serial listener when via="lora" and it's available
             if via == "lora" and self._serial_listener is not None:
                 iface = self._serial_listener
             elif self._active and self._connected and self._mesh_interface is not None:
                 iface = self._mesh_interface
+            elif self._serial_listener is not None:
+                iface = self._serial_listener
             else:
                 return {"sent": False, "reason": "not_connected"}
 

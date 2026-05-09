@@ -191,13 +191,11 @@
       _body.classList.toggle('hidden', !_expanded);
       var chev = _toggle.querySelector('.chevron');
       if (chev) chev.textContent = _expanded ? '▾' : '▶';
+      if (_expanded && !_map && _mapContainer) _initMap();
       if (_expanded && _map) {
         setTimeout(function () { _map.invalidateSize(); }, 200);
       }
-      if (_expanded && !_map && _mapContainer) {
-        _initMap();
-        if (_lastData) _render(_lastData);
-      }
+      if (_expanded && _lastData) _render(_lastData);
     });
   }
 
@@ -393,6 +391,12 @@
       _toggle._wired = true;
     }
 
+    var aircraft = data.aircraft || [];
+    if (_countEl) {
+      _countEl.textContent = aircraft.length + ' aircraft';
+    }
+
+    if (_body && _body.classList.contains('hidden')) return;
     _render(data);
   }
 

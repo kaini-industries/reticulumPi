@@ -280,9 +280,16 @@
       }
     }
 
-    // Fit bounds only on first load, and only when GPS hasn't already centered us
     if (!_initialFit && !_gpsPos && _markerGroup.getLayers().length > 0) {
-      _map.fitBounds(_markerGroup.getBounds().pad(0.1));
+      var selfNode = null;
+      for (var s = 0; s < withPos.length; s++) {
+        if (withPos[s].is_self) { selfNode = withPos[s]; break; }
+      }
+      if (selfNode) {
+        _map.setView([selfNode.latitude, selfNode.longitude], 13);
+      } else {
+        _map.fitBounds(_markerGroup.getBounds().pad(0.1));
+      }
       _initialFit = true;
     }
   }

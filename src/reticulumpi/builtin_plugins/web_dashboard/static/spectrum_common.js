@@ -54,6 +54,14 @@
     return [RAMP[RAMP.length - 1][1], RAMP[RAMP.length - 1][2], RAMP[RAMP.length - 1][3]];
   }
 
+  var _LUT = new Uint8Array(256 * 3);
+  (function() {
+    for (var i = 0; i < 256; i++) {
+      var rgb = colorForNorm(i / 255);
+      _LUT[i * 3] = rgb[0]; _LUT[i * 3 + 1] = rgb[1]; _LUT[i * 3 + 2] = rgb[2];
+    }
+  })();
+
   // -- SVG / DOM helpers ---------------------------------------------------
   function svg(tag, attrs, text) {
     var el = document.createElementNS(SVGNS, tag);
@@ -164,8 +172,7 @@
   ];
 
   // LoRa ISM region definitions.  Channel grid (base, spacing, count) is
-  // shared by the chirp viewer (frequency presets) and the LoRa spectrum
-  // panel (channel overlays).  Spacing is in kHz.
+  // used by the LoRa spectrum panel (channel overlays).  Spacing is in kHz.
   var LORA_REGIONS = {
     US:     { lo: 902.0, hi: 928.0, base: 902.8625, spacing: 250, count: 108, label: 'US 902–928' },
     EU_868: { lo: 863.0, hi: 870.0, base: 864.125,  spacing: 250, count: 24,  label: 'EU 868' },
@@ -262,11 +269,13 @@
         norm = (p - lo) / range;
         if (norm < 0) norm = 0; else if (norm > 1) norm = 1;
       }
-      var rgb = colorForNorm(norm);
+      var lutIdx = (norm * 255 + 0.5) | 0;
+      if (lutIdx > 255) lutIdx = 255;
+      var lutOff = lutIdx * 3;
       var off = x * 4;
-      data[off]     = rgb[0];
-      data[off + 1] = rgb[1];
-      data[off + 2] = rgb[2];
+      data[off]     = _LUT[lutOff];
+      data[off + 1] = _LUT[lutOff + 1];
+      data[off + 2] = _LUT[lutOff + 2];
       data[off + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
@@ -308,11 +317,13 @@
           norm = (p - lo) / range;
           if (norm < 0) norm = 0; else if (norm > 1) norm = 1;
         }
-        var rgb = colorForNorm(norm);
+        var lutIdx = (norm * 255 + 0.5) | 0;
+        if (lutIdx > 255) lutIdx = 255;
+        var lutOff = lutIdx * 3;
         var off = rowOff + x * 4;
-        data[off]     = rgb[0];
-        data[off + 1] = rgb[1];
-        data[off + 2] = rgb[2];
+        data[off]     = _LUT[lutOff];
+        data[off + 1] = _LUT[lutOff + 1];
+        data[off + 2] = _LUT[lutOff + 2];
         data[off + 3] = 255;
       }
     }
@@ -452,6 +463,7 @@
   R.spectrumCommon = {
     RAMP: RAMP,
     colorForNorm: colorForNorm,
+    _LUT: _LUT,
     svg: svg,
     clear: clear,
     hexToRgba: hexToRgba,

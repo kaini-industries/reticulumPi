@@ -549,9 +549,8 @@ reticulumpi:
     # Serials are resolved to numeric indices at plugin start via rtl_test.
     # Run `rtl_test -t` to list attached devices and their serial numbers.
     #
-    # Example 3-dongle setup:
+    # Example 2-dongle setup:
     #   spectrum_scanner:  device_serial: "07143901"  # Nooelec SMArTee XTR (wideband + LoRa presets)
-    #   chirp_detector:    device_serial: "14342860"  # Nooelec SMArTee XTR (always-on LoRa chirp)
     #   adsb_radar:        device_serial: "00000001"  # RTL-SDR Blog V4 (1090 MHz ADS-B)
     # --------------------------------------------------------------------
 
@@ -608,33 +607,6 @@ reticulumpi:
     #  # Flat keys (freq_start_mhz, freq_stop_mhz, etc.) still work for
     #  # backward compatibility — they become a single-preset scanner.
 
-    # --- LoRa chirp detector --------------------------------------------------
-    # Always-on LoRa chirp detector using a dedicated RTL-SDR dongle.
-    # Streams raw I/Q from rtl_sdr and feeds the dechirp-based preamble
-    # detector.  The STFT waterfall is optional (off by default) — when
-    # disabled, I/Q flows directly to detection saving ~30% CPU.
-    #chirp_detector:
-    #  enabled: false
-    #  freq_mhz: 903.9                    # Center frequency for I/Q capture
-    #  sample_rate: 250000                 # 250k (1 ch), 1024k (4 ch), 2048k (16 ch)
-    #  gain_db: 34.0                       # Tuner gain (dB)
-    #  ppm: 0                              # Frequency correction
-    #  device_serial: "14342860"           # RTL-SDR USB serial
-    #  max_restarts: 5
-    #  waterfall_enabled: false            # STFT waterfall (CPU intensive)
-    #  waterfall_depth: 1024
-    #  fft_size: 256                       # FFT size (SR <= 500 kHz)
-    #  hop_divisor: 4                      # hop = fft_size / this
-    #  display_rows_per_s: 32
-    #  batch_interval_s: 0.5
-    #  detection_enabled: true
-    #  detection_bws: [125000]             # LoRa bandwidths to scan
-    #  detection_sfs: [7, 8, 9, 10, 11, 12]
-    #  detection_preamble_len: 8
-    #  detection_snr_threshold_db: 12.0
-    #  detection_history_depth: 256
-    #  packet_history_depth: 128
-
     # --- ADS-B radar ----------------------------------------------------------
     # Tracks nearby aircraft via an RTL-SDR dongle + dump1090.  Launches
     # dump1090 as a subprocess, connects to its SBS BaseStation TCP port, and
@@ -657,6 +629,37 @@ reticulumpi:
     #  max_restarts: 5                    # Subprocess crash-restart cap
     #  receiver_lat: null                 # Receiver position for distance calc (or use GPS plugin)
     #  receiver_lon: null
+
+    # --- FM/AM Radio Receiver -------------------------------------------------
+    # Turns an RTL-SDR dongle into an FM/AM radio receiver with live audio
+    # streaming to the web dashboard.  Uses rtl_fm for demodulation.
+    # Requires: rtl_fm on PATH (apt install rtl-sdr), one dedicated RTL-SDR dongle.
+    # Note: Cannot share a dongle with spectrum_scanner or adsb_radar.
+    # Tuner range: 52-2200 MHz (E4000), 24-1766 MHz (R820T2).
+    # E4000 has a dead zone at 1101-1234 MHz (L-band LO gap).
+    #fm_receiver:
+    #  enabled: false
+    #  device_serial: "07143901"           # RTL-SDR USB serial (stable; run rtl_test -t)
+    #  # device_index: 1                   # Numeric index fallback (fragile)
+    #  default_frequency_mhz: 95.5         # Initial frequency (52-2200 MHz for E4000)
+    #  default_mode: wbfm                  # wbfm, fm, am, usb, lsb
+    #  output_rate_hz: 32000               # Audio output sample rate (32000 for WFM)
+    #  gain_db: null                       # Tuner gain (null = auto; 0-42 dB manual)
+    #  ppm: 0                              # Frequency correction (ppm)
+    #  squelch_level: 0                    # Squelch threshold (0 = off)
+    #  default_volume: 75                  # Initial volume (0-100)
+    #  enable_bias_tee: false              # Enable bias-T power (active antennas)
+    #  max_restarts: 5                     # Subprocess crash-restart cap
+    #  auto_play: false                    # Start playing on plugin startup
+    #  freq_min_mhz: 52.0                  # Tuner lower bound (E4000: 52, R820T2: 24)
+    #  freq_max_mhz: 2200.0               # Tuner upper bound (E4000: 2200, R820T2: 1766)
+    #  presets:                             # Custom frequency presets (merged with built-in)
+    #    my_stations:
+    #      label: "My Stations"
+    #      mode: wbfm
+    #      frequencies:
+    #        - {freq_mhz: 101.1, label: "WKQX"}
+    #        - {freq_mhz: 93.1, label: "WXRT"}
 
     # --- NTP server -----------------------------------------------------------
     # GPS-disciplined time synchronization via chrony. Monitors chrony sync

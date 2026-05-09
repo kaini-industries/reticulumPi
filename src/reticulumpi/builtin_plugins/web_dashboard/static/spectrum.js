@@ -857,6 +857,7 @@
       data.bins_hz = _cachedBinsHz;
     }
     _lastData = data;
+    if (_body && _body.classList.contains('hidden')) return;
     var clip = _clip(data, _zoom);
 
     _renderPresets(data);
@@ -898,7 +899,6 @@
     if (!meta) return;
     _presetBar = document.createElement('div');
     _presetBar.className = 'spectrum-preset-bar';
-    _presetBar.style.cssText = 'display:flex;gap:4px;margin:4px 0;flex-wrap:wrap;';
     meta.parentNode.insertBefore(_presetBar, meta.nextSibling);
   }
 
@@ -915,7 +915,7 @@
     for (var i = 0; i < presets.length; i++) {
       var p = presets[i];
       var btn = document.createElement('button');
-      btn.className = 'btn btn-sm ' + (p.name === active ? 'btn-primary' : 'btn-outline');
+      btn.className = p.name === active ? 'active' : '';
       btn.textContent = p.name.replace(/_/g, ' ');
       btn.title = (p.freq_start_mhz || '?') + ' – ' + (p.freq_stop_mhz || '?') + ' MHz';
       btn.dataset.preset = p.name;

@@ -55,6 +55,12 @@ EVENT_SPECTRUM_SWEEP = events.SPECTRUM_SWEEP
 EVENT_SPECTRUM_STATUS = events.SPECTRUM_STATUS
 
 _BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
+    "full_sweep": {
+        "freq_start_mhz": 52.0,
+        "freq_stop_mhz": 2200.0,
+        "bin_khz": 100.0,
+        "sweep_seconds": 1,
+    },
     "fm_broadcast": {
         "freq_start_mhz": 88.0,
         "freq_stop_mhz": 108.0,
@@ -255,9 +261,6 @@ class SpectrumScanner(PluginBase):
         # iteration — benign, it re-reads on the next loop tick.
         self._switching = False
 
-        with self._state_lock:
-            self._device_released = False
-
         if not self._supervisor_alive:
             self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
@@ -353,7 +356,6 @@ class SpectrumScanner(PluginBase):
             self._set_status("error", str(exc))
 
         self._active = True
-        self._device_released = getattr(self, '_device_released', False)
         self._supervisor_alive = True
         self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
@@ -537,11 +539,6 @@ class SpectrumScanner(PluginBase):
             return
 
         while self._active:
-            if self._device_released:
-                self._set_status("paused", "device released for external use")
-                self._sleep_while_active(1.0)
-                continue
-
             try:
                 self._launch_rtl_power()
             except Exception as exc:
@@ -662,22 +659,6 @@ class SpectrumScanner(PluginBase):
                     proc.stdout.close()
                 except Exception:
                     pass
-
-    def _restart_sweep(self) -> None:
-        """Restart the rtl_power supervisor after an external interruption.
-
-        Subclasses (e.g. LoraChirpViewer) call this after temporarily
-        stopping the sweep to use the USB device for I/Q capture.
-        Clears the device-released flag so the existing supervisor thread
-        resumes; only spawns a new thread if the old one exited.
-        """
-        self._restart_count = 0
-        self._segments = {}
-        self._current_ts = None
-        with self._state_lock:
-            self._device_released = False
-        if not self._supervisor_alive:
-            self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
     # --- parser --------------------------------------------------------------
 

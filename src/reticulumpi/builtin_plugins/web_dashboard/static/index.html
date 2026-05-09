@@ -872,37 +872,6 @@
           </div>
           <div class="lora-ch-timeline" id="lora-ch-timeline" style="display:none"></div>
         </div>
-        <div class="chirp-viewer" id="chirp-viewer-section" style="display:none">
-          <div class="chirp-controls" id="chirp-controls">
-            <select class="chirp-select" id="chirp-freq-select" title="Preset frequencies"></select>
-            <input type="number" class="chirp-freq-input" id="chirp-freq-input" title="Center frequency (MHz)" placeholder="MHz" step="0.001" min="30" max="1800">
-            <select class="chirp-select" id="chirp-bw-select" title="Capture bandwidth">
-              <option value="250000">250 kHz (1 ch)</option>
-              <option value="1024000">1 MHz (4 ch)</option>
-              <option value="2048000">2 MHz (16 ch)</option>
-            </select>
-            <label class="chirp-sf-toggle" title="Show SF slope guides"><input type="checkbox" id="chirp-sf-toggle" checked> SF guides</label>
-            <span class="chirp-status-label" id="chirp-status-label"></span>
-          </div>
-          <div id="chirp-det-settings-container"></div>
-          <div class="chirp-meta" id="chirp-meta" style="display:none"></div>
-          <div class="chirp-det-indicator" id="chirp-det-indicator" style="display:none"></div>
-          <div class="chirp-pkt-indicator" id="chirp-pkt-indicator" style="display:none"></div>
-          <div class="chirp-pkt-detail" id="chirp-pkt-detail" style="display:none">
-            <div class="table-scroll" style="max-height:300px">
-              <table class="data-table">
-                <thead><tr><th>Time</th><th>SF</th><th>CR</th><th>CRC</th><th>Len</th><th>Payload</th></tr></thead>
-                <tbody id="chirp-pkt-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-          <div class="chirp-plot-wrap">
-            <canvas id="chirp-canvas" class="chirp-canvas"></canvas>
-            <canvas id="chirp-det-canvas" class="chirp-det-canvas"></canvas>
-            <div class="chirp-overlay" id="chirp-overlay"></div>
-            <div class="chirp-hover" id="chirp-hover"></div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -932,6 +901,79 @@
             <tbody id="adsb-table-body"></tbody>
           </table>
         </div>
+      </div>
+    </div>
+
+    <!-- FM/AM Radio Receiver -->
+    <div class="section" id="radio-section" style="display:none">
+      <div class="section-header collapsible" id="radio-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> FM/AM Radio</span>
+        <span class="count" id="radio-status-badge"></span>
+      </div>
+      <div class="section-body hidden" id="radio-body">
+        <div class="radio-tuner-display">
+          <div class="radio-freq-row">
+            <span class="radio-band-label" id="radio-band-label">VHF</span>
+            <span class="radio-frequency-display" id="radio-freq-display">95.500</span>
+            <span class="radio-frequency-unit">MHz</span>
+          </div>
+          <div class="radio-dead-zone-warning hidden" id="radio-dead-zone">E4000 L-band gap — signal may be unreliable</div>
+          <div class="radio-feedback hidden" id="radio-feedback"></div>
+          <div class="radio-freq-input-row">
+            <input type="number" id="radio-freq-input" class="radio-freq-input"
+                   step="0.025" min="52" max="2200" placeholder="MHz" />
+            <button id="radio-freq-go" class="radio-btn radio-btn-sm">Go</button>
+          </div>
+        </div>
+
+        <div class="radio-mode-bar" id="radio-mode-bar">
+          <button data-mode="wbfm" class="radio-mode-btn active">WFM</button>
+          <button data-mode="fm" class="radio-mode-btn">FM</button>
+          <button data-mode="am" class="radio-mode-btn">AM</button>
+          <button data-mode="usb" class="radio-mode-btn">USB</button>
+          <button data-mode="lsb" class="radio-mode-btn">LSB</button>
+        </div>
+
+        <div class="radio-controls">
+          <div class="radio-control-row">
+            <label class="radio-control-label">Gain</label>
+            <input type="range" id="radio-gain" class="radio-slider" min="0" max="50" step="0.5" value="0" />
+            <label class="radio-auto-label"><input type="checkbox" id="radio-gain-auto" checked /> Auto</label>
+            <span class="radio-value" id="radio-gain-value">auto</span>
+          </div>
+          <div class="radio-control-row">
+            <label class="radio-control-label">Squelch</label>
+            <input type="range" id="radio-squelch" class="radio-slider" min="0" max="500" step="1" value="0" />
+            <span class="radio-value" id="radio-squelch-value">0</span>
+          </div>
+          <div class="radio-control-row">
+            <label class="radio-control-label">Volume</label>
+            <input type="range" id="radio-volume" class="radio-slider" min="0" max="100" step="1" value="75" />
+            <span class="radio-value" id="radio-volume-value">75%</span>
+          </div>
+        </div>
+
+        <div class="radio-playback-row">
+          <button id="radio-play-btn" class="radio-btn radio-play-btn">&#9654; Play</button>
+          <div class="radio-meters">
+            <div class="radio-signal-meter">
+              <label class="radio-meter-label">Signal</label>
+              <div class="radio-meter-track" id="radio-signal-track">
+                <div class="radio-meter-fill" id="radio-signal-bar"></div>
+              </div>
+              <span class="radio-value" id="radio-signal-db">-- dB</span>
+            </div>
+            <div class="radio-vu-meter">
+              <label class="radio-meter-label">Audio</label>
+              <canvas id="radio-vu-canvas" width="140" height="20"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <canvas id="radio-fft-canvas" class="radio-fft-canvas" width="400" height="48"></canvas>
+
+        <div class="radio-presets" id="radio-presets"></div>
+
       </div>
     </div>
 
@@ -1044,8 +1086,8 @@
   <script src="/static/spectrum_common.js?v=1"></script>
   <script src="/static/spectrum.js?v=9"></script>
   <script src="/static/lora_spectrum.js?v=17"></script>
-  <script src="/static/chirp_spectrogram.js?v=6"></script>
   <script src="/static/adsb.js?v=1"></script>
+  <script src="/static/radio.js?v=1"></script>
   <script src="/static/ntp.js?v=1"></script>
   <script src="/static/link_tester.js?v=1"></script>
 </body>

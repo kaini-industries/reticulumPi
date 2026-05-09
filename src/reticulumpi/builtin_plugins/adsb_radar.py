@@ -140,6 +140,8 @@ class AdsbRadarPlugin(PluginBase):
         self._total_messages = 0
         self._aircraft_seen_total = 0
         self._resolved_index: int | None = None
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl = 3.0
 
         self._active = True
 
@@ -191,6 +193,15 @@ class AdsbRadarPlugin(PluginBase):
                 "aircraft_seen_total": self._aircraft_seen_total,
                 "error": self._last_error,
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+        result = self.get_snapshot()
+        self._broadcast_cache = (now, result)
+        return result
 
     def get_snapshot(self) -> dict[str, Any]:
         with self._state_lock:

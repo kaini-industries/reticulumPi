@@ -444,6 +444,8 @@ class SpaceTrackerPlugin(PluginBase):
         self._passes: list[dict[str, Any]] = []                 # upcoming horizon passes
         self._passes_computed_at: float | None = None
         self._cache_lock = threading.Lock()
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl = 30.0
 
         # Observer position (resolved lazily — gps_telemetry may not be up yet)
         self._observer_cfg = self.config.get("observer", {}) or {}
@@ -497,6 +499,15 @@ class SpaceTrackerPlugin(PluginBase):
     # ------------------------------------------------------------------
     # Status (surfaced in the dashboard / /status endpoint)
     # ------------------------------------------------------------------
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+        result = self.get_snapshot()
+        self._broadcast_cache = (now, result)
+        return result
+
     def get_snapshot(self) -> dict[str, Any]:
         """Full snapshot for dashboard consumption.
 

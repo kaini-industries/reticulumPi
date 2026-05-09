@@ -111,14 +111,27 @@ def resolve_device(configured: str, caller: str = "") -> int:
                 log.info("Resolved RTL-SDR serial '%s' → index %d (caller: %s)", serial, idx, caller or "?")
             return idx
 
+    # Only fall back to numeric index if the value doesn't look like
+    # a serial number.  RTL-SDR serials are always 8 decimal digits;
+    # any other length is treated as a device index.  This prevents
+    # "00000001" from silently resolving to index 1 when the intended
+    # dongle is absent.
+    known_serials = {s for _, s in devices}
     try:
-        return int(configured)
+        idx = int(configured)
     except ValueError:
-        available = ", ".join(f"{i}: SN {s}" for i, s in devices)
-        raise RuntimeError(
-            f"RTL-SDR device '{configured}' not found. "
-            f"Available: [{available}]"
-        ) from None
+        idx = None
+
+    if idx is not None and idx >= 0 and configured not in known_serials and (
+        len(configured) != 8 or not devices
+    ):
+        return idx
+
+    available = ", ".join(f"{i}: SN {s}" for i, s in devices)
+    raise RuntimeError(
+        f"RTL-SDR device '{configured}' not found. "
+        f"Available: [{available}]"
+    )
 
 
 def release_device(configured: str, caller: str = "") -> None:
