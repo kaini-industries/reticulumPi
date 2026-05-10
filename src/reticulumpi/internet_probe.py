@@ -127,9 +127,7 @@ class InternetProbe:
         """Set initial state and start the background monitoring thread."""
         initial = self.probe_once()
         self._set_state(initial)
-        self._lan_ip = self._detect_lan_ip()
         if initial:
-            self._wan_ip = self._detect_wan_ip()
             log.info("Internet probe: online (%d target(s))", len(self._targets))
         else:
             log.warning("Internet probe: offline (force=%s)", self._force_offline)
@@ -181,20 +179,19 @@ class InternetProbe:
                 )
 
     def _set_state(self, online: bool) -> None:
+        lan_ip = self._detect_lan_ip()
+        wan_ip = self._detect_wan_ip() if online else None
+
         with self._lock:
             if self._is_online == online:
                 return
             self._is_online = online
-
-        self._lan_ip = self._detect_lan_ip()
-        if online:
-            self._wan_ip = self._detect_wan_ip()
-        else:
-            self._wan_ip = None
+            self._lan_ip = lan_ip
+            self._wan_ip = wan_ip
 
         event_type = events.INTERNET_ONLINE if online else events.INTERNET_OFFLINE
         self._event_bus.publish(event_type, {
             "timestamp": time.time(),
-            "wan_ip": self._wan_ip,
-            "lan_ip": self._lan_ip,
+            "wan_ip": wan_ip,
+            "lan_ip": lan_ip,
         })

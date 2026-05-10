@@ -11,15 +11,16 @@ log = logging.getLogger(__name__)
 
 EventCallback = Callable[[str, dict[str, Any]], None]
 
-_offload_executor = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="eventbus",
-)
 _OFFLOAD_MAX_PENDING = 64
 _OFFLOAD_ACQUIRE_TIMEOUT = 0.1
-_offload_semaphore = threading.BoundedSemaphore(value=_OFFLOAD_MAX_PENDING)
 
 
-def _safe_offload(callback: EventCallback, evt: str, data: dict[str, Any]) -> None:
+def _safe_offload(
+    callback: EventCallback,
+    evt: str,
+    data: dict[str, Any],
+    semaphore: threading.BoundedSemaphore,
+) -> None:
     try:
         callback(evt, data)
     except Exception:
@@ -29,7 +30,7 @@ def _safe_offload(callback: EventCallback, evt: str, data: dict[str, Any]) -> No
             evt,
         )
     finally:
-        _offload_semaphore.release()
+        semaphore.release()
 
 
 class EventBus:
@@ -46,6 +47,12 @@ class EventBus:
         # event_type -> list of callbacks
         self._subscribers: dict[str, list[EventCallback]] = {}
         self._offload_map: dict[EventCallback, EventCallback] = {}
+        self._offload_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="eventbus",
+        )
+        self._offload_semaphore = threading.BoundedSemaphore(
+            value=_OFFLOAD_MAX_PENDING,
+        )
 
     def subscribe(self, event_type: str, callback: EventCallback) -> None:
         """Register *callback* to be called whenever *event_type* is published."""
@@ -61,15 +68,18 @@ class EventBus:
         with self._lock:
             wrapper = self._offload_map.get(callback)
             if wrapper is None:
+                sem = self._offload_semaphore
+                executor = self._offload_executor
+
                 def _wrapper(evt: str, data: dict[str, Any]) -> None:
-                    if not _offload_semaphore.acquire(timeout=_OFFLOAD_ACQUIRE_TIMEOUT):
+                    if not sem.acquire(timeout=_OFFLOAD_ACQUIRE_TIMEOUT):
                         log.warning(
                             "Event bus backpressure: dropping '%s' for %s",
                             evt,
                             getattr(callback, "__qualname__", callback),
                         )
                         return
-                    _offload_executor.submit(_safe_offload, callback, evt, data)
+                    executor.submit(_safe_offload, callback, evt, data, sem)
                 self._offload_map[callback] = _wrapper
                 wrapper = _wrapper
         self.subscribe(event_type, wrapper)
@@ -108,6 +118,10 @@ class EventBus:
                     getattr(cb, "__qualname__", cb),
                     event_type,
                 )
+
+    def shutdown(self) -> None:
+        """Shut down the offload executor. Call during process exit."""
+        self._offload_executor.shutdown(wait=True, cancel_futures=True)
 
     def unsubscribe_all(self, callback: EventCallback) -> int:
         """Remove *callback* from every event type it is subscribed to.

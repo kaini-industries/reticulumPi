@@ -1,6 +1,7 @@
 """Info Bot plugin - responds to LXMF commands with internet-sourced information."""
 
 import ast
+import inspect
 import json
 import math
 import operator
@@ -86,7 +87,7 @@ def _safe_eval(node):
     elif isinstance(node, ast.BinOp) and type(node.op) in _SAFE_MATH_OPS:
         left = _safe_eval(node.left)
         right = _safe_eval(node.right)
-        if isinstance(node.op, ast.Pow) and right > 1000:
+        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
             raise ValueError("Exponent too large")
         return _SAFE_MATH_OPS[type(node.op)](left, right)
     elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -241,27 +242,28 @@ class InfoBot(PluginBase):
         with self._lock:
             if not self._active:
                 return
-            try:
-                sender = RNS.prettyhexrep(message.source_hash)
-                content = message.content_as_string().strip()
-                self.log.info("Received message from %s: %s", sender, content[:100])
+            router = self.lxmf_router
+            local_dest = self.local_lxmf_destination
 
-                # Store sender hash so commands can check identity
-                self._last_sender_hash = sender
-                response = self._route_command(content)
+        try:
+            sender = RNS.prettyhexrep(message.source_hash)
+            content = message.content_as_string().strip()
+            self.log.info("Received message from %s: %s", sender, content[:100])
 
-                reply = LXMF.LXMessage(
-                    message.source,
-                    self.local_lxmf_destination,
-                    response,
-                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                )
-                self.lxmf_router.handle_outbound(reply)
-                self.log.debug("Sent reply to %s", sender)
-            except Exception:
-                self.log.exception("Error handling LXMF message")
+            response = self._route_command(content, sender=sender)
 
-    def _route_command(self, content: str) -> str:
+            reply = LXMF.LXMessage(
+                message.source,
+                local_dest,
+                response,
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+            )
+            router.handle_outbound(reply)
+            self.log.debug("Sent reply to %s", sender)
+        except Exception:
+            self.log.exception("Error handling LXMF message")
+
+    def _route_command(self, content: str, sender: str = "") -> str:
         """Parse and route a command, returning the response text."""
         if not content.startswith(self.PREFIX):
             return self._cmd_help()
@@ -280,6 +282,9 @@ class InfoBot(PluginBase):
             return f"Unknown command: !{cmd_name}\n\n{self._cmd_help()}"
 
         handler, _description = handler_entry
+        sig = inspect.signature(handler)
+        if "sender" in sig.parameters:
+            return handler(args, sender=sender)
         return handler(args)
 
     # ── Commands ─────────────────────────────────────────────────────
@@ -874,7 +879,7 @@ class InfoBot(PluginBase):
 
         return "\n".join(lines)
 
-    def _cmd_pageauth(self, args: str = "") -> str:
+    def _cmd_pageauth(self, args: str = "", sender: str = "") -> str:
         """Manage NomadNet page access control."""
         nn = self.app.get_plugin("nomadnet_server")
         if not nn or not hasattr(nn, "get_allowed_identities"):
@@ -905,12 +910,10 @@ class InfoBot(PluginBase):
 
         # Admin-only commands: add/remove
         admin_ids = self.config.get("admin_identities", [])
-        if admin_ids:
-            # Check sender identity (from the LXMF message context)
-            # The sender hash is available as the source of the message
-            sender = getattr(self, "_last_sender_hash", "")
-            if sender not in admin_ids:
-                return "Admin access required for add/remove."
+        if not admin_ids:
+            return "No admin_identities configured. Cannot modify page auth."
+        if sender not in admin_ids:
+            return "Admin access required for add/remove."
 
         if subcmd == "add":
             if not arg:

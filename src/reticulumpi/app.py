@@ -161,6 +161,9 @@ class ReticulumPiApp:
 
         self.announce_dispatcher.stop()
 
+        # Shut down event bus thread pool so offloaded callbacks drain cleanly.
+        self.event_bus.shutdown()
+
         # Clean up Reticulum instance
         self._cleanup_rns()
 

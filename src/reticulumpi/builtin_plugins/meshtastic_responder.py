@@ -122,7 +122,7 @@ def _safe_eval(node: ast.AST) -> int | float:
     if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_MATH_OPS:
         left = _safe_eval(node.left)
         right = _safe_eval(node.right)
-        if isinstance(node.op, ast.Pow) and right > 1000:
+        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
             raise ValueError("Exponent too large")
         return _SAFE_MATH_OPS[type(node.op)](left, right)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -814,7 +814,12 @@ def _truncate_response(text: str, max_bytes: int = _MESHTASTIC_MTU) -> str:
     if last_break > limit // 2:
         truncated = truncated[:last_break]
 
-    return truncated.decode("utf-8", errors="ignore") + suffix.decode("utf-8")
+    while truncated and (truncated[-1] & 0xC0) == 0x80:
+        truncated = truncated[:-1]
+    if truncated and truncated[-1] >= 0xC0:
+        truncated = truncated[:-1]
+
+    return truncated.decode("utf-8") + suffix.decode("utf-8")
 
 
 def _fetch_json(url: str) -> dict:

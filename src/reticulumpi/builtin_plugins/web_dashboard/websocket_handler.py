@@ -23,17 +23,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_prev_broadcast_data: dict[str, Any] = {}
-
-
-def _diff_payload(data: dict[str, Any]) -> dict[str, Any]:
+def _diff_payload(data: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any]:
     """Return only keys whose value object changed since last broadcast."""
-    global _prev_broadcast_data
     result = {}
     for key, value in data.items():
-        if value is not _prev_broadcast_data.get(key):
+        if value is not prev.get(key):
             result[key] = value
-    _prev_broadcast_data = data
     return result
 
 
@@ -490,6 +485,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
     _cycle_count = 0
+    _prev_data: dict[str, Any] = {}
     loop = asyncio.get_running_loop()
 
     while True:
@@ -524,7 +520,8 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
             collect_elapsed = time.monotonic() - t_collect
 
-            diff_data = _diff_payload(data)
+            diff_data = _diff_payload(data, _prev_data)
+            _prev_data = data
             if not diff_data:
                 continue
 
@@ -640,7 +637,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
     _ws_loop = None
     _ws_plugin = None
     if _broadcast_executor is not None:
-        _broadcast_executor.shutdown(wait=False)
+        _broadcast_executor.shutdown(wait=True, cancel_futures=True)
         _broadcast_executor = None
     # Close all WebSocket connections
     for ws in list(_ws_clients):

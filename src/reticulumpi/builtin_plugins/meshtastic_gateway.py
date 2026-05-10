@@ -109,6 +109,8 @@ class _MeshtasticMQTTClient:
         long_name: str = "",
         short_name: str = "",
         tls: dict[str, Any] | None = None,
+        max_nodes: int = 1024,
+        node_ttl_seconds: float = 86400.0,
     ):
         import base64
         import hashlib
@@ -154,6 +156,9 @@ class _MeshtasticMQTTClient:
 
         # Node database (populated from received NODEINFO_APP messages)
         self.nodes: dict[str, dict] = {}
+        self._max_nodes: int = max_nodes
+        self._node_ttl_seconds: float = node_ttl_seconds
+        self._node_inserts_since_eviction: int = 0
 
         # Mimic myInfo for _get_own_node_id()
         class _MyInfo:
@@ -352,6 +357,7 @@ class _MeshtasticMQTTClient:
                 if node_id not in self.nodes:
                     self.nodes[node_id] = {}
                 self.nodes[node_id]["snr"] = rx_snr
+            self._maybe_evict_nodes()
 
         # Track nodes from NODEINFO_APP
         if data.portnum == NODEINFO_APP:
@@ -448,6 +454,7 @@ class _MeshtasticMQTTClient:
                     "id": node_id,
                 }
                 self.nodes[node_id]["lastHeard"] = int(time.time())
+            self._maybe_evict_nodes()
         except Exception:
             if self._logger:
                 self._logger.debug("Error parsing NODEINFO payload", exc_info=True)
@@ -475,6 +482,7 @@ class _MeshtasticMQTTClient:
                     "longitude": lon,
                 }
                 self.nodes[node_id]["lastHeard"] = int(time.time())
+            self._maybe_evict_nodes()
             if self._logger:
                 self._logger.debug(
                     "Position update for %s: %.6f, %.6f", node_id, lat, lon
@@ -499,6 +507,35 @@ class _MeshtasticMQTTClient:
                 "lastHeard": int(time.time()),
                 "isSelf": True,
             }
+
+    def _maybe_evict_nodes(self) -> None:
+        """Evict stale or excess nodes from the in-memory database.
+
+        Called periodically (every 64 inserts) to keep memory bounded.
+        Must be called while self._lock is NOT held.
+        """
+        self._node_inserts_since_eviction += 1
+        if self._node_inserts_since_eviction < 64:
+            return
+        self._node_inserts_since_eviction = 0
+
+        now = time.time()
+        cutoff = now - self._node_ttl_seconds
+        with self._lock:
+            self.nodes = {
+                nid: data for nid, data in self.nodes.items()
+                if data.get("isSelf") or data.get("lastHeard", 0) > cutoff
+            }
+            if len(self.nodes) > self._max_nodes:
+                keep = sorted(
+                    self.nodes.items(),
+                    key=lambda kv: (
+                        kv[1].get("isSelf", False),
+                        kv[1].get("lastHeard", 0),
+                    ),
+                    reverse=True,
+                )[:int(self._max_nodes * 0.75)]
+                self.nodes = dict(keep)
 
     def sendNodeInfo(self) -> None:
         """Broadcast a NODEINFO_APP packet with our identity to the mesh."""
@@ -1278,6 +1315,8 @@ class MeshtasticGateway(PluginBase):
             long_name=self._mqtt_long_name or "",
             short_name=self._mqtt_short_name or "",
             tls=tls_cfg if tls_cfg.get("enabled") else None,
+            max_nodes=int(self.config.get("mqtt_max_nodes", 1024)),
+            node_ttl_seconds=float(self.config.get("mqtt_node_ttl_seconds", 86400)),
         )
 
     def _get_own_node_id(self, iface: Any) -> str:
@@ -2193,30 +2232,31 @@ class MeshtasticGateway(PluginBase):
 
     def _drain_send_queue(self) -> None:
         """Send queued messages, skipping expired ones, until rate-limited."""
-        while self._send_queue:
+        while True:
             with self._lock:
-                if not self._send_queue:
-                    return
-                enqueued_at, formatted, channel = self._send_queue[0]
-                if time.time() - enqueued_at > self._send_queue_ttl:
-                    self._send_queue.popleft()
-                    self.log.debug("Queued message expired (%.0fs TTL)", self._send_queue_ttl)
-                    continue
-
-            if not self._check_send_rate_limit():
-                return
-
-            with self._lock:
+                while self._send_queue:
+                    enqueued_at, formatted, channel = self._send_queue[0]
+                    if time.time() - enqueued_at > self._send_queue_ttl:
+                        self._send_queue.popleft()
+                        self.log.debug("Queued message expired (%.0fs TTL)", self._send_queue_ttl)
+                    else:
+                        break
                 if not self._send_queue:
                     return
                 enqueued_at, formatted, channel = self._send_queue.popleft()
-                if time.time() - enqueued_at > self._send_queue_ttl:
-                    continue
+
+            if not self._check_send_rate_limit():
+                with self._lock:
+                    self._send_queue.appendleft((enqueued_at, formatted, channel))
+                return
+
+            with self._lock:
                 if self._connected and self._mesh_interface is not None:
                     iface = self._mesh_interface
                 elif self._serial_listener is not None:
                     iface = self._serial_listener
                 else:
+                    self._send_queue.appendleft((enqueued_at, formatted, channel))
                     return
 
             try:
@@ -2227,6 +2267,9 @@ class MeshtasticGateway(PluginBase):
                 self.log.debug("Sent queued LXMF message on ch%d", channel)
             except Exception:
                 self.log.exception("Error sending queued message to Meshtastic")
+                with self._lock:
+                    self._send_queue.appendleft((enqueued_at, formatted, channel))
+                return
 
     # ── Meshtastic pubsub callbacks ─────────────────────────────────
 
@@ -2581,23 +2624,16 @@ class MeshtasticGateway(PluginBase):
             with self._lock:
                 if not self._pending_lxmf:
                     break
-                enqueued_at, recipient_hash, text = self._pending_lxmf[0]
-                if now - enqueued_at > self._pending_lxmf_ttl:
-                    self._pending_lxmf.popleft()
-                    self.log.debug(
-                        "Pending LXMF to %s expired",
-                        RNS.prettyhexrep(recipient_hash),
-                    )
-                    continue
-            if self._try_send_lxmf(recipient_hash, text):
-                with self._lock:
-                    if self._pending_lxmf:
-                        self._pending_lxmf.popleft()
-            else:
-                with self._lock:
-                    if self._pending_lxmf:
-                        self._pending_lxmf.rotate(-1)
+                enqueued_at, recipient_hash, text = self._pending_lxmf.popleft()
+            if now - enqueued_at > self._pending_lxmf_ttl:
+                self.log.debug(
+                    "Pending LXMF to %s expired",
+                    RNS.prettyhexrep(recipient_hash),
+                )
                 continue
+            if not self._try_send_lxmf(recipient_hash, text):
+                with self._lock:
+                    self._pending_lxmf.append((enqueued_at, recipient_hash, text))
 
     def _handle_propagation_announce(
         self, destination_hash: bytes, announced_identity: Any, app_data: bytes

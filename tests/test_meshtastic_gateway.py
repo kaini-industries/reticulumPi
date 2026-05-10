@@ -1404,14 +1404,14 @@ class TestDrainSendQueue:
         plugin._mesh_interface.sendText.assert_not_called()
         assert len(plugin._send_queue) == 1
 
-    def test_no_interface_returns(self, mock_app, gw_config):
+    def test_no_interface_requeues(self, mock_app, gw_config):
         plugin = self._setup_plugin(mock_app, gw_config)
         plugin._connected = False
         plugin._mesh_interface = None
         plugin._serial_listener = None
         plugin._send_queue.append((time.time(), "msg", 0))
         plugin._drain_send_queue()
-        assert len(plugin._send_queue) == 0
+        assert len(plugin._send_queue) == 1
 
     def test_empty_queue_no_op(self, mock_app, gw_config):
         plugin = self._setup_plugin(mock_app, gw_config)
@@ -1524,3 +1524,97 @@ class TestRetryPendingLxmf:
         with patch.object(plugin, "_try_send_lxmf") as mock_send:
             plugin._retry_pending_lxmf()
         mock_send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestMqttNodeEviction
+# ---------------------------------------------------------------------------
+
+
+class TestMqttNodeEviction:
+    """Test TTL and max-size eviction on _MeshtasticMQTTClient.nodes."""
+
+    @staticmethod
+    def _make_client():
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = MagicMock(spec=_MeshtasticMQTTClient)
+        client._lock = __import__("threading").Lock()
+        client._my_node_num = 0xAABBCCDD
+        client._long_name = "Test"
+        client._short_name = "TS"
+        client.nodes = {}
+        client._max_nodes = 10
+        client._node_ttl_seconds = 3600.0
+        client._node_inserts_since_eviction = 0
+        return client
+
+    def test_evicts_stale_nodes_by_ttl(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        now = time.time()
+        client.nodes = {
+            "!self": {"isSelf": True, "lastHeard": now},
+            "!old1": {"lastHeard": now - 7200},
+            "!old2": {"lastHeard": now - 7200},
+            "!new1": {"lastHeard": now - 100},
+        }
+        client._node_inserts_since_eviction = 63
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!self" in client.nodes
+        assert "!new1" in client.nodes
+        assert "!old1" not in client.nodes
+        assert "!old2" not in client.nodes
+
+    def test_evicts_excess_by_max_size(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        client._max_nodes = 5
+        now = time.time()
+        client.nodes = {
+            "!self": {"isSelf": True, "lastHeard": now},
+        }
+        for i in range(10):
+            client.nodes[f"!node{i:04x}"] = {"lastHeard": now - (10 - i)}
+        client._node_inserts_since_eviction = 63
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!self" in client.nodes
+        assert len(client.nodes) <= int(5 * 0.75) + 1  # 75% of max + self
+
+    def test_self_node_survives_eviction(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        client._max_nodes = 2
+        now = time.time()
+        client.nodes = {
+            "!self": {"isSelf": True, "lastHeard": now - 99999},
+            "!a": {"lastHeard": now - 1},
+            "!b": {"lastHeard": now - 2},
+            "!c": {"lastHeard": now - 3},
+        }
+        client._node_inserts_since_eviction = 63
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!self" in client.nodes
+
+    def test_skips_eviction_before_threshold(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        now = time.time()
+        client.nodes = {
+            "!old": {"lastHeard": now - 99999},
+        }
+        client._node_inserts_since_eviction = 10  # below 64
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!old" in client.nodes  # not evicted yet

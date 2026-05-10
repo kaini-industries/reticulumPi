@@ -1874,7 +1874,6 @@ body {
 .msg-status-sent { color: var(--green); font-size: 0.75rem; }
 .msg-status-delivered { color: var(--cyan); font-size: 0.75rem; }
 .msg-status-queued { color: var(--text-muted); font-size: 0.75rem; }
-.msg-status-pending { color: var(--text-muted); font-size: 0.8rem; letter-spacing: 1px; }
 .msg-status-propagated { color: var(--yellow); font-size: 0.75rem; }
 .msg-status-timeout { color: var(--text-muted); font-size: 0.75rem; }
 .msg-status-expired { color: var(--orange); font-size: 0.75rem; }

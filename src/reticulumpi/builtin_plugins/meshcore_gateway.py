@@ -477,7 +477,8 @@ class MeshCoreGateway(PluginBase):
             if not key:
                 return
             name = payload.get("adv_name", "")
-            self._contact_cache[key] = dict(payload)
+            with self._lock:
+                self._contact_cache[key] = dict(payload)
             self._save_contact_cache()
             # Also update the library's contacts dict so get_contacts() sees it
             with self._lock:
@@ -508,7 +509,9 @@ class MeshCoreGateway(PluginBase):
         Returns the first contact whose key starts with *prefix*.
         Falls back to (prefix, "") if no match.
         """
-        for key, contact in self._contact_cache.items():
+        with self._lock:
+            items = list(self._contact_cache.items())
+        for key, contact in items:
             if key.startswith(prefix):
                 return key, contact.get("adv_name", "")
         return prefix, ""
@@ -517,7 +520,9 @@ class MeshCoreGateway(PluginBase):
         """Look up a contact's full pubkey by adv_name.  Returns "" if unknown."""
         if not name:
             return ""
-        for key, contact in self._contact_cache.items():
+        with self._lock:
+            items = list(self._contact_cache.items())
+        for key, contact in items:
             if contact.get("adv_name", "") == name:
                 return key
         return ""
@@ -632,7 +637,8 @@ class MeshCoreGateway(PluginBase):
 
             path_len = payload.get("path_len")
             if path_len is None and from_key:
-                cached = self._contact_cache.get(from_key)
+                with self._lock:
+                    cached = self._contact_cache.get(from_key)
                 if cached:
                     opl = cached.get("out_path_len")
                     if opl is not None and opl >= 0:
@@ -691,8 +697,9 @@ class MeshCoreGateway(PluginBase):
         """Update the local contact cache from the MeshCore device."""
         try:
             contacts = mc.contacts or {}
-            for key, contact in contacts.items():
-                self._contact_cache[key] = dict(contact)
+            snapshot = {key: dict(contact) for key, contact in contacts.items()}
+            with self._lock:
+                self._contact_cache.update(snapshot)
             self._save_contact_cache()
         except Exception:
             self.log.debug("Error syncing contact cache", exc_info=True)
@@ -705,7 +712,8 @@ class MeshCoreGateway(PluginBase):
             with open(self._cache_path) as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                self._contact_cache = data
+                with self._lock:
+                    self._contact_cache = data
                 self.log.debug("Loaded %d MeshCore contacts from cache", len(data))
         except FileNotFoundError:
             pass
@@ -716,9 +724,11 @@ class MeshCoreGateway(PluginBase):
         """Persist the contact cache to disk."""
         if not self._cache_path:
             return
+        with self._lock:
+            snapshot = dict(self._contact_cache)
         try:
             with open(self._cache_path, "w") as f:
-                json.dump(self._contact_cache, f)
+                json.dump(snapshot, f)
         except Exception:
             self.log.debug("Error saving MeshCore contact cache", exc_info=True)
 
@@ -874,14 +884,16 @@ class MeshCoreGateway(PluginBase):
         if connected and mc is not None:
             try:
                 contacts_dict = dict(mc.contacts or {})
-                # Update cache while we're at it
-                for key, contact in contacts_dict.items():
-                    self._contact_cache[key] = dict(contact)
+                with self._lock:
+                    for key, contact in contacts_dict.items():
+                        self._contact_cache[key] = dict(contact)
             except Exception:
                 self.log.debug("Error reading live contacts", exc_info=True)
-                contacts_dict = dict(self._contact_cache)
+                with self._lock:
+                    contacts_dict = dict(self._contact_cache)
         else:
-            contacts_dict = dict(self._contact_cache)
+            with self._lock:
+                contacts_dict = dict(self._contact_cache)
 
         # Filter stale contacts (0 = show all)
         now = time.time()

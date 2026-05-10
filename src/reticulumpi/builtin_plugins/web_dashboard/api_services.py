@@ -6,6 +6,8 @@ MeshCore gateway, sensors, alerts, emergency broadcasts, and file transfers.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import hashlib
 import threading
 import time
@@ -588,7 +590,11 @@ async def handle_send_message(
             kwargs["channel"] = int(body["channel"])
         except (TypeError, ValueError):
             return _error("channel must be an integer 0-7", 400)
-    result = hub.send_message(transport, text, destination, **kwargs)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        functools.partial(hub.send_message, transport, text, destination, **kwargs),
+    )
     if result.get("sent"):
         return _ok(result)
     return _error(result.get("reason", "Send failed"), 400)
