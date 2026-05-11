@@ -14,7 +14,7 @@ Example config::
       device_index: 0
       gain: "max"
       ppm: 0
-      enable_bias_tee: false
+      enable_bias_tee: true
       sbs_port: 30003
       stale_timeout: 300
       receiver_lat: null
@@ -135,6 +135,8 @@ class AdsbRadarPlugin(PluginBase):
         self._status = "starting"
         self._last_error: str | None = None
         self._dump1090_path: str | None = None
+        self._rtl_biast_path: str | None = None
+        self._bias_tee_active = False
 
         self._aircraft: dict[str, AircraftState] = {}
         self._total_messages = 0
@@ -170,6 +172,8 @@ class AdsbRadarPlugin(PluginBase):
         self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
         self.event_bus.unsubscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
         self._terminate_process()
+        if self._enable_bias_tee:
+            self._set_bias_tee(False)
         try:
             from reticulumpi.rtlsdr import release_device
             release_device(self._device_id, caller=self.plugin_name)
@@ -242,6 +246,13 @@ class AdsbRadarPlugin(PluginBase):
             self.log.error("%s", exc)
             return
 
+        if self._enable_bias_tee:
+            self._rtl_biast_path = shutil.which("rtl_biast")
+            if not self._rtl_biast_path:
+                self.log.warning(
+                    "rtl_biast not found; bias-tee may not work with this dump1090 build",
+                )
+
         while self._active:
             try:
                 self._launch_dump1090()
@@ -287,6 +298,8 @@ class AdsbRadarPlugin(PluginBase):
             self._sleep_while_active(backoff)
 
     def _launch_dump1090(self) -> None:
+        if self._enable_bias_tee:
+            self._set_bias_tee(True)
         cmd = self._build_cmd()
         self.log.debug("Launching: %s", " ".join(cmd))
         self._process = subprocess.Popen(
@@ -310,8 +323,6 @@ class AdsbRadarPlugin(PluginBase):
             "--net-sbs-port", str(self._sbs_port),
             "--quiet",
         ]
-        if self._enable_bias_tee:
-            cmd.append("--enable-bias-tee")
         if self._receiver_lat is not None and self._receiver_lon is not None:
             cmd += ["--lat", str(self._receiver_lat), "--lon", str(self._receiver_lon)]
         return cmd
@@ -341,6 +352,28 @@ class AdsbRadarPlugin(PluginBase):
                     proc.stdout.close()
                 except Exception:
                     pass
+
+    def _set_bias_tee(self, on: bool) -> None:
+        if self._rtl_biast_path is None:
+            return
+        idx = self._resolved_index if self._resolved_index is not None else 0
+        flag = "1" if on else "0"
+        try:
+            result = subprocess.run(
+                [self._rtl_biast_path, "-d", str(idx), "-b", flag],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode == 0:
+                self._bias_tee_active = on
+                self.log.info("Bias-tee %s (device %d)", "enabled" if on else "disabled", idx)
+            else:
+                self.log.warning(
+                    "rtl_biast exited %d: %s",
+                    result.returncode,
+                    result.stderr.decode(errors="replace").strip(),
+                )
+        except Exception:
+            self.log.warning("Failed to %s bias-tee", "enable" if on else "disable", exc_info=True)
 
     # ── SBS parser (TCP to dump1090 port 30003) ──────────────────────
 

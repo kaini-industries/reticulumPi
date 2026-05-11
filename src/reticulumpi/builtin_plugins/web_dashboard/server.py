@@ -91,7 +91,7 @@ async def security_headers_middleware(
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; connect-src 'self' ws: wss: https://api.planespotters.net; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https://*.tile.openstreetmap.org https://api.planespotters.net"
+        "img-src 'self' data: https://*.tile.openstreetmap.org https://api.planespotters.net https://*.plnspttrs.net"
     )
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     if request.path.startswith("/api/"):

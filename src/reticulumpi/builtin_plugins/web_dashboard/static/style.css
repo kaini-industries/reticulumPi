@@ -4343,12 +4343,12 @@ body {
   grid-template-columns: auto 1fr;
   gap: 2px 10px;
 }
-.adsb-popup-label { color: var(--text-muted); white-space: nowrap; }
+.adsb-popup-label { color: var(--text-muted); white-space: nowrap; margin-right: 0.4em; }
 .adsb-popup-value { color: var(--text); text-align: right; }
 .adsb-popup-value .addr { font-family: var(--mono); font-size: 0.8rem; }
 .adsb-popup-photo { margin-top: 8px; text-align: center; }
 .adsb-popup-photo img {
-  max-width: 280px;
+  max-width: 100%;
   border-radius: 4px;
   display: block;
   margin: 0 auto;
