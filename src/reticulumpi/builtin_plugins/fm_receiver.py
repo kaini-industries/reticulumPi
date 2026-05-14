@@ -337,12 +337,7 @@ class FMReceiver(PluginBase):
         if self._playing:
             return {"status": "already_playing"}
         if self._supervisor_alive:
-            for _ in range(20):
-                time.sleep(0.1)
-                if not self._supervisor_alive:
-                    break
-            else:
-                return {"status": "already_playing"}
+            return {"status": "already_playing"}
         if not self._dongle_active:
             return {"status": "error", "error": "Dongle in use by another signal"}
         if self._resolved_index is None:
@@ -455,11 +450,21 @@ class FMReceiver(PluginBase):
             return
         with self._stream_lock:
             queues = list(self._stream_queues)
+        dead: list[asyncio.Queue] = []
         for q in queues:
             try:
                 loop.call_soon_threadsafe(q.put_nowait, chunk)
-            except (asyncio.QueueFull, RuntimeError):
+            except asyncio.QueueFull:
                 pass
+            except RuntimeError:
+                dead.append(q)
+        if dead:
+            with self._stream_lock:
+                for q in dead:
+                    try:
+                        self._stream_queues.remove(q)
+                    except ValueError:
+                        pass
 
     def _notify_clients_stopped(self) -> None:
         loop = self._event_loop
@@ -598,19 +603,11 @@ class FMReceiver(PluginBase):
         self._signal_rms = 0.0
         self._signal_db = -90.0
         self._set_status("playing")
-        self._start_log_reader(self._process_stderr_reader(), prefix="rtl_fm")
+        self._start_stderr_reader(self._process, prefix="rtl_fm")
         self.log.info(
             "Started rtl_fm at %.3f MHz %s (PID %d)",
             self._frequency_hz / 1_000_000, self._mode.upper(), self._pid,
         )
-
-    def _process_stderr_reader(self) -> Any:
-        class _FakeProc:
-            pass
-        fake = _FakeProc()
-        proc = self._process
-        fake.stdout = proc.stderr if proc else None
-        return fake
 
     def _build_cmd(self) -> list[str]:
         assert self._rtl_fm_path is not None

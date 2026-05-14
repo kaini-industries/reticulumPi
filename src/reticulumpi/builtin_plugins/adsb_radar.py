@@ -569,8 +569,8 @@ class AdsbRadarPlugin(PluginBase):
         lat = data.get("lat")
         lon = data.get("lon")
         if lat is not None and lon is not None:
-            had_position = self._receiver_lat is not None
             with self._state_lock:
+                had_position = self._receiver_lat is not None
                 self._receiver_lat = float(lat)
                 self._receiver_lon = float(lon)
             if not had_position:
@@ -579,8 +579,8 @@ class AdsbRadarPlugin(PluginBase):
     # ── helpers ───────────────────────────────────────────────────────
 
     def _set_status(self, status: str, error: str | None = None) -> None:
-        prev = self._status
         with self._state_lock:
+            prev = self._status
             self._status = status
             self._last_error = error
         if status != prev:

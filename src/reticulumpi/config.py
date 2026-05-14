@@ -31,7 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "log_level": 4,
     "plugin_paths": [],
     "plugins": {},
-    "thread_budget": 40,
+    "thread_budget": 50,
     "internet": {
         "force_offline": False,
         "probe_interval": 30,
@@ -139,8 +139,8 @@ class AppConfig:
 
     @property
     def thread_budget(self) -> int:
-        val = self._data.get("thread_budget", 40)
-        return int(val) if isinstance(val, (int, float)) else 40
+        val = self._data.get("thread_budget", 50)
+        return int(val) if isinstance(val, (int, float)) else 50
 
     @property
     def internet(self) -> dict[str, Any]:

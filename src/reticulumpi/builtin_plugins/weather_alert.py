@@ -158,9 +158,18 @@ class WeatherAlert(SignalPluginBase):
         }
         self._status = "idle"
         self._last_error: str | None = None
+        self._start_thread(self._expiry_loop, name="wx-expiry")
 
     def _on_stop(self) -> None:
         pass
+
+    def _expiry_loop(self) -> None:
+        while self._active:
+            self._sleep_while_active(60.0)
+            if not self._active:
+                break
+            self._check_expired()
+            self._update_snapshot_cache()
 
     def _launch_subprocess(self, device_index: int) -> None:
         rtl_fm = shutil.which("rtl_fm")
@@ -203,7 +212,7 @@ class WeatherAlert(SignalPluginBase):
             multimon_cmd,
             stdin=rtl_proc.stdout,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
         self._rtl_process = rtl_proc
         if rtl_proc.stdout:
@@ -211,21 +220,13 @@ class WeatherAlert(SignalPluginBase):
         self._pid = self._process.pid
         self._status = "monitoring"
 
-        self._start_log_reader(self._stderr_fake(rtl_proc), prefix="rtl_fm")
+        self._start_stderr_reader(rtl_proc, prefix="rtl_fm")
         self._start_thread(self._parser_loop, name="wx-parser")
 
         self.log.info(
             "Monitoring %.3f MHz for SAME headers (PID %d)",
             self._freq_hz / 1_000_000, self._pid,
         )
-
-    @staticmethod
-    def _stderr_fake(proc: subprocess.Popen) -> Any:
-        class _F:
-            pass
-        f = _F()
-        f.stdout = proc.stderr  # type: ignore[attr-defined]
-        return f
 
     def _kill_subprocess(self) -> None:
         rtl = getattr(self, "_rtl_process", None)
@@ -358,6 +359,24 @@ class WeatherAlert(SignalPluginBase):
                 except Exception:
                     pass
                 self._active_alert = None
+                self._promote_next_active()
+
+    def _promote_next_active(self) -> None:
+        now = time.time()
+        best: dict[str, Any] | None = None
+        best_rank = 999
+        for alert in self._alert_history:
+            if alert.get("expired"):
+                continue
+            purge = alert.get("purge_ts")
+            if purge and now > purge:
+                alert["expired"] = True
+                continue
+            rank = _SEVERITY_RANK.get(alert.get("severity", "info"), 99)
+            if rank < best_rank:
+                best = alert
+                best_rank = rank
+        self._active_alert = best
 
     def _update_snapshot_cache(self) -> None:
         self._check_expired()

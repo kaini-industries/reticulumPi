@@ -296,8 +296,8 @@ class SpectrumScanner(PluginBase):
             self._last_sweep_at = None
             self._snapshot_cache = None
             self._snapshot_bins_version = self._bins_version
-        self._segments = {}
-        self._current_ts = None
+            self._segments = {}
+            self._current_ts = None
 
     def get_presets(self) -> dict[str, Any]:
         """Return available presets with metadata for the dashboard."""
@@ -751,7 +751,7 @@ class SpectrumScanner(PluginBase):
                 self._bins_hz = freqs
                 self._bins_version += 1
             self._latest_powers_db = powers
-            self._waterfall.append((now, powers))
+            self._waterfall.append((now, list(powers)))
             self._sweep_count += 1
             self._last_sweep_at = now
             self._snapshot_cache = None
@@ -787,8 +787,8 @@ class SpectrumScanner(PluginBase):
     # --- status helper -------------------------------------------------------
 
     def _set_status(self, status: str, error: str | None = None) -> None:
-        prev = self._status
         with self._state_lock:
+            prev = self._status
             self._status = status
             self._last_error = error
         if status != prev:

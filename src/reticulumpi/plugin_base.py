@@ -30,7 +30,7 @@ class PluginBase(ABC):
     broadcast_keys: str | list[str] | None = None
 
     _global_thread_count: int = 0
-    _global_thread_budget: int = 40
+    _global_thread_budget: int = 50
     _global_thread_lock: threading.Lock = threading.Lock()
 
     def __init__(self, app: "ReticulumPiApp", plugin_config: dict[str, Any]):
@@ -179,6 +179,12 @@ class PluginBase(ABC):
                 pass
 
         return self._start_thread(_reader, name=f"{prefix}-log-reader" if prefix else "log-reader")
+
+    def _start_stderr_reader(self, process: Any, prefix: str = "") -> threading.Thread:
+        """Start a log reader that drains the process's stderr pipe."""
+        class _StderrProxy:
+            stdout = process.stderr
+        return self._start_log_reader(_StderrProxy(), prefix=prefix)
 
     @classmethod
     def get_thread_count(cls) -> int:

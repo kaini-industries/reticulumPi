@@ -1,6 +1,6 @@
-"""Example plugin — a starting point for writing your own reticulumPi plugin.
+"""Plugin template — copy this file and customise to create your own plugin.
 
-This plugin creates a Reticulum destination, announces it periodically,
+This template creates a Reticulum destination, announces it periodically,
 and handles incoming data packets with a simple echo response. It
 demonstrates all the key PluginBase features:
 
@@ -12,7 +12,8 @@ demonstrates all the key PluginBase features:
 - Status reporting
 - Logging
 
-Copy this file, rename the class, and change plugin_name to get started.
+Copy this file into plugins/, rename the class, and change plugin_name.
+See also: src/reticulumpi/builtin_plugins/example_plugin.py
 """
 
 import threading
@@ -22,12 +23,12 @@ import RNS
 from reticulumpi.plugin_base import PluginBase
 
 
-class ExamplePlugin(PluginBase):
+class PluginTemplate(PluginBase):
     """Announces a destination and echoes back any received data packets."""
 
-    plugin_name = "example_plugin"
+    plugin_name = "plugin_template"
     plugin_version = "1.0.0"
-    plugin_description = "Example scaffold — announces a destination and echoes packets"
+    plugin_description = "Template scaffold — copy and customise for your own plugin"
 
     def validate_config(self) -> None:
         """Validate plugin-specific config at construction time."""

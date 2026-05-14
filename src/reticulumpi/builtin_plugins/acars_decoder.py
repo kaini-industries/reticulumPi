@@ -79,6 +79,7 @@ class ACARSDecoder(SignalPluginBase):
         self._status = "idle"
         self._last_error: str | None = None
         self._restart_count = 0
+        self._snapshot_dirty = True
 
     def _launch_subprocess(self, device_index: int) -> None:
         decoder = shutil.which(self._decoder_bin)
@@ -110,7 +111,7 @@ class ACARSDecoder(SignalPluginBase):
         self._status = "running"
         self._restart_count = 0
 
-        self._start_log_reader(self._stderr_fake(), prefix="acarsdec")
+        self._start_stderr_reader(self._process, prefix="acarsdec")
         self._start_thread(self._parser_loop, name="acars-parser")
 
         self.log.info(
@@ -118,13 +119,6 @@ class ACARSDecoder(SignalPluginBase):
             ", ".join(str(f) for f in self._frequencies),
             self._pid,
         )
-
-    def _stderr_fake(self) -> Any:
-        class _F:
-            pass
-        f = _F()
-        f.stdout = self._process.stderr if self._process else None  # type: ignore[attr-defined]
-        return f
 
     def _parser_loop(self) -> None:
         proc = self._process
@@ -203,7 +197,7 @@ class ACARSDecoder(SignalPluginBase):
         except Exception:
             pass
 
-        self._update_snapshot_cache()
+        self._snapshot_dirty = True
 
     def _maybe_reset_daily(self) -> None:
         now = time.time()
@@ -228,6 +222,12 @@ class ACARSDecoder(SignalPluginBase):
                     "error_rate_pct": round(error_rate, 1),
                 },
             }
+        self._snapshot_dirty = False
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        if self._snapshot_dirty:
+            self._update_snapshot_cache()
+        return super().broadcast_snapshot(cycle_count)
 
     def get_status(self) -> dict[str, Any]:
         return {
