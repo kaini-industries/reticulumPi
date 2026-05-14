@@ -961,6 +961,98 @@ async def handle_link_tester_clear(
     return _ok(lt.clear_history())
 
 
+# ── Signal plugin endpoints ──────────────────────────────────────────
+
+
+async def handle_weather_alert(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    plugin = _get_plugin(request)
+    wa = plugin.app.get_plugin("weather_alert")
+    if not wa:
+        return _error("weather_alert plugin not available", 503)
+    return _ok(wa.get_snapshot())
+
+
+async def handle_weather_alert_active(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    plugin = _get_plugin(request)
+    wa = plugin.app.get_plugin("weather_alert")
+    if not wa:
+        return _error("weather_alert plugin not available", 503)
+    snap = wa.get_snapshot()
+    return _ok(snap.get("active_alert"))
+
+
+async def handle_ais(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    plugin = _get_plugin(request)
+    ais = plugin.app.get_plugin("ais_receiver")
+    if not ais:
+        return _error("ais_receiver plugin not available", 503)
+    return _ok(ais.get_snapshot())
+
+
+async def handle_acars(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    plugin = _get_plugin(request)
+    acars = plugin.app.get_plugin("acars_decoder")
+    if not acars:
+        return _error("acars_decoder plugin not available", 503)
+    return _ok(acars.get_snapshot())
+
+
+async def handle_radiosonde(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    plugin = _get_plugin(request)
+    rs = plugin.app.get_plugin("radiosonde_tracker")
+    if not rs:
+        return _error("radiosonde_tracker plugin not available", 503)
+    return _ok(rs.get_snapshot())
+
+
+async def handle_noaa(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    plugin = _get_plugin(request)
+    noaa = plugin.app.get_plugin("noaa_apt_decoder")
+    if not noaa:
+        return _error("noaa_apt_decoder plugin not available", 503)
+    return _ok(noaa.get_snapshot())
+
+
+async def handle_noaa_image(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.StreamResponse:
+    import os
+    plugin = _get_plugin(request)
+    noaa = plugin.app.get_plugin("noaa_apt_decoder")
+    if not noaa:
+        return _error("noaa_apt_decoder plugin not available", 503)
+    filename = request.match_info.get("filename", "")
+    if not filename or ".." in filename or "/" in filename:
+        return _error("invalid filename", 400)
+    image_dir = getattr(noaa, "_image_dir", "")
+    path = os.path.join(image_dir, filename)
+    if not os.path.exists(path):
+        return _error("image not found", 404)
+    return aiohttp.web.FileResponse(path)
+
+
+async def handle_sdr_scheduler(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    plugin = _get_plugin(request)
+    sched = getattr(plugin.app, "sdr_scheduler", None)
+    if not sched:
+        return _error("sdr_scheduler not available", 503)
+    return _ok(sched.get_status())
+
+
 def setup_service_routes(app: aiohttp.web.Application) -> None:
     """Register plugin service API routes."""
     # LoRa
@@ -1026,3 +1118,12 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_post("/api/link_tester/start", handle_link_tester_start)
     app.router.add_post("/api/link_tester/stop", handle_link_tester_stop)
     app.router.add_post("/api/link_tester/clear", handle_link_tester_clear)
+    # Signal plugins
+    app.router.add_get("/api/weather_alert", handle_weather_alert)
+    app.router.add_get("/api/weather_alert/active", handle_weather_alert_active)
+    app.router.add_get("/api/ais", handle_ais)
+    app.router.add_get("/api/acars", handle_acars)
+    app.router.add_get("/api/radiosonde", handle_radiosonde)
+    app.router.add_get("/api/noaa", handle_noaa)
+    app.router.add_get("/api/noaa/image/{filename}", handle_noaa_image)
+    app.router.add_get("/api/sdr_scheduler", handle_sdr_scheduler)

@@ -11,6 +11,7 @@ WITH_DASHBOARD=false
 WITH_LORA=false
 WITH_I2P=false
 WITH_YGGDRASIL=false
+WITH_SIGNALS=false
 INSTALL_DIR="/opt/reticulumpi"
 NODE_NAME=""
 while [[ $# -gt 0 ]]; do
@@ -22,6 +23,7 @@ while [[ $# -gt 0 ]]; do
         --with-lora) WITH_LORA=true; shift ;;
         --with-i2p) WITH_I2P=true; shift ;;
         --with-yggdrasil) WITH_YGGDRASIL=true; shift ;;
+        --with-signals) WITH_SIGNALS=true; shift ;;
         --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift 2 ;;
         --install-dir=*) INSTALL_DIR="${1#*=}"; shift ;;
         --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift 2 ;;
@@ -196,6 +198,70 @@ if [ "$WITH_YGGDRASIL" = true ]; then
     else
         echo "  Yggdrasil installed (address will be assigned on start)"
     fi
+fi
+
+# 4h. Optional: Install signal decoder tools
+if [ "$WITH_SIGNALS" = true ]; then
+    echo "[4h/7] Installing signal decoder tools..."
+
+    # multimon-ng (SAME/EAS weather alert decoding)
+    sudo apt-get install -y multimon-ng
+
+    # sox (audio format conversion for NOAA APT)
+    sudo apt-get install -y sox
+
+    # AIS-catcher (AIS vessel tracking) — build from source for ARM64
+    if ! command -v AIS-catcher &>/dev/null; then
+        echo "  Building AIS-catcher from source..."
+        BUILD_DIR=$(mktemp -d)
+        git clone --depth 1 https://github.com/jvde-github/AIS-catcher.git "$BUILD_DIR/AIS-catcher"
+        cd "$BUILD_DIR/AIS-catcher"
+        mkdir build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        make -j"$(nproc)"
+        sudo make install
+        cd /
+        rm -rf "$BUILD_DIR"
+        echo "  AIS-catcher installed."
+    else
+        echo "  AIS-catcher already installed."
+    fi
+
+    # acarsdec (ACARS aircraft message decoding) — build from source for ARM64
+    if ! command -v acarsdec &>/dev/null; then
+        echo "  Building acarsdec from source..."
+        sudo apt-get install -y librtlsdr-dev
+        BUILD_DIR=$(mktemp -d)
+        git clone --depth 1 https://github.com/TLeconte/acarsdec.git "$BUILD_DIR/acarsdec"
+        cd "$BUILD_DIR/acarsdec"
+        mkdir build && cd build
+        cmake .. -Drtl=ON -DCMAKE_BUILD_TYPE=Release
+        make -j"$(nproc)"
+        sudo make install
+        cd /
+        rm -rf "$BUILD_DIR"
+        echo "  acarsdec installed."
+    else
+        echo "  acarsdec already installed."
+    fi
+
+    # noaa-apt (NOAA APT satellite image decoder)
+    if ! command -v noaa-apt &>/dev/null; then
+        echo "  noaa-apt must be installed manually for ARM64."
+        echo "  See: https://noaa-apt.mbernardi.com.ar/download.html"
+    else
+        echo "  noaa-apt already installed."
+    fi
+
+    # rs41mod (radiosonde decoder) from radiosonde_auto_rx
+    if ! command -v rs41mod &>/dev/null; then
+        echo "  rs41mod must be built from radiosonde_auto_rx source."
+        echo "  See: https://github.com/projecthorus/radiosonde_auto_rx"
+    else
+        echo "  rs41mod already installed."
+    fi
+
+    echo "  Signal decoder tools setup complete."
 fi
 
 # 5. Config directories

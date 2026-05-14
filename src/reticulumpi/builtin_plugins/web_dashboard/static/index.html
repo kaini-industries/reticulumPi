@@ -9,6 +9,7 @@
 </head>
 <body>
   <div id="internet-status-banner" class="offline-banner" style="display:none">Internet Unavailable — some features are limited</div>
+  <div id="weather-alert-banner" class="weather-alert-banner" style="display:none"></div>
   <div class="dashboard">
     <!-- Header -->
     <div class="header">
@@ -939,10 +940,14 @@
     <!-- FM/AM Radio Receiver -->
     <div class="section" id="radio-section" style="display:none">
       <div class="section-header collapsible" id="radio-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> FM/AM Radio</span>
+        <span><span class="chevron">&#9656;</span> FM/AM Radio <span class="radio-lock-icon" id="radio-lock-icon" style="display:none" title="Dongle locked">&#128274;</span></span>
         <span class="count" id="radio-status-badge"></span>
       </div>
       <div class="section-body hidden" id="radio-body">
+        <div class="radio-preemption-banner" id="radio-preemption-banner" style="display:none"></div>
+        <div class="radio-lock-row" id="radio-lock-row">
+          <label class="radio-lock-toggle"><input type="checkbox" id="radio-lock-cb" /> Lock dongle</label>
+        </div>
         <div class="radio-tuner-display">
           <div class="radio-freq-row">
             <span class="radio-band-label" id="radio-band-label">VHF</span>
@@ -1045,6 +1050,90 @@
       </div>
     </div>
 
+    <!-- Weather Alerts (SAME) -->
+    <div class="section awaiting-data" id="weather-alert-section" style="display:none">
+      <div class="section-header collapsible" id="weather-alert-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Weather Alerts <span class="svc-tag svc-tag-wx">SAME</span></span>
+        <span class="count" id="weather-alert-status"></span>
+      </div>
+      <div class="section-body hidden" id="weather-alert-body">
+        <div class="metric-summary" id="weather-alert-stats"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>Areas</th></tr></thead>
+            <tbody id="weather-alert-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- AIS Vessel Tracking -->
+    <div class="section awaiting-data" id="ais-section" style="display:none">
+      <div class="section-header collapsible" id="ais-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> AIS Vessels <span class="svc-tag svc-tag-ais">AIS</span></span>
+        <span class="count" id="ais-count">0</span>
+      </div>
+      <div class="section-body hidden" id="ais-body">
+        <div class="metric-summary" id="ais-stats"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>Name</th><th>MMSI</th><th>Type</th><th>Speed</th><th>Course</th><th>Status</th><th>Last Seen</th></tr></thead>
+            <tbody id="ais-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ACARS Messages -->
+    <div class="section awaiting-data" id="acars-section" style="display:none">
+      <div class="section-header collapsible" id="acars-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> ACARS Messages <span class="svc-tag svc-tag-acars">ACARS</span></span>
+        <span class="count" id="acars-count">0</span>
+      </div>
+      <div class="section-body hidden" id="acars-body">
+        <div class="metric-summary" id="acars-stats"></div>
+        <div class="table-scroll" style="max-height:400px">
+          <table class="data-table">
+            <thead><tr><th>Time</th><th>Flight</th><th>Tail</th><th>Freq</th><th>Label</th><th>Text</th></tr></thead>
+            <tbody id="acars-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Radiosonde Tracker -->
+    <div class="section awaiting-data" id="radiosonde-section" style="display:none">
+      <div class="section-header collapsible" id="radiosonde-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Radiosonde Tracker <span class="svc-tag svc-tag-sonde">Sonde</span></span>
+        <span class="count" id="radiosonde-status"></span>
+      </div>
+      <div class="section-body hidden" id="radiosonde-body">
+        <div class="radiosonde-cards" id="radiosonde-cards"></div>
+        <div class="radiosonde-next" id="radiosonde-next"></div>
+        <canvas id="radiosonde-chart" class="radiosonde-chart" width="600" height="200" style="display:none"></canvas>
+        <div class="table-scroll" id="radiosonde-history-wrap" style="display:none">
+          <table class="data-table">
+            <thead><tr><th>ID</th><th>Type</th><th>Max Alt</th><th>Frames</th><th>Duration</th></tr></thead>
+            <tbody id="radiosonde-history"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- NOAA APT Satellite Images -->
+    <div class="section awaiting-data" id="noaa-section" style="display:none">
+      <div class="section-header collapsible" id="noaa-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> NOAA Satellite Images <span class="svc-tag svc-tag-noaa">APT</span></span>
+        <span class="count" id="noaa-status"></span>
+      </div>
+      <div class="section-body hidden" id="noaa-body">
+        <div class="noaa-progress" id="noaa-progress" style="display:none"></div>
+        <div class="metric-summary" id="noaa-stats"></div>
+        <div class="noaa-gallery" id="noaa-gallery"></div>
+        <div class="noaa-passes" id="noaa-passes"></div>
+      </div>
+    </div>
+
     <!-- Plugins (collapsed by default) -->
     <div class="section" id="plugins-section">
       <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
@@ -1123,5 +1212,10 @@
   <script src="/static/ntp.js?v=1"></script>
   <script src="/static/link_tester.js?v=1"></script>
   <script src="/static/hotspot.js?v=1"></script>
+  <script src="/static/weather_alert.js?v=1"></script>
+  <script src="/static/ais.js?v=1"></script>
+  <script src="/static/acars.js?v=1"></script>
+  <script src="/static/radiosonde.js?v=1"></script>
+  <script src="/static/noaa.js?v=1"></script>
 </body>
 </html>

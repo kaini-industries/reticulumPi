@@ -270,6 +270,32 @@ async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.Stream
     return response
 
 
+# ── POST /api/radio/lock ────────────────────────────────────────────
+
+
+async def handle_radio_lock(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    err = _require_auth(request)
+    if err:
+        return err
+    fm, err2 = _require_fm(request)
+    if err2:
+        return err2
+    return _ok(fm.lock_dongle())
+
+
+# ── POST /api/radio/unlock ──────────────────────────────────────────
+
+
+async def handle_radio_unlock(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    err = _require_auth(request)
+    if err:
+        return err
+    fm, err2 = _require_fm(request)
+    if err2:
+        return err2
+    return _ok(fm.unlock_dongle())
+
+
 # ── Route registration ───────────────────────────────────────────────
 
 
@@ -283,3 +309,5 @@ def setup_radio_routes(app: aiohttp.web.Application) -> None:
     app.router.add_post("/api/radio/volume", handle_radio_volume)
     app.router.add_get("/api/radio/presets", handle_radio_presets)
     app.router.add_get("/api/radio/audio", handle_radio_audio)
+    app.router.add_post("/api/radio/lock", handle_radio_lock)
+    app.router.add_post("/api/radio/unlock", handle_radio_unlock)
