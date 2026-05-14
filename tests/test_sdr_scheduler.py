@@ -274,11 +274,9 @@ class TestIntrospection:
 
     def test_get_schedule_sorted_and_unknown_empty(self, sched):
         now = time.time()
-        sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, *_cb_pair(),
-                       windows=[
-                           TimeWindow(now + 200, now + 300, "sat", "B"),
-                           TimeWindow(now + 100, now + 150, "sat", "A"),
-                       ])
+        windows = [TimeWindow(now + 200, now + 300, "sat", "B"),
+                   TimeWindow(now + 100, now + 150, "sat", "A")]
+        sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, *_cb_pair(), windows=windows)
         assert [w["label"] for w in sched.get_schedule(SERIAL)] == ["A", "B"]
         assert sched.get_schedule("NOSUCH") == []
 
