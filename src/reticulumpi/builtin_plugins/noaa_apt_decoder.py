@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -66,6 +67,7 @@ class NOAAAPTDecoder(SignalPluginBase):
         self._current_pass: dict[str, Any] | None = None
         self._recent_images: deque[dict[str, Any]] = deque(maxlen=20)
         self._next_passes: list[dict[str, Any]] = []
+        self._passes_lock = threading.Lock()
         self._stats = {
             "total_captures": 0,
             "successful_decodes": 0,
@@ -129,13 +131,15 @@ class NOAAAPTDecoder(SignalPluginBase):
                 "duration_s": p.get("duration_s", 0),
             })
 
-        self._next_passes = sorted(noaa_passes, key=lambda x: x["aos_ts"])[:6]
+        new_passes = sorted(noaa_passes, key=lambda x: x["aos_ts"])[:6]
+        with self._passes_lock:
+            self._next_passes = new_passes
 
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is None or not self._dongle_serial:
             return
         sched.remove_windows(self._dongle_serial, self.plugin_name)
-        for p in self._next_passes:
+        for p in new_passes:
             sched.add_window(
                 serial=self._dongle_serial,
                 caller=self.plugin_name,
@@ -149,7 +153,9 @@ class NOAAAPTDecoder(SignalPluginBase):
     def _launch_subprocess(self, device_index: int) -> None:
         now = time.time()
         current = None
-        for p in self._next_passes:
+        with self._passes_lock:
+            passes_snapshot = list(self._next_passes)
+        for p in passes_snapshot:
             window_start = p["aos_ts"] - self._pre_pass_seconds
             window_end = p["los_ts"] + self._post_pass_seconds
             if window_start <= now <= window_end:
@@ -158,6 +164,10 @@ class NOAAAPTDecoder(SignalPluginBase):
 
         if current is None:
             self._status = "idle"
+            sched = getattr(self.app, "sdr_scheduler", None)
+            if sched and self._dongle_serial:
+                sched.dongle_released(self._dongle_serial, self.plugin_name)
+            self._dongle_active = False
             return
 
         rtl_fm = shutil.which("rtl_fm")
@@ -285,6 +295,12 @@ class NOAAAPTDecoder(SignalPluginBase):
             self._sleep_while_active(5.0)
 
         self._kill_subprocess()
+
+        sched = getattr(self.app, "sdr_scheduler", None)
+        if sched and self._dongle_serial:
+            sched.dongle_released(self._dongle_serial, self.plugin_name)
+        self._dongle_active = False
+
         self._status = "decoding"
         self._update_snapshot_cache()
 
@@ -373,22 +389,25 @@ class NOAAAPTDecoder(SignalPluginBase):
             files = sorted(
                 Path(self._image_dir).glob("*.png"),
                 key=lambda p: p.stat().st_mtime,
+                reverse=True,
             )
             now = time.time()
             cutoff = now - self._retention_days * 86400
             keep: list[Path] = []
             for f in files:
-                if f.stat().st_mtime < cutoff or len(keep) >= self._max_images:
-                    f.unlink()
-                else:
+                if len(keep) < self._max_images and f.stat().st_mtime >= cutoff:
                     keep.append(f)
+                else:
+                    f.unlink()
         except Exception:
             self.log.debug("Image cleanup error", exc_info=True)
 
     def _update_snapshot_cache(self) -> None:
         now = time.time()
         next_passes = []
-        for p in self._next_passes:
+        with self._passes_lock:
+            passes_snapshot = list(self._next_passes)
+        for p in passes_snapshot:
             entry = dict(p)
             entry["countdown_s"] = max(0, p["aos_ts"] - now)
             next_passes.append(entry)
@@ -404,7 +423,8 @@ class NOAAAPTDecoder(SignalPluginBase):
             }
 
     def get_status(self) -> dict[str, Any]:
-        passes = self._next_passes
+        with self._passes_lock:
+            passes = list(self._next_passes)
         return {
             "active": self._active,
             "status": self._status,

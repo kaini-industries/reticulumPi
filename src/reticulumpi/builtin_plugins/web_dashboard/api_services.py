@@ -1037,6 +1037,8 @@ async def handle_noaa_image(
     if not filename or ".." in filename or "/" in filename:
         return _error("invalid filename", 400)
     image_dir = getattr(noaa, "_image_dir", "")
+    if not image_dir:
+        return _error("image directory not configured", 503)
     path = os.path.join(image_dir, filename)
     if not os.path.exists(path):
         return _error("image not found", 404)

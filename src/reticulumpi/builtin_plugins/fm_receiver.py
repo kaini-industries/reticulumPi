@@ -334,8 +334,15 @@ class FMReceiver(PluginBase):
     # ── public API ───────────────────────────────────────────────────
 
     def play(self) -> dict[str, Any]:
-        if self._playing or self._supervisor_alive:
+        if self._playing:
             return {"status": "already_playing"}
+        if self._supervisor_alive:
+            for _ in range(20):
+                time.sleep(0.1)
+                if not self._supervisor_alive:
+                    break
+            else:
+                return {"status": "already_playing"}
         if not self._dongle_active:
             return {"status": "error", "error": "Dongle in use by another signal"}
         if self._resolved_index is None:
