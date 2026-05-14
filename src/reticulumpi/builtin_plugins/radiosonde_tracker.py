@@ -68,6 +68,9 @@ class RadiosondeTracker(SignalPluginBase):
         self._restart_count = 0
         self._frame_count = 0
         self._last_sonde_frame_ts = 0.0
+        self._snapshot_dirty = True
+        self._cached_next_launch: dict[str, Any] | None = None
+        self._cached_next_launch_ts: float = 0.0
 
         self._schedule_windows()
         self._start_thread(self._window_scheduler_loop, name="sonde-scheduler")
@@ -152,7 +155,7 @@ class RadiosondeTracker(SignalPluginBase):
             decoder_cmd,
             stdin=rtl_proc.stdout,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
         self._rtl_process = rtl_proc
         if rtl_proc.stdout:
@@ -162,21 +165,13 @@ class RadiosondeTracker(SignalPluginBase):
         self._restart_count = 0
         self._frame_count = 0
 
-        self._start_log_reader(self._stderr_fake(rtl_proc), prefix="rtl_fm")
+        self._start_stderr_reader(rtl_proc, prefix="rtl_fm")
         self._start_thread(self._parser_loop, name="sonde-parser")
 
         self.log.info(
             "Radiosonde scanner started at %.3f MHz (PID %d)",
             freq_hz / 1_000_000, self._pid,
         )
-
-    @staticmethod
-    def _stderr_fake(proc: subprocess.Popen) -> Any:
-        class _F:
-            pass
-        f = _F()
-        f.stdout = proc.stderr  # type: ignore[attr-defined]
-        return f
 
     def _kill_subprocess(self) -> None:
         rtl = getattr(self, "_rtl_process", None)
@@ -312,7 +307,7 @@ class RadiosondeTracker(SignalPluginBase):
                     "alt_m": alt,
                 })
 
-        self._update_snapshot_cache()
+        self._snapshot_dirty = True
 
     def _finalize_sonde(self) -> None:
         sonde = self._active_sonde
@@ -357,6 +352,13 @@ class RadiosondeTracker(SignalPluginBase):
                 }
         return best
 
+    def _get_cached_next_launch(self) -> dict[str, Any] | None:
+        now = time.time()
+        if now - self._cached_next_launch_ts > 300:
+            self._cached_next_launch = self._next_launch_window()
+            self._cached_next_launch_ts = now
+        return self._cached_next_launch
+
     def _update_snapshot_cache(self) -> None:
         with self._cache_lock:
             self._snapshot_cache = {
@@ -366,9 +368,15 @@ class RadiosondeTracker(SignalPluginBase):
                 "altitude_profile": list(self._altitude_profile),
                 "position_track": list(self._position_track),
                 "recent_sondes": list(self._recent_sondes),
-                "next_launch": self._next_launch_window(),
+                "next_launch": self._get_cached_next_launch(),
                 "stats": dict(self._stats),
             }
+        self._snapshot_dirty = False
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        if self._snapshot_dirty:
+            self._update_snapshot_cache()
+        return super().broadcast_snapshot(cycle_count)
 
     def get_status(self) -> dict[str, Any]:
         sonde = self._active_sonde

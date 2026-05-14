@@ -223,7 +223,7 @@ class NOAAAPTDecoder(SignalPluginBase):
                 sox_cmd,
                 stdin=rtl_proc.stdout,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
             )
             if rtl_proc.stdout:
                 rtl_proc.stdout.close()

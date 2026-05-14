@@ -73,6 +73,9 @@ class AISReceiver(SignalPluginBase):
         self._status = "idle"
         self._last_error: str | None = None
         self._restart_count = 0
+        self._snapshot_dirty = True
+        self._maintenance_alive = False
+        self._start_thread(self._maintenance_loop, name="ais-maintenance")
 
     def _launch_subprocess(self, device_index: int) -> None:
         decoder = shutil.which(self._decoder_bin)
@@ -101,18 +104,10 @@ class AISReceiver(SignalPluginBase):
         self._status = "running"
         self._restart_count = 0
 
-        self._start_log_reader(self._stderr_fake(), prefix="ais")
+        self._start_stderr_reader(self._process, prefix="ais")
         self._start_thread(self._parser_loop, name="ais-parser")
-        self._start_thread(self._maintenance_loop, name="ais-maintenance")
 
         self.log.info("AIS receiver started (PID %d)", self._pid)
-
-    def _stderr_fake(self) -> Any:
-        class _F:
-            pass
-        f = _F()
-        f.stdout = self._process.stderr if self._process else None  # type: ignore[attr-defined]
-        return f
 
     def _parser_loop(self) -> None:
         proc = self._process
@@ -205,7 +200,7 @@ class AISReceiver(SignalPluginBase):
                     vessel["ship_type"] = msg["shiptype"]
                     vessel["ship_type_desc"] = _ship_type_desc(msg["shiptype"])
 
-        self._update_snapshot_cache()
+        self._snapshot_dirty = True
 
     def _evict_oldest(self) -> None:
         if not self._vessels:
@@ -214,7 +209,14 @@ class AISReceiver(SignalPluginBase):
         self._vessels.pop(oldest_mmsi, None)
 
     def _maintenance_loop(self) -> None:
-        while self._active and self._dongle_active:
+        self._maintenance_alive = True
+        try:
+            self._maintenance_loop_inner()
+        finally:
+            self._maintenance_alive = False
+
+    def _maintenance_loop_inner(self) -> None:
+        while self._active:
             self._sleep_while_active(60.0)
             if not self._active:
                 break
@@ -232,7 +234,7 @@ class AISReceiver(SignalPluginBase):
                 except Exception:
                     pass
             if expired:
-                self._update_snapshot_cache()
+                self._snapshot_dirty = True
 
     def _update_snapshot_cache(self) -> None:
         with self._vessels_lock:
@@ -251,6 +253,12 @@ class AISReceiver(SignalPluginBase):
                     **self._stats,
                 },
             }
+        self._snapshot_dirty = False
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        if self._snapshot_dirty:
+            self._update_snapshot_cache()
+        return super().broadcast_snapshot(cycle_count)
 
     def get_status(self) -> dict[str, Any]:
         with self._vessels_lock:
