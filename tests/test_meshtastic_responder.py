@@ -45,6 +45,15 @@ def _mock_urlopen(json_data):
     return mock_cm
 
 
+def _wait_for_call(mock, timeout=2.0, poll=0.01):
+    """Poll until *mock* has been called, or *timeout* expires."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if mock.call_count:
+            return
+        time.sleep(poll)
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 
@@ -341,8 +350,10 @@ class TestEventFlow:
     def test_event_triggers_response(self, responder, mock_gateway, mock_app):
         mock_app.get_plugin.return_value = mock_gateway
         data = _make_event(text="!ping")
-        # Publish via the real event bus
+        # Publish via the real event bus — callback is offloaded to a
+        # background thread, so we need a short wait.
         mock_app.event_bus.publish(events.MESHTASTIC_MESSAGE_RECEIVED, data)
+        _wait_for_call(mock_gateway.send_message)
         mock_gateway.send_message.assert_called_once()
         args = mock_gateway.send_message.call_args
         assert "Pong!" in args[0][0]  # first positional arg is text
@@ -376,6 +387,7 @@ class TestEventFlow:
         mock_app.get_plugin.return_value = mock_gateway
         data = _make_event(text="hello")
         mock_app.event_bus.publish(events.MESHTASTIC_MESSAGE_RECEIVED, data)
+        _wait_for_call(mock_gateway.send_message)
         mock_gateway.send_message.assert_called_once()
         sent_text = mock_gateway.send_message.call_args[0][0]
         assert sent_text == "Hi from the mesh!"
@@ -729,10 +741,16 @@ class TestStartStop:
         plugin = MeshtasticResponder(mock_app, {})
         plugin.start()
         try:
-            # The real event bus should have the subscriber
             bus = mock_app.event_bus
-            assert plugin._on_mesh_message in bus._subscribers.get(
+            wrapper = bus._offload_map.get(plugin._on_mesh_message)
+            assert wrapper is not None
+            assert wrapper in bus._subscribers.get(
                 events.MESHTASTIC_MESSAGE_RECEIVED, []
+            )
+            mc_wrapper = bus._offload_map.get(plugin._on_meshcore_message)
+            assert mc_wrapper is not None
+            assert mc_wrapper in bus._subscribers.get(
+                events.MESHCORE_MESSAGE_RECEIVED, []
             )
         finally:
             plugin.stop()
@@ -746,9 +764,12 @@ class TestStartStop:
         plugin.start()
         plugin.stop()
         bus = mock_app.event_bus
-        assert plugin._on_mesh_message not in bus._subscribers.get(
+        assert bus._subscribers.get(
             events.MESHTASTIC_MESSAGE_RECEIVED, []
-        )
+        ) == []
+        assert bus._subscribers.get(
+            events.MESHCORE_MESSAGE_RECEIVED, []
+        ) == []
 
     def test_get_status(self, responder, mock_gateway, mock_app):
         mock_app.get_plugin.return_value = mock_gateway

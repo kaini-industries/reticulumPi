@@ -38,6 +38,7 @@ back-off up to ``max_restarts`` attempts.
 from __future__ import annotations
 
 import math
+import select
 import shutil
 import subprocess
 import threading
@@ -46,11 +47,42 @@ from collections import deque
 from typing import Any
 
 from reticulumpi import events
+from reticulumpi.builtin_plugins.lora_analysis import LoraChannelAnalyzer
 from reticulumpi.plugin_base import PluginBase
 
 
 EVENT_SPECTRUM_SWEEP = events.SPECTRUM_SWEEP
 EVENT_SPECTRUM_STATUS = events.SPECTRUM_STATUS
+
+_BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
+    "full_sweep": {
+        "freq_start_mhz": 52.0,
+        "freq_stop_mhz": 2200.0,
+        "bin_khz": 100.0,
+        "sweep_seconds": 1,
+    },
+    "fm_broadcast": {
+        "freq_start_mhz": 88.0,
+        "freq_stop_mhz": 108.0,
+        "bin_khz": 25.0,
+        "sweep_seconds": 2,
+    },
+    "lora_us915": {
+        "freq_start_mhz": 902.0,
+        "freq_stop_mhz": 928.0,
+        "bin_khz": 12.5,
+        "sweep_seconds": 1,
+        "gain_db": 34.0,
+        "analysis": "lora_us915",
+        "threshold_db": 6.0,
+    },
+    "aviation": {
+        "freq_start_mhz": 118.0,
+        "freq_stop_mhz": 137.0,
+        "bin_khz": 25.0,
+        "sweep_seconds": 2,
+    },
+}
 
 
 # E4000 (and most RTL-SDR tuners) support a discrete set of LNA gain
@@ -75,36 +107,54 @@ class SpectrumScanner(PluginBase):
     plugin_name = "spectrum_scanner"
     plugin_version = "0.1.0"
     plugin_description = "RTL-SDR spectrum sweep + waterfall feed"
+    broadcast_tier = 2
+    broadcast_keys = "spectrum"
+    _PRESET_SWITCH_COOLDOWN = 3.0
 
     # --- config validation ---------------------------------------------------
+
+    @staticmethod
+    def _validate_freq_params(
+        freq_start: float,
+        freq_stop: float,
+        bin_khz: float,
+        sweep_seconds: float,
+        gain_db: float | None,
+    ) -> None:
+        if freq_stop <= freq_start:
+            raise ValueError(
+                f"freq_stop_mhz ({freq_stop}) must be greater than "
+                f"freq_start_mhz ({freq_start})"
+            )
+        if not 1.0 <= bin_khz <= 1000.0:
+            raise ValueError(f"bin_khz must be 1-1000, got {bin_khz}")
+        if not 0.1 <= sweep_seconds <= 60:
+            raise ValueError(f"sweep_seconds must be 0.1-60, got {sweep_seconds}")
+        if gain_db is not None and not -10.0 <= gain_db <= 60.0:
+            raise ValueError(f"gain_db must be -10..60 or null (auto), got {gain_db}")
 
     def validate_config(self) -> None:
         cfg = self.config
 
         self._freq_start_mhz = float(cfg.get("freq_start_mhz", 88.0))
         self._freq_stop_mhz = float(cfg.get("freq_stop_mhz", 108.0))
-        if self._freq_stop_mhz <= self._freq_start_mhz:
-            raise ValueError(
-                f"freq_stop_mhz ({self._freq_stop_mhz}) must be greater than "
-                f"freq_start_mhz ({self._freq_start_mhz})"
-            )
 
         bin_khz = float(cfg.get("bin_khz", 25.0))
-        if not 1.0 <= bin_khz <= 1000.0:
-            raise ValueError(f"bin_khz must be 1-1000, got {bin_khz}")
         self._bin_khz = bin_khz
 
         sweep_seconds = float(cfg.get("sweep_seconds", 2))
-        if not 0.1 <= sweep_seconds <= 60:
-            raise ValueError(f"sweep_seconds must be 0.1-60, got {sweep_seconds}")
         self._sweep_seconds = sweep_seconds
 
         gain_db = cfg.get("gain_db", 40.0)
         if gain_db is not None:
             gain_db = float(gain_db)
-            if not -10.0 <= gain_db <= 60.0:
-                raise ValueError(f"gain_db must be -10..60 or null (auto), got {gain_db}")
         self._gain_db = gain_db
+        self._base_gain_db = self._gain_db
+
+        self._validate_freq_params(
+            self._freq_start_mhz, self._freq_stop_mhz,
+            self._bin_khz, self._sweep_seconds, self._gain_db,
+        )
 
         self._ppm = int(cfg.get("ppm", 0))
 
@@ -117,6 +167,152 @@ class SpectrumScanner(PluginBase):
         self._power_command = str(cfg.get("power_command", "rtl_power"))
         self._max_restarts = int(cfg.get("max_restarts", 5))
         self._health_interval = float(cfg.get("health_check_interval", 5.0))
+
+        self._snapshot_cache: tuple[int, dict[str, Any]] | None = None
+        self._snapshot_bins_version = -1
+        self._bins_version = 0
+
+        # --- Preset system ---
+        self._presets: dict[str, dict[str, Any]] = dict(_BUILTIN_PRESETS)
+        user_presets = cfg.get("presets")
+        if isinstance(user_presets, dict):
+            self._presets.update(user_presets)
+
+        default_preset = cfg.get("default_preset")
+        if default_preset and default_preset in self._presets:
+            self._active_preset: str | None = default_preset
+            self._apply_preset_values(self._presets[default_preset])
+        elif not user_presets and not default_preset:
+            self._active_preset = None
+        else:
+            self._active_preset = default_preset
+
+        self._switching = False
+        self._last_preset_switch: float = 0.0
+        self._analyzer: LoraChannelAnalyzer | None = None
+
+    # --- presets -------------------------------------------------------------
+
+    def _apply_preset_values(self, preset: dict[str, Any]) -> None:
+        """Apply frequency/gain/analysis values from a preset dict."""
+        if "freq_start_mhz" in preset:
+            self._freq_start_mhz = float(preset["freq_start_mhz"])
+        if "freq_stop_mhz" in preset:
+            self._freq_stop_mhz = float(preset["freq_stop_mhz"])
+        if "bin_khz" in preset:
+            self._bin_khz = float(preset["bin_khz"])
+        if "sweep_seconds" in preset:
+            self._sweep_seconds = float(preset["sweep_seconds"])
+        if "gain_db" in preset:
+            self._gain_db = float(preset["gain_db"])
+        else:
+            self._gain_db = self._base_gain_db
+        self._validate_freq_params(
+            self._freq_start_mhz, self._freq_stop_mhz,
+            self._bin_khz, self._sweep_seconds, self._gain_db,
+        )
+
+    def _activate_analyzer_for_preset(self, preset: dict[str, Any]) -> None:
+        """Instantiate or tear down the LoRa analyzer based on preset analysis key."""
+        analysis = preset.get("analysis")
+        if analysis and analysis.startswith("lora"):
+            region = analysis.replace("lora_", "").upper()
+            self._analyzer = LoraChannelAnalyzer(
+                region=region,
+                threshold_db=float(preset.get("threshold_db", 6.0)),
+            )
+        else:
+            self._analyzer = None
+
+    def switch_preset(self, name: str) -> dict[str, Any]:
+        """Switch the active frequency preset at runtime.
+
+        Kills the current rtl_power subprocess, reconfigures frequency
+        parameters, clears state, and lets the supervisor relaunch.
+        Returns a summary dict suitable for WS response.
+        """
+        now = time.monotonic()
+        if now - self._last_preset_switch < self._PRESET_SWITCH_COOLDOWN:
+            raise ValueError(
+                f"Preset switch cooldown ({self._PRESET_SWITCH_COOLDOWN}s) — try again shortly"
+            )
+        if name not in self._presets:
+            available = list(self._presets.keys())
+            raise ValueError(f"Unknown preset '{name}'. Available: {available}")
+
+        self._last_preset_switch = now
+        preset = self._presets[name]
+        self._switching = True
+        self._set_status("switching", f"switching to {name}")
+        try:
+            self.event_bus.publish(events.SPECTRUM_PRESET_SWITCHING, {"preset": name})
+        except Exception:
+            self.log.debug("event_bus publish failed", exc_info=True)
+        self._terminate_process()
+
+        self._analyzer = None
+        self._apply_preset_values(preset)
+        self._reset_sweep_state()
+        self._activate_analyzer_for_preset(preset)
+
+        self._active_preset = name
+        self._restart_count = 0
+        # Brief window where supervisor may see _switching=True on a stale
+        # iteration — benign, it re-reads on the next loop tick.
+        self._switching = False
+
+        if not self._supervisor_alive:
+            self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
+
+        try:
+            self.event_bus.publish(events.SPECTRUM_PRESET_ACTIVE, {
+                "preset": name,
+                "freq_start_mhz": self._freq_start_mhz,
+                "freq_stop_mhz": self._freq_stop_mhz,
+                "has_analysis": self._analyzer is not None,
+            })
+        except Exception:
+            self.log.debug("event_bus publish failed", exc_info=True)
+
+        self.log.info(
+            "Preset switched to '%s': %.2f-%.2f MHz, %.1f kHz bins",
+            name, self._freq_start_mhz, self._freq_stop_mhz, self._bin_khz,
+        )
+        return {
+            "preset": name,
+            "freq_start_mhz": self._freq_start_mhz,
+            "freq_stop_mhz": self._freq_stop_mhz,
+            "has_analysis": self._analyzer is not None,
+        }
+
+    def _reset_sweep_state(self) -> None:
+        """Clear all rolling sweep state (waterfall, bins, caches)."""
+        with self._state_lock:
+            self._bins_hz = []
+            self._bins_version += 1
+            self._latest_powers_db = []
+            self._waterfall.clear()
+            self._sweep_count = 0
+            self._last_sweep_at = None
+            self._snapshot_cache = None
+            self._snapshot_bins_version = self._bins_version
+        self._segments = {}
+        self._current_ts = None
+
+    def get_presets(self) -> dict[str, Any]:
+        """Return available presets with metadata for the dashboard."""
+        presets = []
+        for name, p in self._presets.items():
+            presets.append({
+                "name": name,
+                "freq_start_mhz": p.get("freq_start_mhz"),
+                "freq_stop_mhz": p.get("freq_stop_mhz"),
+                "has_analysis": bool(p.get("analysis")),
+            })
+        return {
+            "active_preset": self._active_preset,
+            "presets": presets,
+        }
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -136,20 +332,16 @@ class SpectrumScanner(PluginBase):
 
         # Rolling in-memory state the dashboard reads via get_snapshot().
         self._bins_hz: list[int] = []
-        # Power arrays carry None for bins rtl_power couldn't sample
-        # (nan/inf from the CSV, filtered in _handle_csv_line).  The
-        # snapshot serializer already passes None straight through to
-        # JSON null, which the dashboard treats as "no reading".
+        self._bins_version = 0
         self._latest_powers_db: list[float | None] = []
-        # Each waterfall entry is (flush_timestamp, powers).  Carrying the
-        # timestamp alongside the power row lets the dashboard report a
-        # real wall-clock age per row instead of the drift-prone
-        # rowIdx * sweep_seconds approximation — which is wrong whenever a
-        # wide-span sweep takes longer than sweep_seconds, the scanner
-        # restarts mid-history, or the tab was paused.
         self._waterfall: deque[tuple[float, list[float | None]]] = deque(
             maxlen=self._waterfall_rows
         )
+
+        # Snapshot cache — avoids re-rounding and re-copying on every
+        # broadcast cycle when the sweep hasn't changed.
+        self._snapshot_cache: tuple[int, dict[str, Any]] | None = None
+        self._snapshot_bins_version = -1
 
         # Parser-local accumulator (flushed per sweep).  Maps
         # segment_start_hz -> (bin_step_hz, [power_db, ...]).
@@ -164,7 +356,6 @@ class SpectrumScanner(PluginBase):
             self._set_status("error", str(exc))
 
         self._active = True
-        self._device_released = False
         self._supervisor_alive = True
         self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
@@ -188,17 +379,27 @@ class SpectrumScanner(PluginBase):
                     self._gain_db, nearest,
                 )
 
+        # Activate LoRa analyzer if the active preset requests it.
+        if self._active_preset and self._active_preset in self._presets:
+            self._activate_analyzer_for_preset(self._presets[self._active_preset])
+
         self.log.info(
-            "%s started: %.2f-%.2f MHz, %.1f kHz bins, %.1fs sweep%s",
+            "%s started: %.2f-%.2f MHz, %.1f kHz bins, %.1fs sweep%s%s",
             self.plugin_name,
             self._freq_start_mhz, self._freq_stop_mhz, self._bin_khz,
             self._sweep_seconds,
             f", gain {self._gain_db:.1f} dB" if self._gain_db is not None else ", auto gain",
+            f", preset={self._active_preset}" if self._active_preset else "",
         )
 
     def stop(self) -> None:
         self._active = False
         self._terminate_process()
+        try:
+            from reticulumpi.rtlsdr import release_device
+            release_device(self._device_id, caller=self.plugin_name)
+        except Exception:
+            pass
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -229,19 +430,18 @@ class SpectrumScanner(PluginBase):
     def get_snapshot(self) -> dict[str, Any]:
         """Return a WebSocket-ready snapshot of the current sweep state.
 
-        Sent every WebSocket broadcast tick (~5s).  To keep the wire
-        payload bounded, we include only the most recent few sweeps
-        (``waterfall_tail``) plus a monotonic ``sweep_count``; the client
-        uses the count to dedupe and appends new tail rows to its own
-        in-browser scrolling history.
+        Cached on ``_sweep_count`` — repeat calls within the same sweep
+        return the cached dict in ~0 ms.  Powers are pre-rounded on
+        ingest so no per-call rounding is needed.  ``bins_hz`` is only
+        included when the bin grid changes (tracked via ``bins_version``).
         """
         with self._state_lock:
+            cached = self._snapshot_cache
+            if cached is not None and cached[0] == self._sweep_count:
+                return cached[1]
+
             tail = list(self._waterfall)[-self._SNAPSHOT_TAIL_ROWS:]
-            # Decompose (ts, powers) tuples into two parallel lists kept in
-            # lock-step on the wire.  `waterfall_tail` is unchanged for
-            # backward-compat with older clients; `waterfall_tail_times` is
-            # the new sibling field the dashboard uses for honest per-row age.
-            return {
+            snap: dict[str, Any] = {
                 "status": self._status,
                 "error": self._last_error,
                 "freq_start_hz": int(self._freq_start_mhz * 1_000_000),
@@ -253,17 +453,37 @@ class SpectrumScanner(PluginBase):
                 "sweep_count": self._sweep_count,
                 "last_sweep_at": self._last_sweep_at,
                 "waterfall_rows": self._waterfall_rows,
-                "bins_hz": list(self._bins_hz),
-                "latest_powers_db": [
-                    round(v, 1) if v is not None else None
-                    for v in self._latest_powers_db
-                ],
-                "waterfall_tail": [
-                    [round(v, 1) if v is not None else None for v in powers]
-                    for _, powers in tail
-                ],
+                "bins_version": self._bins_version,
+                "latest_powers_db": list(self._latest_powers_db),
+                "waterfall_tail": [list(powers) for _, powers in tail],
                 "waterfall_tail_times": [round(ts, 3) for ts, _ in tail],
             }
+            if self._bins_version != self._snapshot_bins_version:
+                snap["bins_hz"] = list(self._bins_hz)
+                self._snapshot_bins_version = self._bins_version
+
+            # Preset metadata
+            snap["active_preset"] = self._active_preset
+            snap["switching"] = self._switching
+            if self._presets:
+                snap["available_presets"] = [
+                    {
+                        "name": n,
+                        "freq_start_mhz": p.get("freq_start_mhz"),
+                        "freq_stop_mhz": p.get("freq_stop_mhz"),
+                        "has_analysis": bool(p.get("analysis")),
+                    }
+                    for n, p in self._presets.items()
+                ]
+
+            # LoRa channel analysis (when active preset has analysis and bins populated)
+            if self._analyzer is not None and self._bins_hz:
+                snap["channel_analysis"] = self._analyzer.get_channel_analysis(
+                    bins_hz=self._bins_hz,
+                )
+
+            self._snapshot_cache = (self._sweep_count, snap)
+            return snap
 
     def get_history(self) -> dict[str, Any]:
         """Return the full in-memory waterfall buffer for one-shot backfill.
@@ -279,19 +499,22 @@ class SpectrumScanner(PluginBase):
             # Same decomposition pattern as get_snapshot: parallel arrays
             # (rows / row_timestamps) stay in lock-step.  rows shape is
             # unchanged for backward-compat; row_timestamps is the new sibling.
-            return {
+            hist: dict[str, Any] = {
                 "available": True,
                 "sweep_count": self._sweep_count,
-                "bin_count": len(self._bins_hz),
+                "bins_version": self._bins_version,
                 "waterfall_rows": self._waterfall_rows,
-                "rows": [
-                    [round(v, 1) if v is not None else None for v in powers]
-                    for _, powers in self._waterfall
-                ],
+                "rows": [list(powers) for _, powers in self._waterfall],
                 "row_timestamps": [
                     round(ts, 3) for ts, _ in self._waterfall
                 ],
             }
+            if self._bins_hz:
+                hist["bin_count"] = len(self._bins_hz)
+                hist["bins_hz"] = list(self._bins_hz)
+            if self._analyzer is not None:
+                hist["channel_power_history"] = self._analyzer.get_channel_power_history()
+            return hist
 
     # --- supervisor ----------------------------------------------------------
 
@@ -317,11 +540,6 @@ class SpectrumScanner(PluginBase):
             return
 
         while self._active:
-            if self._device_released:
-                self._set_status("paused", "device released for external use")
-                self._sleep_while_active(1.0)
-                continue
-
             try:
                 self._launch_rtl_power()
             except Exception as exc:
@@ -329,25 +547,22 @@ class SpectrumScanner(PluginBase):
                 self.log.exception("Failed to launch rtl_power")
                 break
 
-            # Start a parser thread dedicated to this subprocess instance;
-            # it exits when rtl_power closes its stdout.
-            parser = threading.Thread(
-                target=self._parser_loop,
-                name="spectrum-parser",
-                daemon=True,
-            )
-            parser.start()
+            parser = self._start_thread(self._parser_loop, name="spectrum-parser")
 
-            # Block until rtl_power exits or we're stopped.
+            # Block until rtl_power exits, parser dies, or we're stopped.
             while self._active and self._process is not None:
                 rc = self._process.poll()
                 if rc is not None:
                     self.log.warning("rtl_power exited (code %s)", rc)
                     break
+                if not parser.is_alive():
+                    self.log.warning("Parser thread exited unexpectedly")
+                    break
                 self._sleep_while_active(self._health_interval)
 
             # Wait for parser to drain.
             parser.join(timeout=2.0)
+            self._remove_thread(parser)
             self._terminate_process()  # idempotent; cleans up zombies
 
             if not self._active:
@@ -446,21 +661,6 @@ class SpectrumScanner(PluginBase):
                 except Exception:
                     pass
 
-    def _restart_sweep(self) -> None:
-        """Restart the rtl_power supervisor after an external interruption.
-
-        Subclasses (e.g. LoraChirpViewer) call this after temporarily
-        stopping the sweep to use the USB device for I/Q capture.
-        Clears the device-released flag so the existing supervisor thread
-        resumes; only spawns a new thread if the old one exited.
-        """
-        self._restart_count = 0
-        self._segments = {}
-        self._current_ts = None
-        self._device_released = False
-        if not self._supervisor_alive:
-            self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
-
     # --- parser --------------------------------------------------------------
 
     def _parser_loop(self) -> None:
@@ -468,11 +668,15 @@ class SpectrumScanner(PluginBase):
         proc = self._process
         if proc is None or proc.stdout is None:
             return
+        fd = proc.stdout.fileno()
         try:
-            for raw in proc.stdout:
-                if not self._active:
+            while self._active:
+                ready, _, _ = select.select([fd], [], [], 0.5)
+                if not ready:
+                    continue
+                raw = proc.stdout.readline()
+                if not raw:
                     break
-                # text=True on Popen yields str rows already.
                 line = raw.strip() if isinstance(raw, str) else raw.decode(
                     "utf-8", errors="replace"
                 ).strip()
@@ -480,14 +684,10 @@ class SpectrumScanner(PluginBase):
                     continue
                 self._handle_csv_line(line)
         except (ValueError, OSError):
-            # stdout closed — process exited.
             pass
         except Exception:
             self.log.exception("Parser loop crashed")
 
-        # Final flush — rtl_power may have been killed mid-sweep, but if
-        # we have at least some segments, emit them so the last
-        # waterfall row isn't lost.
         self._flush_current_sweep()
 
     def _handle_csv_line(self, line: str) -> None:
@@ -540,18 +740,32 @@ class SpectrumScanner(PluginBase):
             step, dbs = segs[freq_lo]
             for i, db in enumerate(dbs):
                 freqs.append(freq_lo + i * step)
-                powers.append(db)
+                powers.append(round(db, 1) if db is not None else None)
 
         if not freqs:
             return
 
         now = time.time()
         with self._state_lock:
-            self._bins_hz = freqs
+            if freqs != self._bins_hz:
+                self._bins_hz = freqs
+                self._bins_version += 1
             self._latest_powers_db = powers
             self._waterfall.append((now, powers))
             self._sweep_count += 1
             self._last_sweep_at = now
+            self._snapshot_cache = None
+
+        # Feed LoRa channel analyzer if active
+        if self._analyzer is not None:
+            triggers = self._analyzer.on_sweep(
+                freqs, powers, timestamp=now, sweep_seconds=self._sweep_seconds,
+            )
+            for payload in triggers:
+                try:
+                    self.event_bus.publish(events.LORA_CAPTURE_TRIGGER, payload)
+                except Exception:
+                    self.log.debug("capture trigger publish failed", exc_info=True)
 
         # Fire-and-forget event bus notification for any subscribers
         # (the dashboard pulls via get_snapshot() so it doesn't rely on

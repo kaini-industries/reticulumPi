@@ -116,7 +116,7 @@ class _RateLimiter:
         self._lock = threading.Lock()
         self._last_request_ts: float = 0.0          # wall-clock epoch seconds
         self._failures: int = 0
-        self._recent: deque[float] = deque()        # successful request timestamps
+        self._recent: deque[float] = deque(maxlen=3600)
 
     # -- state (de)serialisation ---------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -131,7 +131,7 @@ class _RateLimiter:
         with self._lock:
             self._last_request_ts = float(data.get("last_request_ts", 0.0))
             self._failures = int(data.get("failures", 0))
-            self._recent = deque(float(t) for t in data.get("recent", []))
+            self._recent = deque((float(t) for t in data.get("recent", [])), maxlen=3600)
             self._trim_recent(time.time())
 
     # -- quota math ----------------------------------------------------------
@@ -286,6 +286,8 @@ class SpaceTrackerPlugin(PluginBase):
     plugin_name = "space_tracker"
     plugin_version = "0.1.0"
     plugin_description = "Satellite tracking, launch schedule, and space weather"
+    broadcast_tier = 2
+    broadcast_keys = "space"
 
     # Minimum enforced intervals — these are floors, the user can configure
     # larger values but not smaller.
@@ -442,6 +444,8 @@ class SpaceTrackerPlugin(PluginBase):
         self._passes: list[dict[str, Any]] = []                 # upcoming horizon passes
         self._passes_computed_at: float | None = None
         self._cache_lock = threading.Lock()
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl = 30.0
 
         # Observer position (resolved lazily — gps_telemetry may not be up yet)
         self._observer_cfg = self.config.get("observer", {}) or {}
@@ -495,6 +499,15 @@ class SpaceTrackerPlugin(PluginBase):
     # ------------------------------------------------------------------
     # Status (surfaced in the dashboard / /status endpoint)
     # ------------------------------------------------------------------
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+        result = self.get_snapshot()
+        self._broadcast_cache = (now, result)
+        return result
+
     def get_snapshot(self) -> dict[str, Any]:
         """Full snapshot for dashboard consumption.
 
@@ -577,7 +590,17 @@ class SpaceTrackerPlugin(PluginBase):
             # ensures we never actually fire more than once per min_interval.
             self._sleep_while_active(60)
 
+    def on_internet_available(self) -> None:
+        for limiter in self._limiters.values():
+            limiter._failures = 0
+        self.log.info("Internet restored — rate limiters reset")
+
+    def on_internet_lost(self) -> None:
+        self.log.warning("Internet lost — fetch loops paused")
+
     def _refresh_due_groups(self) -> None:
+        if not self.internet_available:
+            return
         now = time.time()
         for group in self._groups:
             last = self._tle_last_fetch.get(group, 0.0)
@@ -659,6 +682,8 @@ class SpaceTrackerPlugin(PluginBase):
             self._sleep_while_active(60)
 
     def _fetch_launches(self) -> None:
+        if not self.internet_available:
+            return
         if not self._limiters["launchlibrary"].can_request():
             return
         url = self._LAUNCH_LIBRARY_URL.format(limit=self._launch_limit)
@@ -722,6 +747,8 @@ class SpaceTrackerPlugin(PluginBase):
             self._sleep_while_active(60)
 
     def _fetch_weather(self) -> None:
+        if not self.internet_available:
+            return
         if not self._limiters["swpc"].can_request():
             return
         status, body, _ = self._http.get(self._SWPC_KP_URL, self._limiters["swpc"], accept="application/json")
@@ -1192,7 +1219,7 @@ def _bisect_horizon(
         if (el_mid < 0) == (el_lo < 0):
             t_lo, el_lo = t_mid, el_mid
         else:
-            t_hi, el_hi = t_mid, el_mid
+            t_hi = t_mid
     return 0.5 * (t_lo + t_hi)
 
 

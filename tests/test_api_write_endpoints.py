@@ -728,7 +728,7 @@ class TestHandleNomadnetAuthAdd:
         request = _make_request(body={"identity": "abc123"}, plugin_mock=plugin)
 
         resp = asyncio.run(handle_nomadnet_auth_add(request))
-        data = _parse_response(resp)
+        _parse_response(resp)
 
         assert resp.status == 503
 
@@ -843,7 +843,7 @@ class TestHandleNomadnetAuthRemove:
         request = _make_request(body=None, plugin_mock=plugin)
 
         resp = asyncio.run(handle_nomadnet_auth_remove(request))
-        data = _parse_response(resp)
+        _parse_response(resp)
 
         assert resp.status == 400
 
@@ -976,7 +976,7 @@ class TestHandleSendMessage:
         request = _make_request(body=body, plugin_mock=plugin)
 
         resp = asyncio.run(handle_send_message(request))
-        data = _parse_response(resp)
+        _parse_response(resp)
 
         assert resp.status == 503
 

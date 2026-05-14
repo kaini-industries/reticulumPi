@@ -1,6 +1,6 @@
 """LoRa PHY-layer codec — Gray, interleave, Hamming FEC, whiten, CRC.
 
-Pure-function building blocks for decoding LoRa symbols (from the dechirp
+Pure-function building blocks for decoding LoRa symbols (from the demodulation
 stage) into payload bytes.  Also provides matching encode functions for
 round-trip testing.
 

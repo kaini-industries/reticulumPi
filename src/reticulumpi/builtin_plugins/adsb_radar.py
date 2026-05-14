@@ -14,7 +14,7 @@ Example config::
       device_index: 0
       gain: "max"
       ppm: 0
-      enable_bias_tee: false
+      enable_bias_tee: true
       sbs_port: 30003
       stale_timeout: 300
       receiver_lat: null
@@ -98,6 +98,10 @@ class AdsbRadarPlugin(PluginBase):
     plugin_name = "adsb_radar"
     plugin_version = "1.0.0"
     plugin_description = "ADS-B aircraft tracker using RTL-SDR and dump1090"
+    broadcast_tier = 2
+    broadcast_keys = "adsb"
+
+    _MAX_SBS_BUF = 1_048_576  # 1 MB
 
     # ── config ────────────────────────────────────────────────────────
 
@@ -131,11 +135,15 @@ class AdsbRadarPlugin(PluginBase):
         self._status = "starting"
         self._last_error: str | None = None
         self._dump1090_path: str | None = None
+        self._rtl_biast_path: str | None = None
+        self._bias_tee_active = False
 
         self._aircraft: dict[str, AircraftState] = {}
         self._total_messages = 0
         self._aircraft_seen_total = 0
         self._resolved_index: int | None = None
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl = 3.0
 
         self._active = True
 
@@ -164,6 +172,13 @@ class AdsbRadarPlugin(PluginBase):
         self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
         self.event_bus.unsubscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
         self._terminate_process()
+        if self._enable_bias_tee:
+            self._set_bias_tee(False)
+        try:
+            from reticulumpi.rtlsdr import release_device
+            release_device(self._device_id, caller=self.plugin_name)
+        except Exception:
+            pass
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -182,6 +197,15 @@ class AdsbRadarPlugin(PluginBase):
                 "aircraft_seen_total": self._aircraft_seen_total,
                 "error": self._last_error,
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+        result = self.get_snapshot()
+        self._broadcast_cache = (now, result)
+        return result
 
     def get_snapshot(self) -> dict[str, Any]:
         with self._state_lock:
@@ -222,6 +246,13 @@ class AdsbRadarPlugin(PluginBase):
             self.log.error("%s", exc)
             return
 
+        if self._enable_bias_tee:
+            self._rtl_biast_path = shutil.which("rtl_biast")
+            if not self._rtl_biast_path:
+                self.log.warning(
+                    "rtl_biast not found; bias-tee may not work with this dump1090 build",
+                )
+
         while self._active:
             try:
                 self._launch_dump1090()
@@ -230,11 +261,7 @@ class AdsbRadarPlugin(PluginBase):
                 self.log.exception("Failed to launch %s", self._dump1090_bin)
                 break
 
-            parser = threading.Thread(
-                target=self._parser_loop,
-                name="adsb-parser",
-            )
-            parser.start()
+            parser = self._start_thread(self._parser_loop, name="adsb-parser")
 
             while self._active and self._process is not None:
                 rc = self._process.poll()
@@ -244,6 +271,7 @@ class AdsbRadarPlugin(PluginBase):
                 self._sleep_while_active(5.0)
 
             parser.join(timeout=3.0)
+            self._remove_thread(parser)
             self._terminate_process()
 
             if not self._active:
@@ -270,16 +298,14 @@ class AdsbRadarPlugin(PluginBase):
             self._sleep_while_active(backoff)
 
     def _launch_dump1090(self) -> None:
+        if self._enable_bias_tee:
+            self._set_bias_tee(True)
         cmd = self._build_cmd()
         self.log.debug("Launching: %s", " ".join(cmd))
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
         )
         self._pid = self._process.pid
         self._start_log_reader(self._process, prefix="dump1090")
@@ -297,8 +323,6 @@ class AdsbRadarPlugin(PluginBase):
             "--net-sbs-port", str(self._sbs_port),
             "--quiet",
         ]
-        if self._enable_bias_tee:
-            cmd.append("--enable-bias-tee")
         if self._receiver_lat is not None and self._receiver_lon is not None:
             cmd += ["--lat", str(self._receiver_lat), "--lon", str(self._receiver_lon)]
         return cmd
@@ -329,6 +353,28 @@ class AdsbRadarPlugin(PluginBase):
                 except Exception:
                     pass
 
+    def _set_bias_tee(self, on: bool) -> None:
+        if self._rtl_biast_path is None:
+            return
+        idx = self._resolved_index if self._resolved_index is not None else 0
+        flag = "1" if on else "0"
+        try:
+            result = subprocess.run(
+                [self._rtl_biast_path, "-d", str(idx), "-b", flag],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode == 0:
+                self._bias_tee_active = on
+                self.log.info("Bias-tee %s (device %d)", "enabled" if on else "disabled", idx)
+            else:
+                self.log.warning(
+                    "rtl_biast exited %d: %s",
+                    result.returncode,
+                    result.stderr.decode(errors="replace").strip(),
+                )
+        except Exception:
+            self.log.warning("Failed to %s bias-tee", "enable" if on else "disable", exc_info=True)
+
     # ── SBS parser (TCP to dump1090 port 30003) ──────────────────────
 
     def _parser_loop(self) -> None:
@@ -350,6 +396,13 @@ class AdsbRadarPlugin(PluginBase):
                     if not data:
                         break
                     buf += data.decode("utf-8", errors="replace")
+                    if len(buf) > self._MAX_SBS_BUF:
+                        self.log.warning(
+                            "SBS buffer exceeded %d bytes; discarding to resync",
+                            self._MAX_SBS_BUF,
+                        )
+                        buf = ""
+                        continue
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
                         line = line.strip()

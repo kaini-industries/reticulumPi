@@ -15,6 +15,7 @@ _FOUND_RE = re.compile(r"^Found\s+(\d+)\s+device")
 
 _cache: list[tuple[int, str]] | None = None
 _cache_lock = threading.Lock()
+_claim_lock = threading.Lock()
 _claimed: dict[str, str] = {}
 
 
@@ -97,27 +98,52 @@ def resolve_device(configured: str, caller: str = "") -> int:
 
     for idx, serial in devices:
         if serial == configured:
-            prev = _claimed.get(serial)
-            if prev and prev != caller and caller:
-                log.warning(
-                    "RTL-SDR serial '%s' claimed by both '%s' and '%s' — "
-                    "only one can use it at a time",
-                    serial, prev, caller,
-                )
-            if caller:
-                _claimed[serial] = caller
+            with _claim_lock:
+                prev = _claimed.get(serial)
+                if prev and prev != caller and caller:
+                    raise RuntimeError(
+                        f"RTL-SDR serial '{serial}' is already claimed by '{prev}' — "
+                        f"only one plugin can use a device at a time"
+                    )
+                if caller:
+                    _claimed[serial] = caller
             if str(idx) != configured:
                 log.info("Resolved RTL-SDR serial '%s' → index %d (caller: %s)", serial, idx, caller or "?")
             return idx
 
+    # Only fall back to numeric index if the value doesn't look like
+    # a serial number.  RTL-SDR serials are always 8 decimal digits;
+    # any other length is treated as a device index.  This prevents
+    # "00000001" from silently resolving to index 1 when the intended
+    # dongle is absent.
+    known_serials = {s for _, s in devices}
     try:
-        return int(configured)
+        idx = int(configured)
     except ValueError:
-        available = ", ".join(f"{i}: SN {s}" for i, s in devices)
-        raise RuntimeError(
-            f"RTL-SDR device '{configured}' not found. "
-            f"Available: [{available}]"
-        ) from None
+        idx = None
+
+    if idx is not None and idx >= 0 and configured not in known_serials and (
+        len(configured) != 8 or not devices
+    ):
+        return idx
+
+    available = ", ".join(f"{i}: SN {s}" for i, s in devices)
+    raise RuntimeError(
+        f"RTL-SDR device '{configured}' not found. "
+        f"Available: [{available}]"
+    )
+
+
+def release_device(configured: str, caller: str = "") -> None:
+    """Release a previously claimed device serial.
+
+    Called during plugin stop() to allow another plugin to claim the device.
+    """
+    with _claim_lock:
+        current = _claimed.get(configured)
+        if current == caller or not caller:
+            _claimed.pop(configured, None)
+            log.debug("Released RTL-SDR device '%s' (caller: %s)", configured, caller or "?")
 
 
 def reset_cache() -> None:
@@ -125,4 +151,5 @@ def reset_cache() -> None:
     global _cache
     with _cache_lock:
         _cache = None
-    _claimed.clear()
+    with _claim_lock:
+        _claimed.clear()

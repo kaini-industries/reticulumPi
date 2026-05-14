@@ -31,6 +31,7 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
 
     app = aiohttp.web.Application(
         middlewares=[
+            compression_middleware,
             security_headers_middleware,
             auth_middleware_factory(plugin),
         ]
@@ -53,6 +54,29 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
     return app
 
 
+_COMPRESSIBLE = frozenset({
+    "text/html",
+    "text/css",
+    "application/javascript",
+    "application/json",
+    "text/plain",
+    "image/svg+xml",
+})
+
+
+@aiohttp.web.middleware
+async def compression_middleware(
+    request: aiohttp.web.Request,
+    handler,
+) -> aiohttp.web.StreamResponse:
+    """Enable gzip/deflate for compressible responses."""
+    response = await handler(request)
+    ct = response.content_type or ""
+    if ct in _COMPRESSIBLE and "Content-Encoding" not in response.headers:
+        response.enable_compression()
+    return response
+
+
 @aiohttp.web.middleware
 async def security_headers_middleware(
     request: aiohttp.web.Request,
@@ -67,7 +91,7 @@ async def security_headers_middleware(
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; connect-src 'self' ws: wss: https://api.planespotters.net; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https://*.tile.openstreetmap.org https://api.planespotters.net"
+        "img-src 'self' data: https://*.tile.openstreetmap.org https://api.planespotters.net https://*.plnspttrs.net"
     )
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     if request.path.startswith("/api/"):
@@ -97,6 +121,12 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
             plugin.config.get("allow_localhost_api", False)
             and request.remote in ("127.0.0.1", "::1")
         ):
+            if request.method in ("POST", "PUT", "DELETE"):
+                if not request.headers.get("X-Requested-With"):
+                    raise aiohttp.web.HTTPForbidden(
+                        text='{"ok": false, "error": "Missing X-Requested-With header", "code": 403}',
+                        content_type="application/json",
+                    )
             return await handler(request)
 
         # Extract token from Authorization header or cookie

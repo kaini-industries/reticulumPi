@@ -47,6 +47,8 @@ def _make_plugin(config: dict | None = None) -> AdsbRadarPlugin:
     plugin._total_messages = 0
     plugin._aircraft_seen_total = 0
     plugin._resolved_index = None
+    plugin._rtl_biast_path = None
+    plugin._bias_tee_active = False
     return plugin
 
 
@@ -113,15 +115,14 @@ class TestBuildCmd:
         g_idx = cmd.index("--gain")
         assert cmd[g_idx + 1] == "max"
 
-    def test_bias_tee_flag(self):
+    def test_bias_tee_not_in_cmd(self):
         p = _make_plugin({"enable_bias_tee": True})
         cmd = p._build_cmd()
-        assert "--enable-bias-tee" in cmd
-
-    def test_no_bias_tee_by_default(self):
-        p = _make_plugin()
-        cmd = p._build_cmd()
         assert "--enable-bias-tee" not in cmd
+
+    def test_bias_tee_config_parsed(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        assert p._enable_bias_tee is True
 
     def test_receiver_position_included(self):
         p = _make_plugin({"receiver_lat": 40.7, "receiver_lon": -74.0})
@@ -137,6 +138,64 @@ class TestBuildCmd:
         cmd = p._build_cmd()
         assert "--lat" not in cmd
         assert "--lon" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# _set_bias_tee
+# ---------------------------------------------------------------------------
+
+class TestSetBiasTee:
+    def test_enable_calls_rtl_biast(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._rtl_biast_path = "/usr/bin/rtl_biast"
+        p._resolved_index = 0
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            p._set_bias_tee(True)
+        mock_run.assert_called_once_with(
+            ["/usr/bin/rtl_biast", "-d", "0", "-b", "1"],
+            capture_output=True, timeout=10,
+        )
+        assert p._bias_tee_active is True
+
+    def test_disable_calls_rtl_biast(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._rtl_biast_path = "/usr/bin/rtl_biast"
+        p._resolved_index = 0
+        p._bias_tee_active = True
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            p._set_bias_tee(False)
+        mock_run.assert_called_once_with(
+            ["/usr/bin/rtl_biast", "-d", "0", "-b", "0"],
+            capture_output=True, timeout=10,
+        )
+        assert p._bias_tee_active is False
+
+    def test_uses_resolved_index(self):
+        p = _make_plugin()
+        p._rtl_biast_path = "/usr/bin/rtl_biast"
+        p._resolved_index = 2
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            p._set_bias_tee(True)
+        assert mock_run.call_args[0][0][2] == "2"
+
+    def test_skips_when_no_binary(self):
+        p = _make_plugin()
+        p._rtl_biast_path = None
+        with patch("subprocess.run") as mock_run:
+            p._set_bias_tee(True)
+        mock_run.assert_not_called()
+        assert p._bias_tee_active is False
+
+    def test_handles_failure_gracefully(self):
+        p = _make_plugin()
+        p._rtl_biast_path = "/usr/bin/rtl_biast"
+        p._resolved_index = 0
+        with patch("subprocess.run", side_effect=OSError("device busy")):
+            p._set_bias_tee(True)
+        assert p._bias_tee_active is False
 
 
 # ---------------------------------------------------------------------------

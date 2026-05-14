@@ -594,7 +594,7 @@ class TestAnnounceMode:
 # ---------------------------------------------------------------------------
 
 
-class TestInterfaceStats:
+class TestInterfaceStatsDelta:
     @patch("RNS.Transport")
     def test_delta_tracking(self, mock_transport, mock_app, base_config):
         mock_app.reticulum.get_interface_stats.return_value = {

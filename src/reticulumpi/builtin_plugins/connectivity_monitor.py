@@ -64,6 +64,8 @@ class ConnectivityMonitorPlugin(PluginBase):
     plugin_name = "connectivity_monitor"
     plugin_version = "2.0.0"
     plugin_description = "Diagnoses link failures and logs transport/routing health"
+    broadcast_tier = 0
+    broadcast_keys = ["connectivity", "routing"]
 
     def validate_config(self) -> None:
         interval = self.config.get("check_interval", _DEFAULT_CHECK_INTERVAL)
@@ -146,6 +148,13 @@ class ConnectivityMonitorPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        if hasattr(self, "_conn_log"):
+            for h in self._conn_log.handlers[:]:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+                self._conn_log.removeHandler(h)
         self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
@@ -162,6 +171,28 @@ class ConnectivityMonitorPlugin(PluginBase):
         """Return the full health snapshot for the dashboard API."""
         with self._lock:
             return dict(self._health)
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        h = self.get_health()
+        if not h:
+            return None
+        return {
+            "connectivity": {
+                "rnsd_reachable": h.get("rnsd_reachable"),
+                "interfaces_online": h.get("interfaces_online"),
+                "interfaces_total": h.get("interfaces_total", 0),
+                "i2p_status": h.get("i2p_status", "unknown"),
+                "i2p_peers": h.get("i2p_peers", 0),
+                "sam_reachable": h.get("sam_reachable", False),
+                "path_count": h.get("path_count", 0),
+                "issues": h.get("issues", []),
+            },
+            "routing": {
+                "path_count": h.get("path_count", 0),
+                "transport_enabled": h.get("transport_enabled", False),
+                "paths": h.get("paths", []),
+            },
+        }
 
     def get_routing_data(
         self,
@@ -258,8 +289,13 @@ class ConnectivityMonitorPlugin(PluginBase):
 
         logger = logging.getLogger("reticulumpi.connectivity")
         logger.setLevel(logging.DEBUG)
-        # Avoid duplicate handlers on restart
-        logger.handlers.clear()
+        # Close and remove existing handlers to avoid FD leaks on restart
+        for h in logger.handlers[:]:
+            try:
+                h.close()
+            except Exception:
+                pass
+            logger.removeHandler(h)
 
         handler = RotatingFileHandler(
             log_path, maxBytes=5 * 1024 * 1024, backupCount=3

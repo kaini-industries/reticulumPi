@@ -360,6 +360,23 @@ class MessageStore:
             )
             self._conn.commit()
 
+    def update_status_unless_terminal(
+        self, msg_id: int, status: str, terminal: frozenset[str],
+    ) -> bool:
+        """Update status only if current status is not in *terminal*.
+
+        Returns True if the row was updated, False if already terminal.
+        """
+        placeholders = ",".join("?" for _ in terminal)
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE messages SET status = ? WHERE id = ? "
+                f"AND status NOT IN ({placeholders})",
+                (status, msg_id, *terminal),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def add_reaction(
         self,
         packet_id: int,
@@ -861,7 +878,7 @@ class LXMFAdapter(TransportAdapter):
         warmer = self._hub.app.get_plugin("path_warmer")
         if warmer and hasattr(warmer, "ensure_path"):
             try:
-                warmer.ensure_path(dest_hash)
+                warmer.ensure_path(dest_hash, interactive=True)
             except Exception:
                 pass
 
@@ -1527,9 +1544,6 @@ class MeshCoreAdapter(TransportAdapter):
         dest = destination if destination and destination != "broadcast" else None
         channel = kwargs.get("channel")
         result = gw.send_message(text, destination=dest, channel=channel)
-        # Pass expected_ack through so the hub can register tracking
-        if result.get("sent") and result.get("expected_ack"):
-            result["expected_ack"] = result["expected_ack"]
         return result
 
     def get_contacts(self) -> list[dict[str, Any]]:
@@ -1567,6 +1581,8 @@ class MessagingHubPlugin(PluginBase):
     plugin_name = "messaging_hub"
     plugin_version = "1.1.0"
     plugin_description = "Unified message store and chat hub for LXMF, Meshtastic, and MeshCore"
+    broadcast_tier = 0
+    broadcast_keys = "messaging"
 
     def validate_config(self) -> None:
         limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)
@@ -1588,6 +1604,9 @@ class MessagingHubPlugin(PluginBase):
         self._outbound_max_age_s = float(
             self.config.get("outbound_queue_ttl_seconds", 600.0)
         )
+        self._drain_time_budget_s = float(
+            self.config.get("drain_time_budget_seconds", 30.0)
+        )
 
         # Initialize SQLite store
         db_path = os.path.expanduser(
@@ -1598,6 +1617,8 @@ class MessagingHubPlugin(PluginBase):
             "message_history_limit", _DEFAULT_HISTORY_LIMIT
         )
         self._last_prune_ts = 0.0
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl: float = 10.0
 
         # Register built-in LXMF adapter
         lxmf_cfg = self.config.get("lxmf", {})
@@ -1618,14 +1639,26 @@ class MessagingHubPlugin(PluginBase):
             self.register_adapter(mc_adapter)
 
         # Drain queued sends as soon as a transport comes back online.
-        self.event_bus.subscribe(
+        # Use subscribe_offloaded so the drain runs in the event-bus thread
+        # pool instead of blocking the reconnect thread (each adapter.send
+        # can block for seconds while warming paths).
+        self.event_bus.subscribe_offloaded(
             events.MESHTASTIC_CONNECTED, self._on_transport_connected
         )
-        self.event_bus.subscribe(
+        self.event_bus.subscribe_offloaded(
             events.MESHCORE_CONNECTED, self._on_transport_connected
         )
 
         self._active = True
+        self.event_bus.subscribe(
+            events.MESSAGE_RECEIVED, self._invalidate_broadcast_cache
+        )
+        self.event_bus.subscribe(
+            events.MESSAGE_SENT, self._invalidate_broadcast_cache
+        )
+        self.event_bus.subscribe(
+            events.MESSAGE_STATUS_CHANGED, self._invalidate_broadcast_cache
+        )
         self._delivery_timeout = float(
             self.config.get("delivery_timeout", 300)
         )
@@ -1643,6 +1676,10 @@ class MessagingHubPlugin(PluginBase):
             self.event_bus.unsubscribe_all(self._on_transport_connected)
         except Exception:
             self.log.debug("Error unsubscribing connected handler", exc_info=True)
+        try:
+            self.event_bus.unsubscribe_all(self._invalidate_broadcast_cache)
+        except Exception:
+            self.log.debug("Error unsubscribing cache invalidator", exc_info=True)
         for adapter in list(self._adapters.values()):
             try:
                 adapter.stop()
@@ -2014,6 +2051,7 @@ class MessagingHubPlugin(PluginBase):
             return 0, 0, len(pending)
 
         now = time.time()
+        drain_start = now
         sent = requeued = expired = 0
         for idx, item in enumerate(pending):
             age = now - item["queued_at"]
@@ -2023,6 +2061,22 @@ class MessagingHubPlugin(PluginBase):
                 )
                 expired += 1
                 continue
+            if time.time() - drain_start > self._drain_time_budget_s:
+                with self._outbound_lock:
+                    dest_q = self._outbound_queues.setdefault(
+                        transport, deque(),
+                    )
+                    for remaining in pending[idx:]:
+                        if now - remaining["queued_at"] <= self._outbound_max_age_s:
+                            dest_q.append(remaining)
+                            requeued += 1
+                        else:
+                            expired += 1
+                self.log.info(
+                    "Drain time budget (%.0fs) exceeded for %s, requeued %d",
+                    self._drain_time_budget_s, transport, requeued,
+                )
+                break
             if not adapter.is_available():
                 # Transport flapped back down. Requeue THIS item and all
                 # remaining ones in order, then stop — no point checking
@@ -2156,14 +2210,17 @@ class MessagingHubPlugin(PluginBase):
         """Called by adapter callbacks when a delivery status changes."""
         try:
             if status in self._NON_OVERWRITING_STATUSES:
-                current = self._store.get_status(msg_id)
-                if current in self._TERMINAL_STATUSES:
+                updated = self._store.update_status_unless_terminal(
+                    msg_id, status, self._TERMINAL_STATUSES,
+                )
+                if not updated:
                     self.log.debug(
-                        "Ignoring %s for msg %d — already %s",
-                        status, msg_id, current,
+                        "Ignoring %s for msg %d — already terminal",
+                        status, msg_id,
                     )
                     return
-            self._store.update_status(msg_id, status)
+            else:
+                self._store.update_status(msg_id, status)
             # Enrich with contact_id / sub_transport so the WS handler can
             # route the status update to the correct panel even when its
             # live get_message() lookup races with shutdown/reload and
@@ -2331,7 +2388,10 @@ class MessagingHubPlugin(PluginBase):
 
     def mark_read(self, contact_id: str) -> int:
         """Mark all unread messages from a contact as read."""
-        return self._store.mark_read(contact_id)
+        count = self._store.mark_read(contact_id)
+        if count > 0:
+            self._broadcast_cache = None
+        return count
 
     def delete_conversation(self, contact_id: str) -> int:
         """Delete all stored messages for a conversation."""
@@ -2363,6 +2423,23 @@ class MessagingHubPlugin(PluginBase):
             "by_transport": stats.get("by_transport", {}),
             "by_direction": stats.get("by_direction", {}),
         }
+
+    def _invalidate_broadcast_cache(self, event_type: str, data: dict) -> None:
+        self._broadcast_cache = None
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+        result = {}
+        if hasattr(self, "get_transports"):
+            result["transports"] = self.get_transports()
+        if hasattr(self, "get_unread_counts_grouped"):
+            result["unread"] = self.get_unread_counts_grouped()
+        snapshot = result or None
+        self._broadcast_cache = (now, snapshot)
+        return snapshot
 
     # ── Internal ───────────────────────────────────────────────────
 

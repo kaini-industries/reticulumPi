@@ -192,6 +192,26 @@ class TestMessageStore:
         msg = store.get_message(msg_id)
         assert msg["status"] == "delivered"
 
+    def test_update_status_unless_terminal_blocks_overwrite(self, store):
+        msg_id = store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="delivered",
+        )
+        terminal = frozenset({"delivered", "delivery_failed", "failed"})
+        updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
+        assert updated is False
+        assert store.get_message(msg_id)["status"] == "delivered"
+
+    def test_update_status_unless_terminal_allows_non_terminal(self, store):
+        msg_id = store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        terminal = frozenset({"delivered", "delivery_failed", "failed"})
+        updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
+        assert updated is True
+        assert store.get_message(msg_id)["status"] == "timeout"
+
     def test_get_stats(self, store):
         store.store(transport="lxmf", direction="received", msg_type="direct", text="A")
         store.store(transport="lxmf", direction="sent", msg_type="direct", text="B")
@@ -1610,6 +1630,50 @@ class TestHubDeliveryStatus:
             }),
         )
 
+    def test_timeout_does_not_overwrite_delivered(self, hub_plugin):
+        msg_id = hub_plugin._store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
+        assert hub_plugin._store.get_message(msg_id)["status"] == "delivered"
+
+    def test_timeout_does_not_overwrite_delivery_failed(self, hub_plugin):
+        msg_id = hub_plugin._store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivery_failed")
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
+        assert hub_plugin._store.get_message(msg_id)["status"] == "delivery_failed"
+
+    def test_expired_does_not_overwrite_delivered(self, hub_plugin):
+        msg_id = hub_plugin._store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "expired")
+        assert hub_plugin._store.get_message(msg_id)["status"] == "delivered"
+
+    def test_timeout_does_not_overwrite_failed(self, hub_plugin):
+        msg_id = hub_plugin._store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "failed")
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
+        assert hub_plugin._store.get_message(msg_id)["status"] == "failed"
+
+    def test_timeout_can_overwrite_sent(self, hub_plugin):
+        msg_id = hub_plugin._store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="Test", status="sent",
+        )
+        hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
+        assert hub_plugin._store.get_message(msg_id)["status"] == "timeout"
+
     def test_expire_stale_pending(self, hub_plugin):
         """expire_stale_pending marks old entries as timeout."""
         # Store a message first so we have a valid msg_id
@@ -1780,3 +1844,32 @@ class TestOutboundQueueEvents:
                 "sub_transport": "",
             }),
         )
+
+    def test_drain_respects_time_budget(self, hub_plugin):
+        """Drain stops and requeues remaining items when time budget expires."""
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+
+        # Queue 5 messages.
+        for i in range(5):
+            hub_plugin.send_message("test", f"msg-{i}", "dest-x")
+
+        # Make adapter available so drain attempts sends, but each send
+        # is slow enough that only one fits in the budget.
+        call_count = 0
+        def slow_send(text, destination, **kw):
+            nonlocal call_count
+            call_count += 1
+            return {"sent": True}
+        adapter.send.side_effect = slow_send
+        adapter.is_available.return_value = True
+
+        # Set a tiny budget so the first send exceeds it.
+        hub_plugin._drain_time_budget_s = 0.0
+
+        sent, requeued, expired = hub_plugin._drain_outbound_queue("test")
+
+        # At most 1 send should have gone through before budget hit.
+        assert sent <= 1
+        assert requeued >= 4
+        assert sent + requeued + expired == 5

@@ -189,8 +189,8 @@ def test_failover_after_threshold(mock_app, base_config):
 
     mock_fallback = MagicMock()
     with patch.object(plugin, "_probe_tcp", return_value=False), \
-         patch("reticulumpi.builtin_plugins.transport_monitor.TCPClientInterface",
-               create=True, return_value=mock_fallback), \
+         patch("RNS.Interfaces.TCPInterface.TCPClientInterface",
+               return_value=mock_fallback), \
          patch("RNS.Transport") as mt:
         mt.interfaces = []
         plugin._check_health()
@@ -538,8 +538,8 @@ class TestConnectDisconnect:
 
         with patch.object(plugin, "_probe_tcp", return_value=True), \
              patch(
-                 "reticulumpi.builtin_plugins.transport_monitor.TCPClientInterface",
-                 create=True, return_value=mock_iface,
+                 "RNS.Interfaces.TCPInterface.TCPClientInterface",
+                 return_value=mock_iface,
              ), \
              patch("RNS.Transport") as mt:
             mt.interfaces = []
@@ -633,8 +633,8 @@ class TestCooldownBackoff:
 
         with patch.object(plugin, "_probe_tcp", return_value=True), \
              patch(
-                 "reticulumpi.builtin_plugins.transport_monitor.TCPClientInterface",
-                 create=True, return_value=mock_iface,
+                 "RNS.Interfaces.TCPInterface.TCPClientInterface",
+                 return_value=mock_iface,
              ), \
              patch("RNS.Transport") as mt:
             mt.interfaces = []
@@ -679,8 +679,8 @@ class TestAutoDiscoveryTick:
 
         with patch.object(plugin, "_probe_tcp", side_effect=probe_side_effect), \
              patch(
-                 "reticulumpi.builtin_plugins.transport_monitor.TCPClientInterface",
-                 create=True, return_value=mock_new_iface,
+                 "RNS.Interfaces.TCPInterface.TCPClientInterface",
+                 return_value=mock_new_iface,
              ), \
              patch("RNS.Transport") as mt:
             mt.interfaces = [mock_dead]

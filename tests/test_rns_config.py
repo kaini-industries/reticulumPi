@@ -8,7 +8,6 @@ import textwrap
 import pytest
 
 from reticulumpi.rns_config import (
-    InterfaceEntry,
     add_interface_section,
     parse_rns_config,
     set_interface_enabled,

@@ -635,7 +635,7 @@ def test_dedup_eviction_preserves_valid_ttl_entries(
     # Expired entries should have been pruned; cache bounded
     assert len(plugin._dedup_cache) <= 10
     # The newest entry should still be a dedup-hit
-    newest_key = ("mesh", f"!new00004", hash("new-4"))
+    newest_key = ("mesh", "!new00004", hash("new-4"))
     assert plugin._dedup_hit(newest_key, fake_now[0])
 
 
@@ -656,7 +656,7 @@ def test_dedup_eviction_fifo_when_all_valid(
         _publish_mesh(bridge_app.event_bus, text=f"msg-{i}", from_id=f"!fifo{i:05d}")
     assert len(plugin._dedup_cache) <= 6
     # Newest entry should survive FIFO eviction
-    newest_key = ("mesh", f"!fifo00003", hash("msg-3"))
+    newest_key = ("mesh", "!fifo00003", hash("msg-3"))
     assert plugin._dedup_hit(newest_key, fake_now[0])
 
 

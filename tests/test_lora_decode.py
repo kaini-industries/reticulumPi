@@ -176,7 +176,6 @@ class TestInterleave:
     @pytest.mark.parametrize("cr", [1, 2, 3, 4])
     def test_round_trip(self, sf: int, cr: int):
         rdd = sf
-        ppm = 4 + cr
         codewords = list(range(rdd))
         symbols = interleave(codewords, sf, cr)
         recovered = deinterleave(symbols, sf, cr)

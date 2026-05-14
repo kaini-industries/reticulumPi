@@ -8,6 +8,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from reticulumpi import events
+
 if TYPE_CHECKING:
     from reticulumpi.app import ReticulumPiApp
 
@@ -22,7 +24,10 @@ class PluginBase(ABC):
     plugin_name: str = "unnamed"
     plugin_version: str = "0.0.0"
     plugin_description: str = "No description"
-    plugin_dependencies: list[str] = []
+    plugin_dependencies: tuple[str, ...] = ()
+
+    broadcast_tier: int | None = None
+    broadcast_keys: str | list[str] | None = None
 
     _global_thread_count: int = 0
     _global_thread_budget: int = 40
@@ -39,6 +44,9 @@ class PluginBase(ABC):
         self._stop_event = threading.Event()
         self._stop_event.set()  # starts "stopped"
         self._threads: list[threading.Thread] = []
+        self._internet_available: bool = True
+        self.event_bus.subscribe(events.INTERNET_ONLINE, self._on_internet_event)
+        self.event_bus.subscribe(events.INTERNET_OFFLINE, self._on_internet_event)
         self.validate_config()
 
     @property
@@ -60,12 +68,51 @@ class PluginBase(ABC):
     def stop(self) -> None:
         """Called on shutdown. Clean up resources, deregister handlers."""
 
+    @property
+    def internet_available(self) -> bool:
+        """Whether internet is currently available."""
+        return self._internet_available
+
+    def _on_internet_event(self, event_type: str, data: dict[str, Any]) -> None:
+        was = self._internet_available
+        now = event_type == events.INTERNET_ONLINE
+        self._internet_available = now
+        if not self._active:
+            return
+        if now and not was:
+            try:
+                self.on_internet_available()
+            except Exception:
+                self.log.exception("Error in on_internet_available")
+        elif not now and was:
+            try:
+                self.on_internet_lost()
+            except Exception:
+                self.log.exception("Error in on_internet_lost")
+
+    def on_internet_available(self) -> None:
+        """Called when internet connectivity is restored. Override to react."""
+
+    def on_internet_lost(self) -> None:
+        """Called when internet connectivity is lost. Override to react."""
+
     def validate_config(self) -> None:
         """Validate plugin config at construction time. Override to add checks."""
 
     def get_status(self) -> dict[str, Any]:
         """Return status info for monitoring. Override for richer status."""
         return {"active": self._active}
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
+        """Return data for the WebSocket broadcast payload.
+
+        Override to provide broadcast data. The default calls get_snapshot()
+        if it exists. Plugins that set broadcast_tier and broadcast_keys
+        participate in the broadcast automatically.
+        """
+        if hasattr(self, "get_snapshot"):
+            return self.get_snapshot()
+        return None
 
     def _join_threads(self, timeout: float = 5.0) -> None:
         """Wait for all tracked threads to finish within a shared deadline.
@@ -88,6 +135,7 @@ class PluginBase(ABC):
             if thread.is_alive():
                 self.log.warning("Thread '%s' did not exit in time", thread.name)
         self._threads.clear()
+        self.event_bus.unsubscribe_all(self._on_internet_event)
         with PluginBase._global_thread_lock:
             PluginBase._global_thread_count = max(
                 0, PluginBase._global_thread_count - thread_count,
@@ -142,6 +190,21 @@ class PluginBase(ABC):
         """Set the global soft thread budget. Logged when exceeded."""
         with cls._global_thread_lock:
             cls._global_thread_budget = budget
+
+    def _remove_thread(self, thread: threading.Thread) -> None:
+        """Remove a finished thread from tracking and decrement the global count.
+
+        Call after joining a thread locally (e.g. in a supervisor restart cycle)
+        to prevent stale entries from accumulating in self._threads.
+        """
+        try:
+            self._threads.remove(thread)
+        except ValueError:
+            return
+        with PluginBase._global_thread_lock:
+            PluginBase._global_thread_count = max(
+                0, PluginBase._global_thread_count - 1,
+            )
 
     def _start_thread(self, target: Any, name: str | None = None) -> threading.Thread:
         """Start a daemon thread and return it."""

@@ -18,6 +18,7 @@ _DEFAULT_WARM_INTERVAL = 120
 _DEFAULT_MAX_PER_CYCLE = 10
 _DEFAULT_AGE_THRESHOLD = 1200  # 20 minutes
 _DEFAULT_PRE_SEND_TIMEOUT = 8
+_DEFAULT_PRE_SEND_TIMEOUT_INTERACTIVE = 4
 _DEFAULT_REQUEST_TIMEOUT = 10
 _DEFAULT_RECENT_HOURS = 24
 _DEFAULT_MAX_BACKOFF = 3600  # 1 hour cap
@@ -37,6 +38,8 @@ class PathWarmerPlugin(PluginBase):
     plugin_name = "path_warmer"
     plugin_version = "1.0.0"
     plugin_description = "Proactively refreshes paths to known/important nodes"
+    broadcast_tier = 1
+    broadcast_keys = "path_warming"
 
     def validate_config(self) -> None:
         interval = self.config.get("warm_interval", _DEFAULT_WARM_INTERVAL)
@@ -112,6 +115,9 @@ class PathWarmerPlugin(PluginBase):
                 "priority_nodes": len(self._priority_hashes),
             }
 
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_warming_stats()
+
     def get_warming_stats(self) -> dict[str, Any]:
         """Full stats for dashboard API."""
         with self._lock:
@@ -140,15 +146,26 @@ class PathWarmerPlugin(PluginBase):
             }
 
     def ensure_path(
-        self, dest_hash: bytes, timeout: float | None = None
+        self, dest_hash: bytes, timeout: float | None = None,
+        *, interactive: bool = False,
     ) -> bool:
         """Ensure a path exists to *dest_hash*, blocking up to *timeout* seconds.
 
         Returns ``True`` if a path is available, ``False`` on timeout.
         Intended for LXMF-sending plugins to call before transmitting.
+
+        When *interactive* is True and no explicit *timeout* is given, a
+        shorter default is used so user-initiated sends don't stall the
+        dashboard for too long.
         """
         if timeout is None:
-            timeout = self._adaptive_timeout(dest_hash)
+            if interactive:
+                timeout = self.config.get(
+                    "pre_send_timeout_interactive",
+                    _DEFAULT_PRE_SEND_TIMEOUT_INTERACTIVE,
+                )
+            else:
+                timeout = self._adaptive_timeout(dest_hash)
 
         if RNS.Transport.has_path(dest_hash):
             return True

@@ -40,6 +40,7 @@
   var _legendExpanded = false;
   var _placeholderEl = null;
   var _hasReceivedData = false;
+  var _cachedBinsHz = null;
   var _css = {};
 
   // -- Zoom state -----------------------------------------------------------
@@ -847,9 +848,20 @@
       _setZoom(null, true);
     }
 
+    if (data.bins_hz) {
+      _cachedBinsHz = data.bins_hz;
+    } else if (_cachedBinsHz) {
+      data.bins_hz = _cachedBinsHz;
+    } else if (SC.historyStore && SC.historyStore.binsHz) {
+      _cachedBinsHz = SC.historyStore.binsHz;
+      data.bins_hz = _cachedBinsHz;
+    }
     _lastData = data;
+    if (_body && _body.classList.contains('hidden')) return;
     var clip = _clip(data, _zoom);
 
+    _renderPresets(data);
+    _renderSwitchingOverlay(data);
     _renderMeta(data);
     _renderBands(data, clip);
     _buildLegend();
@@ -867,10 +879,153 @@
     }
 
     _renderScale(data, clip);
+    _renderChannelAnalysis(data.channel_analysis || null);
 
     if (_countEl) _countEl.textContent = data.sweep_count + ' sweeps';
     if (R.markUpdated) R.markUpdated('spectrum-section');
   }
 
-  R.spectrum = { update: update };
+  // -- Preset switching UI ---------------------------------------------------
+  var _presetBar = null;
+  var _presetBtns = {};
+  var _switchingOverlay = null;
+  var _switchingTimeout = null;
+  var _channelGridEl = null;
+  var _lastActivePreset = null;
+
+  function _ensurePresetBar() {
+    if (_presetBar) return;
+    var meta = _section ? _section.querySelector('.spectrum-meta, .section-meta') : null;
+    if (!meta) return;
+    _presetBar = document.createElement('div');
+    _presetBar.className = 'spectrum-preset-bar';
+    meta.parentNode.insertBefore(_presetBar, meta.nextSibling);
+  }
+
+  function _renderPresets(data) {
+    if (!data.available_presets) return;
+    _ensurePresetBar();
+    if (!_presetBar) return;
+    var presets = data.available_presets;
+    var active = data.active_preset;
+    if (active === _lastActivePreset && Object.keys(_presetBtns).length === presets.length) return;
+    _lastActivePreset = active;
+    _presetBar.innerHTML = '';
+    _presetBtns = {};
+    for (var i = 0; i < presets.length; i++) {
+      var p = presets[i];
+      var btn = document.createElement('button');
+      btn.className = p.name === active ? 'active' : '';
+      btn.textContent = p.name.replace(/_/g, ' ');
+      btn.title = (p.freq_start_mhz || '?') + ' – ' + (p.freq_stop_mhz || '?') + ' MHz';
+      btn.dataset.preset = p.name;
+      btn.addEventListener('click', _onPresetClick);
+      _presetBar.appendChild(btn);
+      _presetBtns[p.name] = btn;
+    }
+  }
+
+  function _onPresetClick(e) {
+    var name = e.target.dataset.preset;
+    if (!name) return;
+    // Disable buttons during switch
+    Object.keys(_presetBtns).forEach(function (k) { _presetBtns[k].disabled = true; });
+    if (R.ws && R.ws.readyState === WebSocket.OPEN) {
+      R.ws.send(JSON.stringify({ action: 'spectrum_switch_preset', preset: name }));
+    }
+  }
+
+  function _renderSwitchingOverlay(data) {
+    if (data.switching || data.status === 'switching') {
+      if (!_switchingOverlay && _body) {
+        _switchingOverlay = document.createElement('div');
+        _switchingOverlay.className = 'spectrum-switching-overlay';
+        _switchingOverlay.style.cssText =
+          'position:absolute;top:0;right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center;' +
+          'background:rgba(0,0,0,0.6);color:#fff;font-size:1.1em;z-index:10;border-radius:6px;';
+        _switchingOverlay.textContent = 'Switching preset…';
+        _body.style.position = 'relative';
+        _body.appendChild(_switchingOverlay);
+        _switchingTimeout = setTimeout(function () {
+          handlePresetError('Preset switch timed out');
+        }, 15000);
+      }
+    } else if (_switchingOverlay) {
+      if (_switchingTimeout) { clearTimeout(_switchingTimeout); _switchingTimeout = null; }
+      _switchingOverlay.remove();
+      _switchingOverlay = null;
+      Object.keys(_presetBtns).forEach(function (k) { _presetBtns[k].disabled = false; });
+    }
+  }
+
+  // -- LoRa channel grid (rendered when preset has channel_analysis) --------
+  function _ensureChannelGrid() {
+    if (_channelGridEl) return;
+    if (!_body) return;
+    _channelGridEl = document.createElement('div');
+    _channelGridEl.className = 'lora-channel-grid-unified';
+    _channelGridEl.style.cssText = 'margin-top:8px;display:none;';
+    _body.appendChild(_channelGridEl);
+  }
+
+  function _renderChannelAnalysis(analysis) {
+    _ensureChannelGrid();
+    if (!_channelGridEl) return;
+    if (!analysis || !analysis.channels) {
+      _channelGridEl.style.display = 'none';
+      return;
+    }
+    _channelGridEl.style.display = '';
+    var chs = analysis.channels;
+    var nf = analysis.noise_floor_db;
+
+    // Summary bar
+    var summary = '<div class="ch-summary" style="font-size:0.85em;margin-bottom:6px;">' +
+      '<span>Noise floor: <b>' + (nf != null ? esc(nf.toFixed(1)) + ' dB' : '—') + '</b></span>' +
+      ' · <span>Active: <b>' + esc(analysis.active_count + '/' + chs.length) + '</b></span>' +
+      ' · <span>Threshold: ' + esc(analysis.threshold_db) + ' dB</span>';
+    if (analysis.interference_flags && analysis.interference_flags.length) {
+      summary += ' · <span style="color:#f44;">⚠ ' + esc(analysis.interference_flags.length) + ' interference</span>';
+    }
+    summary += '</div>';
+
+    // Channel cells — uplink + downlink
+    var ups = chs.filter(function (c) { return c.dir === 'up'; });
+    var dns = chs.filter(function (c) { return c.dir === 'dn'; });
+
+    var html = summary + '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
+    html += _buildChannelBlock('Uplink (' + ups.length + ')', ups, nf);
+    html += _buildChannelBlock('Downlink (' + dns.length + ')', dns, nf);
+    html += '</div>';
+    _channelGridEl.innerHTML = html;
+  }
+
+  function _buildChannelBlock(title, channels, nf) {
+    var html = '<div><div style="font-size:0.8em;color:#aaa;margin-bottom:2px;">' + esc(title) + '</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:2px;">';
+    for (var i = 0; i < channels.length; i++) {
+      var c = channels[i];
+      var color = '#333';
+      if (c.active) color = '#2a6';
+      else if (c.duty_pct > 5) color = '#a62';
+      html += '<div title="Ch ' + esc(c.idx) + ' ' + esc(c.center_mhz) + ' MHz\n' +
+        'Power: ' + (c.power_db != null ? esc(c.power_db) + ' dB' : '—') + '\n' +
+        'Duty: ' + esc(c.duty_pct) + '%\nDetections: ' + esc(c.det_count) + '"' +
+        ' style="width:8px;height:12px;background:' + color + ';border-radius:1px;"></div>';
+    }
+    html += '</div></div>';
+    return html;
+  }
+
+  function handlePresetError(errorMsg) {
+    if (_switchingTimeout) { clearTimeout(_switchingTimeout); _switchingTimeout = null; }
+    Object.keys(_presetBtns).forEach(function (k) { _presetBtns[k].disabled = false; });
+    if (_switchingOverlay && _switchingOverlay.parentNode) {
+      _switchingOverlay.parentNode.removeChild(_switchingOverlay);
+      _switchingOverlay = null;
+    }
+    if (_statusEl) _statusEl.textContent = 'Preset error: ' + errorMsg;
+  }
+
+  R.spectrum = { update: update, handlePresetError: handlePresetError };
 })();

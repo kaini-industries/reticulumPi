@@ -699,12 +699,16 @@ class TestBugFixes:
         assert shared_observer_plugin._on_gateway_connected in unsub_targets
         assert shared_observer_plugin._on_gateway_disconnected in unsub_targets
 
-    def test_stop_does_not_unsubscribe_in_standalone_mode(self, observer_plugin):
+    def test_stop_does_not_unsubscribe_gateway_handlers_in_standalone_mode(self, observer_plugin):
         observer_plugin.event_bus.unsubscribe_all.reset_mock()
 
         observer_plugin.stop()
 
-        observer_plugin.event_bus.unsubscribe_all.assert_not_called()
+        unsubscribed_callbacks = [
+            call.args[0] for call in observer_plugin.event_bus.unsubscribe_all.call_args_list
+        ]
+        assert observer_plugin._on_gateway_connected not in unsubscribed_callbacks
+        assert observer_plugin._on_gateway_disconnected not in unsubscribed_callbacks
 
     def test_uptime_is_seconds_since_start(self, observer_plugin):
         observer_plugin._public_key = "aa" * 32

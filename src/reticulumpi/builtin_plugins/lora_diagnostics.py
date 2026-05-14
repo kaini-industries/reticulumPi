@@ -63,6 +63,8 @@ class LoRaDiagnosticsPlugin(PluginBase):
     plugin_description = (
         "LoRa traffic monitoring, announce beaconing, and peer tracking"
     )
+    broadcast_tier = 2
+    broadcast_keys = "lora_diagnostics"
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -163,6 +165,9 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 "beacons_sent": self._beacons_sent,
                 "lora_online": self._lora_stats.get("online", False),
             }
+
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        return self.get_diagnostics()
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Full diagnostic data for the /api/lora endpoint."""

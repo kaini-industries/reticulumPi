@@ -70,7 +70,9 @@ class MeshCoreObserver(PluginBase):
     plugin_name = "meshcore_observer"
     plugin_description = "MeshCore companion observer for letsmesh.net analyzer"
     plugin_version = "1.0.0"
-    plugin_dependencies = ["meshcore_gateway"]
+    broadcast_tier = 1
+    broadcast_keys = "meshcore_observer"
+    plugin_dependencies = ("meshcore_gateway",)
 
     # ── Configuration validation ────────────────────────────────────
 
@@ -250,6 +252,10 @@ class MeshCoreObserver(PluginBase):
                 ),
             }
 
+    def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        s = self.get_status()
+        return {"available": True, **s} if s else None
+
     # ── Asyncio event loop (standalone mode) ───────────────────────
 
     def _run_async_loop(self) -> None:
@@ -273,6 +279,12 @@ class MeshCoreObserver(PluginBase):
             raise RuntimeError("MeshCore async loop not running")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
+
+    def on_internet_available(self) -> None:
+        self.log.info("Internet restored — MQTT reconnection enabled")
+
+    def on_internet_lost(self) -> None:
+        self.log.warning("Internet lost — MQTT reconnection paused, packets queued")
 
     # ── Standalone device connection ───────────────────────────────
 
@@ -645,6 +657,10 @@ class MeshCoreObserver(PluginBase):
             self._sleep_while_active(2)
 
         while self._active:
+            if not self.internet_available:
+                self._sleep_while_active(30)
+                continue
+
             if not self._connected_mqtt:
                 try:
                     self._connect_mqtt()

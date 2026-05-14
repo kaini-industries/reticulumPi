@@ -15,19 +15,19 @@ INSTALL_DIR="/opt/reticulumpi"
 NODE_NAME=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --start) AUTO_START=true ;;
-        --with-nomadnet) WITH_NOMADNET=true ;;
-        --with-meshchat) WITH_MESHCHAT=true ;;
-        --with-dashboard) WITH_DASHBOARD=true ;;
-        --with-lora) WITH_LORA=true ;;
-        --with-i2p) WITH_I2P=true ;;
-        --with-yggdrasil) WITH_YGGDRASIL=true ;;
-        --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift ;;
-        --install-dir=*) INSTALL_DIR="${1#*=}" ;;
-        --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift ;;
-        --node-name=*) NODE_NAME="${1#*=}" ;;
+        --start) AUTO_START=true; shift ;;
+        --with-nomadnet) WITH_NOMADNET=true; shift ;;
+        --with-meshchat) WITH_MESHCHAT=true; shift ;;
+        --with-dashboard) WITH_DASHBOARD=true; shift ;;
+        --with-lora) WITH_LORA=true; shift ;;
+        --with-i2p) WITH_I2P=true; shift ;;
+        --with-yggdrasil) WITH_YGGDRASIL=true; shift ;;
+        --install-dir) INSTALL_DIR="${2:?--install-dir requires a value}"; shift 2 ;;
+        --install-dir=*) INSTALL_DIR="${1#*=}"; shift ;;
+        --node-name) NODE_NAME="${2:?--node-name requires a value}"; shift 2 ;;
+        --node-name=*) NODE_NAME="${1#*=}"; shift ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
-    shift
 done
 CONFIG_DIR="/etc/reticulumpi"
 DATA_DIR="/var/lib/reticulumpi"
@@ -38,7 +38,7 @@ echo "=== ReticulumPi Bootstrap ==="
 # 1. System packages
 echo "[1/7] Installing system packages..."
 sudo apt-get update
-PACKAGES="python3 python3-venv python3-pip git"
+PACKAGES="python3 python3-venv python3-pip git avahi-daemon avahi-utils"
 if [ "$WITH_MESHCHAT" = true ]; then
     PACKAGES="$PACKAGES nodejs npm"
 fi
@@ -367,6 +367,16 @@ if sudo visudo -cf /etc/sudoers.d/reticulumpi-services >/dev/null 2>&1; then
 else
     echo "  WARNING: sudoers syntax check failed — removing to prevent lockout"
     sudo rm -f /etc/sudoers.d/reticulumpi-services
+fi
+
+# 7c. Sudoers rule for offline simulation script
+echo "  Installing sudoers rule for offline simulation..."
+sudo install -m 0440 "$INSTALL_DIR/config/sudoers.d/reticulumpi-offline" /etc/sudoers.d/reticulumpi-offline
+if sudo visudo -cf /etc/sudoers.d/reticulumpi-offline >/dev/null 2>&1; then
+    echo "  Sudoers rule installed and validated"
+else
+    echo "  WARNING: sudoers syntax check failed — removing to prevent lockout"
+    sudo rm -f /etc/sudoers.d/reticulumpi-offline
 fi
 
 echo ""

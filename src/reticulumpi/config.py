@@ -21,6 +21,7 @@ VALID_KEYS = {
     "plugin_paths",
     "plugins",
     "thread_budget",
+    "internet",
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -31,6 +32,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "plugin_paths": [],
     "plugins": {},
     "thread_budget": 40,
+    "internet": {
+        "force_offline": False,
+        "probe_interval": 30,
+        "probe_timeout": 3,
+        "offline_threshold": 3,
+        "targets": [
+            {"host": "1.1.1.1", "port": 53},
+            {"host": "8.8.8.8", "port": 53},
+            {"host": "9.9.9.9", "port": 53},
+        ],
+    },
 }
 
 
@@ -129,6 +141,10 @@ class AppConfig:
     def thread_budget(self) -> int:
         val = self._data.get("thread_budget", 40)
         return int(val) if isinstance(val, (int, float)) else 40
+
+    @property
+    def internet(self) -> dict[str, Any]:
+        return dict(self._data.get("internet", DEFAULT_CONFIG["internet"]))
 
     @property
     def plugins(self) -> dict[str, dict[str, Any]]:

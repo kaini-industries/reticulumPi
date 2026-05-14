@@ -73,6 +73,7 @@
   var _needsBulkPaint = false;
   var _lastOverlaySig = '';    // "<region>|<freq>|<bw>|<zoom>" for overlay rebuild
   var _lastData = null;
+  var _cachedBinsHz = null;
   // Zoom: null = full clipped region; else [loMhz, hiMhz] user-selected window.
   var _zoom = null;
   var _dragState = null;       // {startFrac, curFrac, rectEl} during a drag
@@ -1400,13 +1401,6 @@
     } else {
       _selectedChannel = idx;
       _showChannelDetail(idx);
-      // Prefill chirp viewer frequency when a channel is selected
-      if (R.chirpSpectrogram && R.chirpSpectrogram.setFreqMhz && _lastData && _lastData.spectrum) {
-        var _ca = _lastData.spectrum.channel_analysis;
-        if (_ca && _ca.channels && _ca.channels[idx]) {
-          R.chirpSpectrogram.setFreqMhz(_ca.channels[idx].center_mhz);
-        }
-      }
     }
     if (_lastData) _renderAll(_lastData);
   }
@@ -1450,25 +1444,25 @@
     _chDetailEl.innerHTML = ''
       + '<span class="lora-channel-detail-close" data-action="close">&times;</span>'
       + '<div class="lora-channel-detail-header">'
-      +   'Ch ' + esc(String(ch.idx)) + ' · '
-      +   ch.center_mhz.toFixed(3) + ' MHz · '
-      +   ch.bw_khz + ' kHz ' + (ch.dir === 'dn' ? 'Downlink' : 'Uplink')
+      +   'Ch ' + esc(String(ch.idx)) + ' &middot; '
+      +   esc(ch.center_mhz.toFixed(3)) + ' MHz &middot; '
+      +   esc(String(ch.bw_khz)) + ' kHz ' + (ch.dir === 'dn' ? 'Downlink' : 'Uplink')
       + '</div>'
-      + 'Power: ' + (ch.power_db != null ? ch.power_db.toFixed(1) + ' dB' : '—')
-      + ' · Avg: ' + (ch.avg_db != null ? ch.avg_db.toFixed(1) + ' dB' : '—')
-      + ' · Peak: ' + (ch.peak_db != null ? ch.peak_db.toFixed(1) + ' dB' : '—')
-      + '<br>Duty cycle: ' + ch.duty_pct.toFixed(1) + '%'
-      + ' · Detections: ' + ch.det_count;
+      + 'Power: ' + (ch.power_db != null ? esc(ch.power_db.toFixed(1)) + ' dB' : '&#x2014;')
+      + ' &middot; Avg: ' + (ch.avg_db != null ? esc(ch.avg_db.toFixed(1)) + ' dB' : '&#x2014;')
+      + ' &middot; Peak: ' + (ch.peak_db != null ? esc(ch.peak_db.toFixed(1)) + ' dB' : '&#x2014;')
+      + '<br>Duty cycle: ' + esc(ch.duty_pct.toFixed(1)) + '%'
+      + ' &middot; Detections: ' + esc(String(ch.det_count));
     var sc = (_lastData.spectrum && _lastData.spectrum.sweep_count) ? _lastData.spectrum.sweep_count : 0;
     if (sc > 0 && ch.det_count > 0) {
-      _chDetailEl.innerHTML += ' (' + (ch.det_count / sc * 100).toFixed(1) + '% of sweeps)';
+      _chDetailEl.innerHTML += ' (' + esc((ch.det_count / sc * 100).toFixed(1)) + '% of sweeps)';
     }
     var closeBtn = _chDetailEl.querySelector('[data-action="close"]');
-    if (closeBtn) closeBtn.addEventListener('click', function () {
+    if (closeBtn) closeBtn.onclick = function () {
       _selectedChannel = null;
       _chDetailEl.style.display = 'none';
       if (_lastData) _renderAll(_lastData);
-    });
+    };
   }
 
   // -- Interference alerts in meta strip ------------------------------------
@@ -1751,29 +1745,48 @@
     if (!data) return;
     if (!_resolveDom()) return;
 
-    // Prefer dedicated lora_scanner / lora_chirp_viewer data; fall back to wideband spectrum.
-    var _loraSnap = data.lora_scanner || data.lora_chirp_viewer;
-    if (_loraSnap && _loraSnap.bins_hz && _loraSnap.bins_hz.length) {
+    var _loraSnap = data.lora_scanner;
+    if (_loraSnap) {
+      if (_loraSnap.bins_hz && _loraSnap.bins_hz.length) {
+        _cachedBinsHz = _loraSnap.bins_hz;
+      } else if (_cachedBinsHz && _cachedBinsHz.length) {
+        _loraSnap.bins_hz = _cachedBinsHz;
+      } else {
+        var _hs = SC.loraHistoryStore || SC.historyStore;
+        if (_hs && _hs.binsHz && _hs.binsHz.length) {
+          _cachedBinsHz = _hs.binsHz;
+          _loraSnap.bins_hz = _cachedBinsHz;
+        }
+      }
+    }
+    var _hasSweepData = _loraSnap && _loraSnap.bins_hz && _loraSnap.bins_hz.length
+      && _loraSnap.sweep_count > 0;
+    if (_hasSweepData) {
       _dedicatedMode = true;
       data = Object.assign({}, data, { spectrum: _loraSnap });
     } else {
       _dedicatedMode = false;
     }
 
-    // Show/hide chirp viewer section when lora_chirp_viewer plugin is active
-    if (data.lora_chirp_viewer && R.chirpSpectrogram) {
-      R.chirpSpectrogram.show();
-      R.chirpSpectrogram.handleUpdate(data);
-    }
     if (!data.spectrum) return;
 
+    var spec = data.spectrum;
+    if (spec.bins_hz && spec.bins_hz.length) {
+      _cachedBinsHz = spec.bins_hz;
+    } else if (_cachedBinsHz && _cachedBinsHz.length) {
+      spec.bins_hz = _cachedBinsHz;
+    } else if (SC.historyStore && SC.historyStore.binsHz && SC.historyStore.binsHz.length) {
+      _cachedBinsHz = SC.historyStore.binsHz;
+      spec.bins_hz = _cachedBinsHz;
+    }
+
     // Show scanner status in placeholder when not yet producing sweeps
-    var specStatus = data.spectrum.status;
+    var specStatus = spec.status;
     if (specStatus === 'unavailable' || specStatus === 'error') {
       if (_placeholderEl) {
         _placeholderEl.textContent = specStatus === 'unavailable'
           ? 'RTL-SDR scanner unavailable'
-          : 'Scanner error: ' + (data.spectrum.error || 'unknown');
+          : 'Scanner error: ' + (spec.error || 'unknown');
         _placeholderEl.style.display = '';
       }
       return;
@@ -1797,6 +1810,7 @@
     }
 
     _lastData = data;
+    if (_body && _body.classList.contains('hidden')) return;
     _detectRNode(data);
 
     _renderAll(data);
@@ -1819,6 +1833,11 @@
           }
         }
       }
+    },
+    clearChannelSelection: function () {
+      _selectedChannel = null;
+      if (_chDetailEl) _chDetailEl.style.display = 'none';
+      if (_lastData) _renderAll(_lastData);
     },
   };
 })();

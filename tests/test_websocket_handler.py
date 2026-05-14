@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
-    _BROADCAST_PLUGIN_NAMES,
     _broadcast_metrics,
     _collect_broadcast_data,
     _collect_interfaces,
@@ -25,11 +24,9 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _lookup_message_row,
     _on_alert_event,
     _on_message_event,
-    _on_plugin_lifecycle,
     _on_status_event,
     _parse_rnode_config,
     _push_to_clients,
-    _rebuild_plugin_refs,
     _start_broadcast_task,
     _stop_broadcast_task,
     _ws_clients,
@@ -40,7 +37,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
 async def _empty_async_iter():
     """Async iterator that yields nothing — simulates an idle WebSocket."""
     return
-    yield  # noqa: unreachable — makes this an async generator
+    yield  # makes this an async generator
 
 
 @pytest.fixture(autouse=True)
@@ -51,14 +48,6 @@ def _reset_ws_clients():
     _ws_clients.clear()
     yield
     _ws_clients.clear()
-
-
-@pytest.fixture(autouse=True)
-def _reset_plugin_refs():
-    import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
-    wsh._plugin_refs = {}
-    yield
-    wsh._plugin_refs = {}
 
 
 # ── _extract_radio tests ───────────────────────────────────────────
@@ -479,7 +468,7 @@ class TestEnrichTransportTraffic:
 # ── WebSocket auth & connection tests ──────────────────────────────
 
 
-def _make_ws_request(token=None, cookie_token=None, max_clients=10, auth_valid=True):
+def _make_ws_request(token=None, cookie_token=None, bearer_token=None, max_clients=10, auth_valid=True):
     """Create a mock aiohttp request for WebSocket tests."""
     request = MagicMock()
     request.query = {}
@@ -489,6 +478,11 @@ def _make_ws_request(token=None, cookie_token=None, max_clients=10, auth_valid=T
     request.cookies = {}
     if cookie_token:
         request.cookies["session"] = cookie_token
+
+    headers = {}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    request.headers = headers
 
     plugin = MagicMock()
     plugin.config = {"max_websocket_clients": max_clients}
@@ -508,7 +502,7 @@ class TestWebsocketAuth:
         ws_mock.close = AsyncMock()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         ws_mock.close.assert_called_once()
         call_kwargs = ws_mock.close.call_args
@@ -523,7 +517,7 @@ class TestWebsocketAuth:
         ws_mock.close = AsyncMock()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         ws_mock.close.assert_called_once()
 
@@ -536,7 +530,7 @@ class TestWebsocketAuth:
         ws_mock.close = AsyncMock()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         ws_mock.close.assert_called_once()
 
@@ -549,10 +543,24 @@ class TestWebsocketAuth:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         # Should have validated the cookie token
         request.app["plugin"]._auth.validate_token.assert_called_with("cookie_token")
+        ws_mock.close.assert_not_called()
+
+    def test_accepts_bearer_token(self):
+        """Authenticates via Authorization: Bearer header."""
+        request = _make_ws_request(bearer_token="bearer_token", auth_valid=True)
+
+        ws_mock = MagicMock()
+        ws_mock.prepare = AsyncMock()
+        ws_mock.__aiter__ = lambda self: _empty_async_iter()
+
+        with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
+            asyncio.run(websocket_metrics(request))
+
+        request.app["plugin"]._auth.validate_token.assert_called_with("bearer_token")
         ws_mock.close.assert_not_called()
 
     def test_rejects_when_max_clients_reached(self):
@@ -572,7 +580,7 @@ class TestWebsocketAuth:
 
         try:
             with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-                result = asyncio.run(websocket_metrics(request))
+                asyncio.run(websocket_metrics(request))
 
             ws_mock.close.assert_called_once()
             call_args = ws_mock.close.call_args
@@ -590,7 +598,7 @@ class TestWebsocketAuth:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         # After disconnect, client should be removed
         assert ws_mock not in _ws_clients
@@ -610,7 +618,7 @@ class TestWebsocketAuth:
             return ws
 
         with patch("aiohttp.web.WebSocketResponse", side_effect=capture_ws):
-            result = asyncio.run(websocket_metrics(request))
+            asyncio.run(websocket_metrics(request))
 
         # The authenticated WS (second call) should have heartbeat=60.0
         # First call is for auth failure/max clients, second for success
@@ -699,18 +707,24 @@ class TestBroadcastLifecycle:
 
 
 class TestBroadcastDataCollection:
+    @staticmethod
+    def _broadcast_plugin(snapshot, *, tier=1, keys=None):
+        """Wrap a MagicMock so the broadcast registry sees it."""
+        m = MagicMock()
+        m.broadcast_tier = tier
+        m.broadcast_keys = keys
+        m.broadcast_snapshot = MagicMock(return_value=snapshot)
+        m.get_status.return_value = {"active": True}
+        return m
+
     def _make_plugin(self, plugins=None):
         """Create a mock plugin with configurable sub-plugins."""
         plugin = MagicMock()
         plugin.config = {"metrics_interval": 0.1}
         plugin.app.reticulum = MagicMock()
         plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
-
-        available = plugins or {}
-        plugin.app.get_plugin.side_effect = lambda name: available.get(name)
-        plugin.app.plugins = {}
-
-        _rebuild_plugin_refs(plugin.app.get_plugin)
+        plugin.app.plugins = plugins or {}
+        plugin.app.internet_probe = None
         return plugin
 
     def test_broadcasts_to_clients(self):
@@ -749,9 +763,9 @@ class TestBroadcastDataCollection:
         assert data["type"] == "update"
         assert "data" in data
         assert "timestamp" in data
-        assert "metrics" in data["data"]
         assert "interfaces" in data["data"]
         assert "plugins" in data["data"]
+        assert "mesh" in data["data"]
 
         _ws_clients.clear()
 
@@ -840,11 +854,15 @@ class TestBroadcastDataCollection:
         """Mesh data from network_map is included in broadcast."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
-        network_map = MagicMock()
-        network_map.get_node_count.return_value = 42
-        network_map.get_recent_announces.return_value = [
-            {"hash": "aa" * 16, "last_seen": time.time()},
-        ]
+        mesh_snapshot = {
+            "known_nodes": 42,
+            "recent_announces": [
+                {"hash": "aa" * 16, "last_seen": time.time()},
+            ],
+        }
+        network_map = self._broadcast_plugin(
+            mesh_snapshot, tier=1, keys="mesh",
+        )
 
         plugin = self._make_plugin({"network_map": network_map})
         _ws_clients.clear()
@@ -884,10 +902,12 @@ class TestBroadcastDataCollection:
         """Sensor data is included when sensor_framework plugin is available."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
-        sensor_fw = MagicMock()
-        sensor_fw.get_latest_readings.return_value = {
+        sensor_snapshot = {
             "temperature": {"value": 22.5, "unit": "C"},
         }
+        sensor_fw = self._broadcast_plugin(
+            sensor_snapshot, tier=2, keys="sensors",
+        )
 
         plugin = self._make_plugin({"sensor_framework": sensor_fw})
         _ws_clients.clear()
@@ -922,14 +942,16 @@ class TestBroadcastDataCollection:
         """Transport data is enriched with interface traffic stats."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
-        transport_mon = MagicMock()
-        transport_mon.get_hub_health.return_value = {
+        transport_snapshot = {
             "primaries": [
                 {"target_host": "hub.example.com", "target_port": 4242},
             ],
             "active_fallbacks": [],
             "auto_discovery": {"connected": []},
         }
+        transport_mon = self._broadcast_plugin(
+            transport_snapshot, tier=0, keys="transport",
+        )
 
         plugin = self._make_plugin({"transport_monitor": transport_mon})
         # Set up interface stats to have matching TCP client
@@ -979,18 +1001,16 @@ class TestBroadcastDataCollection:
         _ws_clients.clear()
 
     def test_includes_messaging_data(self):
-        """Slow-moving messaging state (transports, unread) rides the tick.
-
-        Per-message rows are delivered via the dedicated `message` /
-        `message_status` WS envelopes and explicitly not included here —
-        keeping the tick small lets an active conversation avoid a full
-        thread refetch on every inbound packet.
-        """
+        """Slow-moving messaging state (transports, unread) rides the tick."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
-        msg_hub = MagicMock()
-        msg_hub.get_transports.return_value = ["lxmf"]
-        msg_hub.get_unread_counts_grouped.return_value = {"lxmf": {"abc": 2}}
+        messaging_snapshot = {
+            "transports": ["lxmf"],
+            "unread": {"lxmf": {"abc": 2}},
+        }
+        msg_hub = self._broadcast_plugin(
+            messaging_snapshot, tier=1, keys="messaging",
+        )
 
         plugin = self._make_plugin({"messaging_hub": msg_hub})
         _ws_clients.clear()
@@ -1021,7 +1041,6 @@ class TestBroadcastDataCollection:
         assert "messages" not in data["data"]["messaging"]
         assert data["data"]["messaging"]["transports"] == ["lxmf"]
         assert data["data"]["messaging"]["unread"] == {"lxmf": {"abc": 2}}
-        msg_hub.get_messages.assert_not_called()
 
         _ws_clients.clear()
 
@@ -1436,90 +1455,72 @@ class TestPushToClients:
 class TestCollectBroadcastDataDirect:
     """Direct synchronous tests for the extracted data collection function."""
 
-    def _make_mock_plugin(self, plugins=None):
+    def _make_mock_plugin(self, broadcast_plugins=None, interval=5):
         plugin = MagicMock()
         plugin.config.get.side_effect = lambda key, default=None: {
-            "metrics_interval": 5,
+            "metrics_interval": interval,
         }.get(key, default)
         plugin.app.reticulum = MagicMock()
         plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
-        plugin.app.plugins = {}
+        plugin.app.plugins = broadcast_plugins or {}
+        return plugin
 
-        available = plugins or {}
-        plugin.app.get_plugin.side_effect = lambda name: available.get(name)
-        return plugin, {name: available.get(name) for name in _BROADCAST_PLUGIN_NAMES}
+    @staticmethod
+    def _mock_broadcast_plugin(tier, keys, snapshot_return):
+        p = MagicMock()
+        p.broadcast_tier = tier
+        p.broadcast_keys = keys
+        p.broadcast_snapshot.return_value = snapshot_return
+        p.get_status.return_value = {"active": True}
+        return p
 
     def test_returns_base_keys(self):
-        plugin, refs = self._make_mock_plugin()
-        data, ts, ver = _collect_broadcast_data(plugin, 1, 0, 0, refs)
-        assert "metrics" in data
+        plugin = self._make_mock_plugin()
+        data, ts, ver = _collect_broadcast_data(plugin, 1, 0, 0)
         assert "plugins" in data
         assert "interfaces" in data
-        assert "sensors" in data
-        assert "transport" in data
+        assert "mesh" in data
 
-    def test_mesh_summary_on_third_cycle(self):
-        network_map = MagicMock()
-        network_map.get_node_count.return_value = 5
-        network_map.get_recent_announces.return_value = []
-        network_map.get_mesh_summary.return_value = {"total": 5}
-
-        plugin, refs = self._make_mock_plugin({"network_map": network_map})
-        data, _, _ = _collect_broadcast_data(plugin, 3, 0, 0, refs)
-        network_map.get_mesh_summary.assert_called_once()
-        assert data["mesh"]["summary"] == {"total": 5}
-
-    def test_mesh_summary_skipped_off_cycle(self):
-        network_map = MagicMock()
-        network_map.get_node_count.return_value = 5
-        network_map.get_recent_announces.return_value = []
-
-        plugin, refs = self._make_mock_plugin({"network_map": network_map})
-        _collect_broadcast_data(plugin, 2, 0, 0, refs)
-        network_map.get_mesh_summary.assert_not_called()
-
-    def test_updates_mesh_state(self):
-        network_map = MagicMock()
-        network_map.get_node_count.return_value = 10
-        network_map.get_recent_announces.return_value = [
-            {"hash": "aa" * 16, "last_seen": 100.0},
-        ]
-
-        plugin, refs = self._make_mock_plugin({"network_map": network_map})
-        data, new_ts, new_ver = _collect_broadcast_data(plugin, 1, 0, 0, refs)
+    def test_mesh_version_bump_on_new_announces(self):
+        network_map = self._mock_broadcast_plugin(
+            1, "mesh",
+            {"node_count": 10, "recent_announces": [{"last_seen": 100.0}]},
+        )
+        plugin = self._make_mock_plugin({"network_map": network_map})
+        data, new_ts, new_ver = _collect_broadcast_data(plugin, 1, 0, 0)
         assert new_ts == 100.0
         assert new_ver == 1
         assert data["mesh"]["recent_announces"][0]["last_seen"] == 100.0
 
+    def test_mesh_version_stable_on_stale_announces(self):
+        network_map = self._mock_broadcast_plugin(
+            1, "mesh",
+            {"node_count": 5, "recent_announces": [{"last_seen": 50.0}]},
+        )
+        plugin = self._make_mock_plugin({"network_map": network_map})
+        data, new_ts, new_ver = _collect_broadcast_data(plugin, 1, 50.0, 3)
+        assert new_ts == 50.0
+        assert new_ver == 3
 
-# ── Plugin ref cache tests ────────────────────────────────────────
+    def test_mesh_peers_merged(self):
+        network_map = self._mock_broadcast_plugin(1, "mesh", {"node_count": 2})
+        mesh_tel = self._mock_broadcast_plugin(1, "mesh_peers", [{"dest": "aa"}])
+        plugin = self._make_mock_plugin({
+            "network_map": network_map, "mesh_telemetry": mesh_tel,
+        })
+        data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0)
+        assert data["mesh"]["peers"] == [{"dest": "aa"}]
+        assert data["mesh"]["peer_count"] == 1
+        assert "mesh_peers" not in data
 
-
-class TestPluginRefCache:
-    def test_rebuild_resolves_all_names(self):
-        mock_get = MagicMock(side_effect=lambda name: name if name == "system_monitor" else None)
-        _rebuild_plugin_refs(mock_get)
-
-        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
-        assert len(wsh._plugin_refs) == len(_BROADCAST_PLUGIN_NAMES)
-        assert wsh._plugin_refs["system_monitor"] == "system_monitor"
-        assert wsh._plugin_refs["network_map"] is None
-
-    def test_lifecycle_event_triggers_rebuild(self):
-        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
-
-        plugin = MagicMock()
-        plugin.app.get_plugin.return_value = None
-        with patch.object(wsh, "_ws_plugin", plugin):
-            _on_plugin_lifecycle("plugin.started", {"name": "foo"})
-        assert len(wsh._plugin_refs) == len(_BROADCAST_PLUGIN_NAMES)
-
-    def test_lifecycle_noop_when_no_plugin(self):
-        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
-
-        with patch.object(wsh, "_ws_plugin", None):
-            _on_plugin_lifecycle("plugin.started", {"name": "foo"})
-        assert wsh._plugin_refs == {}
+    def test_alerts_merged_into_mesh(self):
+        alert_sys = self._mock_broadcast_plugin(
+            1, "alerts", {"alerts_sent": 3, "last_alert": "fire"},
+        )
+        plugin = self._make_mock_plugin({"alert_system": alert_sys})
+        data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0)
+        assert data["mesh"]["alerts_sent"] == 3
+        assert "alerts" not in data
 
 
 # ── Budget / timeout tests ───────────────────────────────────────
@@ -1528,80 +1529,81 @@ class TestPluginRefCache:
 class TestCollectBroadcastBudget:
     """Test that _collect_broadcast_data respects the time budget."""
 
-    def _make_mock_plugin(self, plugins=None, interval=5):
+    @staticmethod
+    def _mock_broadcast_plugin(tier, keys, snapshot_return):
+        p = MagicMock()
+        p.broadcast_tier = tier
+        p.broadcast_keys = keys
+        p.broadcast_snapshot.return_value = snapshot_return
+        p.get_status.return_value = {"active": True}
+        return p
+
+    def _make_mock_plugin(self, broadcast_plugins=None, interval=5):
         plugin = MagicMock()
         plugin.config.get.side_effect = lambda key, default=None: {
             "metrics_interval": interval,
         }.get(key, default)
         plugin.app.reticulum = MagicMock()
         plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
-        plugin.app.plugins = {}
-        available = plugins or {}
-        plugin.app.get_plugin.side_effect = lambda name: available.get(name)
-        return plugin, {name: available.get(name) for name in _BROADCAST_PLUGIN_NAMES}
+        plugin.app.plugins = broadcast_plugins or {}
+        return plugin
 
     def test_skips_expensive_plugins_when_budget_exceeded(self):
         """When the budget is exhausted, expensive-tier plugins are skipped."""
-        space = MagicMock()
-        space.get_snapshot.return_value = {"tle_groups": {}}
-        spectrum = MagicMock()
-        spectrum.get_snapshot.return_value = {"power": [1, 2, 3]}
+        space = self._mock_broadcast_plugin(2, "space", {"tle_groups": {}})
+        spectrum = self._mock_broadcast_plugin(2, "spectrum", {"power": [1, 2, 3]})
 
-        plugin, refs = self._make_mock_plugin(
+        plugin = self._make_mock_plugin(
             {"space_tracker": space, "spectrum_scanner": spectrum},
-            interval=0,  # budget = 0 * 0.75 = 0 → immediately over budget
+            interval=0,
         )
-        data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0, refs)
+        data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0)
 
-        # Critical tier keys are always present
-        assert "metrics" in data
+        assert "plugins" in data
         assert "interfaces" in data
-
-        # Expensive plugins were skipped
         assert "space" not in data
         assert "spectrum" not in data
-
-        # Snapshot methods were never called
-        space.get_snapshot.assert_not_called()
-        spectrum.get_snapshot.assert_not_called()
+        space.broadcast_snapshot.assert_not_called()
+        spectrum.broadcast_snapshot.assert_not_called()
 
     def test_collects_all_plugins_within_budget(self):
         """With a generous budget, all plugins are collected."""
-        space = MagicMock()
-        space.get_snapshot.return_value = {
+        space = self._mock_broadcast_plugin(2, "space", {
             "tle_groups": {"amateur": 5},
             "positions": {"objects": [{"name": "ISS", "el": 45}]},
             "observer": {"lat": 30, "lon": -85},
-        }
+        })
 
-        plugin, refs = self._make_mock_plugin(
+        plugin = self._make_mock_plugin(
             {"space_tracker": space},
-            interval=60,  # budget = 60 * 0.75 = 45s — very generous
+            interval=60,
         )
-        data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0, refs)
+        data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0)
         assert "space" in data
-        space.get_snapshot.assert_called_once()
+        space.broadcast_snapshot.assert_called_once()
 
     def test_slow_plugin_logged(self):
-        """A plugin exceeding _SLOW_PLUGIN_THRESHOLD triggers a warning."""
-        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+        """A plugin exceeding the slow threshold triggers a warning."""
+        from reticulumpi.builtin_plugins.web_dashboard import broadcast_registry as br
 
         conn_mon = MagicMock()
+        conn_mon.broadcast_tier = 0
+        conn_mon.broadcast_keys = "connectivity"
+        conn_mon.get_status.return_value = {"active": True}
 
-        def slow_get_health():
-            time.sleep(0.25)  # > 0.2s threshold
+        def slow_snapshot(**kwargs):
+            time.sleep(0.25)
             return {"status": "ok"}
 
-        conn_mon.get_health = slow_get_health
+        conn_mon.broadcast_snapshot = slow_snapshot
 
-        plugin, refs = self._make_mock_plugin(
+        plugin = self._make_mock_plugin(
             {"connectivity_monitor": conn_mon},
             interval=5,
         )
 
-        with patch.object(wsh.log, "warning") as mock_warn:
-            _collect_broadcast_data(plugin, 1, 0, 0, refs)
-            # Should have logged a slow-plugin warning
+        with patch.object(br.log, "warning") as mock_warn:
+            _collect_broadcast_data(plugin, 1, 0, 0)
             assert mock_warn.called
             call_args = mock_warn.call_args[0]
             assert "connectivity_monitor" in call_args[1]

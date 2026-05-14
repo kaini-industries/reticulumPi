@@ -224,7 +224,7 @@ class TestCmdWeather:
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             result = info_plugin._cmd_weather("London")
-        assert "network error" in result.lower()
+        assert "offline" in result.lower() or "unavailable" in result.lower()
 
     def test_weather_malformed_response(self, info_plugin):
         """Malformed JSON should return a parse error, not crash."""

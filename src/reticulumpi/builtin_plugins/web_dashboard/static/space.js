@@ -175,6 +175,7 @@
     if (!_resolveDom()) return;
     _lastSpace = space;
     _section.style.display = '';
+    if (_body && _body.classList.contains('hidden')) return;
 
     // Totals & groups
     var groups = space.tle_groups || {};

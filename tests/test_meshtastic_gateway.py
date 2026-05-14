@@ -750,26 +750,50 @@ class TestConnectionManagement:
         assert gateway_plugin._connected is False
 
     def test_on_mesh_disconnect_sets_flag(self, gateway_plugin):
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = True
-        gateway_plugin._on_mesh_disconnect()
+        gateway_plugin._on_mesh_disconnect(interface=iface)
         assert gateway_plugin._connected is False
 
     def test_on_mesh_disconnect_records_time(self, gateway_plugin):
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = True
         gateway_plugin._last_disconnect_time = 0.0
-        gateway_plugin._on_mesh_disconnect()
+        gateway_plugin._on_mesh_disconnect(interface=iface)
         assert gateway_plugin._last_disconnect_time > 0
+
+    def test_on_mesh_disconnect_ignores_none_interface(self, gateway_plugin):
+        """Pubsub event with interface=None must not falsely disconnect."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
+        gateway_plugin._connected = True
+        gateway_plugin._on_mesh_disconnect(interface=None)
+        assert gateway_plugin._connected is True
 
     def test_on_mesh_connect_restores_connected(self, gateway_plugin):
         """When paho auto-reconnects, _on_mesh_connect must set _connected = True."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = False
-        gateway_plugin._on_mesh_connect()
+        gateway_plugin._on_mesh_connect(interface=iface)
         assert gateway_plugin._connected is True
+
+    def test_on_mesh_connect_ignores_none_interface(self, gateway_plugin):
+        """Pubsub event with interface=None must not falsely connect."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
+        gateway_plugin._connected = False
+        gateway_plugin._on_mesh_connect(interface=None)
+        assert gateway_plugin._connected is False
 
     def test_on_mesh_connect_publishes_event_on_reconnect(self, gateway_plugin):
         """Auto-reconnect fires MESHTASTIC_CONNECTED event."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = False
-        gateway_plugin._on_mesh_connect()
+        gateway_plugin._on_mesh_connect(interface=iface)
         gateway_plugin.event_bus.publish.assert_called()
         # Find the MESHTASTIC_CONNECTED call
         from reticulumpi import events
@@ -781,9 +805,11 @@ class TestConnectionManagement:
 
     def test_on_mesh_connect_no_event_when_already_connected(self, gateway_plugin):
         """No duplicate event when _on_mesh_connect fires while already connected."""
+        iface = _make_mock_mesh_interface()
+        gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = True
         gateway_plugin.event_bus.publish.reset_mock()
-        gateway_plugin._on_mesh_connect()
+        gateway_plugin._on_mesh_connect(interface=iface)
         # Should NOT publish MESHTASTIC_CONNECTED
         from reticulumpi import events
         connected_calls = [
@@ -1303,3 +1329,292 @@ class TestLoadOrCreateNodeNum:
             f.write("not-valid-hex\n")
         num = _load_or_create_node_num(path)
         assert 0x10000000 <= num <= 0x7FFFFFFF
+
+
+# ---------------------------------------------------------------------------
+# TestDrainSendQueue
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_lxmf_message(source_hex="aabbccdd" + "0" * 24, content="hello"):
+    msg = MagicMock()
+    msg.source_hash = bytes.fromhex(source_hex)
+    msg.content_as_string.return_value = content
+    return msg
+
+
+def _init_queue_state(plugin):
+    """Set up the queue/lock attributes that start() normally initializes."""
+    import collections
+    import threading
+    plugin._lock = threading.Lock()
+    plugin._active = True
+    plugin._connected = True
+    plugin._mesh_interface = MagicMock()
+    plugin._serial_listener = None
+    plugin._send_min_interval = 0
+    plugin._last_send_time = 0.0
+    plugin._send_queue_max = int(plugin.config.get("send_queue_size", 10))
+    plugin._send_queue_ttl = float(plugin.config.get("send_queue_ttl", 60))
+    plugin._send_queue = collections.deque()
+    plugin._send_queue_dropped = 0
+    plugin._msgs_rate_limited = 0
+    plugin._msgs_lxmf_to_mesh = 0
+    plugin._last_lxmf_msg_time = None
+    plugin._pending_lxmf = collections.deque()
+    plugin._pending_lxmf_max = int(plugin.config.get("pending_lxmf_size", 20))
+    plugin._pending_lxmf_ttl = float(plugin.config.get("pending_lxmf_ttl", 120))
+    plugin._lxmf_allow_set = set()
+    return plugin
+
+
+class TestDrainSendQueue:
+    """Tests for _drain_send_queue — the rate-limited outbound queue."""
+
+    def _setup_plugin(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        return _init_queue_state(plugin)
+
+    def test_drains_multiple_messages(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        now = time.time()
+        for i in range(3):
+            plugin._send_queue.append((now, f"msg{i}", 0))
+        plugin._drain_send_queue()
+        assert plugin._mesh_interface.sendText.call_count == 3
+        assert len(plugin._send_queue) == 0
+
+    def test_skips_expired_messages(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        expired = time.time() - plugin._send_queue_ttl - 10
+        now = time.time()
+        plugin._send_queue.append((expired, "old", 0))
+        plugin._send_queue.append((now, "fresh1", 0))
+        plugin._send_queue.append((now, "fresh2", 0))
+        plugin._drain_send_queue()
+        assert plugin._mesh_interface.sendText.call_count == 2
+        assert len(plugin._send_queue) == 0
+
+    def test_stops_when_rate_limited(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._send_min_interval = 9999
+        plugin._last_send_time = time.time()
+        plugin._send_queue.append((time.time(), "msg", 0))
+        plugin._drain_send_queue()
+        plugin._mesh_interface.sendText.assert_not_called()
+        assert len(plugin._send_queue) == 1
+
+    def test_no_interface_requeues(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._connected = False
+        plugin._mesh_interface = None
+        plugin._serial_listener = None
+        plugin._send_queue.append((time.time(), "msg", 0))
+        plugin._drain_send_queue()
+        assert len(plugin._send_queue) == 1
+
+    def test_empty_queue_no_op(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._drain_send_queue()
+        plugin._mesh_interface.sendText.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestEnqueueLxmfSend
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueLxmfSend:
+    """Tests for _enqueue_lxmf_send — queuing rate-limited LXMF messages."""
+
+    def _setup_plugin(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        return _init_queue_state(plugin)
+
+    def test_enqueues_message(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        msg = _make_mock_lxmf_message()
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 1
+
+    def test_drops_oldest_when_full(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._send_queue_max = 2
+        for i in range(3):
+            msg = _make_mock_lxmf_message(content=f"msg{i}")
+            plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 2
+        assert plugin._send_queue_dropped == 1
+
+    def test_allow_list_blocks(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._lxmf_allow_set = {"aaaa" + "0" * 28}
+        msg = _make_mock_lxmf_message(source_hex="bbbbccdd" + "0" * 24)
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 0
+
+    def test_allow_list_permits(self, mock_app, gw_config):
+        source = "aabbccdd" + "0" * 24
+        plugin = self._setup_plugin(mock_app, gw_config)
+        plugin._lxmf_allow_set = {source}
+        msg = _make_mock_lxmf_message(source_hex=source)
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 1
+
+    def test_formatting_error_no_crash(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        msg = _make_mock_lxmf_message()
+        msg.content_as_string.side_effect = RuntimeError("boom")
+        plugin._enqueue_lxmf_send(msg)
+        assert len(plugin._send_queue) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestRetryPendingLxmf
+# ---------------------------------------------------------------------------
+
+
+class TestRetryPendingLxmf:
+    """Tests for _retry_pending_lxmf — retrying deferred LXMF messages."""
+
+    def _setup_plugin(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        return _init_queue_state(plugin)
+
+    def test_retries_all_items(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        now = time.time()
+        for i in range(3):
+            plugin._pending_lxmf.append((now, bytes(16), f"text{i}"))
+        with patch.object(plugin, "_try_send_lxmf", return_value=True) as mock_send:
+            plugin._retry_pending_lxmf()
+        assert mock_send.call_count == 3
+        assert len(plugin._pending_lxmf) == 0
+
+    def test_continues_past_failure(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        now = time.time()
+        hash_a, hash_b, hash_c = bytes(16), bytes(range(16)), bytes([0xFF] * 16)
+        plugin._pending_lxmf.append((now, hash_a, "a"))
+        plugin._pending_lxmf.append((now, hash_b, "b"))
+        plugin._pending_lxmf.append((now, hash_c, "c"))
+
+        def side_effect(h, _text):
+            return h != hash_a
+
+        with patch.object(plugin, "_try_send_lxmf", side_effect=side_effect) as mock_send:
+            plugin._retry_pending_lxmf()
+        assert mock_send.call_count == 3
+        assert len(plugin._pending_lxmf) == 1
+        assert plugin._pending_lxmf[0][1] == hash_a
+
+    def test_expired_items_removed(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        expired = time.time() - plugin._pending_lxmf_ttl - 10
+        now = time.time()
+        plugin._pending_lxmf.append((expired, bytes(16), "old"))
+        plugin._pending_lxmf.append((now, bytes(range(16)), "fresh"))
+        with patch.object(plugin, "_try_send_lxmf", return_value=True) as mock_send:
+            plugin._retry_pending_lxmf()
+        assert mock_send.call_count == 1
+        assert len(plugin._pending_lxmf) == 0
+
+    def test_empty_queue_no_op(self, mock_app, gw_config):
+        plugin = self._setup_plugin(mock_app, gw_config)
+        with patch.object(plugin, "_try_send_lxmf") as mock_send:
+            plugin._retry_pending_lxmf()
+        mock_send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestMqttNodeEviction
+# ---------------------------------------------------------------------------
+
+
+class TestMqttNodeEviction:
+    """Test TTL and max-size eviction on _MeshtasticMQTTClient.nodes."""
+
+    @staticmethod
+    def _make_client():
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = MagicMock(spec=_MeshtasticMQTTClient)
+        client._lock = __import__("threading").Lock()
+        client._my_node_num = 0xAABBCCDD
+        client._long_name = "Test"
+        client._short_name = "TS"
+        client.nodes = {}
+        client._max_nodes = 10
+        client._node_ttl_seconds = 3600.0
+        client._node_inserts_since_eviction = 0
+        return client
+
+    def test_evicts_stale_nodes_by_ttl(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        now = time.time()
+        client.nodes = {
+            "!self": {"isSelf": True, "lastHeard": now},
+            "!old1": {"lastHeard": now - 7200},
+            "!old2": {"lastHeard": now - 7200},
+            "!new1": {"lastHeard": now - 100},
+        }
+        client._node_inserts_since_eviction = 63
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!self" in client.nodes
+        assert "!new1" in client.nodes
+        assert "!old1" not in client.nodes
+        assert "!old2" not in client.nodes
+
+    def test_evicts_excess_by_max_size(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        client._max_nodes = 5
+        now = time.time()
+        client.nodes = {
+            "!self": {"isSelf": True, "lastHeard": now},
+        }
+        for i in range(10):
+            client.nodes[f"!node{i:04x}"] = {"lastHeard": now - (10 - i)}
+        client._node_inserts_since_eviction = 63
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!self" in client.nodes
+        assert len(client.nodes) <= int(5 * 0.75) + 1  # 75% of max + self
+
+    def test_self_node_survives_eviction(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        client._max_nodes = 2
+        now = time.time()
+        client.nodes = {
+            "!self": {"isSelf": True, "lastHeard": now - 99999},
+            "!a": {"lastHeard": now - 1},
+            "!b": {"lastHeard": now - 2},
+            "!c": {"lastHeard": now - 3},
+        }
+        client._node_inserts_since_eviction = 63
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!self" in client.nodes
+
+    def test_skips_eviction_before_threshold(self):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
+        client = self._make_client()
+        now = time.time()
+        client.nodes = {
+            "!old": {"lastHeard": now - 99999},
+        }
+        client._node_inserts_since_eviction = 10  # below 64
+
+        _MeshtasticMQTTClient._maybe_evict_nodes(client)
+
+        assert "!old" in client.nodes  # not evicted yet

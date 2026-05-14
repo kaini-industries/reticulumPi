@@ -98,6 +98,21 @@
     return 'metric-ok';
   }
 
+  // --- Panel visibility for WS update gating ---
+
+  function isPanelVisible(bodyId) {
+    var body = document.getElementById(bodyId);
+    if (!body) return true;
+    if (!body.classList.contains('hidden')) return true;
+    var secId = bodyId.replace(/-body$/, '-section');
+    var sec = document.getElementById(secId);
+    return sec ? sec.style.display === 'none' : false;
+  }
+  RPI.isPanelVisible = isPanelVisible;
+
+  var _stash = {};
+  var _sectionOnExpand = {};
+
   // --- Section freshness tracking ---
 
   var _sectionUpdated = {};  // sectionId -> timestamp (seconds)
@@ -221,6 +236,9 @@
   function renderMetricSparkline(containerId, values) {
     var el = $(containerId);
     if (!el || !values || values.length < 2) { if (el) el.innerHTML = ''; return; }
+    var sig = values.length + ':' + values[values.length - 1].toFixed(1);
+    if (el._lastSig === sig) return;
+    el._lastSig = sig;
     var min = Infinity, max = -Infinity;
     for (var i = 0; i < values.length; i++) {
       if (values[i] < min) min = values[i];
@@ -1025,6 +1043,37 @@
     }
   }
 
+  function updateInternetStatus(info) {
+    var online, wanIp, lanIp;
+    if (typeof info === 'boolean') {
+      online = info;
+      wanIp = null;
+      lanIp = null;
+    } else if (info && typeof info === 'object') {
+      online = info.online;
+      wanIp = info.wan_ip || null;
+      lanIp = info.lan_ip || null;
+    } else {
+      return;
+    }
+
+    var banner = document.getElementById('internet-status-banner');
+    if (banner) banner.style.display = online ? 'none' : 'block';
+
+    var badge = $('inet-status');
+    if (badge) {
+      badge.className = 'badge badge-inet ' + (online ? 'inet-online' : 'inet-offline');
+      var lbl = badge.querySelector('.inet-label');
+      if (lbl) lbl.textContent = online ? 'online' : 'offline';
+      badge.title = 'Internet: ' + (online ? 'online' : 'offline');
+    }
+
+    var wanEl = $('wan-ip');
+    if (wanEl) wanEl.textContent = wanIp || '';
+    var lanEl = $('lan-ip');
+    if (lanEl) lanEl.textContent = lanIp || '';
+  }
+
   // --- Config ---
 
   function fetchConfig() {
@@ -1174,6 +1223,63 @@
 
   // --- WebSocket ---
 
+  function _applyUpdate(d) {
+    if (d.internet !== undefined) {
+      updateInternetStatus(d.internet);
+    }
+    if (d.metrics) updateMetrics(d.metrics);
+    if (d.interfaces) {
+      updateInterfaces(d.interfaces);
+      if (RPI.updateLoraRadio) RPI.updateLoraRadio(d.interfaces, null);
+    }
+    if (d.mesh) {
+      if (d.mesh.peers && RPI.cacheMeshPeers) RPI.cacheMeshPeers(d.mesh.peers);
+      if (d.mesh.peers && RPI.updateMapReticulum) RPI.updateMapReticulum(d.mesh.peers);
+      if (RPI.updateMeshFromWS) RPI.updateMeshFromWS(d.mesh);
+    }
+    if (d.sensors) {
+      _stash.sensors = d.sensors;
+      if (isPanelVisible('sensors-body')) updateSensors(d.sensors);
+    }
+    if (d.emergency) {
+      _stash.emergency = d.emergency;
+      if (isPanelVisible('emergency-body')) updateEmergency(d.emergency);
+    }
+    if (d.transport) updateTransport(d.transport);
+    if (d.connectivity) updateConnectivity(d.connectivity);
+    if (d.routing && RPI.updateRoutingSummary) RPI.updateRoutingSummary(d.routing);
+    if (d.meshtastic_device && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(d.meshtastic_device);
+    if (d.meshtastic_nodes) {
+      if (RPI.updateMeshtastic) RPI.updateMeshtastic(d.meshtastic_status || {}, d.meshtastic_nodes);
+      if (RPI.updateMap) RPI.updateMap(d.meshtastic_nodes);
+    }
+    if (d.meshtastic_lora_neighbors) {
+      if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(d.meshtastic_lora_neighbors);
+      if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(d.meshtastic_lora_neighbors);
+    }
+    if (d.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(d.meshcore_status, d.meshcore_contacts);
+    if (d.meshcore_contacts && RPI.updateMapMeshCore) RPI.updateMapMeshCore(d.meshcore_contacts);
+    if (d.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(d.meshcore_device);
+    if (d.meshcore_observer && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(d.meshcore_observer);
+    if (d.mesh_bridge && RPI.updateMeshBridge) RPI.updateMeshBridge(d.mesh_bridge);
+    if (d.messaging) {
+      if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(d.messaging);
+      if (RPI.updateMqttFeed) RPI.updateMqttFeed(d.messaging);
+      if (RPI.updateMessagingLora) RPI.updateMessagingLora(d.messaging);
+      if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(d.messaging);
+    }
+    if (d.space && RPI.space && RPI.space.update) RPI.space.update(d.space);
+    if (d.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(d.spectrum);
+    if ((d.spectrum || d.lora_scanner) && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(d);
+    if (d.gps && RPI.updateGps) RPI.updateGps(d.gps);
+    if (d.gps && d.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(d.gps.last_fix);
+    if (d.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(d.adsb);
+    if (d.ntp && RPI.updateNtp) RPI.updateNtp(d.ntp);
+    if (d.hotspot && RPI.updateHotspot) RPI.updateHotspot(d.hotspot);
+    if (d.fm_receiver && RPI.updateRadio) RPI.updateRadio(d.fm_receiver);
+    if (d.link_tester && RPI.updateLinkTester) RPI.updateLinkTester(d.link_tester);
+  }
+
   function connectWS() {
     if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 
@@ -1214,46 +1320,14 @@
           }
           return;
         }
-        if (msg.type === 'chirp_result' && msg.data) {
-          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleChirpResult) {
-            RPI.chirpSpectrogram.handleChirpResult(msg.data);
+        if (msg.type === 'spectrum_preset_error') {
+          if (RPI.spectrum && RPI.spectrum.handlePresetError) {
+            RPI.spectrum.handlePresetError(msg.error || 'Preset switch failed');
           }
           return;
         }
-        if (msg.type === 'chirp_waterfall_rows' && msg.data) {
-          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleWaterfallRows) {
-            RPI.chirpSpectrogram.handleWaterfallRows(msg.data);
-          }
-          return;
-        }
-        if (msg.type === 'chirp_waterfall_history' && msg.data) {
-          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleWaterfallHistory) {
-            RPI.chirpSpectrogram.handleWaterfallHistory(msg.data);
-          }
-          return;
-        }
-        if (msg.type === 'chirp_detection' && msg.data) {
-          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleDetection) {
-            RPI.chirpSpectrogram.handleDetection(msg.data);
-          }
-          return;
-        }
-        if (msg.type === 'chirp_detection_history' && msg.data) {
-          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handleDetectionHistory) {
-            RPI.chirpSpectrogram.handleDetectionHistory(msg.data);
-          }
-          return;
-        }
-        if (msg.type === 'chirp_packet_decoded' && msg.data) {
-          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handlePacketDecoded) {
-            RPI.chirpSpectrogram.handlePacketDecoded(msg.data);
-          }
-          return;
-        }
-        if (msg.type === 'chirp_packet_history' && msg.data) {
-          if (RPI.chirpSpectrogram && RPI.chirpSpectrogram.handlePacketHistory) {
-            RPI.chirpSpectrogram.handlePacketHistory(msg.data);
-          }
+        if (msg.type && msg.type.indexOf('radio_') === 0) {
+          if (RPI.onRadioResponse) RPI.onRadioResponse(msg);
           return;
         }
         if (msg.type === 'message' && msg.data) {
@@ -1269,66 +1343,38 @@
           if (RPI.onMessagingReaction) RPI.onMessagingReaction(msg.data);
           return;
         }
+        if (msg.type === 'internet_status' && msg.data) {
+          updateInternetStatus(msg.data);
+          return;
+        }
         if (msg.type === 'update' && msg.data) {
           if (!_wsFirstTick) {
             _wsFirstTick = true;
             for (var _wi = 0; _wi < _wsReadyCallbacks.length; _wi++) _wsReadyCallbacks[_wi]();
             _wsReadyCallbacks = [];
           }
-          // Maintain the shared spectrum history ring BEFORE panel updates
-          // run, so both panels read a consistent snapshot.
+          // Ring buffer ingestion must be immediate so both spectrum
+          // panels read a consistent snapshot on the next render.
           if (msg.data.spectrum
               && RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
             RPI.spectrumCommon.historyStore.ingestTick(msg.data.spectrum);
           }
-          var loraData = msg.data.lora_scanner || msg.data.lora_chirp_viewer;
+          var loraData = msg.data.lora_scanner;
           if (loraData
               && RPI.spectrumCommon && RPI.spectrumCommon.loraHistoryStore) {
             RPI.spectrumCommon.loraHistoryStore.ingestTick(loraData);
           }
-          if (msg.data.metrics) updateMetrics(msg.data.metrics);
-          if (msg.data.interfaces) {
-            updateInterfaces(msg.data.interfaces);
-            if (RPI.updateLoraRadio) RPI.updateLoraRadio(msg.data.interfaces, null);
+          // Batch DOM updates into the next animation frame.
+          RPI._pendingUpdate = msg.data;
+          if (!RPI._rafPending) {
+            RPI._rafPending = true;
+            requestAnimationFrame(function() {
+              RPI._rafPending = false;
+              var d = RPI._pendingUpdate;
+              if (!d) return;
+              _applyUpdate(d);
+            });
           }
-          if (msg.data.mesh) {
-            if (msg.data.mesh.peers && RPI.cacheMeshPeers) RPI.cacheMeshPeers(msg.data.mesh.peers);
-            if (msg.data.mesh.peers && RPI.updateMapReticulum) RPI.updateMapReticulum(msg.data.mesh.peers);
-            if (RPI.updateMeshFromWS) RPI.updateMeshFromWS(msg.data.mesh);
-          }
-          if (msg.data.sensors) updateSensors(msg.data.sensors);
-          if (msg.data.emergency) updateEmergency(msg.data.emergency);
-          if (msg.data.transport) updateTransport(msg.data.transport);
-          if (msg.data.connectivity) updateConnectivity(msg.data.connectivity);
-          if (msg.data.routing && RPI.updateRoutingSummary) RPI.updateRoutingSummary(msg.data.routing);
-          if (msg.data.meshtastic_device && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(msg.data.meshtastic_device);
-          if (msg.data.meshtastic_nodes) {
-            if (RPI.updateMeshtastic) RPI.updateMeshtastic(msg.data.meshtastic_status || {}, msg.data.meshtastic_nodes);
-            if (RPI.updateMap) RPI.updateMap(msg.data.meshtastic_nodes);
-          }
-          if (msg.data.meshtastic_lora_neighbors) {
-            if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(msg.data.meshtastic_lora_neighbors);
-            if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(msg.data.meshtastic_lora_neighbors);
-          }
-          if (msg.data.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(msg.data.meshcore_status, msg.data.meshcore_contacts);
-          if (msg.data.meshcore_contacts && RPI.updateMapMeshCore) RPI.updateMapMeshCore(msg.data.meshcore_contacts);
-          if (msg.data.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(msg.data.meshcore_device);
-          if (msg.data.meshcore_observer && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(msg.data.meshcore_observer);
-          if (msg.data.mesh_bridge && RPI.updateMeshBridge) RPI.updateMeshBridge(msg.data.mesh_bridge);
-          if (msg.data.messaging) {
-            if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(msg.data.messaging);
-            if (RPI.updateMqttFeed) RPI.updateMqttFeed(msg.data.messaging);
-            if (RPI.updateMessagingLora) RPI.updateMessagingLora(msg.data.messaging);
-            if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(msg.data.messaging);
-          }
-          if (msg.data.space && RPI.space && RPI.space.update) RPI.space.update(msg.data.space);
-          if (msg.data.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(msg.data.spectrum);
-          if ((msg.data.spectrum || msg.data.lora_scanner || msg.data.lora_chirp_viewer) && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(msg.data);
-          if (msg.data.gps && RPI.updateGps) RPI.updateGps(msg.data.gps);
-          if (msg.data.gps && msg.data.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(msg.data.gps.last_fix);
-          if (msg.data.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(msg.data.adsb);
-          if (msg.data.ntp && RPI.updateNtp) RPI.updateNtp(msg.data.ntp);
-          if (msg.data.link_tester && RPI.updateLinkTester) RPI.updateLinkTester(msg.data.link_tester);
         }
       } catch(e) { /* ignore parse errors */ }
     };
@@ -1383,7 +1429,7 @@
   function registerDeferredSection(name, fn) { _sectionFirstExpand[name] = fn; }
   RPI.registerDeferredSection = registerDeferredSection;
 
-  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section'].forEach(function(name) {
+  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot'].forEach(function(name) {
     var toggle = $(name + '-toggle');
     var body = $(name + '-body');
     if (toggle && body) {
@@ -1391,6 +1437,7 @@
         if (body.classList.contains('hidden')) {
           body.classList.remove('hidden');
           toggle.classList.add('open');
+          if (_sectionOnExpand[name]) _sectionOnExpand[name]();
           if (_sectionFirstExpand[name]) {
             _sectionFirstExpand[name]();
             delete _sectionFirstExpand[name];
@@ -1655,6 +1702,10 @@
     }
   });
   fetchInterfacesConfig();
+
+  // Render from WS stash when a collapsed section is re-expanded
+  _sectionOnExpand.sensors = function() { if (_stash.sensors) updateSensors(_stash.sensors); };
+  _sectionOnExpand.emergency = function() { if (_stash.emergency) updateEmergency(_stash.emergency); };
 
   // Register deferred fetches for collapsed sections
   registerDeferredSection('alerts', function() {

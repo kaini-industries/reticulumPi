@@ -37,6 +37,10 @@ HUB_OFFLINE = "hub.offline"
 FALLBACK_ACTIVATED = "transport.fallback_activated"
 FALLBACK_DEACTIVATED = "transport.fallback_deactivated"
 
+# Internet connectivity
+INTERNET_ONLINE = "internet.online"
+INTERNET_OFFLINE = "internet.offline"
+
 # Connectivity monitoring
 RNSD_DOWN = "connectivity.rnsd_down"
 RNSD_RECOVERED = "connectivity.rnsd_recovered"
@@ -147,21 +151,15 @@ SPACE_WEATHER_UPDATED = "space.weather.updated"
 # Spectrum scanner — RTL-SDR sweep-based waterfall / spectrum
 SPECTRUM_SWEEP = "spectrum.sweep"         # one complete sweep ready
 SPECTRUM_STATUS = "spectrum.status"       # status change (running/error/unavailable)
+SPECTRUM_PRESET_SWITCHING = "spectrum.preset_switching"
+SPECTRUM_PRESET_ACTIVE = "spectrum.preset_active"
 
 # LoRa scanner — dedicated RTL-SDR LoRa band sweep
 LORA_SCANNER_SWEEP = "lora_scanner.sweep"
 LORA_SCANNER_STATUS = "lora_scanner.status"
 
-# LoRa chirp viewer — on-demand I/Q capture + spectrogram
-CHIRP_CAPTURE_STARTING = "chirp.capture_starting"
-CHIRP_CAPTURE_DONE = "chirp.capture_done"
-
-# LoRa chirp viewer — continuous streaming waterfall
-CHIRP_WATERFALL_ROWS = "chirp.waterfall_rows"
-
-# LoRa chirp detection — preamble / packet detection from dechirp
-CHIRP_DETECTION = "chirp.detection"
-CHIRP_PACKET_DECODED = "chirp.packet_decoded"
+# LoRa scanner — sweep-triggered I/Q capture request
+LORA_CAPTURE_TRIGGER = "lora.capture_trigger"
 
 # ADS-B radar — aircraft tracking via dump1090
 ADSB_AIRCRAFT_DETECTED = "adsb.aircraft_detected"
@@ -180,3 +178,7 @@ NTP_SYNC_ACQUIRED = "ntp.sync_acquired"
 NTP_SYNC_LOST = "ntp.sync_lost"
 NTP_STATUS_UPDATED = "ntp.status_updated"
 NTP_GPS_REFCLOCK_ACTIVE = "ntp.gps_refclock_active"
+
+# FM/AM radio receiver
+FM_RECEIVER_TUNED = "fm_receiver.tuned"
+FM_RECEIVER_STATUS = "fm_receiver.status"

@@ -14,10 +14,23 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 import aiohttp.web
 
+from reticulumpi.builtin_plugins.web_dashboard.broadcast_registry import (
+    BroadcastRegistry,
+)
+
 if TYPE_CHECKING:
     pass
 
 log = logging.getLogger(__name__)
+
+def _diff_payload(data: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any]:
+    """Return only keys whose value object changed since last broadcast."""
+    result = {}
+    for key, value in data.items():
+        if value is not prev.get(key):
+            result[key] = value
+    return result
+
 
 # ── RNode config cache ──────────────────────────────────────────────
 _rnode_config_cache: dict[str, dict] | None = None
@@ -266,44 +279,14 @@ _ws_plugin: Any | None = None
 _broadcast_executor: concurrent.futures.ThreadPoolExecutor | None = None
 _collection_running = threading.Event()
 
-_BROADCAST_PLUGIN_NAMES: tuple[str, ...] = (
-    "system_monitor", "network_map", "mesh_telemetry", "alert_system",
-    "sensor_framework", "emergency_broadcast", "transport_monitor",
-    "connectivity_monitor", "path_warmer", "transport_health",
-    "meshtastic_gateway", "meshcore_gateway", "meshcore_observer",
-    "mesh_bridge", "space_tracker", "spectrum_scanner", "lora_scanner",
-    "lora_chirp_viewer", "lora_diagnostics", "gps_telemetry", "messaging_hub",
-    "ntp_server", "adsb_radar", "lora_link_tester",
-)
-
-_plugin_refs: dict[str, Any] = {}
-
-
-def _rebuild_plugin_refs(app_get_plugin: Any) -> None:
-    """Resolve all broadcast plugin references and cache them."""
-    global _plugin_refs
-    refs: dict[str, Any] = {}
-    for name in _BROADCAST_PLUGIN_NAMES:
-        try:
-            refs[name] = app_get_plugin(name)
-        except Exception:
-            refs[name] = None
-    _plugin_refs = refs
-
-
-def _on_plugin_lifecycle(_event_type: str, _data: dict[str, Any]) -> None:
-    """Invalidate plugin ref cache when a plugin starts/stops/crashes."""
-    if _ws_plugin is not None:
-        _rebuild_plugin_refs(_ws_plugin.app.get_plugin)
-
-
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Handle WebSocket connections for live metrics streaming."""
     plugin = request.app["plugin"]
     max_clients = plugin.config.get("max_websocket_clients", 10)
 
     # Authenticate via cookie or Authorization header
-    token = request.cookies.get("session")
+    _auth_hdr = request.headers.get("Authorization", "")
+    token = _auth_hdr[7:] if _auth_hdr.startswith("Bearer ") else request.cookies.get("session")
 
     if not token or not plugin._auth.validate_token(token):
         ws = aiohttp.web.WebSocketResponse()
@@ -339,10 +322,7 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         except Exception:
             log.debug("Failed to send spectrum history hello", exc_info=True)
 
-    lora_scanner = (
-        plugin.app.get_plugin("lora_scanner")
-        or plugin.app.get_plugin("lora_chirp_viewer")
-    )
+    lora_scanner = plugin.app.get_plugin("lora_scanner")
     if lora_scanner and hasattr(lora_scanner, "get_history"):
         try:
             lora_hist = lora_scanner.get_history()
@@ -355,48 +335,6 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             }))
         except Exception:
             log.debug("Failed to send lora_scanner history hello", exc_info=True)
-
-    chirp_viewer = plugin.app.get_plugin("lora_chirp_viewer")
-    if chirp_viewer and hasattr(chirp_viewer, "get_chirp_waterfall_history"):
-        try:
-            chirp_hist = chirp_viewer.get_chirp_waterfall_history()
-        except Exception:
-            chirp_hist = {"available": False}
-        try:
-            await ws.send_str(json.dumps({
-                "type": "chirp_waterfall_history",
-                "data": chirp_hist,
-            }))
-        except Exception:
-            log.debug("Failed to send chirp waterfall history hello", exc_info=True)
-
-    if chirp_viewer and hasattr(chirp_viewer, "get_detection_history"):
-        try:
-            det_hist = chirp_viewer.get_detection_history()
-        except Exception:
-            det_hist = []
-        if det_hist:
-            try:
-                await ws.send_str(json.dumps({
-                    "type": "chirp_detection_history",
-                    "data": det_hist,
-                }))
-            except Exception:
-                log.debug("Failed to send chirp detection history hello", exc_info=True)
-
-    if chirp_viewer and hasattr(chirp_viewer, "get_packet_history"):
-        try:
-            pkt_hist = chirp_viewer.get_packet_history()
-        except Exception:
-            pkt_hist = []
-        if pkt_hist:
-            try:
-                await ws.send_str(json.dumps({
-                    "type": "chirp_packet_history",
-                    "data": pkt_hist,
-                }))
-            except Exception:
-                log.debug("Failed to send chirp packet history hello", exc_info=True)
 
     link_tester = plugin.app.get_plugin("lora_link_tester")
     if link_tester and hasattr(link_tester, "get_history"):
@@ -423,7 +361,6 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
             0,
             _last_mesh_announce_ts,
             _mesh_version,
-            _plugin_refs,
         )
         await ws.send_str(json.dumps({
             "type": "update",
@@ -444,7 +381,9 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
                 log.debug("WebSocket error: %s", ws.exception())
                 break
             if msg.type == aiohttp.WSMsgType.TEXT:
-                _handle_ws_command(msg.data, plugin)
+                resp = _handle_ws_command(msg.data, plugin)
+                if resp is not None:
+                    await ws.send_str(json.dumps(resp))
     finally:
         _ws_clients.discard(ws)
         _ws_last_activity.pop(ws, None)
@@ -457,11 +396,8 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     return ws
 
 
-_last_mesh_announce_ts: float = 0  # track last announce time for delta broadcasts
-_mesh_version: int = 0  # increments when mesh data changes
-
-# Slow-plugin threshold for per-plugin timing warnings (seconds).
-_SLOW_PLUGIN_THRESHOLD = 0.2
+_last_mesh_announce_ts: float = 0
+_mesh_version: int = 0
 
 
 def _collect_broadcast_data(
@@ -469,46 +405,16 @@ def _collect_broadcast_data(
     cycle_count: int,
     last_mesh_announce_ts: float,
     mesh_version: int,
-    plugin_refs: dict[str, Any],
 ) -> tuple[dict[str, Any], float, int]:
     """Collect all plugin data synchronously.  Runs in a thread executor.
 
-    Plugins are collected in priority order.  A time budget (75% of the
-    configured metrics_interval) ensures that expensive plugins at the
-    tail don't stall the broadcast loop and starve the event-loop of
-    CPU time for heartbeat processing.
+    Uses :class:`BroadcastRegistry` to iterate plugins by tier with a
+    time budget, then post-processes to preserve the frontend contract.
     """
-    refs = plugin_refs
-    budget = plugin.config.get("metrics_interval", 5) * 0.75
-    t0 = time.monotonic()
-    skipped: list[str] = []
+    interval = plugin.config.get("metrics_interval", 5)
+    registry = BroadcastRegistry(metrics_interval=interval)
 
-    def _over_budget() -> bool:
-        return (time.monotonic() - t0) >= budget
-
-    def _timed(label: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
-        """Call *fn* and warn if it exceeds the slow-plugin threshold."""
-        t = time.monotonic()
-        try:
-            return fn(*args, **kwargs)
-        except Exception:
-            return None
-        finally:
-            elapsed = time.monotonic() - t
-            if elapsed > _SLOW_PLUGIN_THRESHOLD:
-                log.warning("Slow broadcast plugin %s: %.0fms", label, elapsed * 1000)
-
-    # ── Critical tier (always collected) ─────────────────────────────
-
-    monitor = refs.get("system_monitor")
-    metrics = {}
-    if monitor and hasattr(monitor, "latest_metrics"):
-        try:
-            metrics = monitor.latest_metrics
-        except Exception:
-            pass
-
-    plugin_statuses = {}
+    plugin_statuses: dict[str, Any] = {}
     for name, p in plugin.app.plugins.items():
         try:
             plugin_statuses[name] = {"active": p.get_status().get("active", False)}
@@ -517,348 +423,57 @@ def _collect_broadcast_data(
 
     interfaces = _collect_interfaces(plugin.app.reticulum)
 
-    connectivity_data: dict = {}
-    conn_mon = refs.get("connectivity_monitor")
-    if conn_mon and hasattr(conn_mon, "get_health"):
-        connectivity_data = _timed("connectivity_monitor", conn_mon.get_health) or {}
+    data = registry.collect(plugin.app.plugins, cycle_count)
 
-    routing_data: dict = {}
-    if connectivity_data:
-        routing_data = connectivity_data.get("routing", {})
+    data["plugins"] = plugin_statuses
+    data["interfaces"] = interfaces
+    probe = getattr(plugin.app, "internet_probe", None)
+    data["internet"] = probe.get_status() if probe else {"online": True, "wan_ip": None, "lan_ip": None}
 
-    transport_data: dict = {}
-    transport_mon = refs.get("transport_monitor")
-    if transport_mon and hasattr(transport_mon, "get_hub_health"):
-        transport_data = _timed("transport_monitor", transport_mon.get_hub_health) or {}
-        if transport_data:
-            try:
-                _enrich_transport_traffic(transport_data, interfaces)
-            except Exception:
-                pass
-
-    # ── Standard tier (collected if time remains) ────────────────────
-
-    mesh_data: dict = {}
-    if not _over_budget():
-        network_map = refs.get("network_map")
-        if network_map:
-            try:
-                if hasattr(network_map, "get_node_count"):
-                    mesh_data["known_nodes"] = network_map.get_node_count()
-                elif hasattr(network_map, "get_known_nodes"):
-                    mesh_data["known_nodes"] = len(network_map.get_known_nodes())
-
-                if hasattr(network_map, "get_recent_announces"):
-                    recent = _timed(
-                        "network_map.recent",
-                        network_map.get_recent_announces,
-                        since=last_mesh_announce_ts,
-                        limit=20,
-                    )
-                    if recent:
-                        mesh_data["recent_announces"] = recent
-                        mesh_version += 1
-                        last_mesh_announce_ts = max(
-                            n.get("last_seen", 0) for n in recent
-                        )
-                mesh_data["version"] = mesh_version
-
-                if cycle_count % 3 == 0 and hasattr(network_map, "get_mesh_summary"):
-                    mesh_data["summary"] = _timed(
-                        "network_map.summary", network_map.get_mesh_summary,
-                    )
-            except Exception:
-                pass
-    else:
-        skipped.append("network_map")
-
-    if not _over_budget():
-        telemetry = refs.get("mesh_telemetry")
-        if telemetry and hasattr(telemetry, "get_peer_metrics"):
-            peers = _timed("mesh_telemetry", telemetry.get_peer_metrics)
-            if peers is not None:
-                mesh_data["peers"] = peers
-                mesh_data["peer_count"] = len(peers)
-    else:
-        skipped.append("mesh_telemetry")
-
-    alert_sys = refs.get("alert_system")
-    if alert_sys:
+    if "transport" in data:
         try:
-            alert_status = alert_sys.get_status()
-            mesh_data["alerts_sent"] = alert_status.get("alerts_sent", 0)
-            mesh_data["last_alert"] = alert_status.get("last_alert")
+            _enrich_transport_traffic(data["transport"], interfaces)
         except Exception:
             pass
 
-    emergency_data: dict = {}
-    emergency = refs.get("emergency_broadcast")
-    if emergency and hasattr(emergency, "get_status"):
-        try:
-            emergency_data = emergency.get_status()
-        except Exception:
-            pass
+    mesh = data.get("mesh") or {}
+    mesh_peers = data.pop("mesh_peers", None)
+    if mesh_peers is not None:
+        mesh["peers"] = mesh_peers
+        mesh["peer_count"] = len(mesh_peers)
+    alerts = data.pop("alerts", None)
+    if alerts:
+        mesh["alerts_sent"] = alerts.get("alerts_sent", 0)
+        mesh["last_alert"] = alerts.get("last_alert")
 
-    path_warming_data: dict = {}
-    warmer = refs.get("path_warmer")
-    if warmer and hasattr(warmer, "get_warming_stats"):
-        try:
-            path_warming_data = warmer.get_warming_stats()
-        except Exception:
-            pass
+    recent = mesh.get("recent_announces")
+    if recent:
+        newest_ts = max(n.get("last_seen", 0) for n in recent)
+        if newest_ts > last_mesh_announce_ts:
+            mesh_version += 1
+            last_mesh_announce_ts = newest_ts
+    mesh["version"] = mesh_version
+    if mesh:
+        data["mesh"] = mesh
 
-    transport_health_data: dict = {}
-    th = refs.get("transport_health")
-    if th and hasattr(th, "get_transport_summary"):
-        try:
-            transport_health_data = th.get_transport_summary()
-        except Exception:
-            pass
-
-    meshtastic_device_data: dict = {}
-    meshtastic_status: dict = {}
-    meshtastic_nodes: list = []
-    meshtastic_lora_neighbors: list = []
-    if not _over_budget():
-        meshtastic_gw = refs.get("meshtastic_gateway")
-        if meshtastic_gw:
-            if hasattr(meshtastic_gw, "get_device_info"):
-                meshtastic_device_data = _timed(
-                    "meshtastic.device", meshtastic_gw.get_device_info,
-                ) or {}
-            if hasattr(meshtastic_gw, "get_status"):
-                meshtastic_status = _timed(
-                    "meshtastic.status", meshtastic_gw.get_status,
-                ) or {}
-            if hasattr(meshtastic_gw, "get_meshtastic_nodes"):
-                meshtastic_nodes = _timed(
-                    "meshtastic.nodes", meshtastic_gw.get_meshtastic_nodes,
-                ) or []
-            if hasattr(meshtastic_gw, "get_lora_neighbors"):
-                meshtastic_lora_neighbors = _timed(
-                    "meshtastic.neighbors", meshtastic_gw.get_lora_neighbors,
-                ) or []
-    else:
-        skipped.append("meshtastic_gateway")
-
-    meshcore_device_data: dict = {}
-    meshcore_contacts: list = []
-    meshcore_status: dict = {}
-    if not _over_budget():
-        meshcore_gw = refs.get("meshcore_gateway")
-        if meshcore_gw:
-            if hasattr(meshcore_gw, "get_device_info"):
-                meshcore_device_data = _timed(
-                    "meshcore.device", meshcore_gw.get_device_info,
-                ) or {}
-            if hasattr(meshcore_gw, "get_contacts"):
-                meshcore_contacts = _timed(
-                    "meshcore.contacts", meshcore_gw.get_contacts,
-                ) or []
-            if hasattr(meshcore_gw, "get_status"):
-                meshcore_status = _timed(
-                    "meshcore.status", meshcore_gw.get_status,
-                ) or {}
-    else:
-        skipped.append("meshcore_gateway")
-
-    meshcore_obs_status: dict = {}
-    meshcore_obs = refs.get("meshcore_observer")
-    if meshcore_obs and hasattr(meshcore_obs, "get_status"):
-        try:
-            meshcore_obs_status = {"available": True, **meshcore_obs.get_status()}
-        except Exception:
-            pass
-
-    mesh_bridge_data: dict = {}
-    mesh_bridge = refs.get("mesh_bridge")
-    if mesh_bridge and hasattr(mesh_bridge, "get_status"):
-        try:
-            mesh_bridge_data = mesh_bridge.get_status()
-        except Exception:
-            pass
-
-    messaging_data: dict = {}
-    if not _over_budget():
-        msg_hub = refs.get("messaging_hub")
-        if msg_hub and hasattr(msg_hub, "get_transports"):
-            try:
-                transports = msg_hub.get_transports()
-                if transports:
-                    messaging_data["transports"] = transports
-                if hasattr(msg_hub, "get_unread_counts_grouped"):
-                    messaging_data["unread"] = msg_hub.get_unread_counts_grouped()
-                elif hasattr(msg_hub, "get_unread_counts"):
-                    messaging_data["unread"] = msg_hub.get_unread_counts()
-            except Exception:
-                pass
-    else:
-        skipped.append("messaging_hub")
-
-    # ── Expensive tier (collected last, skippable) ───────────────────
-
-    space_data: dict = {}
-    if not _over_budget():
-        space_tracker = refs.get("space_tracker")
-        if space_tracker and hasattr(space_tracker, "get_snapshot"):
-            snap = _timed("space_tracker", space_tracker.get_snapshot)
-            if snap:
-                space_data = {
-                    "tle_groups": snap.get("tle_groups", {}),
-                    "launches": (snap.get("launches") or [])[:5],
-                    "weather": snap.get("weather"),
-                    "observer": snap.get("observer"),
-                    "passes": (snap.get("passes") or [])[:10],
-                    "passes_computed_at": snap.get("passes_computed_at"),
-                }
-                positions = snap.get("positions") or {}
-                objects = positions.get("objects") or []
-                if objects:
-                    if snap.get("observer"):
-                        objects = sorted(
-                            objects,
-                            key=lambda o: o.get("el", -999),
-                            reverse=True,
-                        )
-                    space_data["positions"] = {
-                        "fetched_at": positions.get("fetched_at"),
-                        "count": positions.get("count", len(objects)),
-                        "objects": objects[:60],
-                    }
-    else:
-        skipped.append("space_tracker")
-
-    spectrum_data: dict = {}
-    if not _over_budget():
-        scanner = refs.get("spectrum_scanner")
-        if scanner and hasattr(scanner, "get_snapshot"):
-            spectrum_data = _timed("spectrum_scanner", scanner.get_snapshot) or {}
-    else:
-        skipped.append("spectrum_scanner")
-
-    lora_scanner_data: dict = {}
-    lora_chirp_viewer_data: dict = {}
-    if not _over_budget():
-        lora_scanner = refs.get("lora_scanner")
-        if lora_scanner and hasattr(lora_scanner, "get_snapshot"):
-            lora_scanner_data = _timed("lora_scanner", lora_scanner.get_snapshot) or {}
-        lora_chirp = refs.get("lora_chirp_viewer")
-        if lora_chirp and hasattr(lora_chirp, "get_snapshot"):
-            lora_chirp_viewer_data = _timed("lora_chirp_viewer", lora_chirp.get_snapshot) or {}
-    else:
-        skipped.append("lora_scanner")
-
-    lora_diag_data: dict = {}
-    lora_diag = refs.get("lora_diagnostics")
-    if lora_diag and hasattr(lora_diag, "get_diagnostics"):
-        try:
-            d = lora_diag.get_diagnostics()
-            li = d.get("lora_interface", {}) or {}
-            lora_diag_data = {
-                "channel_load_short": li.get("channel_load_short"),
-                "channel_load_long":  li.get("channel_load_long"),
-                "airtime_short":      li.get("airtime_short"),
-                "airtime_long":       li.get("airtime_long"),
-                "announce_queue":     li.get("announce_queue"),
-                "online":             li.get("online"),
+    space = data.get("space")
+    if space:
+        if "launches" in space:
+            space["launches"] = (space["launches"] or [])[:5]
+        if "passes" in space:
+            space["passes"] = (space["passes"] or [])[:10]
+        positions = space.get("positions") or {}
+        objects = positions.get("objects") or []
+        if objects:
+            if space.get("observer"):
+                objects = sorted(
+                    objects, key=lambda o: o.get("el", -999), reverse=True,
+                )
+            space["positions"] = {
+                "fetched_at": positions.get("fetched_at"),
+                "count": positions.get("count", len(objects)),
+                "objects": objects[:60],
             }
-        except Exception:
-            pass
-
-    gps_data: dict = {}
-    if not _over_budget():
-        gps = refs.get("gps_telemetry")
-        if gps and hasattr(gps, "get_snapshot"):
-            gps_data = _timed("gps_telemetry", gps.get_snapshot) or {}
-    else:
-        skipped.append("gps_telemetry")
-
-    sensor_data: dict = {}
-    if not _over_budget():
-        sensor_fw = refs.get("sensor_framework")
-        if sensor_fw and hasattr(sensor_fw, "get_latest_readings"):
-            sensor_data = _timed("sensor_framework", sensor_fw.get_latest_readings) or {}
-    else:
-        skipped.append("sensor_framework")
-
-    # ── Assemble response ────────────────────────────────────────────
-
-    data: dict[str, Any] = {
-        "metrics": metrics,
-        "plugins": plugin_statuses,
-        "interfaces": interfaces,
-        "sensors": sensor_data,
-        "emergency": emergency_data,
-        "transport": transport_data,
-        "connectivity": connectivity_data,
-        "routing": routing_data,
-        "path_warming": path_warming_data,
-        "transport_health": transport_health_data,
-    }
-    if meshtastic_device_data:
-        data["meshtastic_device"] = meshtastic_device_data
-    if meshtastic_status:
-        data["meshtastic_status"] = meshtastic_status
-    if meshtastic_nodes:
-        data["meshtastic_nodes"] = meshtastic_nodes
-    if meshtastic_lora_neighbors:
-        data["meshtastic_lora_neighbors"] = meshtastic_lora_neighbors
-    if meshcore_status:
-        data["meshcore_status"] = meshcore_status
-    if meshcore_device_data:
-        data["meshcore_device"] = meshcore_device_data
-    if meshcore_contacts:
-        data["meshcore_contacts"] = meshcore_contacts
-    if meshcore_obs_status:
-        data["meshcore_observer"] = meshcore_obs_status
-    if messaging_data:
-        data["messaging"] = messaging_data
-    if mesh_data:
-        data["mesh"] = mesh_data
-    if space_data:
-        data["space"] = space_data
-    if spectrum_data:
-        data["spectrum"] = spectrum_data
-    if lora_scanner_data:
-        data["lora_scanner"] = lora_scanner_data
-    if lora_chirp_viewer_data:
-        data["lora_chirp_viewer"] = lora_chirp_viewer_data
-    if lora_diag_data:
-        data["lora_diagnostics"] = lora_diag_data
-    if gps_data:
-        data["gps"] = gps_data
-    if mesh_bridge_data:
-        data["mesh_bridge"] = mesh_bridge_data
-
-    if not _over_budget():
-        ntp_srv = refs.get("ntp_server")
-        if ntp_srv and hasattr(ntp_srv, "get_snapshot"):
-            ntp_data = _timed("ntp_server", ntp_srv.get_snapshot)
-            if ntp_data:
-                data["ntp"] = ntp_data
-    else:
-        skipped.append("ntp_server")
-
-    if not _over_budget():
-        adsb_plugin = refs.get("adsb_radar")
-        if adsb_plugin and hasattr(adsb_plugin, "get_snapshot"):
-            adsb_data = _timed("adsb_radar", adsb_plugin.get_snapshot)
-            if adsb_data:
-                data["adsb"] = adsb_data
-    else:
-        skipped.append("adsb_radar")
-
-    if not _over_budget():
-        lt_plugin = refs.get("lora_link_tester")
-        if lt_plugin and hasattr(lt_plugin, "get_snapshot"):
-            lt_data = _timed("lora_link_tester", lt_plugin.get_snapshot)
-            if lt_data:
-                data["link_tester"] = lt_data
-    else:
-        skipped.append("lora_link_tester")
-
-    if skipped:
-        log.info("Broadcast budget exceeded — skipped: %s", ", ".join(skipped))
 
     return data, last_mesh_announce_ts, mesh_version
 
@@ -870,6 +485,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
     _cycle_count = 0
+    _prev_data: dict[str, Any] = {}
     loop = asyncio.get_running_loop()
 
     while True:
@@ -897,7 +513,6 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                         _cycle_count,
                         _last_mesh_announce_ts,
                         _mesh_version,
-                        _plugin_refs,
                     )
                 )
             finally:
@@ -905,9 +520,14 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
             collect_elapsed = time.monotonic() - t_collect
 
+            diff_data = _diff_payload(data, _prev_data)
+            _prev_data = data
+            if not diff_data:
+                continue
+
             message = json.dumps({
                 "type": "update",
-                "data": data,
+                "data": diff_data,
                 "timestamp": time.time(),
             })
 
@@ -953,9 +573,12 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             # Periodic health log (~every 60s at default interval).
             if _cycle_count % 30 == 0:
                 log.info(
-                    "WS broadcast: collect=%.0fms payload=%dB clients=%d",
+                    "WS broadcast: collect=%.0fms payload=%dB"
+                    " diff=%d/%d clients=%d",
                     collect_elapsed * 1000,
                     len(message),
+                    len(diff_data),
+                    len(data),
                     len(clients),
                 )
 
@@ -966,14 +589,17 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             await asyncio.sleep(1)
 
 
+_push_sem: asyncio.Semaphore | None = None
+
+
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor
+    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor, _push_sem
     _ws_loop = asyncio.get_running_loop()
     _ws_plugin = app["plugin"]
+    _push_sem = asyncio.Semaphore(8)
     _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="ws-broadcast",
     )
-    _rebuild_plugin_refs(_ws_plugin.app.get_plugin)
     _broadcast_task = asyncio.create_task(_broadcast_metrics(app))
     try:
         from reticulumpi import events as _events
@@ -983,13 +609,8 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
         event_bus.subscribe(_events.MESSAGE_REACTION_RECEIVED, _on_reaction_event)
         event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
-        event_bus.subscribe(_events.PLUGIN_STARTED, _on_plugin_lifecycle)
-        event_bus.subscribe(_events.PLUGIN_STOPPED, _on_plugin_lifecycle)
-        event_bus.subscribe(_events.PLUGIN_CRASHED, _on_plugin_lifecycle)
-        event_bus.subscribe(_events.CHIRP_CAPTURE_DONE, _on_chirp_capture_done)
-        event_bus.subscribe(_events.CHIRP_WATERFALL_ROWS, _on_chirp_waterfall_rows)
-        event_bus.subscribe(_events.CHIRP_DETECTION, _on_chirp_detection)
-        event_bus.subscribe(_events.CHIRP_PACKET_DECODED, _on_chirp_packet_decoded)
+        event_bus.subscribe(_events.INTERNET_ONLINE, _on_internet_event)
+        event_bus.subscribe(_events.INTERNET_OFFLINE, _on_internet_event)
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -1003,11 +624,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_status_event)
             event_bus.unsubscribe_all(_on_reaction_event)
             event_bus.unsubscribe_all(_on_alert_event)
-            event_bus.unsubscribe_all(_on_plugin_lifecycle)
-            event_bus.unsubscribe_all(_on_chirp_capture_done)
-            event_bus.unsubscribe_all(_on_chirp_waterfall_rows)
-            event_bus.unsubscribe_all(_on_chirp_detection)
-            event_bus.unsubscribe_all(_on_chirp_packet_decoded)
+            event_bus.unsubscribe_all(_on_internet_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _broadcast_task:
@@ -1020,7 +637,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
     _ws_loop = None
     _ws_plugin = None
     if _broadcast_executor is not None:
-        _broadcast_executor.shutdown(wait=False)
+        _broadcast_executor.shutdown(wait=True, cancel_futures=True)
         _broadcast_executor = None
     # Close all WebSocket connections
     for ws in list(_ws_clients):
@@ -1105,74 +722,88 @@ def _on_reaction_event(event_type: str, data: dict) -> None:
         pass
 
 
-def _on_chirp_capture_done(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_CAPTURE_DONE — push spectrogram to WS clients."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_result", data)
-    except RuntimeError:
-        pass
+def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
+    """Process a JSON command from a WebSocket client.
 
-
-def _on_chirp_waterfall_rows(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_WATERFALL_ROWS — push streaming batch."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_waterfall_rows", data)
-    except RuntimeError:
-        pass
-
-
-def _on_chirp_detection(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_DETECTION — push detection to WS clients."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_detection", data)
-    except RuntimeError:
-        pass
-
-
-def _on_chirp_packet_decoded(event_type: str, data: dict) -> None:
-    """Event-bus callback for CHIRP_PACKET_DECODED — push decoded packet to WS."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "chirp_packet_decoded", data)
-    except RuntimeError:
-        pass
-
-
-def _handle_ws_command(raw: str, plugin: Any) -> None:
-    """Process a JSON command from a WebSocket client."""
+    Returns an optional response dict to send back to the caller.
+    """
     try:
         cmd = json.loads(raw)
     except Exception:
         return
     action = cmd.get("action")
-    if action == "chirp_capture":
-        viewer = plugin.app.plugins.get("lora_chirp_viewer")
-        if viewer and hasattr(viewer, "capture_chirps"):
+    if action == "spectrum_switch_preset":
+        scanner = plugin.app.plugins.get("spectrum_scanner")
+        if scanner and hasattr(scanner, "switch_preset"):
+            preset_name = cmd.get("preset", "")
             try:
-                viewer.capture_chirps(
-                    freq_hz=int(cmd["freq_hz"]) if "freq_hz" in cmd else None,
-                    sample_rate=int(cmd["sample_rate"]) if "sample_rate" in cmd else None,
-                    duration_s=float(cmd["duration_s"]) if "duration_s" in cmd else None,
-                )
+                result = scanner.switch_preset(preset_name)
+                return {"type": "spectrum_preset_switched", **result}
+            except ValueError as exc:
+                return {"type": "spectrum_preset_error", "error": str(exc)}
             except Exception:
-                log.debug("Chirp capture command failed", exc_info=True)
-    elif action == "chirp_set_params":
-        viewer = plugin.app.plugins.get("lora_chirp_viewer")
-        if viewer and hasattr(viewer, "set_continuous_params"):
+                log.debug("Spectrum preset switch failed", exc_info=True)
+    elif action == "spectrum_list_presets":
+        scanner = plugin.app.plugins.get("spectrum_scanner")
+        if scanner and hasattr(scanner, "get_presets"):
+            return {"type": "spectrum_presets", **scanner.get_presets()}
+    elif action == "radio_tune":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "tune"):
+            freq_mhz = cmd.get("frequency_mhz")
+            if freq_mhz is None:
+                return {"type": "radio_error", "error": "frequency_mhz required"}
             try:
-                viewer.set_continuous_params(
-                    freq_mhz=float(cmd["freq_mhz"]) if "freq_mhz" in cmd else None,
-                    sample_rate=int(cmd["sample_rate"]) if "sample_rate" in cmd else None,
-                )
-            except Exception:
-                log.debug("Chirp set_params command failed", exc_info=True)
+                result = fm.tune(int(float(freq_mhz) * 1_000_000), mode=cmd.get("mode"))
+                return {"type": "radio_tuned", **result}
+            except ValueError as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_play":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "play"):
+            try:
+                result = fm.play()
+                return {"type": "radio_play", **result}
+            except Exception as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_stop":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "stop_playback"):
+            try:
+                result = fm.stop_playback()
+                return {"type": "radio_stop", **result}
+            except Exception as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_gain":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "set_gain"):
+            try:
+                gain = cmd.get("gain_db")
+                if gain is not None:
+                    gain = float(gain)
+                result = fm.set_gain(gain)
+                return {"type": "radio_gain", **result}
+            except (ValueError, TypeError) as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_squelch":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "set_squelch"):
+            try:
+                result = fm.set_squelch(int(cmd.get("level", 0)))
+                return {"type": "radio_squelch", **result}
+            except (ValueError, TypeError) as exc:
+                return {"type": "radio_error", "error": str(exc)}
+    elif action == "radio_volume":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "set_volume"):
+            try:
+                vol = float(cmd.get("volume", 0.75))
+                if not 0.0 <= vol <= 1.0:
+                    return {"type": "radio_error", "error": "volume must be 0.0-1.0"}
+                result = fm.set_volume(vol)
+                return {"type": "radio_volume", **result}
+            except (ValueError, TypeError) as exc:
+                return {"type": "radio_error", "error": str(exc)}
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
@@ -1181,6 +812,21 @@ def _on_alert_event(event_type: str, data: dict) -> None:
         return
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "alert", data)
+    except RuntimeError:
+        pass
+
+
+def _on_internet_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for INTERNET_ONLINE/OFFLINE — push to WS clients."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    payload = {
+        "online": event_type == "internet.online",
+        "wan_ip": data.get("wan_ip"),
+        "lan_ip": data.get("lan_ip"),
+    }
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "internet_status", payload)
     except RuntimeError:
         pass
 
@@ -1200,26 +846,37 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
     Fans out sends concurrently so a single slow peer (congested link,
     large TCP send-queue) can't block other subscribers from getting
     status updates during the same event.
+
+    Bounded by ``_push_sem`` so message storms can't accumulate
+    unbounded tasks on the event loop.
     """
-    if not _ws_clients:
-        return
-    message = json.dumps({
-        "type": push_type,
-        "data": payload,
-        "timestamp": time.time(),
-    })
-    clients = list(_ws_clients)
+    sem = _push_sem
+    if sem is not None:
+        await sem.acquire()
+    try:
+        if not _ws_clients:
+            return
+        message = json.dumps({
+            "type": push_type,
+            "data": payload,
+            "timestamp": time.time(),
+        })
+        clients = list(_ws_clients)
 
-    async def _send_one(ws: aiohttp.web.WebSocketResponse) -> bool:
-        try:
-            await ws.send_str(message)
-            return True
-        except Exception:
-            return False
+        async def _send_one(ws: aiohttp.web.WebSocketResponse) -> bool:
+            try:
+                await ws.send_str(message)
+                return True
+            except Exception:
+                return False
 
-    results = await asyncio.gather(
-        *(_send_one(ws) for ws in clients), return_exceptions=False,
-    )
-    for ws, ok in zip(clients, results):
-        if not ok:
-            _ws_clients.discard(ws)
+        results = await asyncio.gather(
+            *(_send_one(ws) for ws in clients), return_exceptions=False,
+        )
+        for ws, ok in zip(clients, results):
+            if not ok:
+                _ws_clients.discard(ws)
+                _ws_last_activity.pop(ws, None)
+    finally:
+        if sem is not None:
+            sem.release()

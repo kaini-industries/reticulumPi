@@ -1,6 +1,7 @@
 """Info Bot plugin - responds to LXMF commands with internet-sourced information."""
 
 import ast
+import inspect
 import json
 import math
 import operator
@@ -86,7 +87,7 @@ def _safe_eval(node):
     elif isinstance(node, ast.BinOp) and type(node.op) in _SAFE_MATH_OPS:
         left = _safe_eval(node.left)
         right = _safe_eval(node.right)
-        if isinstance(node.op, ast.Pow) and right > 1000:
+        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
             raise ValueError("Exponent too large")
         return _SAFE_MATH_OPS[type(node.op)](left, right)
     elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -136,6 +137,12 @@ _WMO_CODES = {
 
 _HTTP_TIMEOUT = 10  # seconds
 
+_FALLBACK_JOKES = [
+    ("Why do programmers prefer dark mode?", "Because light attracts bugs."),
+    ("Why did the packet cross the network?", "To get to the other site."),
+    ("What's a mesh network's favorite dance?", "The hop."),
+    ("How do routers greet each other?", "With a SYN!"),
+]
 
 
 class InfoBot(PluginBase):
@@ -235,27 +242,28 @@ class InfoBot(PluginBase):
         with self._lock:
             if not self._active:
                 return
-            try:
-                sender = RNS.prettyhexrep(message.source_hash)
-                content = message.content_as_string().strip()
-                self.log.info("Received message from %s: %s", sender, content[:100])
+            router = self.lxmf_router
+            local_dest = self.local_lxmf_destination
 
-                # Store sender hash so commands can check identity
-                self._last_sender_hash = sender
-                response = self._route_command(content)
+        try:
+            sender = RNS.prettyhexrep(message.source_hash)
+            content = message.content_as_string().strip()
+            self.log.info("Received message from %s: %s", sender, content[:100])
 
-                reply = LXMF.LXMessage(
-                    message.source,
-                    self.local_lxmf_destination,
-                    response,
-                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                )
-                self.lxmf_router.handle_outbound(reply)
-                self.log.debug("Sent reply to %s", sender)
-            except Exception:
-                self.log.exception("Error handling LXMF message")
+            response = self._route_command(content, sender=sender)
 
-    def _route_command(self, content: str) -> str:
+            reply = LXMF.LXMessage(
+                message.source,
+                local_dest,
+                response,
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+            )
+            router.handle_outbound(reply)
+            self.log.debug("Sent reply to %s", sender)
+        except Exception:
+            self.log.exception("Error handling LXMF message")
+
+    def _route_command(self, content: str, sender: str = "") -> str:
         """Parse and route a command, returning the response text."""
         if not content.startswith(self.PREFIX):
             return self._cmd_help()
@@ -274,6 +282,9 @@ class InfoBot(PluginBase):
             return f"Unknown command: !{cmd_name}\n\n{self._cmd_help()}"
 
         handler, _description = handler_entry
+        sig = inspect.signature(handler)
+        if "sender" in sig.parameters:
+            return handler(args, sender=sender)
         return handler(args)
 
     # ── Commands ─────────────────────────────────────────────────────
@@ -514,12 +525,16 @@ class InfoBot(PluginBase):
                 return f"No definition found for: {word}"
             return f"Dictionary lookup failed (HTTP {exc.code})."
         except urllib.error.URLError:
-            return "Dictionary lookup failed (network error)."
+            if not self.internet_available:
+                return "Dictionary lookup unavailable — node is offline."
+            return "Dictionary lookup unavailable — network error."
         except (KeyError, TypeError, ValueError):
             return f"Could not parse definition for: {word}"
 
     def _cmd_news(self, args: str = "") -> str:
         """Fetch latest headlines from Wikinews RSS."""
+        if not self.internet_available:
+            return "News unavailable — node is offline."
         try:
             # Use Wikinews Atom feed — no API key needed
             url = "https://en.wikinews.org/w/api.php?" + urllib.parse.urlencode({
@@ -552,7 +567,9 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch news (network error)."
+            if not self.internet_available:
+                return "News unavailable — node is offline."
+            return "News unavailable — network error."
         except Exception:
             return "Could not parse news feed."
 
@@ -587,7 +604,9 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch ISS position (network error)."
+            if not self.internet_available:
+                return "ISS position unavailable — node is offline."
+            return "ISS position unavailable — network error."
         except (KeyError, TypeError, ValueError):
             return "Could not parse ISS data."
 
@@ -644,12 +663,17 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch crypto price (network error)."
+            if not self.internet_available:
+                return "Crypto prices unavailable — node is offline."
+            return "Crypto prices unavailable — network error."
         except (KeyError, TypeError, ValueError):
             return f"Could not parse price data for: {symbol}"
 
     def _cmd_joke(self, _args: str = "") -> str:
         """Fetch a random joke."""
+        if not self.internet_available:
+            setup, punchline = random.choice(_FALLBACK_JOKES)
+            return f"{setup}\n\n{punchline}"
         try:
             req = urllib.request.Request(
                 "https://official-joke-api.appspot.com/random_joke",
@@ -661,14 +685,7 @@ class InfoBot(PluginBase):
             punchline = data.get("punchline", "")
             return f"{setup}\n\n{punchline}"
         except Exception:
-            # Fallback to a local joke
-            jokes = [
-                ("Why do programmers prefer dark mode?", "Because light attracts bugs."),
-                ("Why did the packet cross the network?", "To get to the other site."),
-                ("What's a mesh network's favorite dance?", "The hop."),
-                ("How do routers greet each other?", "With a SYN!"),
-            ]
-            setup, punchline = random.choice(jokes)
+            setup, punchline = random.choice(_FALLBACK_JOKES)
             return f"{setup}\n\n{punchline}"
 
     def _cmd_solar(self, _args: str = "") -> str:
@@ -720,7 +737,9 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.URLError:
-            return "Could not fetch solar data (network error)."
+            if not self.internet_available:
+                return "Solar data unavailable — node is offline."
+            return "Solar data unavailable — network error."
         except (KeyError, TypeError, ValueError, IndexError):
             return "Could not parse solar data."
 
@@ -860,7 +879,7 @@ class InfoBot(PluginBase):
 
         return "\n".join(lines)
 
-    def _cmd_pageauth(self, args: str = "") -> str:
+    def _cmd_pageauth(self, args: str = "", sender: str = "") -> str:
         """Manage NomadNet page access control."""
         nn = self.app.get_plugin("nomadnet_server")
         if not nn or not hasattr(nn, "get_allowed_identities"):
@@ -891,12 +910,10 @@ class InfoBot(PluginBase):
 
         # Admin-only commands: add/remove
         admin_ids = self.config.get("admin_identities", [])
-        if admin_ids:
-            # Check sender identity (from the LXMF message context)
-            # The sender hash is available as the source of the message
-            sender = getattr(self, "_last_sender_hash", "")
-            if sender not in admin_ids:
-                return "Admin access required for add/remove."
+        if not admin_ids:
+            return "No admin_identities configured. Cannot modify page auth."
+        if sender not in admin_ids:
+            return "Admin access required for add/remove."
 
         if subcmd == "add":
             if not arg:
@@ -1065,7 +1082,9 @@ class InfoBot(PluginBase):
 
         except urllib.error.URLError as exc:
             self.log.warning("Weather fetch failed for %r: %s", location, exc)
-            return "Could not fetch weather (network error). Try again later."
+            if not self.internet_available:
+                return "Weather unavailable — node is offline."
+            return "Weather unavailable — network error."
         except (KeyError, TypeError, ValueError) as exc:
             self.log.warning("Weather parse error for %r: %s", location, exc)
             return f"Could not parse weather data for: {location}"
@@ -1120,8 +1139,16 @@ class InfoBot(PluginBase):
 
         return lat, lon
 
+    def on_internet_lost(self) -> None:
+        self.log.warning("Internet lost — API commands will return offline messages")
+
+    def on_internet_available(self) -> None:
+        self.log.info("Internet restored — API commands operational")
+
     def _fetch_json(self, url: str) -> dict:
         """Fetch a URL and parse the JSON response."""
+        if not self.internet_available:
+            raise urllib.error.URLError("Internet unavailable")
         req = urllib.request.Request(
             url, headers={"User-Agent": "ReticulumPi-InfoBot/1.0"}
         )

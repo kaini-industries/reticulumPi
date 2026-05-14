@@ -619,8 +619,6 @@
         return ' <span class="msg-status-delivered">&#10003;&#10003;</span>';
       if (status === 'queued')
         return ' <span class="msg-status-queued">&#9203;</span>';
-      if (status === 'pending')
-        return ' <span class="msg-status-pending">&hellip;</span>';
       if (status === 'propagated')
         return ' <span class="msg-status-propagated">&#10003;</span>';
       if (status === 'timeout')

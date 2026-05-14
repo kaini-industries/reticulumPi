@@ -1,6 +1,8 @@
 """Web Dashboard plugin — secure web UI for node monitoring."""
 
 import asyncio
+import shutil
+import subprocess
 import time
 from typing import Any
 
@@ -156,8 +158,33 @@ class WebDashboardPlugin(PluginBase):
                 "Consider enabling SSL in the web_dashboard config."
             )
 
+        self._mdns_proc: subprocess.Popen | None = None
+        if self._host != "127.0.0.1" and shutil.which("avahi-publish-service"):
+            try:
+                self._mdns_proc = subprocess.Popen(
+                    [
+                        "avahi-publish-service",
+                        "ReticulumPi Dashboard",
+                        "_http._tcp",
+                        str(self._port),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                import socket
+                self.log.info(
+                    "mDNS: dashboard advertised at %s://%s.local:%d",
+                    scheme, socket.gethostname(), self._port,
+                )
+            except OSError:
+                self.log.warning("Failed to start mDNS advertisement")
+
     def stop(self) -> None:
         self._active = False
+        if self._mdns_proc:
+            self._mdns_proc.terminate()
+            self._mdns_proc.wait(timeout=5)
+            self._mdns_proc = None
         if self._loop and self._runner:
             future = asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
             try:
