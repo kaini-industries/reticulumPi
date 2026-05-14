@@ -63,6 +63,7 @@ class DongleState:
     device_index: int | None = None
     current_holder: str | None = None
     locked_by: str | None = None
+    relock_after: str | None = None
     slots: dict[str, SignalSlot] = field(default_factory=dict)
     bg_order: list[str] = field(default_factory=list)
     bg_index: int = 0
@@ -120,8 +121,11 @@ class SdrScheduler:
         )
 
     def stop(self) -> None:
-        self._running = False
         with self._condition:
+            for dongle in self._dongles.values():
+                if dongle.current_holder:
+                    self._do_yield(dongle, dongle.current_holder, "", "", None)
+            self._running = False
             self._condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
@@ -211,41 +215,44 @@ class SdrScheduler:
                 start_ts=start_ts, end_ts=end_ts, caller=caller, label=label,
             ))
             slot.windows.sort(key=lambda w: w.start_ts)
+            window_count = len(slot.windows)
             self._condition.notify_all()
 
         try:
             self._event_bus.publish(events.SDR_SCHEDULE_UPDATED, {
                 "serial": serial,
                 "caller": caller,
-                "window_count": len(slot.windows),
+                "window_count": window_count,
             })
         except Exception:
             pass
 
     def remove_windows(self, serial: str, caller: str) -> None:
-        with self._lock:
+        with self._condition:
             dongle = self._dongles.get(serial)
             if dongle is None:
                 return
             slot = dongle.slots.get(caller)
             if slot is not None:
                 slot.windows.clear()
+            self._condition.notify_all()
 
     # ── lock support ─────────────────────────────────────────────────
 
-    def lock(self, serial: str, caller: str) -> None:
+    def lock(self, serial: str, caller: str) -> bool:
         with self._condition:
             dongle = self._dongles.get(serial)
             if dongle is None:
-                return
+                return False
             if dongle.current_holder != caller:
                 log.warning(
                     "lock() rejected: %s is not current holder of %s",
                     caller, serial,
                 )
-                return
+                return False
             dongle.locked_by = caller
             log.info("Dongle %s locked by %s", serial, caller)
+            return True
 
     def unlock(self, serial: str, caller: str) -> None:
         with self._condition:
@@ -406,11 +413,6 @@ class SdrScheduler:
             dongle.serial, caller, preempted_by or "none",
         )
 
-        try:
-            slot.yield_cb(preempted_by, preempted_by_label, preempted_until_ts)
-        except Exception:
-            log.exception("yield_cb failed for %s", caller)
-
         slot.is_active = False
         slot.last_yielded = time.time()
         dongle.current_holder = None
@@ -418,71 +420,113 @@ class SdrScheduler:
         was_locked = dongle.locked_by == caller
         if was_locked and preempted_by:
             dongle.locked_by = None
-            dongle._relock_after = caller
+            dongle.relock_after = caller
         else:
-            dongle._relock_after = None  # type: ignore[attr-defined]
+            dongle.relock_after = None
 
-        from reticulumpi.rtlsdr import release_device
-        try:
-            release_device(dongle.serial, caller=caller)
-        except Exception:
-            pass
+        yield_cb = slot.yield_cb
+        serial = dongle.serial
 
+        self._condition.release()
         try:
-            self._event_bus.publish(events.SDR_DONGLE_YIELDED, {
-                "serial": dongle.serial,
-                "caller": caller,
-                "preempted_by": preempted_by,
-            })
-        except Exception:
-            pass
+            try:
+                yield_cb(preempted_by, preempted_by_label, preempted_until_ts)
+            except Exception:
+                log.exception("yield_cb failed for %s", caller)
+
+            from reticulumpi.rtlsdr import release_device
+            try:
+                release_device(serial, caller=caller)
+            except Exception:
+                pass
+
+            try:
+                self._event_bus.publish(events.SDR_DONGLE_YIELDED, {
+                    "serial": serial,
+                    "caller": caller,
+                    "preempted_by": preempted_by,
+                })
+            except Exception:
+                pass
+        finally:
+            self._condition.acquire()
 
     def _do_acquire(self, dongle: DongleState, caller: str) -> None:
         slot = dongle.slots.get(caller)
         if slot is None:
             return
 
-        time.sleep(_USB_SETTLE_DELAY)
+        acquire_cb = slot.acquire_cb
+        priority = slot.priority
+        serial = dongle.serial
 
-        from reticulumpi.rtlsdr import resolve_device
+        idx = None
+        acquire_ok = False
+
+        self._condition.release()
         try:
-            idx = resolve_device(dongle.serial, caller=caller)
-            dongle.device_index = idx
-        except RuntimeError as exc:
-            log.error("Failed to claim dongle %s for %s: %s", dongle.serial, caller, exc)
-            return
+            time.sleep(_USB_SETTLE_DELAY)
 
-        log.info("Granting dongle %s to %s (index %s)", dongle.serial, caller, idx)
-
-        try:
-            slot.acquire_cb(dongle.serial, idx)
-        except Exception:
-            log.exception("acquire_cb failed for %s", caller)
-            from reticulumpi.rtlsdr import release_device
+            from reticulumpi.rtlsdr import resolve_device
             try:
-                release_device(dongle.serial, caller=caller)
+                idx = resolve_device(serial, caller=caller)
+            except RuntimeError as exc:
+                log.error(
+                    "Failed to claim dongle %s for %s: %s",
+                    serial, caller, exc,
+                )
+                return
+
+            log.info("Granting dongle %s to %s (index %s)", serial, caller, idx)
+
+            try:
+                acquire_cb(serial, idx)
+                acquire_ok = True
             except Exception:
-                pass
+                log.exception("acquire_cb failed for %s", caller)
+                from reticulumpi.rtlsdr import release_device
+                try:
+                    release_device(serial, caller=caller)
+                except Exception:
+                    pass
+        finally:
+            self._condition.acquire()
+
+        if not acquire_ok:
             return
 
+        slot = dongle.slots.get(caller)
+        if slot is None:
+            self._condition.release()
+            try:
+                from reticulumpi.rtlsdr import release_device
+                try:
+                    release_device(serial, caller=caller)
+                except Exception:
+                    pass
+            finally:
+                self._condition.acquire()
+            return
+
+        dongle.device_index = idx
         slot.is_active = True
         slot.last_acquired = time.time()
         dongle.current_holder = caller
 
-        if slot.priority == PRIORITY_BACKGROUND:
+        if priority == PRIORITY_BACKGROUND:
             dongle.bg_last_rotation = time.time()
             if caller in dongle.bg_order:
                 dongle.bg_index = dongle.bg_order.index(caller)
 
-        relock_for = getattr(dongle, "_relock_after", None)
-        if relock_for and relock_for != caller:
-            pass
+        if dongle.relock_after == caller:
+            dongle.locked_by = caller
+            dongle.relock_after = None
 
         try:
             self._event_bus.publish(events.SDR_DONGLE_GRANTED, {
-                "serial": dongle.serial,
+                "serial": serial,
                 "caller": caller,
-                "priority": slot.priority,
+                "priority": priority,
             })
         except Exception:
             pass

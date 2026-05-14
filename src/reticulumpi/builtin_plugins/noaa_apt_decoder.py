@@ -188,11 +188,12 @@ class NOAAAPTDecoder(SignalPluginBase):
             "-d", str(device_index),
             "-f", str(freq_hz),
             "-s", "48000",
-            "-g", str(self._gain),
             "-p", str(self._ppm),
             "-E", "dc",
             "-F", "9",
         ]
+        if self._gain is not None:
+            rtl_cmd.extend(["-g", str(self._gain)])
         rtl_cmd.append("-")
 
         if sox:
@@ -218,13 +219,11 @@ class NOAAAPTDecoder(SignalPluginBase):
                 rtl_proc.stdout.close()
             self._rtl_process = rtl_proc
         else:
-            rtl_cmd[-1] = wav_path
-            self._process = subprocess.Popen(
-                rtl_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            self._rtl_process = None
+            self.log.error("sox not found — cannot record WAV for APT decode")
+            self._status = "error"
+            self._last_error = "sox not installed"
+            self._update_snapshot_cache()
+            return
 
         self._pid = self._process.pid
 
@@ -279,8 +278,9 @@ class NOAAAPTDecoder(SignalPluginBase):
                 break
             if cp:
                 duration = cp["los_ts"] - cp["aos_ts"]
-                elapsed = now - cp["aos_ts"]
-                cp["progress_pct"] = min(100.0, max(0.0, elapsed / duration * 100))
+                if duration > 0:
+                    elapsed = now - cp["aos_ts"]
+                    cp["progress_pct"] = min(100.0, max(0.0, elapsed / duration * 100))
             self._update_snapshot_cache()
             self._sleep_while_active(5.0)
 
@@ -376,10 +376,12 @@ class NOAAAPTDecoder(SignalPluginBase):
             )
             now = time.time()
             cutoff = now - self._retention_days * 86400
+            keep: list[Path] = []
             for f in files:
-                if f.stat().st_mtime < cutoff or len(files) > self._max_images:
+                if f.stat().st_mtime < cutoff or len(keep) >= self._max_images:
                     f.unlink()
-                    files.remove(f)
+                else:
+                    keep.append(f)
         except Exception:
             self.log.debug("Image cleanup error", exc_info=True)
 
@@ -402,11 +404,12 @@ class NOAAAPTDecoder(SignalPluginBase):
             }
 
     def get_status(self) -> dict[str, Any]:
+        passes = self._next_passes
         return {
             "active": self._active,
             "status": self._status,
             "error": self._last_error,
             "total_captures": self._stats["total_captures"],
             "successful_decodes": self._stats["successful_decodes"],
-            "next_pass": self._next_passes[0]["satellite"] if self._next_passes else None,
+            "next_pass": passes[0]["satellite"] if passes else None,
         }

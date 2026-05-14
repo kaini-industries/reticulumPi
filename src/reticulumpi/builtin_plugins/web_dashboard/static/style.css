@@ -4867,6 +4867,16 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
   margin-top: 4px;
 }
 .noaa-quality { font-size: 0.65em; padding: 1px 4px; border-radius: 2px; }
+.noaa-progress-label { font-size: 0.85em; margin-bottom: 4px; }
+.noaa-progress-track {
+  height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;
+}
+.noaa-thumb-info { padding: 4px 6px; font-size: 0.75em; }
+.noaa-thumb-sat { font-weight: 600; }
+.noaa-thumb-date { color: var(--text-muted); }
+.noaa-thumb-size { color: var(--text-muted); font-size: 0.9em; }
+.noaa-empty { font-size: 0.85em; color: var(--text-muted); padding: 12px 0; }
+.noaa-pass-entry { display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 3px; }
 .noaa-passes {
   font-size: 0.8em;
   color: var(--text-muted);

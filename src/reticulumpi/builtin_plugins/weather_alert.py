@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-import threading
 import time
 from collections import deque
 from typing import Any
@@ -97,11 +96,16 @@ def _parse_issued_ts(issued: str) -> float | None:
         jday = int(issued[:3])
         hour = int(issued[3:5])
         minute = int(issued[5:7])
-        now = time.gmtime()
+        now_ts = time.time()
+        now = time.gmtime(now_ts)
         year = now.tm_year
         import calendar
         jan1 = calendar.timegm((year, 1, 1, 0, 0, 0, 0, 1, -1))
-        return jan1 + (jday - 1) * 86400 + hour * 3600 + minute * 60
+        ts = jan1 + (jday - 1) * 86400 + hour * 3600 + minute * 60
+        if ts > now_ts + 86400:
+            jan1_prev = calendar.timegm((year - 1, 1, 1, 0, 0, 0, 0, 1, -1))
+            ts = jan1_prev + (jday - 1) * 86400 + hour * 3600 + minute * 60
+        return ts
     except (ValueError, OverflowError):
         return None
 
@@ -135,7 +139,6 @@ class WeatherAlert(SignalPluginBase):
         )
         self._gain_db = self.config.get("gain", None)
         self._ppm = int(self.config.get("ppm", 0))
-        self._max_restarts = int(self.config.get("max_restarts", 5))
         self._max_history = int(self.config.get("max_history", 50))
         self._fips_filter: set[str] | None = None
         fips = self.config.get("fips_filter")
@@ -155,8 +158,6 @@ class WeatherAlert(SignalPluginBase):
         }
         self._status = "idle"
         self._last_error: str | None = None
-        self._restart_count = 0
-        self._supervisor_thread: threading.Thread | None = None
 
     def _on_stop(self) -> None:
         pass
@@ -209,7 +210,6 @@ class WeatherAlert(SignalPluginBase):
             rtl_proc.stdout.close()
         self._pid = self._process.pid
         self._status = "monitoring"
-        self._restart_count = 0
 
         self._start_log_reader(self._stderr_fake(rtl_proc), prefix="rtl_fm")
         self._start_thread(self._parser_loop, name="wx-parser")

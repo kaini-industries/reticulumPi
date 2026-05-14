@@ -35,7 +35,6 @@ class SignalPluginBase(PluginBase):
         self._dongle_index: int | None = None
         self._dongle_active = False
         self._process: subprocess.Popen | None = None
-        self._pid: int | None = None
         self._snapshot_cache: dict[str, Any] = {}
         self._cache_lock = threading.Lock()
         self._preempted_by: str = ""
@@ -99,6 +98,7 @@ class SignalPluginBase(PluginBase):
         preempted_until_ts: float | None,
     ) -> bool:
         self._dongle_active = False
+        self._locked = False
         self._preempted_by = preempted_by
         self._preempted_by_label = preempted_by_label
         self._preempted_until_ts = preempted_until_ts
@@ -164,10 +164,11 @@ class SignalPluginBase(PluginBase):
         return snap
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
-        snap = self.get_snapshot()
-        if not snap or (not self._dongle_active and not self._snapshot_cache):
+        with self._cache_lock:
+            has_data = bool(self._snapshot_cache)
+        if not self._dongle_active and not has_data:
             return None
-        return snap
+        return self.get_snapshot()
 
     # ── lock ─────────────────────────────────────────────────────────
 
@@ -177,7 +178,8 @@ class SignalPluginBase(PluginBase):
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is None:
             return False
-        sched.lock(self._dongle_serial, self.plugin_name)
+        if not sched.lock(self._dongle_serial, self.plugin_name):
+            return False
         self._locked = True
         return True
 

@@ -13,6 +13,8 @@ import time
 from collections import deque
 from typing import Any
 
+from reticulumpi import events
+
 from reticulumpi.builtin_plugins.signal_plugin_base import SignalPluginBase
 from reticulumpi.sdr_scheduler import PRIORITY_BACKGROUND
 
@@ -193,6 +195,13 @@ class ACARSDecoder(SignalPluginBase):
         if tail and tail not in self._seen_tails:
             self._seen_tails.add(tail)
             self._stats["unique_tails_today"] = len(self._seen_tails)
+
+        try:
+            self.event_bus.publish(events.ACARS_MESSAGE_DECODED, {
+                "flight": flight, "tail": tail, "label": label,
+            })
+        except Exception:
+            pass
 
         self._update_snapshot_cache()
 

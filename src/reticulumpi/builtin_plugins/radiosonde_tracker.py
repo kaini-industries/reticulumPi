@@ -76,6 +76,7 @@ class RadiosondeTracker(SignalPluginBase):
         if sched is None or not self._dongle_serial:
             return
 
+        sched.remove_windows(self._dongle_serial, self.plugin_name)
         now = time.time()
         gm = time.gmtime(now)
         midnight_utc = now - (gm.tm_hour * 3600 + gm.tm_min * 60 + gm.tm_sec)
@@ -296,7 +297,7 @@ class RadiosondeTracker(SignalPluginBase):
                     })
                 except Exception:
                     pass
-        if sonde.get("phase") == "burst" and vel_v < 0:
+        elif sonde.get("phase") == "burst" and vel_v < 0:
             sonde["phase"] = "descent"
 
         if alt is not None:
@@ -371,11 +372,12 @@ class RadiosondeTracker(SignalPluginBase):
             }
 
     def get_status(self) -> dict[str, Any]:
+        sonde = self._active_sonde
         return {
             "active": self._active,
             "status": self._status,
             "error": self._last_error,
             "sondes_tracked": self._stats["sondes_tracked_total"],
             "frames_decoded": self._stats["frames_decoded_total"],
-            "active_sonde_id": self._active_sonde.get("id") if self._active_sonde else None,
+            "active_sonde_id": sonde.get("id") if sonde else None,
         }

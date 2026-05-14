@@ -318,9 +318,10 @@ class FMReceiver(PluginBase):
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is None:
             return {"locked": False, "error": "scheduler not available"}
-        sched.lock(self._device_id, self.plugin_name)
-        self._locked = True
-        return {"locked": True}
+        if sched.lock(self._device_id, self.plugin_name):
+            self._locked = True
+            return {"locked": True}
+        return {"locked": False, "error": "lock rejected"}
 
     def unlock_dongle(self) -> dict[str, Any]:
         sched = getattr(self.app, "sdr_scheduler", None)

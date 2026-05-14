@@ -1075,9 +1075,9 @@
       </div>
       <div class="section-body hidden" id="ais-body">
         <div class="metric-summary" id="ais-stats"></div>
-        <div class="table-scroll">
+        <div class="table-scroll" id="ais-table-wrap">
           <table class="data-table">
-            <thead><tr><th>Name</th><th>MMSI</th><th>Type</th><th>Speed</th><th>Course</th><th>Status</th><th>Last Seen</th></tr></thead>
+            <thead><tr><th data-sort="name">Name</th><th data-sort="mmsi">MMSI</th><th data-sort="type">Type</th><th data-sort="sog_knots">Speed</th><th data-sort="cog_deg">Course</th><th>Status</th><th data-sort="last_seen">Last Seen</th></tr></thead>
             <tbody id="ais-table"></tbody>
           </table>
         </div>
@@ -1110,8 +1110,8 @@
       <div class="section-body hidden" id="radiosonde-body">
         <div class="radiosonde-cards" id="radiosonde-cards"></div>
         <div class="radiosonde-next" id="radiosonde-next"></div>
-        <canvas id="radiosonde-chart" class="radiosonde-chart" width="600" height="200" style="display:none"></canvas>
-        <div class="table-scroll" id="radiosonde-history-wrap" style="display:none">
+        <canvas id="radiosonde-chart" class="radiosonde-chart" width="600" height="200"></canvas>
+        <div class="table-scroll" id="radiosonde-history-wrap">
           <table class="data-table">
             <thead><tr><th>ID</th><th>Type</th><th>Max Alt</th><th>Frames</th><th>Duration</th></tr></thead>
             <tbody id="radiosonde-history"></tbody>

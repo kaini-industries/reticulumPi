@@ -204,11 +204,8 @@ fi
 if [ "$WITH_SIGNALS" = true ]; then
     echo "[4h/7] Installing signal decoder tools..."
 
-    # multimon-ng (SAME/EAS weather alert decoding)
-    sudo apt-get install -y multimon-ng
-
-    # sox (audio format conversion for NOAA APT)
-    sudo apt-get install -y sox
+    # Build tools + decoder packages
+    sudo apt-get install -y cmake build-essential multimon-ng sox librtlsdr-dev libusb-1.0-0-dev
 
     # AIS-catcher (AIS vessel tracking) — build from source for ARM64
     if ! command -v AIS-catcher &>/dev/null; then

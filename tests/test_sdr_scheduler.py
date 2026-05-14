@@ -86,7 +86,8 @@ class TestPriorityPreemption:
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld_bg.assert_called_once()
         acq_p0.assert_called_once()
 
@@ -101,7 +102,8 @@ class TestPriorityPreemption:
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld_bg.assert_called_once()
         acq_p1.assert_called_once()
 
@@ -116,7 +118,8 @@ class TestPriorityPreemption:
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "sat"
         dongle.slots["sat"].is_active = True
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld_p1.assert_not_called()
         acq_bg.assert_not_called()
 
@@ -133,7 +136,8 @@ class TestLocking:
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
         sched.lock(SERIAL, "ais")
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld_bg.assert_not_called()
 
     def test_p0_overrides_lock_when_enabled(self, sched):
@@ -147,7 +151,8 @@ class TestLocking:
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
         sched.lock(SERIAL, "ais")
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld_bg.assert_called_once()
         acq_p0.assert_called_once()
 
@@ -162,16 +167,17 @@ class TestLocking:
             d.current_holder = "ais"
             d.slots["ais"].is_active = True
             s.lock(SERIAL, "ais")
-            s._evaluate(SERIAL)
+            with s._condition:
+                s._evaluate(SERIAL)
             yld_bg.assert_not_called()
 
     def test_lock_requires_holder_and_unlock_clears(self, sched):
         sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, *_cb_pair(), continuous=True)
         dongle = sched._dongles[SERIAL]
-        sched.lock(SERIAL, "ais")
-        assert dongle.locked_by is None  # rejected: not current holder
+        assert sched.lock(SERIAL, "ais") is False  # rejected: not current holder
+        assert dongle.locked_by is None
         dongle.current_holder = "ais"
-        sched.lock(SERIAL, "ais")
+        assert sched.lock(SERIAL, "ais") is True
         assert dongle.locked_by == "ais"
         sched.unlock(SERIAL, "ais")
         assert dongle.locked_by is None
@@ -203,7 +209,8 @@ class TestTimeWindows:
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld_bg.assert_not_called()
 
 
@@ -212,7 +219,8 @@ class TestBackgroundRoundRobin:
         acq, _ = _cb_pair()
         sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq, _cb_pair()[1],
                        continuous=True)
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         acq.assert_called_once_with(SERIAL, 0)
 
     def test_rotation_after_slice_expires(self, sched):
@@ -226,7 +234,8 @@ class TestBackgroundRoundRobin:
         dongle.slots["ais"].is_active = True
         dongle.bg_last_rotation = time.time() - dongle.bg_slice_seconds - 1
         dongle.bg_index = 0
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld1.assert_called_once()
 
     def test_bg_stays_within_slice(self, sched):
@@ -240,7 +249,8 @@ class TestBackgroundRoundRobin:
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
         dongle.bg_last_rotation = time.time()
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         yld1.assert_not_called()
         acq2.assert_not_called()
 
@@ -255,7 +265,8 @@ class TestHandoffProtocol:
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
-        sched._evaluate(SERIAL)
+        with sched._condition:
+            sched._evaluate(SERIAL)
         preempted_by, label, _ = yld_bg.call_args[0]
         assert preempted_by == "wx"
         assert label == "SAME Alert"

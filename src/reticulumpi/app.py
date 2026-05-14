@@ -75,12 +75,6 @@ class ReticulumPiApp:
             "Internet: %s", "online" if self.internet_probe.is_online else "offline"
         )
 
-        self.internet_probe = InternetProbe(self.event_bus, self.config.internet)
-        self.internet_probe.start()
-        log.info(
-            "Internet: %s", "online" if self.internet_probe.is_online else "offline"
-        )
-
         PluginBase.set_thread_budget(self.config.thread_budget)
 
         self._load_plugins()

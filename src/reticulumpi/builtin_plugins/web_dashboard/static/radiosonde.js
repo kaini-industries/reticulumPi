@@ -134,7 +134,7 @@
     var el = $('radiosonde-next');
     if (!el) return;
     if (!next) { el.textContent = ''; return; }
-    el.textContent = 'Next window: ' + esc(next.label || '--')
+    el.textContent = 'Next window: ' + (next.label || '--')
       + ' in ' + _fmtHM(next.countdown_s);
   }
 

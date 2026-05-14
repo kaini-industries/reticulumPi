@@ -605,7 +605,7 @@
 
     if (_statusBadge) {
       var st = data.status || 'stopped';
-      var validSt = ['stopped','playing','paused','error','restarting','unavailable'];
+      var validSt = ['stopped','starting','playing','paused','error','restarting','unavailable'];
       if (validSt.indexOf(st) < 0) st = 'stopped';
       _statusBadge.textContent = st;
       _statusBadge.className = 'count radio-status-' + st;
@@ -710,6 +710,12 @@
 
     if (msg.type === 'radio_gain' || msg.type === 'radio_squelch' || msg.type === 'radio_volume') {
       _clearPending();
+    }
+
+    if (msg.type === 'radio_lock' || msg.type === 'radio_unlock') {
+      if (_lockCb) _lockCb.checked = !!msg.locked;
+      if (_lockIcon) _lockIcon.style.display = msg.locked ? '' : 'none';
+      if (msg.error) _showFeedback(msg.error);
     }
   }
 
