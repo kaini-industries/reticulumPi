@@ -211,14 +211,17 @@ if [ "$WITH_SIGNALS" = true ]; then
     if ! command -v AIS-catcher &>/dev/null; then
         echo "  Building AIS-catcher from source..."
         BUILD_DIR=$(mktemp -d)
+        trap 'rm -rf "$BUILD_DIR"' EXIT
         git clone --depth 1 https://github.com/jvde-github/AIS-catcher.git "$BUILD_DIR/AIS-catcher"
-        cd "$BUILD_DIR/AIS-catcher"
-        mkdir build && cd build
-        cmake .. -DCMAKE_BUILD_TYPE=Release
-        make -j"$(nproc)"
-        sudo make install
-        cd /
+        (
+            cd "$BUILD_DIR/AIS-catcher"
+            mkdir build && cd build
+            cmake .. -DCMAKE_BUILD_TYPE=Release
+            make -j"$(nproc)"
+            sudo make install
+        )
         rm -rf "$BUILD_DIR"
+        trap - EXIT
         echo "  AIS-catcher installed."
     else
         echo "  AIS-catcher already installed."
@@ -227,16 +230,19 @@ if [ "$WITH_SIGNALS" = true ]; then
     # acarsdec (ACARS aircraft message decoding) — build from source for ARM64
     if ! command -v acarsdec &>/dev/null; then
         echo "  Building acarsdec from source..."
-        sudo apt-get install -y librtlsdr-dev
+        sudo apt-get install -y libacars-dev
         BUILD_DIR=$(mktemp -d)
+        trap 'rm -rf "$BUILD_DIR"' EXIT
         git clone --depth 1 https://github.com/TLeconte/acarsdec.git "$BUILD_DIR/acarsdec"
-        cd "$BUILD_DIR/acarsdec"
-        mkdir build && cd build
-        cmake .. -Drtl=ON -DCMAKE_BUILD_TYPE=Release
-        make -j"$(nproc)"
-        sudo make install
-        cd /
+        (
+            cd "$BUILD_DIR/acarsdec"
+            mkdir build && cd build
+            cmake .. -Drtl=ON -DCMAKE_BUILD_TYPE=Release
+            make -j"$(nproc)"
+            sudo make install
+        )
         rm -rf "$BUILD_DIR"
+        trap - EXIT
         echo "  acarsdec installed."
     else
         echo "  acarsdec already installed."

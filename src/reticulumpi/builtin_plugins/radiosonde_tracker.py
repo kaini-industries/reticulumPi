@@ -70,6 +70,7 @@ class RadiosondeTracker(SignalPluginBase):
         self._last_sonde_frame_ts = 0.0
 
         self._schedule_windows()
+        self._start_thread(self._window_scheduler_loop, name="sonde-scheduler")
 
     def _schedule_windows(self) -> None:
         sched = getattr(self.app, "sdr_scheduler", None)
@@ -101,8 +102,6 @@ class RadiosondeTracker(SignalPluginBase):
                 end_ts=window_end,
                 label=f"Radiosonde {time_str} UTC window",
             )
-
-        self._start_thread(self._window_scheduler_loop, name="sonde-scheduler")
 
     def _window_scheduler_loop(self) -> None:
         while self._active:

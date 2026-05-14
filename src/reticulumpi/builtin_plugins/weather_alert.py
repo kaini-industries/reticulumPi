@@ -358,7 +358,6 @@ class WeatherAlert(SignalPluginBase):
                 except Exception:
                     pass
                 self._active_alert = None
-                self._update_snapshot_cache()
 
     def _update_snapshot_cache(self) -> None:
         self._check_expired()

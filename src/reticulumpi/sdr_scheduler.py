@@ -122,10 +122,10 @@ class SdrScheduler:
 
     def stop(self) -> None:
         with self._condition:
+            self._running = False
             for dongle in self._dongles.values():
                 if dongle.current_holder:
                     self._do_yield(dongle, dongle.current_holder, "", "", None)
-            self._running = False
             self._condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
@@ -145,6 +145,9 @@ class SdrScheduler:
         windows: list[TimeWindow] | None = None,
         continuous: bool = False,
     ) -> None:
+        if priority == PRIORITY_CRITICAL and not continuous:
+            raise ValueError("P0/critical slots must be continuous")
+
         with self._condition:
             dongle = self._dongles.get(serial)
             if dongle is None:
@@ -290,7 +293,14 @@ class SdrScheduler:
             return
         if winner == dongle.current_holder:
             return
+
         if winner is None and dongle.current_holder is not None:
+            current_slot = dongle.slots.get(dongle.current_holder)
+            if current_slot and current_slot.priority == PRIORITY_SCHEDULED:
+                self._do_yield(dongle, dongle.current_holder, "", "", None)
+                bg = self._pick_background(dongle, now)
+                if bg:
+                    self._do_acquire(dongle, bg)
             return
 
         current = dongle.current_holder
@@ -332,24 +342,27 @@ class SdrScheduler:
         if not bg:
             return None
 
+        should_rotate = False
         if dongle.current_holder in bg:
             elapsed = now - dongle.bg_last_rotation
             if elapsed < dongle.bg_slice_seconds:
                 return dongle.current_holder
+            should_rotate = True
+
+        if should_rotate:
             dongle.bg_index += 1
 
-        if not bg:
-            return None
-
-        idx = dongle.bg_index % len(bg)
-        candidate = bg[idx]
-
-        slot = dongle.slots.get(candidate)
-        if slot is None:
+        for _ in range(len(bg)):
+            if not bg:
+                return None
+            idx = dongle.bg_index % len(bg)
+            candidate = bg[idx]
+            slot = dongle.slots.get(candidate)
+            if slot is not None:
+                return candidate
             bg.pop(idx)
-            return self._pick_background(dongle, now)
 
-        return candidate
+        return None
 
     def _can_preempt(
         self, dongle: DongleState, current: str, winner: str,
@@ -421,7 +434,7 @@ class SdrScheduler:
         if was_locked and preempted_by:
             dongle.locked_by = None
             dongle.relock_after = caller
-        else:
+        elif dongle.relock_after == caller:
             dongle.relock_after = None
 
         yield_cb = slot.yield_cb
@@ -495,8 +508,22 @@ class SdrScheduler:
         if not acquire_ok:
             return
 
+        if not self._running:
+            self._condition.release()
+            try:
+                from reticulumpi.rtlsdr import release_device
+                try:
+                    release_device(serial, caller=caller)
+                except Exception:
+                    pass
+            finally:
+                self._condition.acquire()
+            return
+
         slot = dongle.slots.get(caller)
         if slot is None:
+            if dongle.relock_after == caller:
+                dongle.relock_after = None
             self._condition.release()
             try:
                 from reticulumpi.rtlsdr import release_device

@@ -83,6 +83,8 @@ class SignalPluginBase(PluginBase):
     # ── scheduler callbacks ──────────────────────────────────────────
 
     def _on_acquire(self, serial: str, device_index: int) -> None:
+        if not self._active:
+            return
         self._dongle_index = device_index
         self._dongle_active = True
         self._preempted_by = ""

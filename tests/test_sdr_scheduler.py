@@ -42,6 +42,7 @@ def sched():
     """Scheduler with one managed dongle; hardware access patched out."""
     with _patch_hw(), patch("reticulumpi.sdr_scheduler._USB_SETTLE_DELAY", 0):
         s = _make_scheduler()
+        s._running = True
         yield s
         s.stop()
 
@@ -181,6 +182,36 @@ class TestLocking:
         assert dongle.locked_by == "ais"
         sched.unlock(SERIAL, "ais")
         assert dongle.locked_by is None
+
+    def test_relock_after_p0_preemption(self, sched):
+        acq_bg, yld_bg = _cb_pair()
+        acq_p0, yld_p0 = _cb_pair()
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, yld_bg,
+                       continuous=True)
+        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, acq_p0, yld_p0,
+                       continuous=True)
+        dongle = sched._dongles[SERIAL]
+
+        # Give ais the dongle and lock it
+        dongle.current_holder = "ais"
+        dongle.slots["ais"].is_active = True
+        sched.lock(SERIAL, "ais")
+        assert dongle.locked_by == "ais"
+
+        # P0 preempts — lock broken, relock_after saved
+        with sched._condition:
+            sched._evaluate(SERIAL)
+        assert dongle.relock_after == "ais"
+        assert dongle.locked_by is None
+
+        # Now yield P0 (unregister) and let ais re-acquire
+        sched.unregister(SERIAL, "wx")
+        assert dongle.relock_after == "ais"  # not clobbered by P0 yield
+        with sched._condition:
+            sched._evaluate(SERIAL)
+        assert dongle.current_holder == "ais"
+        assert dongle.locked_by == "ais"  # lock auto-restored
+        assert dongle.relock_after is None
 
 
 class TestTimeWindows:
