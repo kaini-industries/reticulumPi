@@ -1278,6 +1278,11 @@
     if (d.hotspot && RPI.updateHotspot) RPI.updateHotspot(d.hotspot);
     if (d.fm_receiver && RPI.updateRadio) RPI.updateRadio(d.fm_receiver);
     if (d.link_tester && RPI.updateLinkTester) RPI.updateLinkTester(d.link_tester);
+    if (d.weather_alert && RPI.updateWeatherAlert) RPI.updateWeatherAlert(d.weather_alert);
+    if (d.ais && RPI.updateAis) RPI.updateAis(d.ais);
+    if (d.acars && RPI.updateAcars) RPI.updateAcars(d.acars);
+    if (d.radiosonde && RPI.updateRadiosonde) RPI.updateRadiosonde(d.radiosonde);
+    if (d.noaa_apt && RPI.updateNoaa) RPI.updateNoaa(d.noaa_apt);
   }
 
   function connectWS() {

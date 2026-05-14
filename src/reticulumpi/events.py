@@ -8,9 +8,6 @@ PLUGIN_STOPPED = "plugin.stopped"
 PLUGIN_CRASHED = "plugin.crashed"
 PLUGIN_STOPPING = "plugin.stopping"
 
-# System metrics
-METRICS_UPDATED = "metrics.updated"
-
 # Mesh network
 NODE_DISCOVERED = "node.discovered"
 NODE_METRICS_RECEIVED = "node.metrics_received"
@@ -20,10 +17,6 @@ ALERT_TRIGGERED = "alert.triggered"
 
 # File transfer
 FILE_RECEIVED = "file.received"
-
-# Links
-LINK_ESTABLISHED = "link.established"
-LINK_CLOSED = "link.closed"
 
 # Sensors
 SENSOR_READING = "sensor.reading"
@@ -42,11 +35,8 @@ INTERNET_ONLINE = "internet.online"
 INTERNET_OFFLINE = "internet.offline"
 
 # Connectivity monitoring
-RNSD_DOWN = "connectivity.rnsd_down"
 RNSD_RECOVERED = "connectivity.rnsd_recovered"
 RNSD_RESTARTING = "connectivity.rnsd_restarting"
-INTERFACE_OFFLINE = "connectivity.interface_offline"
-I2P_NO_PEERS = "connectivity.i2p_no_peers"
 
 # Hub pool auto-discovery
 HUB_POOL_CONNECTED = "hub_pool.connected"
@@ -80,7 +70,6 @@ MESHTASTIC_DISCONNECTED = "meshtastic.disconnected"
 MESHTASTIC_CONNECT_FAILED = "meshtastic.connect_failed"
 MESHTASTIC_MESSAGE_RECEIVED = "meshtastic.message_received"
 MESHTASTIC_MESSAGE_SENT = "meshtastic.message_sent"
-MESHTASTIC_NODEINFO_SENT = "meshtastic.nodeinfo_sent"
 
 # MeshCore gateway
 MESHCORE_CONNECTED = "meshcore.connected"
@@ -113,16 +102,11 @@ SHUTDOWN_STARTING = "shutdown.starting"
 # Messaging hub
 MESSAGE_RECEIVED = "messaging.message_received"
 MESSAGE_SENT = "messaging.message_sent"
-# Not currently published; failures route through MESSAGE_STATUS_CHANGED.
-MESSAGE_FAILED = "messaging.message_failed"
 MESSAGE_STATUS_CHANGED = "messaging.message_status_changed"
 
 # Meshtastic firmware watchdog
 MESHTASTIC_FIRMWARE_HANG = "meshtastic.firmware_hang"
 MESHTASTIC_FIRMWARE_RECOVERED = "meshtastic.firmware_recovered"
-
-# Meshtastic message ack/nak
-MESHTASTIC_MESSAGE_ACKED = "meshtastic.message_acked"
 
 # Meshtastic emoji reactions
 MESHTASTIC_REACTION_RECEIVED = "meshtastic.reaction_received"
@@ -139,7 +123,6 @@ MESHCORE_OBSERVER_DEVICE_DISCONNECTED = "meshcore_observer.device_disconnected"
 MESHCORE_OBSERVER_CONNECT_FAILED = "meshcore_observer.connect_failed"
 MESHCORE_OBSERVER_MQTT_CONNECTED = "meshcore_observer.mqtt_connected"
 MESHCORE_OBSERVER_MQTT_DISCONNECTED = "meshcore_observer.mqtt_disconnected"
-MESHCORE_OBSERVER_PACKET_CAPTURED = "meshcore_observer.packet_captured"
 
 # Space tracker — satellites, launches, space weather
 SPACE_TLE_UPDATED = "space.tle.updated"
@@ -182,3 +165,35 @@ NTP_GPS_REFCLOCK_ACTIVE = "ntp.gps_refclock_active"
 # FM/AM radio receiver
 FM_RECEIVER_TUNED = "fm_receiver.tuned"
 FM_RECEIVER_STATUS = "fm_receiver.status"
+
+# SDR scheduler — dongle time-sharing
+SDR_DONGLE_GRANTED = "sdr.dongle.granted"
+SDR_DONGLE_YIELDED = "sdr.dongle.yielded"
+SDR_SCHEDULE_UPDATED = "sdr.schedule.updated"
+
+# NOAA APT weather satellite decoder
+NOAA_APT_CAPTURE_START = "noaa_apt.capture_start"
+NOAA_APT_CAPTURE_DONE = "noaa_apt.capture_done"
+NOAA_APT_DECODE_COMPLETE = "noaa_apt.decode_complete"
+NOAA_APT_STATUS = "noaa_apt.status"
+
+# Radiosonde tracker
+RADIOSONDE_DETECTED = "radiosonde.detected"
+RADIOSONDE_BURST = "radiosonde.burst"
+RADIOSONDE_LOST = "radiosonde.lost"
+RADIOSONDE_STATUS = "radiosonde.status"
+
+# AIS marine vessel receiver
+AIS_VESSEL_DETECTED = "ais.vessel_detected"
+AIS_VESSEL_LOST = "ais.vessel_lost"
+AIS_STATUS = "ais.status"
+
+# ACARS aircraft message decoder
+ACARS_MESSAGE_DECODED = "acars.message_decoded"
+ACARS_STATUS = "acars.status"
+
+# NOAA Weather Radio SAME alert monitor
+WEATHER_ALERT_RECEIVED = "weather_alert.received"
+WEATHER_ALERT_SEVERE = "weather_alert.severe"
+WEATHER_ALERT_EXPIRED = "weather_alert.expired"
+WEATHER_ALERT_STATUS = "weather_alert.status"

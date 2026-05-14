@@ -17,6 +17,7 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.sdr_scheduler import PRIORITY_BACKGROUND
 
 _VALID_MODES = ("wbfm", "fm", "am", "usb", "lsb")
 
@@ -174,6 +175,13 @@ class FMReceiver(PluginBase):
                 else:
                     self._presets[name] = preset
 
+        self._dongle_active = False
+        self._preempted_by = ""
+        self._preempted_by_label = ""
+        self._preempted_until_ts: float | None = None
+        self._locked = False
+        self._was_playing_before_yield = False
+
     def _validate_frequency(self, freq_mhz: float) -> None:
         if not self._freq_min_mhz <= freq_mhz <= self._freq_max_mhz:
             raise ValueError(
@@ -212,14 +220,27 @@ class FMReceiver(PluginBase):
         self._stream_lock = threading.Lock()
         self._event_loop: asyncio.AbstractEventLoop | None = None
 
-        try:
-            from reticulumpi.rtlsdr import resolve_device
-            self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
-        except (RuntimeError, ValueError) as exc:
-            self.log.error("RTL-SDR device resolution failed: %s", exc)
-            self._set_status("error", str(exc))
-
         self._active = True
+
+        sched = getattr(self.app, "sdr_scheduler", None)
+        if sched is not None and self._device_id:
+            sched.register(
+                serial=self._device_id,
+                caller=self.plugin_name,
+                priority=PRIORITY_BACKGROUND,
+                acquire_cb=self._on_scheduler_acquire,
+                yield_cb=self._on_scheduler_yield,
+                label="FM/AM Radio",
+                continuous=True,
+            )
+        else:
+            try:
+                from reticulumpi.rtlsdr import resolve_device
+                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+                self._dongle_active = True
+            except (RuntimeError, ValueError) as exc:
+                self.log.error("RTL-SDR device resolution failed: %s", exc)
+                self._set_status("error", str(exc))
 
         freq_mhz = self._frequency_hz / 1_000_000
         warning = self._check_dead_zone(freq_mhz)
@@ -227,7 +248,7 @@ class FMReceiver(PluginBase):
             self._dead_zone_warning = warning
             self.log.warning(warning)
 
-        if self._auto_play:
+        if self._auto_play and self._dongle_active:
             self.play()
 
         self.log.info(
@@ -240,21 +261,83 @@ class FMReceiver(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        self._playing = False
         self._terminate_process()
         self._notify_clients_stopped()
-        try:
-            from reticulumpi.rtlsdr import release_device
-            release_device(self._device_id, caller=self.plugin_name)
-        except Exception:
-            pass
+        sched = getattr(self.app, "sdr_scheduler", None)
+        if sched is not None and self._device_id:
+            sched.unregister(self._device_id, self.plugin_name)
+        else:
+            try:
+                from reticulumpi.rtlsdr import release_device
+                release_device(self._device_id, caller=self.plugin_name)
+            except Exception:
+                pass
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
+
+    # ── scheduler callbacks ────────────────────────────────────────────
+
+    def _on_scheduler_acquire(self, serial: str, device_index: int) -> None:
+        self._resolved_index = device_index
+        self._dongle_active = True
+        self._preempted_by = ""
+        self._preempted_by_label = ""
+        self._preempted_until_ts = None
+        self.log.info("Acquired dongle %s (index %d)", serial, device_index)
+        if self._was_playing_before_yield:
+            self._was_playing_before_yield = False
+            self.play()
+        elif self._auto_play:
+            self.play()
+
+    def _on_scheduler_yield(
+        self,
+        preempted_by: str,
+        preempted_by_label: str,
+        preempted_until_ts: float | None,
+    ) -> bool:
+        self._was_playing_before_yield = self._playing
+        self._dongle_active = False
+        self._preempted_by = preempted_by
+        self._preempted_by_label = preempted_by_label
+        self._preempted_until_ts = preempted_until_ts
+        if self._playing:
+            self._playing = False
+            self._terminate_process()
+            self._notify_clients_stopped()
+            self._set_status("paused")
+        self.log.info("Yielded dongle to %s", preempted_by)
+        return True
+
+    # ── lock / unlock ───────────────────────────────────────────────
+
+    def lock_dongle(self) -> dict[str, Any]:
+        if not self._dongle_active:
+            return {"locked": False, "error": "dongle not active"}
+        sched = getattr(self.app, "sdr_scheduler", None)
+        if sched is None:
+            return {"locked": False, "error": "scheduler not available"}
+        if sched.lock(self._device_id, self.plugin_name):
+            self._locked = True
+            return {"locked": True}
+        return {"locked": False, "error": "lock rejected"}
+
+    def unlock_dongle(self) -> dict[str, Any]:
+        sched = getattr(self.app, "sdr_scheduler", None)
+        if sched is None:
+            return {"locked": False, "error": "scheduler not available"}
+        sched.unlock(self._device_id, self.plugin_name)
+        self._locked = False
+        return {"locked": False}
 
     # ── public API ───────────────────────────────────────────────────
 
     def play(self) -> dict[str, Any]:
         if self._playing or self._supervisor_alive:
             return {"status": "already_playing"}
+        if not self._dongle_active:
+            return {"status": "error", "error": "Dongle in use by another signal"}
         if self._resolved_index is None:
             return {"status": "error", "error": "No RTL-SDR device resolved"}
         self._playing = True
@@ -392,7 +475,7 @@ class FMReceiver(PluginBase):
         freq_mhz = self._frequency_hz / 1_000_000
         with self._stream_lock:
             client_count = len(self._stream_queues)
-        return {
+        snap: dict[str, Any] = {
             "status": self._status,
             "playing": self._playing,
             "frequency_hz": self._frequency_hz,
@@ -410,7 +493,14 @@ class FMReceiver(PluginBase):
             "error": self._last_error,
             "dead_zone_warning": self._dead_zone_warning,
             "audio_clients": client_count,
+            "dongle_active": self._dongle_active,
+            "locked": self._locked,
         }
+        if not self._dongle_active and self._preempted_by:
+            snap["preempted_by"] = self._preempted_by
+            snap["preempted_by_label"] = self._preempted_by_label
+            snap["preempted_until_ts"] = self._preempted_until_ts
+        return snap
 
     def get_status(self) -> dict[str, Any]:
         running = self._process is not None and self._process.poll() is None

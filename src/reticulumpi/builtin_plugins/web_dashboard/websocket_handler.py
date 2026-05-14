@@ -805,6 +805,24 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
             except (ValueError, TypeError) as exc:
                 return {"type": "radio_error", "error": str(exc)}
 
+    elif action == "radio_lock":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "lock_dongle"):
+            try:
+                result = fm.lock_dongle()
+                return {"type": "radio_lock", **result}
+            except Exception as exc:
+                return {"type": "radio_error", "error": str(exc)}
+
+    elif action == "radio_unlock":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "unlock_dongle"):
+            try:
+                result = fm.unlock_dongle()
+                return {"type": "radio_unlock", **result}
+            except Exception as exc:
+                return {"type": "radio_error", "error": str(exc)}
+
 
 def _on_alert_event(event_type: str, data: dict) -> None:
     """Event-bus callback for ALERT_TRIGGERED — push to WS clients."""

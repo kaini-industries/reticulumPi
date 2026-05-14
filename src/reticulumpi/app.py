@@ -19,6 +19,7 @@ from reticulumpi.event_bus import EventBus
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.internet_probe import InternetProbe
 from reticulumpi.plugin_loader import PluginLoader
+from reticulumpi.sdr_scheduler import SdrScheduler
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,10 @@ class ReticulumPiApp:
         self.event_bus = EventBus()
         self.announce_dispatcher = AnnounceDispatcher()
         self.internet_probe: InternetProbe | None = None
+        self.sdr_scheduler = SdrScheduler(
+            self.event_bus,
+            config=self.config.plugins.get("sdr_scheduler", {}),
+        )
 
     def start(self) -> None:
         """Initialize Reticulum, load identity, start plugins, and enter the run loop."""
@@ -62,6 +67,7 @@ class ReticulumPiApp:
         log.info("Node identity hash: %s", RNS.prettyhexrep(self.identity.hash))
 
         self.announce_dispatcher.start()
+        self.sdr_scheduler.start()
 
         self.internet_probe = InternetProbe(self.event_bus, self.config.internet)
         self.internet_probe.start()
@@ -100,8 +106,8 @@ class ReticulumPiApp:
         log.info("ReticulumPi is running. Press Ctrl+C to stop.")
         self._shutdown_event.wait()
 
-    # Leave 5s headroom under systemd's TimeoutStopSec=30
-    SHUTDOWN_TIMEOUT: float = 25.0
+    # Leave 15s headroom under systemd's TimeoutStopSec=60
+    SHUTDOWN_TIMEOUT: float = 45.0
     PLUGIN_STOP_TIMEOUT: float = 10.0
     PLUGIN_START_TIMEOUT: float = 30.0
 
@@ -113,7 +119,7 @@ class ReticulumPiApp:
         finds its process already exited or nearly so.
         """
         signalled: list[str] = []
-        for name, plugin in self.plugins.items():
+        for name, plugin in list(self.plugins.items()):
             proc = getattr(plugin, "_process", None)
             if proc is None:
                 continue
@@ -159,6 +165,7 @@ class ReticulumPiApp:
         if self.internet_probe:
             self.internet_probe.stop()
 
+        self.sdr_scheduler.stop()
         self.announce_dispatcher.stop()
 
         # Shut down event bus thread pool so offloaded callbacks drain cleanly.

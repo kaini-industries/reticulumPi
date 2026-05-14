@@ -838,6 +838,11 @@ body {
 .svc-tag-gps { background: rgba(0, 229, 255, 0.15); color: var(--gps, #00e5ff); }
 .svc-tag-ntp { background: rgba(191, 90, 242, 0.15); color: var(--purple); }
 .svc-tag-hotspot { background: rgba(77, 208, 225, 0.15); color: #4dd0e1; }
+.svc-tag-wx    { background: rgba(244, 67, 54, 0.15); color: #ef5350; }
+.svc-tag-ais   { background: rgba(33, 150, 243, 0.15); color: #42a5f5; }
+.svc-tag-acars { background: rgba(171, 71, 188, 0.15); color: #ab47bc; }
+.svc-tag-sonde { background: rgba(255, 167, 38, 0.15); color: #ffa726; }
+.svc-tag-noaa  { background: rgba(38, 166, 154, 0.15); color: #26a69a; }
 
 .hotspot-overview { padding: 0.75rem 1rem; }
 
@@ -4617,6 +4622,31 @@ body {
 .radio-status-error { color: var(--red); }
 .radio-status-restarting { color: var(--yellow); }
 .radio-status-unavailable { color: var(--text-muted); }
+.radio-status-paused { color: var(--yellow); }
+
+.radio-preemption-banner {
+  background: rgba(255, 182, 39, 0.15);
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  font-size: 0.85em;
+  text-align: center;
+}
+.radio-paused .radio-tuner-display,
+.radio-paused .radio-controls,
+.radio-paused .radio-playback-row,
+.radio-paused .radio-mode-bar { opacity: 0.4; pointer-events: none; }
+.radio-lock-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 0.8em;
+}
+.radio-lock-toggle { cursor: pointer; color: var(--text-muted); }
+.radio-lock-toggle input { margin-right: 4px; }
+.radio-lock-icon { margin-left: 6px; font-size: 0.75em; }
 
 .radio-btn.pending, .radio-mode-btn.pending {
   opacity: 0.6;
@@ -4744,3 +4774,113 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
   top: 0;
   z-index: 1000;
 }
+
+/* ── Weather alert banner ────────────────────────────────── */
+.weather-alert-banner {
+  text-align: center;
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 0.95em;
+  position: sticky;
+  top: 0;
+  z-index: 1100;
+}
+.weather-alert-extreme { background: #b71c1c; color: #fff; }
+.weather-alert-severe  { background: #e65100; color: #fff; }
+.weather-alert-moderate { background: #f9a825; color: #000; }
+
+/* ── Signal plugin panels ────────────────────────────────── */
+.radiosonde-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.radiosonde-card {
+  background: var(--surface, #161b2e);
+  border: 1px solid var(--border, #1e2a45);
+  border-radius: 4px;
+  padding: 8px 12px;
+  min-width: 100px;
+  flex: 1 1 auto;
+}
+.radiosonde-card .radiosonde-card-label {
+  font-size: 0.7em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.radiosonde-card .radiosonde-card-value {
+  font-size: 1.1em;
+  font-weight: 600;
+}
+.radiosonde-chart {
+  width: 100%;
+  max-width: 600px;
+  height: 200px;
+  background: var(--surface, #161b2e);
+  border-radius: 4px;
+  margin-bottom: 10px;
+}
+.radiosonde-next {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.noaa-progress {
+  background: var(--surface, #161b2e);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+.noaa-progress-bar {
+  height: 6px;
+  background: var(--border, #1e2a45);
+  border-radius: 3px;
+  margin-top: 6px;
+}
+.noaa-progress-fill {
+  height: 100%;
+  background: var(--green, #00ff88);
+  border-radius: 3px;
+  transition: width 0.5s;
+}
+.noaa-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.noaa-thumb {
+  width: 140px;
+  cursor: pointer;
+  text-align: center;
+}
+.noaa-thumb img {
+  width: 100%;
+  border-radius: 4px;
+  border: 1px solid var(--border, #1e2a45);
+}
+.noaa-thumb-label {
+  font-size: 0.7em;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.noaa-quality { font-size: 0.65em; padding: 1px 4px; border-radius: 2px; }
+.noaa-progress-label { font-size: 0.85em; margin-bottom: 4px; }
+.noaa-progress-track {
+  height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;
+}
+.noaa-thumb-info { padding: 4px 6px; font-size: 0.75em; }
+.noaa-thumb-sat { font-weight: 600; }
+.noaa-thumb-date { color: var(--text-muted); }
+.noaa-thumb-size { color: var(--text-muted); font-size: 0.9em; }
+.noaa-empty { font-size: 0.85em; color: var(--text-muted); padding: 12px 0; }
+.noaa-pass-entry { display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 3px; }
+.noaa-passes {
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+.noaa-passes div { margin-bottom: 3px; }
+
+.acars-error { opacity: 0.6; }

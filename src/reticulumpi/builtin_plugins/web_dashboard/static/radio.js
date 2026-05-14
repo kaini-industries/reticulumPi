@@ -24,6 +24,7 @@
   var _presetsEl;
   var _statusBadge;
   var _feedbackEl;
+  var _preemptBanner, _lockCb, _lockIcon;
 
   // -- State ----------------------------------------------------------------
   var _expanded = false;
@@ -86,6 +87,9 @@
     _vuCanvas = $('radio-vu-canvas');
     _fftCanvas = $('radio-fft-canvas');
     _presetsEl = $('radio-presets');
+    _preemptBanner = $('radio-preemption-banner');
+    _lockCb = $('radio-lock-cb');
+    _lockIcon = $('radio-lock-icon');
     if (_vuCanvas) _vuCtx = _vuCanvas.getContext('2d');
     if (_fftCanvas) _fftCtx = _fftCanvas.getContext('2d');
 
@@ -184,6 +188,11 @@
       if (_bandLabel) _bandLabel.textContent = _bandFor(next);
       _setPending('tune');
       _sendWs({ action: 'radio_tune', frequency_mhz: next });
+    });
+
+    if (_lockCb) _lockCb.addEventListener('change', function () {
+      var action = _lockCb.checked ? 'radio_lock' : 'radio_unlock';
+      _sendWs({ action: action });
     });
   }
 
@@ -596,11 +605,31 @@
 
     if (_statusBadge) {
       var st = data.status || 'stopped';
-      var validSt = ['stopped','playing','error','restarting','unavailable'];
+      var validSt = ['stopped','starting','playing','paused','error','restarting','unavailable'];
       if (validSt.indexOf(st) < 0) st = 'stopped';
       _statusBadge.textContent = st;
       _statusBadge.className = 'count radio-status-' + st;
     }
+
+    if (_preemptBanner) {
+      if (data.dongle_active === false && data.preempted_by) {
+        var label = data.preempted_by_label || data.preempted_by;
+        var remaining = '';
+        if (data.preempted_until_ts) {
+          var secs = Math.max(0, Math.round(data.preempted_until_ts - Date.now() / 1000));
+          if (secs > 0) remaining = ' (' + Math.floor(secs / 60) + 'm ' + (secs % 60) + 's remaining)';
+        }
+        _preemptBanner.textContent = 'Paused — ' + label + remaining;
+        _preemptBanner.style.display = '';
+        _section.classList.add('radio-paused');
+      } else {
+        _preemptBanner.style.display = 'none';
+        _section.classList.remove('radio-paused');
+      }
+    }
+
+    if (_lockCb) _lockCb.checked = !!data.locked;
+    if (_lockIcon) _lockIcon.style.display = data.locked ? '' : 'none';
 
     if (!_presetsBuilt) {
       R.api('/api/radio/presets').then(function (r) {
@@ -681,6 +710,12 @@
 
     if (msg.type === 'radio_gain' || msg.type === 'radio_squelch' || msg.type === 'radio_volume') {
       _clearPending();
+    }
+
+    if (msg.type === 'radio_lock' || msg.type === 'radio_unlock') {
+      if (_lockCb) _lockCb.checked = !!msg.locked;
+      if (_lockIcon) _lockIcon.style.display = msg.locked ? '' : 'none';
+      if (msg.error) _showFeedback(msg.error);
     }
   }
 
