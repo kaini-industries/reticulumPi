@@ -298,6 +298,9 @@ class SpectrumScanner(PluginBase):
             self._snapshot_bins_version = self._bins_version
             self._segments = {}
             self._current_ts = None
+            self._detected_peaks = []
+            self._sweep_intervals.clear()
+            self._last_sweep_mono = None
 
     def get_presets(self) -> dict[str, Any]:
         """Return available presets with metadata for the dashboard."""
@@ -342,6 +345,11 @@ class SpectrumScanner(PluginBase):
         # broadcast cycle when the sweep hasn't changed.
         self._snapshot_cache: tuple[int, dict[str, Any]] | None = None
         self._snapshot_bins_version = -1
+
+        # Peak detection + sweep timing
+        self._detected_peaks: list[dict[str, Any]] = []
+        self._sweep_intervals: deque[float] = deque(maxlen=60)
+        self._last_sweep_mono: float | None = None
 
         # Parser-local accumulator (flushed per sweep).  Maps
         # segment_start_hz -> (bin_step_hz, [power_db, ...]).
@@ -461,6 +469,17 @@ class SpectrumScanner(PluginBase):
             if self._bins_version != self._snapshot_bins_version:
                 snap["bins_hz"] = list(self._bins_hz)
                 self._snapshot_bins_version = self._bins_version
+
+            # Peak detection
+            snap["detected_peaks"] = list(self._detected_peaks)
+
+            # Sweep rate
+            intervals = self._sweep_intervals
+            if intervals:
+                avg_interval = sum(intervals) / len(intervals)
+                snap["sweep_rate_hz"] = round(1.0 / avg_interval, 3) if avg_interval > 0 else None
+            else:
+                snap["sweep_rate_hz"] = None
 
             # Preset metadata
             snap["active_preset"] = self._active_preset
@@ -727,6 +746,34 @@ class SpectrumScanner(PluginBase):
         self._current_ts = ts
         self._segments[freq_lo] = (bin_step, dbs)
 
+    def _detect_peaks(
+        self, freqs: list[int], powers: list[float | None], noise_floor: float,
+    ) -> list[dict[str, Any]]:
+        """Find local maxima above noise_floor + 10 dB.  Returns up to 20 peaks."""
+        threshold = noise_floor + 10.0
+        peaks: list[dict[str, Any]] = []
+        n = len(powers)
+        for i in range(n):
+            p = powers[i]
+            if p is None or p <= threshold:
+                continue
+            # Local maximum: higher than both neighbors (edges only need one side)
+            left = powers[i - 1] if i > 0 else None
+            right = powers[i + 1] if i < n - 1 else None
+            if left is not None and left >= p:
+                continue
+            if right is not None and right >= p:
+                continue
+            peaks.append({
+                "freq_hz": freqs[i],
+                "freq_mhz": round(freqs[i] / 1_000_000, 4),
+                "power_db": p,
+                "excess_db": round(p - noise_floor, 1),
+            })
+        # Sort by power descending, cap at 20
+        peaks.sort(key=lambda pk: pk["power_db"], reverse=True)
+        return peaks[:20]
+
     def _flush_current_sweep(self) -> None:
         """Assemble accumulated segments into a complete sweep; publish + roll waterfall."""
         segs = self._segments
@@ -746,6 +793,17 @@ class SpectrumScanner(PluginBase):
             return
 
         now = time.time()
+        now_mono = time.monotonic()
+
+        # Peak detection — compute noise floor from valid powers
+        valid = [p for p in powers if p is not None]
+        if valid:
+            valid_sorted = sorted(valid)
+            nf = valid_sorted[len(valid_sorted) // 2]  # median as noise floor
+            detected = self._detect_peaks(freqs, powers, nf)
+        else:
+            detected = []
+
         with self._state_lock:
             if freqs != self._bins_hz:
                 self._bins_hz = freqs
@@ -755,6 +813,11 @@ class SpectrumScanner(PluginBase):
             self._sweep_count += 1
             self._last_sweep_at = now
             self._snapshot_cache = None
+            self._detected_peaks = detected
+            # Sweep timing
+            if self._last_sweep_mono is not None:
+                self._sweep_intervals.append(now_mono - self._last_sweep_mono)
+            self._last_sweep_mono = now_mono
 
         # Feed LoRa channel analyzer if active
         if self._analyzer is not None:

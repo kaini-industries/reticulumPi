@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from typing import Any
 
 import RNS
@@ -111,6 +112,8 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 "hops": None,
                 "last_announce_seen": None,
                 "last_path_check": None,
+                "path_checks_total": 0,
+                "path_up_count": 0,
             }
 
         # LoRa interface stats
@@ -130,6 +133,9 @@ class LoRaDiagnosticsPlugin(PluginBase):
         # Beacon stats
         self._beacons_sent = 0
         self._last_beacon_time: float | None = None
+
+        # Airtime trending history — one entry per poll cycle
+        self._airtime_history: deque[tuple[float, float, float]] = deque(maxlen=120)
 
         # Subscribe to announces for monitored destinations
         self._announce_sub = self.announce_dispatcher.subscribe(
@@ -174,6 +180,9 @@ class LoRaDiagnosticsPlugin(PluginBase):
         with self._lock:
             monitored = []
             for hex_hash, info in self._monitored.items():
+                total = info["path_checks_total"]
+                up = info["path_up_count"]
+                uptime_pct = round(up / total * 100, 1) if total > 0 else 0.0
                 monitored.append(
                     {
                         "hash": hex_hash,
@@ -182,9 +191,16 @@ class LoRaDiagnosticsPlugin(PluginBase):
                         "hops": info["hops"],
                         "last_announce_seen": info["last_announce_seen"],
                         "last_path_check": info["last_path_check"],
+                        "path_checks_total": total,
+                        "path_up_count": up,
+                        "path_uptime_pct": uptime_pct,
                     }
                 )
             current_mode = self._detect_announce_mode()
+            airtime_hist = [
+                {"t": round(t, 3), "short": round(s, 4), "long": round(l, 4)}
+                for t, s, l in self._airtime_history
+            ]
             return {
                 "lora_interface": dict(self._lora_stats),
                 "monitored_destinations": monitored,
@@ -202,6 +218,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
                         current_mode, {}
                     ).get("description", "unknown"),
                 },
+                "airtime_history": airtime_hist,
             }
 
     def set_announce_mode(self, mode: str) -> dict[str, Any]:
@@ -417,6 +434,12 @@ class LoRaDiagnosticsPlugin(PluginBase):
             txb_delta = txb - self._prev_txb
             self._prev_rxb = rxb
             self._prev_txb = txb
+            # Record airtime trending
+            self._airtime_history.append((
+                time.time(),
+                self._lora_stats["airtime_short"],
+                self._lora_stats["airtime_long"],
+            ))
 
         self.event_bus.publish(
             events.LORA_STATS_UPDATED,
@@ -442,6 +465,9 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 info["has_path"] = has_path
                 info["hops"] = hops
                 info["last_path_check"] = now
+                info["path_checks_total"] += 1
+                if has_path:
+                    info["path_up_count"] += 1
 
             # Publish events on state transitions
             if had_path and not has_path:

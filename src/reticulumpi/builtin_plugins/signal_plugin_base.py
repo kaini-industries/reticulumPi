@@ -7,6 +7,7 @@ import threading
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.sdr_scheduler import (
     PRIORITY_BACKGROUND,
@@ -41,6 +42,8 @@ class SignalPluginBase(PluginBase):
         self._preempted_by_label: str = ""
         self._preempted_until_ts: float | None = None
         self._locked = False
+        self._receiver_lat: float | None = None
+        self._receiver_lon: float | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -50,6 +53,19 @@ class SignalPluginBase(PluginBase):
             or self.config.get("device_index", ""),
         )
         self._active = True
+
+        self._receiver_lat = self.config.get("receiver_lat")
+        self._receiver_lon = self.config.get("receiver_lon")
+        if self._receiver_lat is not None:
+            self._receiver_lat = float(self._receiver_lat)
+        if self._receiver_lon is not None:
+            self._receiver_lon = float(self._receiver_lon)
+
+        try:
+            self.event_bus.subscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
+            self.event_bus.subscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
+        except Exception:
+            pass
 
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is not None and self._dongle_serial:
@@ -65,8 +81,20 @@ class SignalPluginBase(PluginBase):
 
         self._on_start()
 
+    def _on_gps_fix(self, _event_type: str, data: dict) -> None:
+        lat = data.get("lat")
+        lon = data.get("lon")
+        if lat is not None and lon is not None:
+            self._receiver_lat = float(lat)
+            self._receiver_lon = float(lon)
+
     def stop(self) -> None:
         self._active = False
+        try:
+            self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
+            self.event_bus.unsubscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
+        except Exception:
+            pass
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is not None and self._dongle_serial:
             sched.unregister(self._dongle_serial, self.plugin_name)

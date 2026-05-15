@@ -156,6 +156,10 @@ class WeatherAlert(SignalPluginBase):
             "alerts_by_type": {},
             "last_header_at": None,
         }
+        self._decode_errors = 0
+        self._partial_headers = 0
+        self._retransmissions = 0
+        self._seen_headers: dict[str, float] = {}
         self._status = "idle"
         self._last_error: str | None = None
         self._start_thread(self._expiry_loop, name="wx-expiry")
@@ -265,6 +269,8 @@ class WeatherAlert(SignalPluginBase):
                 m = _SAME_RE.search(text)
                 if m:
                     self._handle_same_header(m)
+                elif "EAS:" in text or "ZCZC" in text:
+                    self._partial_headers += 1
         except (ValueError, OSError):
             pass
         except Exception:
@@ -289,6 +295,22 @@ class WeatherAlert(SignalPluginBase):
         issued_ts = _parse_issued_ts(issued)
         purge_ts = _compute_purge_ts(issued_ts, purge)
 
+        missing = sum(1 for v in (issued_ts, purge_ts, callsign) if not v)
+        decode_confidence = max(0.0, 1.0 - 0.2 * missing)
+
+        duration_s = None
+        if issued_ts and purge_ts:
+            duration_s = purge_ts - issued_ts
+
+        raw_header = m.group(0)
+        retransmission = False
+        now = time.time()
+        prev_ts = self._seen_headers.get(raw_header)
+        if prev_ts is not None and now - prev_ts < 120:
+            retransmission = True
+            self._retransmissions += 1
+        self._seen_headers[raw_header] = now
+
         alert = {
             "event_code": event_code,
             "event_desc": event_desc,
@@ -299,10 +321,13 @@ class WeatherAlert(SignalPluginBase):
             "counties": [_fips_label(f) for f in fips_codes],
             "issued_ts": issued_ts,
             "purge_ts": purge_ts,
+            "duration_s": duration_s,
             "callsign": callsign,
-            "raw_header": m.group(0),
-            "received_at": time.time(),
+            "raw_header": raw_header,
+            "received_at": now,
             "expired": False,
+            "decode_confidence": round(decode_confidence, 2),
+            "retransmission": retransmission,
         }
 
         self._alert_history.appendleft(alert)
@@ -346,6 +371,24 @@ class WeatherAlert(SignalPluginBase):
                 except Exception:
                     pass
 
+        try:
+            self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
+                "source": "weather_alert",
+                "type": "alert",
+                "timestamp": now,
+                "confidence": decode_confidence,
+                "position": None,
+                "distance_nm": None,
+                "bearing_deg": None,
+                "data": {
+                    "event_code": event_code,
+                    "severity": severity,
+                    "fips_codes": fips_codes,
+                },
+            })
+        except Exception:
+            pass
+
     def _check_expired(self) -> None:
         now = time.time()
         if self._active_alert:
@@ -381,6 +424,10 @@ class WeatherAlert(SignalPluginBase):
     def _update_snapshot_cache(self) -> None:
         self._check_expired()
         with self._cache_lock:
+            total = self._stats["headers_decoded_total"] + self._partial_headers
+            error_rate = round(
+                self._partial_headers / max(1, total) * 100, 1,
+            )
             self._snapshot_cache = {
                 "status": self._status,
                 "error": self._last_error,
@@ -388,6 +435,10 @@ class WeatherAlert(SignalPluginBase):
                 "active_alert": dict(self._active_alert) if self._active_alert else None,
                 "alert_history": list(self._alert_history),
                 "stats": dict(self._stats),
+                "decode_errors": self._decode_errors,
+                "partial_headers": self._partial_headers,
+                "retransmissions": self._retransmissions,
+                "error_rate_pct": error_rate,
             }
 
     def get_status(self) -> dict[str, Any]:

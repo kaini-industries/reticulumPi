@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import struct
 import threading
+from collections import deque
 from unittest.mock import MagicMock
 
 import pytest
@@ -51,6 +52,10 @@ def _make_plugin(config: dict | None = None) -> FMReceiver:
     plugin._dead_zone_warning = None
     plugin._stream_queues = []
     plugin._event_loop = None
+    plugin._signal_history = deque(maxlen=300)
+    plugin._squelch_break_count = 0
+    plugin._squelch_was_open = False
+    plugin._last_signal_history_ts = 0.0
     return plugin
 
 

@@ -13,6 +13,7 @@ import struct
 import subprocess
 import threading
 import time
+from collections import deque
 from typing import Any
 
 from reticulumpi import events
@@ -215,6 +216,11 @@ class FMReceiver(PluginBase):
         self._signal_rms: float = 0.0
         self._signal_db: float = -90.0
         self._dead_zone_warning: str | None = None
+
+        self._signal_history: deque[float] = deque(maxlen=300)
+        self._squelch_break_count = 0
+        self._squelch_was_open = False
+        self._last_signal_history_ts = 0.0
 
         self._stream_queues: list[asyncio.Queue] = []
         self._stream_lock = threading.Lock()
@@ -512,6 +518,8 @@ class FMReceiver(PluginBase):
             snap["preempted_by"] = self._preempted_by
             snap["preempted_by_label"] = self._preempted_by_label
             snap["preempted_until_ts"] = self._preempted_until_ts
+        snap["squelch_break_count"] = self._squelch_break_count
+        snap["signal_history"] = list(self._signal_history)[-30:]
         return snap
 
     def get_status(self) -> dict[str, Any]:
@@ -680,6 +688,18 @@ class FMReceiver(PluginBase):
         rms = math.sqrt(sum_sq / n_samples)
         self._signal_rms = rms
         self._signal_db = 20.0 * math.log10(max(rms, 1.0)) - 90.0
+
+        # Signal history at ~1 sample/sec
+        now = time.time()
+        if now - self._last_signal_history_ts >= 1.0:
+            self._signal_history.append(rms)
+            self._last_signal_history_ts = now
+
+        # Squelch break detection (RMS crosses above 500)
+        squelch_open = rms > 500
+        if squelch_open and not self._squelch_was_open:
+            self._squelch_break_count += 1
+        self._squelch_was_open = squelch_open
 
     # ── process management ───────────────────────────────────────────
 

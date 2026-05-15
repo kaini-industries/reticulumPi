@@ -1257,6 +1257,9 @@
       if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(d.meshtastic_lora_neighbors);
       if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(d.meshtastic_lora_neighbors);
     }
+    if (d.meshtastic_nodes || d.meshtastic_lora_neighbors || d.meshcore_contacts) {
+      if (RPI.updateNodeTracker) RPI.updateNodeTracker(d.meshtastic_nodes || null, d.meshtastic_lora_neighbors || null, d.meshcore_contacts || null);
+    }
     if (d.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(d.meshcore_status, d.meshcore_contacts);
     if (d.meshcore_contacts && RPI.updateMapMeshCore) RPI.updateMapMeshCore(d.meshcore_contacts);
     if (d.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(d.meshcore_device);
@@ -1283,6 +1286,8 @@
     if (d.acars && RPI.updateAcars) RPI.updateAcars(d.acars);
     if (d.radiosonde && RPI.updateRadiosonde) RPI.updateRadiosonde(d.radiosonde);
     if (d.noaa_apt && RPI.updateNoaa) RPI.updateNoaa(d.noaa_apt);
+    if (d.sigops && RPI.sigops && RPI.sigops.update) RPI.sigops.update(d.sigops);
+    if (d.ism && RPI.sigops && RPI.sigops.updateIsm) RPI.sigops.updateIsm(d.ism);
   }
 
   function connectWS() {
@@ -1434,7 +1439,7 @@
   function registerDeferredSection(name, fn) { _sectionFirstExpand[name] = fn; }
   RPI.registerDeferredSection = registerDeferredSection;
 
-  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot'].forEach(function(name) {
+  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot', 'node-tracker'].forEach(function(name) {
     var toggle = $(name + '-toggle');
     var body = $(name + '-body');
     if (toggle && body) {

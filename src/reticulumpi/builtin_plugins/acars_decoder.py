@@ -76,6 +76,14 @@ class ACARSDecoder(SignalPluginBase):
         self._seen_flights: set[str] = set()
         self._seen_tails: set[str] = set()
         self._daily_reset_ts = time.time()
+        self._airline_stats: dict[str, int] = {}
+        self._hourly_rate: deque[int] = deque(maxlen=24)
+        self._hourly_count = 0
+        self._hourly_ts = time.time()
+        self._level_min: float | None = None
+        self._level_max: float | None = None
+        self._level_sum: float = 0.0
+        self._level_count: int = 0
         self._status = "idle"
         self._last_error: str | None = None
         self._restart_count = 0
@@ -190,9 +198,44 @@ class ACARSDecoder(SignalPluginBase):
             self._seen_tails.add(tail)
             self._stats["unique_tails_today"] = len(self._seen_tails)
 
+        # Airline code tracking (first 3 chars of flight number)
+        if flight and len(flight) >= 3:
+            airline = flight[:3].strip()
+            if airline:
+                self._airline_stats[airline] = self._airline_stats.get(airline, 0) + 1
+
+        # Hourly message rate
+        now_ts = time.time()
+        if now_ts - self._hourly_ts >= 3600:
+            self._hourly_rate.append(self._hourly_count)
+            self._hourly_count = 0
+            self._hourly_ts = now_ts
+        self._hourly_count += 1
+
+        # Signal level min/max/running-average
+        if level:
+            lf = float(level)
+            if self._level_min is None or lf < self._level_min:
+                self._level_min = lf
+            if self._level_max is None or lf > self._level_max:
+                self._level_max = lf
+            self._level_sum += lf
+            self._level_count += 1
+
         try:
             self.event_bus.publish(events.ACARS_MESSAGE_DECODED, {
                 "flight": flight, "tail": tail, "label": label,
+            })
+        except Exception:
+            pass
+
+        try:
+            self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
+                "source": "acars_decoder",
+                "signal_type": "ACARS",
+                "tail": tail,
+                "flight": flight,
+                "label": label,
             })
         except Exception:
             pass
@@ -212,6 +255,17 @@ class ACARSDecoder(SignalPluginBase):
         total = self._stats["messages_total"]
         error_count = self._stats["error_count"]
         error_rate = (error_count / total * 100) if total > 0 else 0.0
+
+        # Top 20 airlines by message count
+        top_airlines = dict(
+            sorted(self._airline_stats.items(), key=lambda x: x[1], reverse=True)[:20],
+        )
+
+        level_avg = (
+            round(self._level_sum / self._level_count, 1)
+            if self._level_count > 0 else None
+        )
+
         with self._cache_lock:
             self._snapshot_cache = {
                 "status": self._status,
@@ -220,6 +274,11 @@ class ACARSDecoder(SignalPluginBase):
                 "stats": {
                     **self._stats,
                     "error_rate_pct": round(error_rate, 1),
+                    "airline_stats": top_airlines,
+                    "hourly_rate": list(self._hourly_rate),
+                    "level_min": self._level_min,
+                    "level_max": self._level_max,
+                    "level_avg": level_avg,
                 },
             }
         self._snapshot_dirty = False

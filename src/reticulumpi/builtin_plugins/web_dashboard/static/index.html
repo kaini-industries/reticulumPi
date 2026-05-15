@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=40">
+  <link rel="stylesheet" href="/static/style.css?v=41">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -113,7 +113,6 @@
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
-              <input type="text" id="msg-lxmf-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
               <button class="msg-new-btn" id="msg-lxmf-new-btn" title="New message">+</button>
             </div>
             <div class="msg-conversations" id="msg-lxmf-conversations"></div>
@@ -161,7 +160,6 @@
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
-              <input type="text" id="msg-lora-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
               <button class="msg-channels-btn" id="msg-lora-ch-manage-btn" title="Manage channels">Channels</button>
               <button class="msg-new-btn" id="msg-lora-new-btn" title="New message">+</button>
             </div>
@@ -212,7 +210,6 @@
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
-              <input type="text" id="msg-meshcore-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
               <button class="msg-new-btn" id="msg-meshcore-new-btn" title="New message">+</button>
             </div>
             <div class="msg-conversations" id="msg-meshcore-conversations"></div>
@@ -746,6 +743,37 @@
       </details>
     </div>
 
+    <!-- Node Tracker -->
+    <div class="section svc-meshtastic" id="node-tracker-section" style="display:none">
+      <div class="section-header collapsible" id="node-tracker-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Node Tracker <span class="svc-tag svc-tag-msh">MSH</span> <span class="svc-tag svc-tag-mc">MC</span></span>
+        <span class="count" id="node-tracker-count"></span>
+      </div>
+      <div class="section-body hidden" id="node-tracker-body">
+        <div class="nt-controls">
+          <div class="nt-search-wrap">
+            <input type="text" id="node-tracker-search" class="rt-input" placeholder="Search nodes by name or ID..." autocomplete="off">
+            <div class="nt-results" id="node-tracker-results"></div>
+          </div>
+        </div>
+        <div class="nt-chips" id="node-tracker-chips"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Position</th>
+                <th>Last Heard</th>
+              </tr>
+            </thead>
+            <tbody id="node-tracker-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Node Map -->
     <div class="section awaiting-data" id="map-section">
       <div class="section-header">
@@ -756,6 +784,7 @@
         <button class="mesh-tab" id="map-show-all" title="Show all nodes with position">All Nodes</button>
         <button class="mesh-tab active" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
         <button class="mesh-tab" id="map-show-rns" title="Show Reticulum mesh peers only">Reticulum Peers</button>
+        <button class="mesh-tab" id="map-show-tracked" title="Show tracked nodes only">Tracked</button>
         <button class="mesh-tab" id="map-center-gps" title="Center on GPS location">My Location</button>
         <span class="map-stats" id="map-stats"></span>
       </div>
@@ -946,7 +975,7 @@
       <div class="section-body hidden" id="radio-body">
         <div class="radio-preemption-banner" id="radio-preemption-banner" style="display:none"></div>
         <div class="radio-lock-row" id="radio-lock-row">
-          <label class="radio-lock-toggle"><input type="checkbox" id="radio-lock-cb" /> Lock dongle</label>
+          <label class="radio-lock-toggle"><input type="checkbox" id="radio-lock-cb" /><span>Lock dongle</span></label>
         </div>
         <div class="radio-tuner-display">
           <div class="radio-freq-row">
@@ -1134,6 +1163,65 @@
       </div>
     </div>
 
+    <!-- Signal Operations -->
+    <div class="section awaiting-data" id="sigops-section" style="display:none">
+      <div class="section-header collapsible" id="sigops-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Signal Operations <span class="svc-tag svc-tag-sigops">SIGOPS</span></span>
+        <span class="svc-status" id="sigops-status-tag"></span>
+      </div>
+      <div class="section-body hidden" id="sigops-body">
+        <div class="metric-summary" id="sigops-stats"></div>
+
+        <!-- Contacts sub-section -->
+        <div class="sigops-subsection">
+          <div class="sigops-subheader collapsible" id="sigops-contacts-toggle">
+            <span><span class="chevron">&#9656;</span> Active Contacts <span class="count" id="sigops-contacts-count">0</span></span>
+            <select id="sigops-type-filter" class="sigops-filter"><option value="">All types</option></select>
+          </div>
+          <div class="hidden" id="sigops-contacts-body">
+            <div class="table-scroll" style="max-height:400px">
+              <table class="data-table">
+                <thead><tr>
+                  <th data-sort="contact_type">Type</th>
+                  <th data-sort="display_name">Name</th>
+                  <th data-sort="observation_count">Obs</th>
+                  <th>Sources</th>
+                  <th data-sort="distance_nm">Distance</th>
+                  <th data-sort="last_seen">Last Seen</th>
+                </tr></thead>
+                <tbody id="sigops-contacts-table"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ISM Devices sub-section -->
+        <div class="sigops-subsection" id="sigops-ism-wrap" style="display:none">
+          <div class="sigops-subheader collapsible" id="sigops-ism-toggle">
+            <span><span class="chevron">&#9656;</span> ISM Devices <span class="count" id="sigops-ism-count">0</span></span>
+          </div>
+          <div class="hidden" id="sigops-ism-body">
+            <div class="table-scroll" style="max-height:300px">
+              <table class="data-table">
+                <thead><tr><th>Model</th><th>ID</th><th>Ch</th><th>Reading</th><th>Msgs</th><th>Last Seen</th></tr></thead>
+                <tbody id="sigops-ism-table"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Correlations sub-section -->
+        <div class="sigops-subsection">
+          <div class="sigops-subheader collapsible" id="sigops-correlations-toggle">
+            <span><span class="chevron">&#9656;</span> Correlation Events</span>
+          </div>
+          <div class="hidden" id="sigops-correlations-body">
+            <div id="sigops-correlations-list" class="sigops-feed" style="max-height:250px;overflow-y:auto"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Plugins (collapsed by default) -->
     <div class="section" id="plugins-section">
       <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
@@ -1188,7 +1276,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=32"></script>
+  <script src="/static/app.js?v=33"></script>
   <script src="/static/messages_panel.js?v=7"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
   <script src="/static/mqtt_feed.js?v=1"></script>
@@ -1199,9 +1287,10 @@
   <script src="/static/lora.js?v=23"></script>
   <script src="/static/routing.js?v=23"></script>
   <script src="/static/meshtastic.js?v=25"></script>
+  <script src="/static/node_tracker.js?v=1"></script>
   <script src="/static/meshcore.js?v=3"></script>
   <script src="/static/vendor/leaflet.js"></script>
-  <script src="/static/map.js?v=5"></script>
+  <script src="/static/map.js?v=6"></script>
   <script src="/static/gps.js?v=3"></script>
   <script src="/static/space.js?v=2"></script>
   <script src="/static/spectrum_common.js?v=1"></script>
@@ -1217,5 +1306,6 @@
   <script src="/static/acars.js?v=1"></script>
   <script src="/static/radiosonde.js?v=1"></script>
   <script src="/static/noaa.js?v=1"></script>
+  <script src="/static/sigops.js?v=1"></script>
 </body>
 </html>

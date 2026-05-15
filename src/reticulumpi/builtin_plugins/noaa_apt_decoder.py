@@ -68,10 +68,13 @@ class NOAAAPTDecoder(SignalPluginBase):
         self._recent_images: deque[dict[str, Any]] = deque(maxlen=20)
         self._next_passes: list[dict[str, Any]] = []
         self._passes_lock = threading.Lock()
-        self._stats = {
+        self._stats: dict[str, Any] = {
             "total_captures": 0,
             "successful_decodes": 0,
+            "failed_decodes": 0,
             "last_capture_at": None,
+            "success_rate_pct": 0.0,
+            "best_pass": None,
         }
         self._status = "idle"
         self._last_error: str | None = None
@@ -347,9 +350,31 @@ class NOAAAPTDecoder(SignalPluginBase):
             )
             if result.returncode != 0:
                 self.log.warning("Decode failed (rc=%d): %s", result.returncode, result.stderr[:200])
+                self._stats["failed_decodes"] += 1
             elif os.path.exists(png_path) and os.path.getsize(png_path) > 0:
                 max_el = pass_info.get("max_el", 0)
-                quality = "good" if max_el >= 40 else "fair" if max_el >= 20 else "poor"
+                file_size = os.path.getsize(png_path)
+                quality_score = 0.3  # base for successful decode
+                if file_size > 500_000:
+                    quality_score += 0.3
+                elif file_size > 200_000:
+                    quality_score += 0.2
+                elif file_size > 100_000:
+                    quality_score += 0.1
+                if max_el >= 60:
+                    quality_score += 0.4
+                elif max_el >= 40:
+                    quality_score += 0.3
+                elif max_el >= 25:
+                    quality_score += 0.2
+                else:
+                    quality_score += 0.1
+                quality_score = round(min(1.0, quality_score), 2)
+                quality = (
+                    "excellent" if quality_score >= 0.8 else
+                    "good" if quality_score >= 0.6 else
+                    "fair" if quality_score >= 0.4 else "poor"
+                )
                 image_meta = {
                     "satellite": pass_info["satellite"],
                     "captured_at": pass_info.get("los_ts", time.time()),
@@ -357,16 +382,42 @@ class NOAAAPTDecoder(SignalPluginBase):
                     "max_el": max_el,
                     "duration_s": pass_info.get("duration_s", 0),
                     "filename": png_name,
-                    "file_size_bytes": os.path.getsize(png_path),
+                    "file_size_bytes": file_size,
                     "quality": quality,
+                    "quality_score": quality_score,
                 }
                 self._recent_images.appendleft(image_meta)
                 self._stats["successful_decodes"] += 1
                 self._stats["last_capture_at"] = time.time()
+                best = self._stats.get("best_pass")
+                if best is None or quality_score > best.get("quality_score", 0):
+                    self._stats["best_pass"] = {
+                        "satellite": pass_info["satellite"],
+                        "max_el": max_el,
+                        "quality_score": quality_score,
+                    }
 
-                self.log.info("Decoded image: %s (%s quality)", png_name, quality)
+                total = self._stats["successful_decodes"] + self._stats["failed_decodes"]
+                self._stats["success_rate_pct"] = round(
+                    self._stats["successful_decodes"] / max(1, total) * 100, 1,
+                )
+
+                self.log.info("Decoded image: %s (%s quality, score %.2f)", png_name, quality, quality_score)
                 try:
                     self.event_bus.publish(events.NOAA_APT_DECODE_COMPLETE, image_meta)
+                except Exception:
+                    pass
+                try:
+                    self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
+                        "source": "noaa_apt_decoder",
+                        "type": "satellite_image",
+                        "timestamp": time.time(),
+                        "confidence": quality_score,
+                        "position": None,
+                        "distance_nm": None,
+                        "bearing_deg": None,
+                        "data": image_meta,
+                    })
                 except Exception:
                     pass
         except subprocess.TimeoutExpired:
