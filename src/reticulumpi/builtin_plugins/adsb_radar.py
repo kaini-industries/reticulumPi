@@ -29,7 +29,6 @@ Requirements:
 
 from __future__ import annotations
 
-import math
 import shutil
 import socket
 import subprocess

@@ -374,7 +374,7 @@ class WeatherAlert(SignalPluginBase):
         try:
             self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
                 "source": "weather_alert",
-                "type": "alert",
+                "signal_type": "weather_alert",
                 "timestamp": now,
                 "confidence": decode_confidence,
                 "position": None,
@@ -391,6 +391,11 @@ class WeatherAlert(SignalPluginBase):
 
     def _check_expired(self) -> None:
         now = time.time()
+        if self._seen_headers:
+            cutoff = now - 300
+            self._seen_headers = {
+                k: v for k, v in self._seen_headers.items() if v > cutoff
+            }
         if self._active_alert:
             purge = self._active_alert.get("purge_ts")
             if purge and now > purge:

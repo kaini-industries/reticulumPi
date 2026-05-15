@@ -130,7 +130,7 @@ class ISMDecoder(SignalPluginBase):
         if not model:
             return
 
-        key = f"{model}:{dev_id}" if dev_id else model
+        key = f"{model}:{dev_id}" if dev_id is not None and dev_id != "" else model
         now = time.time()
         self._stats["messages_total"] += 1
         self._stats["last_message_at"] = now
@@ -158,7 +158,7 @@ class ISMDecoder(SignalPluginBase):
             try:
                 self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
                     "source": "ism_decoder",
-                    "type": "ism_device",
+                    "signal_type": "ism_device",
                     "timestamp": now,
                     "confidence": 1.0,
                     "position": None,

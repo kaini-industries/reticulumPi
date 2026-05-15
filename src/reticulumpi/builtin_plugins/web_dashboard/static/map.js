@@ -11,7 +11,7 @@
   var _mshNodes = [];        // Meshtastic nodes
   var _mcContacts = [];      // MeshCore contacts
   var _rnsPeers = [];        // Reticulum mesh peers
-  var _filter = 'lora';      // 'all', 'lora', or 'rns'
+  var _filter = 'lora';      // 'all', 'lora', 'rns', or 'tracked'
   var _loraNeighborIds = {}; // {id: true} for Meshtastic LoRa neighbor filter
   var _initialFit = false;   // whether we've done the first fitBounds
   var _gpsPos = null;        // [lat, lng] from attached GPS unit
@@ -218,6 +218,7 @@
     // Meshtastic self/neighbors + ALL MeshCore contacts (MeshCore is
     // always LoRa).
     var withPos = [];
+    var tIds = (_filter === 'tracked' && R.getTrackedNodeIds) ? R.getTrackedNodeIds() : null;
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i];
       if (!_hasValidPos(n)) continue;
@@ -229,9 +230,10 @@
           || _loraNeighborIds[n.id]
           || (!hasLoraData && n.source === 'meshtastic');
         if (!keep) continue;
-      }
-      if (_filter === 'rns') {
+      } else if (_filter === 'rns') {
         if (n.source !== 'reticulum') continue;
+      } else if (tIds) {
+        if (!tIds[n.id] && !n.is_self) continue;
       }
       withPos.push(n);
     }
@@ -352,6 +354,7 @@
     var allBtn = $('map-show-all');
     var loraBtn = $('map-show-lora');
     var rnsBtn = $('map-show-rns');
+    var trackedBtn = $('map-show-tracked');
     var gpsBtn = $('map-center-gps');
     if (!allBtn || !loraBtn) return;
 
@@ -359,6 +362,7 @@
       allBtn.classList.remove('active');
       loraBtn.classList.remove('active');
       if (rnsBtn) rnsBtn.classList.remove('active');
+      if (trackedBtn) trackedBtn.classList.remove('active');
     }
 
     allBtn.addEventListener('click', function () {
@@ -381,6 +385,14 @@
         _render();
       });
     }
+    if (trackedBtn) {
+      trackedBtn.addEventListener('click', function () {
+        _filter = 'tracked';
+        _clearActive();
+        trackedBtn.classList.add('active');
+        _render();
+      });
+    }
     if (gpsBtn) {
       gpsBtn.addEventListener('click', function () {
         if (_gpsPos && _map) _map.setView(_gpsPos, 13);
@@ -388,6 +400,10 @@
     }
   }
   _wireFilterTabs();
+
+  R.refreshMapTrackedFilter = function () {
+    if (_filter === 'tracked') _render();
+  };
 
   // -- Handle window resize (Leaflet needs invalidateSize) -----------------
 
