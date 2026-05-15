@@ -1487,7 +1487,6 @@
       if (!_matchesPanel(row)) return;
       if (_markSeen(row.id)) return;
       if (!_resolveDom()) return;
-      _hasFreshData = true;
 
       var isReceived = row.direction === 'received';
       var activeMatch = _activeContactId && row.contact_id === _activeContactId;

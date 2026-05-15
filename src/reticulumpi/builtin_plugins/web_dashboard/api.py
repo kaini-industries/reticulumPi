@@ -154,6 +154,9 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     from reticulumpi.builtin_plugins.web_dashboard.api_services import (
         setup_service_routes,
     )
+    from reticulumpi.builtin_plugins.web_dashboard.api_sigops import (
+        setup_sigops_routes,
+    )
 
     # Version
     app.router.add_get("/api/version", handle_version)
@@ -177,6 +180,7 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     setup_mesh_routes(app)
     setup_service_routes(app)
     setup_radio_routes(app)
+    setup_sigops_routes(app)
 
 
 # ── Version endpoint ─────────────────────────────────────────────────

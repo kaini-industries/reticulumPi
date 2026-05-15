@@ -424,6 +424,12 @@ class LoraLinkTester(PluginBase):
         with self._lock:
             return self._compute_stats_unlocked()
 
+    @staticmethod
+    def _percentile(sorted_vals: list[float], pct: float) -> float:
+        """Compute percentile from a pre-sorted list (nearest-rank method)."""
+        idx = max(0, min(int(len(sorted_vals) * pct / 100.0 + 0.5) - 1, len(sorted_vals) - 1))
+        return sorted_vals[idx]
+
     def _compute_stats_unlocked(self) -> dict[str, Any]:
         sent = self._probes_sent
         acked = self._probes_acked
@@ -434,6 +440,19 @@ class LoraLinkTester(PluginBase):
         rssis = [r["rssi"] for r in self._history if r["rssi"] is not None]
         snrs = [r["snr"] for r in self._history if r["snr"] is not None]
 
+        # RTT percentiles
+        sorted_rtts = sorted(rtts) if rtts else []
+        rtt_p50 = round(self._percentile(sorted_rtts, 50), 1) if sorted_rtts else None
+        rtt_p95 = round(self._percentile(sorted_rtts, 95), 1) if sorted_rtts else None
+        rtt_p99 = round(self._percentile(sorted_rtts, 99), 1) if sorted_rtts else None
+
+        # Jitter: mean absolute deviation of RTT
+        if rtts:
+            rtt_mean = sum(rtts) / len(rtts)
+            jitter_ms = round(sum(abs(r - rtt_mean) for r in rtts) / len(rtts), 1)
+        else:
+            jitter_ms = None
+
         return {
             "sent": sent,
             "acked": acked,
@@ -442,6 +461,14 @@ class LoraLinkTester(PluginBase):
             "rtt_min": round(min(rtts), 1) if rtts else None,
             "rtt_avg": round(sum(rtts) / len(rtts), 1) if rtts else None,
             "rtt_max": round(max(rtts), 1) if rtts else None,
+            "rtt_p50": rtt_p50,
+            "rtt_p95": rtt_p95,
+            "rtt_p99": rtt_p99,
+            "rtt_jitter_ms": jitter_ms,
             "rssi_avg": round(sum(rssis) / len(rssis), 1) if rssis else None,
+            "rssi_min": round(min(rssis), 1) if rssis else None,
+            "rssi_max": round(max(rssis), 1) if rssis else None,
             "snr_avg": round(sum(snrs) / len(snrs), 1) if snrs else None,
+            "snr_min": round(min(snrs), 1) if snrs else None,
+            "snr_max": round(max(snrs), 1) if snrs else None,
         }

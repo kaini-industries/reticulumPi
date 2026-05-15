@@ -57,6 +57,8 @@ class RadiosondeTracker(SignalPluginBase):
         self._position_track: deque[dict[str, Any]] = deque(
             maxlen=self._max_track_points,
         )
+        self._wind_profile: deque[dict[str, Any]] = deque(maxlen=500)
+        self._prev_wind_point: dict[str, Any] | None = None
         self._recent_sondes: deque[dict[str, Any]] = deque(maxlen=10)
         self._stats = {
             "sondes_tracked_total": 0,
@@ -307,7 +309,79 @@ class RadiosondeTracker(SignalPluginBase):
                     "alt_m": alt,
                 })
 
+            if self._receiver_lat is not None:
+                from reticulumpi.geo import haversine_km, bearing_deg
+                sonde["distance_km"] = round(
+                    haversine_km(self._receiver_lat, self._receiver_lon, lat, lon), 1,
+                )
+                sonde["bearing_deg"] = round(
+                    bearing_deg(self._receiver_lat, self._receiver_lon, lat, lon), 0,
+                )
+
+            wind = self._derive_wind(lat, lon, alt, now)
+            if wind:
+                self._wind_profile.append(wind)
+
+        if sonde.get("phase") == "ascent" and alt is not None:
+            sonde["predicted_burst_alt_m"] = self._predict_burst_alt()
+
+        if self._frame_count % 10 == 0:
+            try:
+                self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
+                    "source": "radiosonde_tracker",
+                    "type": "radiosonde",
+                    "timestamp": now,
+                    "confidence": 1.0,
+                    "position": {"lat": lat, "lon": lon} if lat and lon else None,
+                    "distance_nm": (
+                        round(sonde["distance_km"] / 1.852, 1)
+                        if sonde.get("distance_km") is not None else None
+                    ),
+                    "bearing_deg": sonde.get("bearing_deg"),
+                    "data": {"id": sonde_id, "alt_m": alt, "phase": sonde.get("phase")},
+                })
+            except Exception:
+                pass
+
         self._snapshot_dirty = True
+
+    def _derive_wind(
+        self, lat: float, lon: float, alt: float | None, now: float,
+    ) -> dict[str, Any] | None:
+        prev = self._prev_wind_point
+        self._prev_wind_point = {"lat": lat, "lon": lon, "alt": alt, "ts": now}
+        if prev is None:
+            return None
+        dt = now - prev["ts"]
+        if dt < 2.0:
+            return None
+        from reticulumpi.geo import haversine_km, bearing_deg
+        dist_km = haversine_km(prev["lat"], prev["lon"], lat, lon)
+        speed_ms = dist_km * 1000.0 / dt
+        direction = bearing_deg(prev["lat"], prev["lon"], lat, lon)
+        return {
+            "alt_m": alt,
+            "speed_ms": round(speed_ms, 1),
+            "speed_kts": round(speed_ms * 1.944, 1),
+            "direction_deg": round(direction, 0),
+            "ts": now,
+        }
+
+    def _predict_burst_alt(self) -> float | None:
+        points = list(self._altitude_profile)
+        if len(points) < 10:
+            return None
+        recent = points[-10:]
+        vel_vs = [p.get("vel_v", 0) for p in recent if p.get("vel_v") is not None]
+        alts = [p["alt_m"] for p in recent if p.get("alt_m") is not None]
+        if not vel_vs or not alts:
+            return None
+        avg_vel_v = sum(vel_vs) / len(vel_vs)
+        if avg_vel_v <= 0:
+            return None
+        current_alt = alts[-1]
+        remaining_m = max(0, 33000 - current_alt)
+        return round(current_alt + remaining_m, 0)
 
     def _finalize_sonde(self) -> None:
         sonde = self._active_sonde
@@ -367,6 +441,7 @@ class RadiosondeTracker(SignalPluginBase):
                 "active_sonde": dict(self._active_sonde) if self._active_sonde else None,
                 "altitude_profile": list(self._altitude_profile),
                 "position_track": list(self._position_track),
+                "wind_profile": list(self._wind_profile)[-30:],
                 "recent_sondes": list(self._recent_sondes),
                 "next_launch": self._get_cached_next_launch(),
                 "stats": dict(self._stats),

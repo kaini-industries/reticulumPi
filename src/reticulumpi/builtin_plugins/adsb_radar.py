@@ -35,6 +35,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -84,12 +85,8 @@ class AircraftState:
 
 def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in nautical miles."""
-    r_nm = 3440.065
-    lat1, lon1, lat2, lon2 = (math.radians(v) for v in (lat1, lon1, lat2, lon2))
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    return r_nm * 2 * math.asin(math.sqrt(a))
+    from reticulumpi.geo import haversine_nm
+    return haversine_nm(lat1, lon1, lat2, lon2)
 
 
 class AdsbRadarPlugin(PluginBase):
@@ -144,6 +141,12 @@ class AdsbRadarPlugin(PluginBase):
         self._resolved_index: int | None = None
         self._broadcast_cache: tuple[float, dict] | None = None
         self._broadcast_cache_ttl = 3.0
+
+        self._msg_rate_history: deque[float] = deque(maxlen=60)
+        self._msg_rate_window_start = time.time()
+        self._msg_rate_window_count = 0
+        self._max_distance_nm = 0.0
+        self._emergency_history: deque[dict[str, Any]] = deque(maxlen=20)
 
         self._active = True
 
@@ -220,6 +223,9 @@ class AdsbRadarPlugin(PluginBase):
                     "aircraft_seen_total": self._aircraft_seen_total,
                     "receiver_lat": self._receiver_lat,
                     "receiver_lon": self._receiver_lon,
+                    "max_distance_nm": self._max_distance_nm,
+                    "msg_rate_history": list(self._msg_rate_history),
+                    "emergency_history": list(self._emergency_history),
                 },
             }
 
@@ -477,6 +483,14 @@ class AdsbRadarPlugin(PluginBase):
             ac.message_count += 1
             self._total_messages += 1
 
+            # Message rate: roll window every 10 seconds
+            self._msg_rate_window_count += 1
+            if now - self._msg_rate_window_start >= 10.0:
+                rate = self._msg_rate_window_count / (now - self._msg_rate_window_start)
+                self._msg_rate_history.append(round(rate, 1))
+                self._msg_rate_window_count = 0
+                self._msg_rate_window_start = now
+
             callsign = parts[10].strip() if len(parts) > 10 else ""
             if callsign:
                 ac.callsign = callsign
@@ -516,6 +530,8 @@ class AdsbRadarPlugin(PluginBase):
                                     ),
                                     1,
                                 )
+                                if ac.distance_nm > self._max_distance_nm:
+                                    self._max_distance_nm = ac.distance_nm
                     except ValueError:
                         pass
 
@@ -539,9 +555,29 @@ class AdsbRadarPlugin(PluginBase):
             self._publish(events.ADSB_AIRCRAFT_DETECTED, {"icao": icao})
 
         if emergency:
+            squawk_val = parts[17].strip()
+            emerg_record = {
+                "icao": icao,
+                "squawk": squawk_val,
+                "callsign": callsign or None,
+                "altitude": ac.altitude,
+                "latitude": ac.latitude,
+                "longitude": ac.longitude,
+                "distance_nm": ac.distance_nm,
+                "timestamp": now,
+            }
+            self._emergency_history.append(emerg_record)
+
             self._publish(events.ADSB_EMERGENCY_SQUAWK, {
                 "icao": icao,
-                "squawk": parts[17].strip(),
+                "squawk": squawk_val,
+                "callsign": callsign or None,
+            })
+            self._publish(events.SIGOPS_SIGNAL_DETECTED, {
+                "source": "adsb_radar",
+                "signal_type": "ADS-B_EMERGENCY",
+                "icao": icao,
+                "squawk": squawk_val,
                 "callsign": callsign or None,
             })
 

@@ -843,6 +843,7 @@ body {
 .svc-tag-acars { background: rgba(171, 71, 188, 0.15); color: #ab47bc; }
 .svc-tag-sonde { background: rgba(255, 167, 38, 0.15); color: #ffa726; }
 .svc-tag-noaa  { background: rgba(38, 166, 154, 0.15); color: #26a69a; }
+.svc-tag-sigops { background: rgba(255, 152, 0, 0.15); color: #ffa726; }
 
 .hotspot-overview { padding: 0.75rem 1rem; }
 
@@ -1303,18 +1304,6 @@ body {
   padding: 0.5rem;
   border-bottom: 1px solid var(--border);
   align-items: center;
-}
-.msg-sidebar-toolbar .rt-input {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.8rem;
-  padding: 0.3rem 0.5rem;
-}
-.msg-sidebar-toolbar .rt-select {
-  width: 70px;
-  min-width: 70px;
-  font-size: 0.75rem;
-  padding: 0.3rem 0.25rem;
 }
 .msg-new-btn {
   background: var(--accent);
@@ -4991,3 +4980,59 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
 }
 .nt-chip-mc .nt-chip-remove { color: rgba(255, 107, 107, 0.7); }
 .nt-source-badge { font-size: 0.6rem; vertical-align: middle; }
+
+/* ── Signal Operations panel ─────────────────────────────────────── */
+.sigops-subsection { margin-top: 0.5rem; }
+.sigops-subheader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  border-top: 1px solid var(--border);
+}
+.sigops-subheader:hover { color: var(--text-primary); }
+.sigops-subheader .chevron { font-size: 0.7rem; margin-right: 0.3rem; }
+.sigops-filter {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.4rem;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+}
+.sigops-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+.sigops-feed { padding: 0.5rem 0.75rem; }
+.sigops-corr-item {
+  padding: 0.25rem 0;
+  font-size: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+.sigops-corr-time {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  min-width: 4rem;
+  display: inline-block;
+}
+.sigops-corr-type {
+  font-weight: 600;
+  color: var(--orange, #ffa726);
+  margin-right: 0.3rem;
+}
+.sigops-empty {
+  padding: 1rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from typing import Any
 
 from reticulumpi import events
@@ -65,6 +66,7 @@ class AISReceiver(SignalPluginBase):
     def _on_start(self) -> None:
         self._vessels: dict[str, dict[str, Any]] = {}
         self._vessels_lock = threading.Lock()
+        self._vessel_type_counts: dict[str, int] = {}
         self._stats = {
             "messages_total": 0,
             "messages_by_type": {},
@@ -155,6 +157,8 @@ class AISReceiver(SignalPluginBase):
                     "destination": None,
                     "lat": None,
                     "lon": None,
+                    "distance_nm": None,
+                    "bearing_deg": None,
                     "speed_kts": None,
                     "course": None,
                     "heading": None,
@@ -162,12 +166,22 @@ class AISReceiver(SignalPluginBase):
                     "first_seen": now,
                     "last_seen": now,
                     "message_count": 0,
+                    "track_history": deque(maxlen=20),
                 }
                 self._vessels[mmsi] = vessel
                 self._stats["vessels_seen_total"] += 1
 
                 try:
                     self.event_bus.publish(events.AIS_VESSEL_DETECTED, {"mmsi": mmsi})
+                except Exception:
+                    pass
+
+                try:
+                    self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
+                        "source": "ais_receiver",
+                        "signal_type": "AIS",
+                        "id": mmsi,
+                    })
                 except Exception:
                     pass
 
@@ -191,6 +205,19 @@ class AISReceiver(SignalPluginBase):
                         status_code, f"Status {status_code}",
                     )
 
+                if vessel["lat"] is not None and vessel["lon"] is not None:
+                    vessel["track_history"].append(
+                        {"ts": now, "lat": vessel["lat"], "lon": vessel["lon"]},
+                    )
+                    if self._receiver_lat is not None and self._receiver_lon is not None:
+                        from reticulumpi.geo import haversine_nm, bearing_deg
+                        vessel["distance_nm"] = round(
+                            haversine_nm(self._receiver_lat, self._receiver_lon, vessel["lat"], vessel["lon"]), 1,
+                        )
+                        vessel["bearing_deg"] = round(
+                            bearing_deg(self._receiver_lat, self._receiver_lon, vessel["lat"], vessel["lon"]), 0,
+                        )
+
             elif msg_type == 5:
                 if msg.get("shipname"):
                     vessel["name"] = msg["shipname"].strip()
@@ -198,7 +225,9 @@ class AISReceiver(SignalPluginBase):
                     vessel["destination"] = msg["destination"].strip()
                 if msg.get("shiptype") is not None:
                     vessel["ship_type"] = msg["shiptype"]
-                    vessel["ship_type_desc"] = _ship_type_desc(msg["shiptype"])
+                    desc = _ship_type_desc(msg["shiptype"])
+                    vessel["ship_type_desc"] = desc
+                    self._vessel_type_counts[desc] = self._vessel_type_counts.get(desc, 0) + 1
 
         self._snapshot_dirty = True
 
@@ -238,11 +267,11 @@ class AISReceiver(SignalPluginBase):
 
     def _update_snapshot_cache(self) -> None:
         with self._vessels_lock:
-            vessel_list = sorted(
-                self._vessels.values(),
-                key=lambda v: v["last_seen"],
-                reverse=True,
-            )
+            vessel_list = []
+            for v in sorted(self._vessels.values(), key=lambda v: v["last_seen"], reverse=True):
+                rec = dict(v)
+                rec["track_history"] = list(v["track_history"])
+                vessel_list.append(rec)
         with self._cache_lock:
             self._snapshot_cache = {
                 "status": self._status,
@@ -250,6 +279,7 @@ class AISReceiver(SignalPluginBase):
                 "vessels": vessel_list,
                 "stats": {
                     "vessel_count": len(vessel_list),
+                    "vessel_types": dict(self._vessel_type_counts),
                     **self._stats,
                 },
             }

@@ -123,6 +123,8 @@ class LoraChannelAnalyzer:
         self._noise_floor_db: float | None = None
         self._noise_floor_history: deque[tuple[float, float]] = deque(maxlen=_NF_HISTORY_LEN)
         self._noise_baseline_db: float | None = None
+        self._noise_floor_hourly: deque[tuple[float, float]] = deque(maxlen=168)  # 7 days
+        self._last_hourly_ts: float = 0.0
 
         self._bin_max_hold: list[float | None] = []
         self._bin_consec_count: list[int] = []
@@ -194,6 +196,12 @@ class LoraChannelAnalyzer:
             else:
                 a = self._noise_baseline_alpha
                 self._noise_baseline_db = a * nf + (1 - a) * self._noise_baseline_db
+
+            # Hourly noise floor tracking — record once per hour boundary
+            hour_ts = now - (now % 3600)
+            if hour_ts > self._last_hourly_ts:
+                self._noise_floor_hourly.append((hour_ts, nf))
+                self._last_hourly_ts = hour_ts
 
         nf = self._noise_floor_db
 
@@ -349,6 +357,55 @@ class LoraChannelAnalyzer:
     # Output: snapshot / history
     # ------------------------------------------------------------------
 
+    def get_channel_recommendations(self) -> list[dict[str, Any]]:
+        """Score channels by cleanliness and return top 10 recommendations.
+
+        Score = 100 - duty_pct - interference_penalty.
+        Interference penalty: 20 for CW interference overlapping the channel,
+        10 if noise is elevated.
+        """
+        nf = self._noise_floor_db
+        interference_flags = self.build_interference_flags()
+
+        # Build set of CW interference frequencies for fast lookup
+        cw_freqs_mhz: list[float] = []
+        noise_elevated = False
+        for flag in interference_flags:
+            if flag["type"] == "cw":
+                cw_freqs_mhz.append(flag["freq_mhz"])
+            elif flag["type"] == "noise_elevated":
+                noise_elevated = True
+
+        scored: list[dict[str, Any]] = []
+        for ci, ch in enumerate(self._channels):
+            stats = self._channel_stats[ci]
+            duty_pct = stats["duty_pct"]
+
+            # Interference penalty
+            interference_penalty = 0.0
+            ch_lo_mhz = ch.lo_hz / 1_000_000
+            ch_hi_mhz = ch.hi_hz / 1_000_000
+            for cw_mhz in cw_freqs_mhz:
+                if ch_lo_mhz <= cw_mhz <= ch_hi_mhz:
+                    interference_penalty += 20.0
+                    break
+            if noise_elevated:
+                interference_penalty += 10.0
+
+            score = max(0.0, 100.0 - duty_pct - interference_penalty)
+            scored.append({
+                "idx": ch.idx,
+                "center_mhz": round(ch.center_hz / 1_000_000, 4),
+                "bw_khz": ch.bw_hz // 1000,
+                "dir": ch.direction,
+                "score": round(score, 1),
+                "duty_pct": duty_pct,
+                "interference_penalty": round(interference_penalty, 1),
+            })
+
+        scored.sort(key=lambda c: c["score"], reverse=True)
+        return scored[:10]
+
     def get_channel_analysis(self, bins_hz: list[int] | None = None) -> dict[str, Any]:
         """Return the channel analysis dict matching the current lora_scanner snapshot shape."""
         nf = self._noise_floor_db
@@ -385,6 +442,12 @@ class LoraChannelAnalyzer:
 
         interference = self.build_interference_flags(bins_hz)
 
+        # Hourly noise floor — last 24 entries
+        hourly = [
+            {"t": round(t, 0), "db": round(db, 1)}
+            for t, db in list(self._noise_floor_hourly)[-24:]
+        ]
+
         return {
             "channels": channels_out,
             "noise_floor_db": round(nf, 1) if nf is not None else None,
@@ -393,6 +456,8 @@ class LoraChannelAnalyzer:
             "active_count": active_count,
             "threshold_db": self._threshold_db,
             "interference_flags": interference,
+            "noise_floor_hourly": hourly,
+            "channel_recommendations": self.get_channel_recommendations(),
         }
 
     def get_channel_power_history(self) -> dict[int, list[list[float | None]]]:

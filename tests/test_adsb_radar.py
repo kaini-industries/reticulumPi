@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -49,6 +50,11 @@ def _make_plugin(config: dict | None = None) -> AdsbRadarPlugin:
     plugin._resolved_index = None
     plugin._rtl_biast_path = None
     plugin._bias_tee_active = False
+    plugin._msg_rate_history = deque(maxlen=60)
+    plugin._msg_rate_window_start = time.time()
+    plugin._msg_rate_window_count = 0
+    plugin._max_distance_nm = 0.0
+    plugin._emergency_history = deque(maxlen=20)
     return plugin
 
 

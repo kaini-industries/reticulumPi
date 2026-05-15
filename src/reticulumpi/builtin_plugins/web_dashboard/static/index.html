@@ -113,7 +113,6 @@
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
-              <input type="text" id="msg-lxmf-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
               <button class="msg-new-btn" id="msg-lxmf-new-btn" title="New message">+</button>
             </div>
             <div class="msg-conversations" id="msg-lxmf-conversations"></div>
@@ -161,7 +160,6 @@
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
-              <input type="text" id="msg-lora-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
               <button class="msg-channels-btn" id="msg-lora-ch-manage-btn" title="Manage channels">Channels</button>
               <button class="msg-new-btn" id="msg-lora-new-btn" title="New message">+</button>
             </div>
@@ -212,7 +210,6 @@
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
-              <input type="text" id="msg-meshcore-search" class="rt-input" placeholder="Search messages..." autocomplete="off">
               <button class="msg-new-btn" id="msg-meshcore-new-btn" title="New message">+</button>
             </div>
             <div class="msg-conversations" id="msg-meshcore-conversations"></div>
@@ -1166,6 +1163,65 @@
       </div>
     </div>
 
+    <!-- Signal Operations -->
+    <div class="section awaiting-data" id="sigops-section" style="display:none">
+      <div class="section-header collapsible" id="sigops-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Signal Operations <span class="svc-tag svc-tag-sigops">SIGOPS</span></span>
+        <span class="svc-status" id="sigops-status-tag"></span>
+      </div>
+      <div class="section-body hidden" id="sigops-body">
+        <div class="metric-summary" id="sigops-stats"></div>
+
+        <!-- Contacts sub-section -->
+        <div class="sigops-subsection">
+          <div class="sigops-subheader collapsible" id="sigops-contacts-toggle">
+            <span><span class="chevron">&#9656;</span> Active Contacts <span class="count" id="sigops-contacts-count">0</span></span>
+            <select id="sigops-type-filter" class="sigops-filter"><option value="">All types</option></select>
+          </div>
+          <div class="hidden" id="sigops-contacts-body">
+            <div class="table-scroll" style="max-height:400px">
+              <table class="data-table">
+                <thead><tr>
+                  <th data-sort="contact_type">Type</th>
+                  <th data-sort="display_name">Name</th>
+                  <th data-sort="observation_count">Obs</th>
+                  <th>Sources</th>
+                  <th data-sort="distance_nm">Distance</th>
+                  <th data-sort="last_seen">Last Seen</th>
+                </tr></thead>
+                <tbody id="sigops-contacts-table"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ISM Devices sub-section -->
+        <div class="sigops-subsection" id="sigops-ism-wrap" style="display:none">
+          <div class="sigops-subheader collapsible" id="sigops-ism-toggle">
+            <span><span class="chevron">&#9656;</span> ISM Devices <span class="count" id="sigops-ism-count">0</span></span>
+          </div>
+          <div class="hidden" id="sigops-ism-body">
+            <div class="table-scroll" style="max-height:300px">
+              <table class="data-table">
+                <thead><tr><th>Model</th><th>ID</th><th>Ch</th><th>Reading</th><th>Msgs</th><th>Last Seen</th></tr></thead>
+                <tbody id="sigops-ism-table"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Correlations sub-section -->
+        <div class="sigops-subsection">
+          <div class="sigops-subheader collapsible" id="sigops-correlations-toggle">
+            <span><span class="chevron">&#9656;</span> Correlation Events</span>
+          </div>
+          <div class="hidden" id="sigops-correlations-body">
+            <div id="sigops-correlations-list" class="sigops-feed" style="max-height:250px;overflow-y:auto"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Plugins (collapsed by default) -->
     <div class="section" id="plugins-section">
       <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
@@ -1250,5 +1306,6 @@
   <script src="/static/acars.js?v=1"></script>
   <script src="/static/radiosonde.js?v=1"></script>
   <script src="/static/noaa.js?v=1"></script>
+  <script src="/static/sigops.js?v=1"></script>
 </body>
 </html>

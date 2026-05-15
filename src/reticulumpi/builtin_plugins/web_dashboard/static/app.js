@@ -1286,6 +1286,8 @@
     if (d.acars && RPI.updateAcars) RPI.updateAcars(d.acars);
     if (d.radiosonde && RPI.updateRadiosonde) RPI.updateRadiosonde(d.radiosonde);
     if (d.noaa_apt && RPI.updateNoaa) RPI.updateNoaa(d.noaa_apt);
+    if (d.sigops && RPI.sigops && RPI.sigops.update) RPI.sigops.update(d.sigops);
+    if (d.ism && RPI.sigops && RPI.sigops.updateIsm) RPI.sigops.updateIsm(d.ism);
   }
 
   function connectWS() {

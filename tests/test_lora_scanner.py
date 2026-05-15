@@ -37,6 +37,9 @@ def _make_plugin(config: dict | None = None) -> LoraScanner:
     plugin._segments = {}
     plugin._current_ts = None
     plugin._resolved_index = None
+    plugin._detected_peaks = []
+    plugin._sweep_intervals = deque(maxlen=60)
+    plugin._last_sweep_mono = None
     return plugin
 
 
