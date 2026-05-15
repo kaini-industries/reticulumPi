@@ -1257,6 +1257,9 @@
       if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(d.meshtastic_lora_neighbors);
       if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(d.meshtastic_lora_neighbors);
     }
+    if (d.meshtastic_nodes || d.meshtastic_lora_neighbors || d.meshcore_contacts) {
+      if (RPI.updateNodeTracker) RPI.updateNodeTracker(d.meshtastic_nodes || null, d.meshtastic_lora_neighbors || null, d.meshcore_contacts || null);
+    }
     if (d.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(d.meshcore_status, d.meshcore_contacts);
     if (d.meshcore_contacts && RPI.updateMapMeshCore) RPI.updateMapMeshCore(d.meshcore_contacts);
     if (d.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(d.meshcore_device);
@@ -1434,7 +1437,7 @@
   function registerDeferredSection(name, fn) { _sectionFirstExpand[name] = fn; }
   RPI.registerDeferredSection = registerDeferredSection;
 
-  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot'].forEach(function(name) {
+  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot', 'node-tracker'].forEach(function(name) {
     var toggle = $(name + '-toggle');
     var body = $(name + '-body');
     if (toggle && body) {

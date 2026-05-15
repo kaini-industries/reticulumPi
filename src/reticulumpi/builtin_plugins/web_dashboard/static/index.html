@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=40">
+  <link rel="stylesheet" href="/static/style.css?v=41">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -746,6 +746,37 @@
       </details>
     </div>
 
+    <!-- Node Tracker -->
+    <div class="section svc-meshtastic" id="node-tracker-section" style="display:none">
+      <div class="section-header collapsible" id="node-tracker-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> Node Tracker <span class="svc-tag svc-tag-msh">MSH</span> <span class="svc-tag svc-tag-mc">MC</span></span>
+        <span class="count" id="node-tracker-count"></span>
+      </div>
+      <div class="section-body hidden" id="node-tracker-body">
+        <div class="nt-controls">
+          <div class="nt-search-wrap">
+            <input type="text" id="node-tracker-search" class="rt-input" placeholder="Search nodes by name or ID..." autocomplete="off">
+            <div class="nt-results" id="node-tracker-results"></div>
+          </div>
+        </div>
+        <div class="nt-chips" id="node-tracker-chips"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Position</th>
+                <th>Last Heard</th>
+              </tr>
+            </thead>
+            <tbody id="node-tracker-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Node Map -->
     <div class="section awaiting-data" id="map-section">
       <div class="section-header">
@@ -756,6 +787,7 @@
         <button class="mesh-tab" id="map-show-all" title="Show all nodes with position">All Nodes</button>
         <button class="mesh-tab active" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
         <button class="mesh-tab" id="map-show-rns" title="Show Reticulum mesh peers only">Reticulum Peers</button>
+        <button class="mesh-tab" id="map-show-tracked" title="Show tracked nodes only">Tracked</button>
         <button class="mesh-tab" id="map-center-gps" title="Center on GPS location">My Location</button>
         <span class="map-stats" id="map-stats"></span>
       </div>
@@ -946,7 +978,7 @@
       <div class="section-body hidden" id="radio-body">
         <div class="radio-preemption-banner" id="radio-preemption-banner" style="display:none"></div>
         <div class="radio-lock-row" id="radio-lock-row">
-          <label class="radio-lock-toggle"><input type="checkbox" id="radio-lock-cb" /> Lock dongle</label>
+          <label class="radio-lock-toggle"><input type="checkbox" id="radio-lock-cb" /><span>Lock dongle</span></label>
         </div>
         <div class="radio-tuner-display">
           <div class="radio-freq-row">
@@ -1188,7 +1220,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=32"></script>
+  <script src="/static/app.js?v=33"></script>
   <script src="/static/messages_panel.js?v=7"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
   <script src="/static/mqtt_feed.js?v=1"></script>
@@ -1199,9 +1231,10 @@
   <script src="/static/lora.js?v=23"></script>
   <script src="/static/routing.js?v=23"></script>
   <script src="/static/meshtastic.js?v=25"></script>
+  <script src="/static/node_tracker.js?v=1"></script>
   <script src="/static/meshcore.js?v=3"></script>
   <script src="/static/vendor/leaflet.js"></script>
-  <script src="/static/map.js?v=5"></script>
+  <script src="/static/map.js?v=6"></script>
   <script src="/static/gps.js?v=3"></script>
   <script src="/static/space.js?v=2"></script>
   <script src="/static/spectrum_common.js?v=1"></script>
