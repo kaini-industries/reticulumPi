@@ -248,18 +248,21 @@ class SpectrumScanner(PluginBase):
             self.event_bus.publish(events.SPECTRUM_PRESET_SWITCHING, {"preset": name})
         except Exception:
             self.log.debug("event_bus publish failed", exc_info=True)
-        self._terminate_process()
+        try:
+            self._terminate_process()
 
-        self._analyzer = None
-        self._apply_preset_values(preset)
-        self._reset_sweep_state()
-        self._activate_analyzer_for_preset(preset)
+            self._analyzer = None
+            self._apply_preset_values(preset)
+            self._reset_sweep_state()
+            self._activate_analyzer_for_preset(preset)
 
-        self._active_preset = name
-        self._restart_count = 0
-        # Brief window where supervisor may see _switching=True on a stale
-        # iteration — benign, it re-reads on the next loop tick.
-        self._switching = False
+            self._active_preset = name
+            self._restart_count = 0
+        except Exception:
+            self._set_status("error", f"preset switch failed: {name}")
+            raise
+        finally:
+            self._switching = False
 
         if not self._supervisor_alive:
             self._start_thread(self._supervisor_loop, name="spectrum-supervisor")

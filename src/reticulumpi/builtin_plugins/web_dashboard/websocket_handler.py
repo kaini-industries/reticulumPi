@@ -741,8 +741,9 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
                 return {"type": "spectrum_preset_switched", **result}
             except ValueError as exc:
                 return {"type": "spectrum_preset_error", "error": str(exc)}
-            except Exception:
-                log.debug("Spectrum preset switch failed", exc_info=True)
+            except Exception as exc:
+                log.warning("Spectrum preset switch failed", exc_info=True)
+                return {"type": "spectrum_preset_error", "error": str(exc) or "Internal error during preset switch"}
     elif action == "spectrum_list_presets":
         scanner = plugin.app.plugins.get("spectrum_scanner")
         if scanner and hasattr(scanner, "get_presets"):

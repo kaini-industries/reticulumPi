@@ -631,6 +631,21 @@ class TestSwitchPreset:
             p.switch_preset("aviation")
             mock_start.assert_not_called()
 
+    def test_switch_resets_switching_flag_on_error(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        with patch.object(p, "_apply_preset_values", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                p.switch_preset("aviation")
+        assert p._switching is False
+        assert "error" in p._status
+
+    def test_switch_resets_switching_flag_on_terminate_error(self):
+        p = _make_plugin({"default_preset": "fm_broadcast"})
+        with patch.object(p, "_terminate_process", side_effect=OSError("kill failed")):
+            with pytest.raises(OSError, match="kill failed"):
+                p.switch_preset("aviation")
+        assert p._switching is False
+
 
 class TestPresetValidation:
     def test_preset_rejects_invalid_freq_range(self):
@@ -764,7 +779,6 @@ class TestPresetAnalyzerIntegration:
         assert p._analyzer is None
         snap = p.get_snapshot()
         assert "channel_analysis" not in snap
-
 
 class TestSpectrumSweepEvent:
     """Verify that SPECTRUM_SWEEP events carry frequency and power data."""

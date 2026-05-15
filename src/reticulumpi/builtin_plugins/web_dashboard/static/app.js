@@ -1330,6 +1330,12 @@
           }
           return;
         }
+        if (msg.type === 'spectrum_preset_switched') {
+          if (RPI.spectrum && RPI.spectrum.handlePresetSwitched) {
+            RPI.spectrum.handlePresetSwitched(msg);
+          }
+          return;
+        }
         if (msg.type === 'spectrum_preset_error') {
           if (RPI.spectrum && RPI.spectrum.handlePresetError) {
             RPI.spectrum.handlePresetError(msg.error || 'Preset switch failed');
