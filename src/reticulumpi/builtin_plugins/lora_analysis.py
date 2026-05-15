@@ -364,7 +364,6 @@ class LoraChannelAnalyzer:
         Interference penalty: 20 for CW interference overlapping the channel,
         10 if noise is elevated.
         """
-        nf = self._noise_floor_db
         interference_flags = self.build_interference_flags()
 
         # Build set of CW interference frequencies for fast lookup

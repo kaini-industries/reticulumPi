@@ -10,7 +10,6 @@ import json
 import shutil
 import subprocess
 import time
-from collections import deque
 from typing import Any
 
 from reticulumpi import events

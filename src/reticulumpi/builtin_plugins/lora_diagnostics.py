@@ -198,8 +198,8 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 )
             current_mode = self._detect_announce_mode()
             airtime_hist = [
-                {"t": round(t, 3), "short": round(s, 4), "long": round(l, 4)}
-                for t, s, l in self._airtime_history
+                {"t": round(t, 3), "short": round(s, 4), "long": round(lng, 4)}
+                for t, s, lng in self._airtime_history
             ]
             return {
                 "lora_interface": dict(self._lora_stats),

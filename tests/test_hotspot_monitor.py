@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from reticulumpi.builtin_plugins.hotspot_monitor import (
     HotspotMonitorPlugin,
     _get_interface_ip,

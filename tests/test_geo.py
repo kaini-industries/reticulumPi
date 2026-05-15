@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from reticulumpi.geo import bearing_deg, bearing_label, haversine_km, haversine_nm
 
 

@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import threading
 import time
-from collections import deque
 from typing import Any
 from unittest.mock import MagicMock
-
-import pytest
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.ism_decoder import ISMDecoder
