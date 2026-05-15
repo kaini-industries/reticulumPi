@@ -309,8 +309,7 @@ def _apply_patches(meshchat_module):
     # the next-hop interface is low-bandwidth (< 100 kbps), use OPPORTUNISTIC
     # (single packet) instead.
     try:
-        import RNS
-        import LXMF
+        import RNS  # noqa: F811
 
         RMC = meshchat_module.ReticulumMeshChat
         _original_send = RMC.send_message
@@ -362,7 +361,7 @@ def _apply_patches(meshchat_module):
         import database as _database
 
         _SWEEP_INTERVAL = 300   # seconds between sweeps
-        _FAILED_MAX_AGE = 120   # delete failed outbound messages older than this (seconds)
+        _FAILED_MAX_AGE = 14400  # 4h — keep failed msgs long enough for destination to re-announce
 
         def _sweep_failed_messages():
             while True:
@@ -372,7 +371,7 @@ def _apply_patches(meshchat_module):
                     cutoff = datetime.now(timezone.utc) - timedelta(seconds=_FAILED_MAX_AGE)
                     deleted = (_database.LxmfMessage.delete()
                                .where(_database.LxmfMessage.state == "failed")
-                               .where(_database.LxmfMessage.is_incoming == False)
+                               .where(_database.LxmfMessage.is_incoming == False)  # noqa: E712
                                .where(_database.LxmfMessage.updated_at < cutoff)
                                .execute())
                     if deleted > 0:
@@ -541,6 +540,73 @@ def _apply_patches(meshchat_module):
         print(f"{_TAG} Announce multiplexer installed")
     except Exception as exc:
         print(f"{_TAG} Warning: could not install announce multiplexer ({exc})")
+
+    # --- Patch 11 + 12: Deferred startup tasks (auto-resend + path warming) ---
+    # These run in a background thread after a 30s delay so MeshChat's DB is
+    # initialized.  Patch 11 enables MeshChat's built-in auto-resend on
+    # announce (resends failed messages when the destination announces with a
+    # fresh path).  Patch 12 pre-requests paths for all known conversation
+    # peers so sends work immediately after any rnsd restart.
+    try:
+        import threading as _warm_threading
+        import RNS as _warm_RNS
+        import database as _warm_db
+
+        def _warm_paths():
+            time.sleep(30)
+            try:
+                # Patch 11: enable auto-resend
+                _warm_db.Config.insert(
+                    key="auto_resend_failed_messages_when_announce_received",
+                    value="true",
+                ).on_conflict(
+                    conflict_target=[_warm_db.Config.key],
+                    update={_warm_db.Config.value: "true"},
+                ).execute()
+                print(f"{_TAG} Enabled auto_resend_failed_messages_when_announce_received")
+            except Exception as e:
+                print(f"{_TAG} Warning: could not enable auto-resend ({e})")
+
+            try:
+                peers = set()
+                for msg in (_warm_db.LxmfMessage
+                            .select(_warm_db.LxmfMessage.destination_hash)
+                            .distinct()
+                            .where(_warm_db.LxmfMessage.is_incoming == False)):  # noqa: E712
+                    peers.add(msg.destination_hash)
+                for msg in (_warm_db.LxmfMessage
+                            .select(_warm_db.LxmfMessage.source_hash)
+                            .distinct()
+                            .where(_warm_db.LxmfMessage.is_incoming == True)):  # noqa: E712
+                    peers.add(msg.source_hash)
+
+                warmed = 0
+                for peer_hex in peers:
+                    try:
+                        peer_bytes = bytes.fromhex(peer_hex)
+                        if not _warm_RNS.Transport.has_path(peer_bytes):
+                            _warm_RNS.Transport.request_path(peer_bytes)
+                            warmed += 1
+                            time.sleep(0.5)
+                    except Exception:
+                        pass
+                if warmed > 0:
+                    print(
+                        f"{_TAG} Path warmer: requested {warmed} paths "
+                        f"for {len(peers)} conversation peers"
+                    )
+                else:
+                    print(f"{_TAG} Path warmer: all {len(peers)} peers already have paths")
+            except Exception as e:
+                print(f"{_TAG} Path warmer error: {e}")
+
+        _warm_t = _warm_threading.Thread(
+            target=_warm_paths, daemon=True, name="meshchat-path-warmer",
+        )
+        _warm_t.start()
+        print(f"{_TAG} Path warmer scheduled (30s delay)")
+    except Exception as exc:
+        print(f"{_TAG} Warning: could not start path warmer ({exc})")
 
     return ok
 

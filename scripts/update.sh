@@ -45,6 +45,7 @@ if ! sudo -u "$SERVICE_USER" test -r "$INSTALL_DIR/src"; then
 fi
 
 VENV="$INSTALL_DIR/.venv"
+RNS_VERSION_BEFORE=$(sudo "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
 sudo "$VENV/bin/pip" install --upgrade pip
 if ! sudo "$VENV/bin/pip" install --upgrade -e "$INSTALL_DIR"; then
     echo "Error: pip install failed. Check dependencies."
@@ -91,6 +92,7 @@ fi
 # 3. Update systemd service files if they changed
 echo "[3/5] Updating systemd services..."
 SERVICES_CHANGED=false
+RNSD_SERVICE_CHANGED=false
 for svc in reticulumpi.service rnsd.service rnsd-watchdog.service rnsd-watchdog.timer; do
     src="$INSTALL_DIR/systemd/$svc"
     dest="/etc/systemd/system/$svc"
@@ -99,6 +101,9 @@ for svc in reticulumpi.service rnsd.service rnsd-watchdog.service rnsd-watchdog.
             sudo cp "$src" "$dest"
             SERVICES_CHANGED=true
             echo "  Updated $svc"
+            if [ "$svc" = "rnsd.service" ]; then
+                RNSD_SERVICE_CHANGED=true
+            fi
         fi
     fi
 done
@@ -143,17 +148,36 @@ done
 
 # 5. Restart services
 echo "[5/5] Restarting services..."
+
+# Only restart rnsd if something rnsd-relevant changed (service file, RNS package).
+# Unnecessary restarts wipe the in-memory path table, breaking LXMF delivery until
+# peers re-announce (up to 3 hours).
+RNS_VERSION_AFTER=$(sudo "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
+RNSD_NEEDS_RESTART=false
+if [ "$RNSD_SERVICE_CHANGED" = true ]; then
+    RNSD_NEEDS_RESTART=true
+    echo "  rnsd.service changed — rnsd restart required"
+fi
+if [ "$RNS_VERSION_BEFORE" != "$RNS_VERSION_AFTER" ]; then
+    RNSD_NEEDS_RESTART=true
+    echo "  RNS package updated ($RNS_VERSION_BEFORE -> $RNS_VERSION_AFTER) — rnsd restart required"
+fi
+
 if systemctl is-active --quiet rnsd; then
-    sudo systemctl restart rnsd
-    echo "  Waiting for rnsd shared instance socket..."
-    for i in $(seq 1 60); do
-        ss -xa 2>/dev/null | grep -q "@rns/default" && break
-        sleep 1
-    done
-    if ss -xa 2>/dev/null | grep -q "@rns/default"; then
-        echo "  rnsd ready (${i}s)"
+    if [ "$RNSD_NEEDS_RESTART" = true ]; then
+        sudo systemctl restart rnsd
+        echo "  Waiting for rnsd shared instance socket..."
+        for i in $(seq 1 60); do
+            ss -xa 2>/dev/null | grep -q "@rns/default" && break
+            sleep 1
+        done
+        if ss -xa 2>/dev/null | grep -q "@rns/default"; then
+            echo "  rnsd ready (${i}s)"
+        else
+            echo "  Warning: rnsd socket not detected after 60s, continuing anyway"
+        fi
     else
-        echo "  Warning: rnsd socket not detected after 60s, continuing anyway"
+        echo "  Skipping rnsd restart (no relevant changes)"
     fi
 fi
 sudo systemctl restart reticulumpi
