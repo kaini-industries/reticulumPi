@@ -7,6 +7,22 @@ import aiohttp.web
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok
 
 
+def _int_param(request: aiohttp.web.Request, name: str, default: int, max_val: int = 0) -> int:
+    try:
+        val = int(request.query.get(name, str(default)))
+    except (ValueError, TypeError):
+        val = default
+    val = max(0, val)
+    return min(val, max_val) if max_val else val
+
+
+def _float_param(request: aiohttp.web.Request, name: str, default: float) -> float:
+    try:
+        return float(request.query.get(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
 def _get_sigops(request: aiohttp.web.Request):
     plugin = _get_plugin(request)
     sigops = plugin.app.plugins.get("signal_operations")
@@ -50,7 +66,7 @@ async def handle_sigops_contacts(
     if err:
         return err
     contact_type = request.query.get("type", "")
-    limit = min(int(request.query.get("limit", "100")), 500)
+    limit = _int_param(request, "limit", 100, 500)
     return _ok(sigops.get_contacts(contact_type=contact_type, limit=limit))
 
 
@@ -79,11 +95,11 @@ async def handle_sigops_detections(
     sigops, err = _require_sigops(request)
     if err:
         return err
-    since = float(request.query.get("since", "0"))
-    freq_min = int(request.query.get("freq_min", "0"))
-    freq_max = int(request.query.get("freq_max", "0"))
+    since = _float_param(request, "since", 0.0)
+    freq_min = _int_param(request, "freq_min", 0)
+    freq_max = _int_param(request, "freq_max", 0)
     signal_type = request.query.get("type", "")
-    limit = min(int(request.query.get("limit", "100")), 500)
+    limit = _int_param(request, "limit", 100, 500)
     return _ok(sigops.get_detections(
         since=since, freq_min=freq_min, freq_max=freq_max,
         signal_type=signal_type, limit=limit,
@@ -111,7 +127,7 @@ async def handle_sigops_correlations(
     sigops, err = _require_sigops(request)
     if err:
         return err
-    limit = min(int(request.query.get("limit", "50")), 200)
+    limit = _int_param(request, "limit", 50, 200)
     return _ok(sigops.get_correlations(limit=limit))
 
 

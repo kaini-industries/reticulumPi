@@ -165,6 +165,7 @@ class SignalOperationsPlugin(PluginBase):
 
         self._baseline_db: dict[int, float] = {}
         self._active_signals: dict[int, SignalTrack] = {}
+        self._signals_lock = threading.Lock()
         self._contacts: dict[str, Contact] = {}
         self._contacts_lock = threading.Lock()
         self._correlation_events: deque[dict[str, Any]] = deque(maxlen=200)
@@ -203,7 +204,9 @@ class SignalOperationsPlugin(PluginBase):
 
     def _subscribe_events(self) -> None:
         sub = self.event_bus.subscribe
+        sub_off = self.event_bus.subscribe_offloaded
         sub(events.SPECTRUM_SWEEP, self._on_spectrum_sweep)
+        sub_off(events.SIGOPS_SIGNAL_DETECTED, self._on_sigops_detection)
         sub(events.ADSB_AIRCRAFT_DETECTED, self._on_adsb)
         sub(events.ADSB_AIRCRAFT_LOST, self._on_adsb_lost)
         sub(events.ADSB_EMERGENCY_SQUAWK, self._on_adsb_emergency)
@@ -223,6 +226,7 @@ class SignalOperationsPlugin(PluginBase):
     def _unsubscribe_events(self) -> None:
         unsub = self.event_bus.unsubscribe
         unsub(events.SPECTRUM_SWEEP, self._on_spectrum_sweep)
+        unsub(events.SIGOPS_SIGNAL_DETECTED, self._on_sigops_detection)
         unsub(events.ADSB_AIRCRAFT_DETECTED, self._on_adsb)
         unsub(events.ADSB_AIRCRAFT_LOST, self._on_adsb_lost)
         unsub(events.ADSB_EMERGENCY_SQUAWK, self._on_adsb_emergency)
@@ -246,6 +250,23 @@ class SignalOperationsPlugin(PluginBase):
         if lat is not None and lon is not None:
             self._receiver_lat = float(lat)
             self._receiver_lon = float(lon)
+
+    def _on_sigops_detection(self, _event_type: str, data: dict) -> None:
+        source = data.get("source", "")
+        if source == "spectrum_scanner":
+            return
+        sig = DetectedSignal(
+            center_freq_hz=int(data.get("freq_hz", 0)),
+            bandwidth_hz=int(data.get("bandwidth_hz", 0)),
+            peak_power_db=float(data.get("power_db", 0.0)),
+            timestamp=data.get("timestamp", time.time()),
+        )
+        name = data.get("signal_type", data.get("type", ""))
+        conf = float(data.get("confidence", 0.0))
+        if sig.center_freq_hz > 0:
+            self._db_save_observation(sig, name, conf, source=source)
+        self._stats["signals_detected_total"] += 1
+        self._snapshot_dirty = True
 
     # ── detection engine ─────────────────────────────────────────────
 
@@ -364,39 +385,42 @@ class SignalOperationsPlugin(PluginBase):
         self, sig: DetectedSignal, name: str | None, conf: float,
     ) -> None:
         qfreq = sig.center_freq_hz // 10000 * 10000
-        existing = self._active_signals.get(qfreq)
-        if existing is not None:
-            gap = sig.timestamp - existing.last_seen
-            if gap > 30:
-                existing.intermittent = True
-            existing.last_seen = sig.timestamp
-            existing.duration_s = sig.timestamp - existing.first_seen
-            existing.observation_count += 1
-            existing.peak_power_db = max(existing.peak_power_db, sig.peak_power_db)
-            if name and (existing.classification is None or conf > existing.confidence):
-                existing.classification = name
-                existing.confidence = conf
-        else:
-            track = SignalTrack(
-                center_freq_hz=sig.center_freq_hz,
-                bandwidth_hz=sig.bandwidth_hz,
-                peak_power_db=sig.peak_power_db,
-                first_seen=sig.timestamp,
-                last_seen=sig.timestamp,
-                classification=name,
-                confidence=conf,
-            )
-            self._active_signals[qfreq] = track
-            self._stats["signals_detected_total"] += 1
-            if name:
-                self._stats["signals_classified"] += 1
+        publish_evt = None
+        with self._signals_lock:
+            existing = self._active_signals.get(qfreq)
+            if existing is not None:
+                gap = sig.timestamp - existing.last_seen
+                if gap > 30:
+                    existing.intermittent = True
+                existing.last_seen = sig.timestamp
+                existing.duration_s = sig.timestamp - existing.first_seen
+                existing.observation_count += 1
+                existing.peak_power_db = max(existing.peak_power_db, sig.peak_power_db)
+                if name and (existing.classification is None or conf > existing.confidence):
+                    existing.classification = name
+                    existing.confidence = conf
             else:
-                self._stats["signals_unknown"] += 1
-            self._snapshot_dirty = True
+                track = SignalTrack(
+                    center_freq_hz=sig.center_freq_hz,
+                    bandwidth_hz=sig.bandwidth_hz,
+                    peak_power_db=sig.peak_power_db,
+                    first_seen=sig.timestamp,
+                    last_seen=sig.timestamp,
+                    classification=name,
+                    confidence=conf,
+                )
+                self._active_signals[qfreq] = track
+                self._stats["signals_detected_total"] += 1
+                if name:
+                    self._stats["signals_classified"] += 1
+                else:
+                    self._stats["signals_unknown"] += 1
+                self._snapshot_dirty = True
+                publish_evt = events.SIGOPS_SIGNAL_CLASSIFIED if name else events.SIGOPS_SIGNAL_UNKNOWN
 
+        if publish_evt is not None:
             try:
-                evt = events.SIGOPS_SIGNAL_CLASSIFIED if name else events.SIGOPS_SIGNAL_UNKNOWN
-                self.event_bus.publish(evt, {
+                self.event_bus.publish(publish_evt, {
                     "freq_hz": sig.center_freq_hz,
                     "freq_mhz": round(sig.center_freq_hz / 1e6, 4),
                     "bandwidth_hz": sig.bandwidth_hz,
@@ -821,12 +845,13 @@ class SignalOperationsPlugin(PluginBase):
 
     def _evict_stale_signals(self) -> None:
         now = time.time()
-        stale = [
-            qfreq for qfreq, t in self._active_signals.items()
-            if now - t.last_seen > 300
-        ]
-        for qfreq in stale:
-            del self._active_signals[qfreq]
+        with self._signals_lock:
+            stale = [
+                qfreq for qfreq, t in self._active_signals.items()
+                if now - t.last_seen > 300
+            ]
+            for qfreq in stale:
+                del self._active_signals[qfreq]
 
     def _update_stats(self) -> None:
         with self._contacts_lock:
@@ -891,6 +916,7 @@ class SignalOperationsPlugin(PluginBase):
 
     def _db_save_observation(
         self, sig: DetectedSignal, name: str | None, conf: float,
+        source: str = "spectrum_scanner",
     ) -> None:
         try:
             with sqlite3.connect(self._db_path) as conn:
@@ -903,12 +929,12 @@ class SignalOperationsPlugin(PluginBase):
                         sig.timestamp, sig.center_freq_hz, sig.bandwidth_hz,
                         round(sig.peak_power_db, 1),
                         "classified" if name else "detected",
-                        name, round(conf, 2), "spectrum_scanner",
+                        name, round(conf, 2), source,
                     ),
                 )
             self._stats["observations_persisted"] += 1
         except Exception:
-            pass
+            self.log.debug("Failed to save observation", exc_info=True)
 
     def _db_save_correlation(self, entry: dict) -> None:
         try:
@@ -970,10 +996,14 @@ class SignalOperationsPlugin(PluginBase):
     # ── public query methods ─────────────────────────────────────────
 
     def get_overview(self) -> dict[str, Any]:
+        with self._signals_lock:
+            active_sigs = len(self._active_signals)
+        with self._contacts_lock:
+            active_contacts = len(self._contacts)
         return {
             "stats": dict(self._stats),
-            "active_signals": len(self._active_signals),
-            "active_contacts": len(self._contacts),
+            "active_signals": active_sigs,
+            "active_contacts": active_contacts,
             "correlation_events": len(self._correlation_events),
         }
 
@@ -1073,19 +1103,24 @@ class SignalOperationsPlugin(PluginBase):
                     "WHERE classification_name IS NOT NULL GROUP BY classification_name "
                     "ORDER BY COUNT(*) DESC LIMIT 20",
                 ).fetchall()
+            with self._signals_lock:
+                active_sigs = len(self._active_signals)
+            with self._contacts_lock:
+                active_contacts = len(self._contacts)
             return {
                 "total_observations": total,
                 "by_type": {r[0]: r[1] for r in by_type if r[0]},
                 "by_classification": {r[0]: r[1] for r in by_class},
-                "active_signals": len(self._active_signals),
-                "active_contacts": len(self._contacts),
+                "active_signals": active_sigs,
+                "active_contacts": active_contacts,
             }
         except Exception:
             return {"total_observations": 0}
 
     def reset_baseline(self) -> None:
         self._baseline_db.clear()
-        self._active_signals.clear()
+        with self._signals_lock:
+            self._active_signals.clear()
 
     def _contact_to_dict(self, c: Contact) -> dict[str, Any]:
         return {
@@ -1124,11 +1159,12 @@ class SignalOperationsPlugin(PluginBase):
             )[:50]
             contact_list = [self._contact_to_dict(c) for c in contacts]
 
-        signals = sorted(
-            self._active_signals.values(),
-            key=lambda s: s.last_seen,
-            reverse=True,
-        )[:20]
+        with self._signals_lock:
+            signals = sorted(
+                self._active_signals.values(),
+                key=lambda s: s.last_seen,
+                reverse=True,
+            )[:20]
         signal_list = [
             {
                 "freq_hz": s.center_freq_hz,
@@ -1153,10 +1189,12 @@ class SignalOperationsPlugin(PluginBase):
         self._snapshot_dirty = False
 
     def get_status(self) -> dict[str, Any]:
+        with self._contacts_lock:
+            contacts_active = len(self._contacts)
         return {
             "active": self._active,
             "signals_detected": self._stats["signals_detected_total"],
-            "contacts_active": len(self._contacts),
+            "contacts_active": contacts_active,
             "correlations": self._stats["correlations_total"],
             "observations": self._stats["observations_persisted"],
         }

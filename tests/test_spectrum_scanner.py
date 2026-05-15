@@ -764,3 +764,40 @@ class TestPresetAnalyzerIntegration:
         assert p._analyzer is None
         snap = p.get_snapshot()
         assert "channel_analysis" not in snap
+
+
+class TestSpectrumSweepEvent:
+    """Verify that SPECTRUM_SWEEP events carry frequency and power data."""
+
+    def _make_csv_line(self, freq_lo_hz, freq_hi_hz, bin_step_hz, powers_db):
+        n_bins = len(powers_db)
+        parts = ["2026-01-01", "00:00:00", str(freq_lo_hz), str(freq_hi_hz),
+                 str(bin_step_hz), str(n_bins)]
+        parts += [f"{p:.1f}" for p in powers_db]
+        return ", ".join(parts)
+
+    def test_sweep_event_includes_bins_and_powers(self):
+        from reticulumpi import events
+        p = _make_plugin()
+        p._event_sweep_topic = events.SPECTRUM_SWEEP
+        freq_lo = 88_000_000
+        freq_hi = 108_000_000
+        bin_step = 250_000
+        n_bins = (freq_hi - freq_lo) // bin_step
+        powers = [-70.0] * n_bins
+
+        line = self._make_csv_line(freq_lo, freq_hi, bin_step, powers)
+        p._handle_csv_line(line)
+        p._flush_current_sweep()
+
+        publish_calls = p.app.event_bus.publish.call_args_list
+        sweep_calls = [c for c in publish_calls
+                       if c[0][0] == "spectrum.sweep"]
+        assert len(sweep_calls) >= 1
+        payload = sweep_calls[0][0][1]
+        assert "bins_hz" in payload
+        assert "powers_db" in payload
+        assert len(payload["bins_hz"]) == n_bins
+        assert len(payload["powers_db"]) == n_bins
+        assert payload["bins_hz"][0] == freq_lo
+        assert payload["powers_db"][0] == -70.0

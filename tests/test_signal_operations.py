@@ -42,6 +42,7 @@ def _make_plugin(config: dict | None = None) -> SignalOperationsPlugin:
     plugin._active = True
     plugin._baseline_db = {}
     plugin._active_signals = {}
+    plugin._signals_lock = threading.Lock()
     plugin._contacts = {}
     plugin._contacts_lock = threading.Lock()
     plugin._correlation_events = deque(maxlen=200)
@@ -55,8 +56,10 @@ def _make_plugin(config: dict | None = None) -> SignalOperationsPlugin:
     plugin._snapshot_dirty = True
     plugin._signal_db = []
     plugin._db_path = ":memory:"
-    plugin._receiver_lat = None
-    plugin._receiver_lon = None
+    if not hasattr(plugin, "_receiver_lat"):
+        plugin._receiver_lat = None
+    if not hasattr(plugin, "_receiver_lon"):
+        plugin._receiver_lon = None
     return plugin
 
 
@@ -634,4 +637,69 @@ class TestPersistence:
         with sqlite3.connect(path) as conn:
             rows = conn.execute("SELECT event_type, description FROM correlation_events").fetchall()
         assert rows[0] == ("test_event", "testing")
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# SIGOPS detection handler
+# ---------------------------------------------------------------------------
+
+class TestSigopsDetectionHandler:
+    def test_saves_observation_with_correct_source(self):
+        p, path = _make_plugin_with_db()
+        p._on_sigops_detection("sigops.signal_detected", {
+            "source": "acars_decoder",
+            "signal_type": "ACARS",
+            "freq_hz": 131_550_000,
+            "bandwidth_hz": 2400,
+            "power_db": -60.0,
+            "confidence": 0.95,
+            "timestamp": time.time(),
+        })
+        assert p._stats["signals_detected_total"] == 1
+        with sqlite3.connect(path) as conn:
+            row = conn.execute(
+                "SELECT classification_name, source_plugin FROM signal_observations",
+            ).fetchone()
+        assert row[0] == "ACARS"
+        assert row[1] == "acars_decoder"
+        os.unlink(path)
+
+    def test_skips_spectrum_scanner_source(self):
+        p, path = _make_plugin_with_db()
+        p._on_sigops_detection("sigops.signal_detected", {
+            "source": "spectrum_scanner",
+            "signal_type": "unknown",
+        })
+        assert p._stats["signals_detected_total"] == 0
+        os.unlink(path)
+
+    def test_skips_persistence_for_zero_freq(self):
+        p, path = _make_plugin_with_db()
+        p._on_sigops_detection("sigops.signal_detected", {
+            "source": "weather_alert",
+            "type": "weather_alert",
+            "confidence": 0.8,
+            "timestamp": time.time(),
+        })
+        assert p._stats["signals_detected_total"] == 1
+        assert p._stats["observations_persisted"] == 0
+        with sqlite3.connect(path) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM signal_observations").fetchone()[0]
+        assert count == 0
+        os.unlink(path)
+
+    def test_handles_type_fallback(self):
+        p, path = _make_plugin_with_db()
+        p._on_sigops_detection("sigops.signal_detected", {
+            "source": "ais_receiver",
+            "type": "AIS",
+            "freq_hz": 161_975_000,
+            "confidence": 0.8,
+            "timestamp": time.time(),
+        })
+        assert p._stats["signals_detected_total"] == 1
+        dets = p.get_detections()
+        assert len(dets["detections"]) == 1
+        assert dets["detections"][0]["classification"] == "AIS"
         os.unlink(path)

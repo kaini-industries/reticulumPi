@@ -842,6 +842,8 @@ class SpectrumScanner(PluginBase):
                     "bin_count": len(freqs),
                     "freq_start_hz": freqs[0],
                     "freq_stop_hz": freqs[-1],
+                    "bins_hz": tuple(freqs),
+                    "powers_db": tuple(powers),
                 },
             )
         except Exception:
