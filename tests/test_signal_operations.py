@@ -55,8 +55,10 @@ def _make_plugin(config: dict | None = None) -> SignalOperationsPlugin:
     plugin._snapshot_dirty = True
     plugin._signal_db = []
     plugin._db_path = ":memory:"
-    plugin._receiver_lat = None
-    plugin._receiver_lon = None
+    if plugin._receiver_lat is None:
+        plugin._receiver_lat = None
+    if plugin._receiver_lon is None:
+        plugin._receiver_lon = None
     return plugin
 
 
