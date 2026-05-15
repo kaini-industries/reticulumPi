@@ -21,6 +21,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _collect_interfaces,
     _enrich_transport_traffic,
     _extract_radio,
+    _handle_ws_command,
     _lookup_message_row,
     _on_alert_event,
     _on_message_event,
@@ -1645,3 +1646,43 @@ class TestBroadcastOverlapGuard:
         finally:
             wsh._collection_running.clear()
             wsh._ws_clients.discard(ws_mock)
+
+
+class TestHandleWsSpectrumPreset:
+    def _make_plugin(self, scanner=None):
+        plugin = MagicMock()
+        plugin.app.plugins.get.return_value = scanner
+        return plugin
+
+    def test_success_returns_switched_type(self):
+        scanner = MagicMock()
+        scanner.switch_preset.return_value = {
+            "preset": "aviation",
+            "freq_start_mhz": 108.0,
+            "freq_stop_mhz": 137.0,
+            "has_analysis": False,
+        }
+        plugin = self._make_plugin(scanner)
+        raw = json.dumps({"action": "spectrum_switch_preset", "preset": "aviation"})
+        result = _handle_ws_command(raw, plugin)
+        assert result["type"] == "spectrum_preset_switched"
+        assert result["preset"] == "aviation"
+
+    def test_value_error_returns_preset_error(self):
+        scanner = MagicMock()
+        scanner.switch_preset.side_effect = ValueError("Unknown preset")
+        plugin = self._make_plugin(scanner)
+        raw = json.dumps({"action": "spectrum_switch_preset", "preset": "bad"})
+        result = _handle_ws_command(raw, plugin)
+        assert result["type"] == "spectrum_preset_error"
+        assert "Unknown preset" in result["error"]
+
+    def test_generic_exception_returns_preset_error(self):
+        scanner = MagicMock()
+        scanner.switch_preset.side_effect = RuntimeError("boom")
+        plugin = self._make_plugin(scanner)
+        raw = json.dumps({"action": "spectrum_switch_preset", "preset": "x"})
+        result = _handle_ws_command(raw, plugin)
+        assert result is not None
+        assert result["type"] == "spectrum_preset_error"
+        assert "boom" in result["error"]

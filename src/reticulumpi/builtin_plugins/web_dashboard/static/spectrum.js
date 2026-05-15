@@ -1027,5 +1027,17 @@
     if (_statusEl) _statusEl.textContent = 'Preset error: ' + errorMsg;
   }
 
-  R.spectrum = { update: update, handlePresetError: handlePresetError };
+  function handlePresetSwitched(data) {
+    if (_switchingTimeout) { clearTimeout(_switchingTimeout); _switchingTimeout = null; }
+    if (_switchingOverlay && _switchingOverlay.parentNode) {
+      _switchingOverlay.parentNode.removeChild(_switchingOverlay);
+      _switchingOverlay = null;
+    }
+    Object.keys(_presetBtns).forEach(function (k) {
+      _presetBtns[k].disabled = false;
+      _presetBtns[k].className = (k === data.preset) ? 'active' : '';
+    });
+  }
+
+  R.spectrum = { update: update, handlePresetError: handlePresetError, handlePresetSwitched: handlePresetSwitched };
 })();
