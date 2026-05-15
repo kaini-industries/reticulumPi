@@ -493,9 +493,14 @@ async def handle_messages(
     except (ValueError, TypeError):
         return _error("since must be a numeric timestamp", 400)
 
-    messages = hub.get_messages(
-        limit=limit, offset=offset, transport=transport,
-        direction=direction, since=since, sub_transport=sub_transport,
+    loop = asyncio.get_running_loop()
+    messages = await loop.run_in_executor(
+        None,
+        functools.partial(
+            hub.get_messages,
+            limit=limit, offset=offset, transport=transport,
+            direction=direction, since=since, sub_transport=sub_transport,
+        ),
     )
     return _ok({"messages": messages})
 
@@ -608,7 +613,9 @@ async def handle_transports(
     hub = plugin.app.get_plugin("messaging_hub")
     if not hub or not hasattr(hub, "get_transports"):
         return _ok({"transports": []})
-    return _ok({"transports": hub.get_transports()})
+    loop = asyncio.get_running_loop()
+    transports = await loop.run_in_executor(None, hub.get_transports)
+    return _ok({"transports": transports})
 
 
 async def handle_contacts(
@@ -627,7 +634,10 @@ async def handle_contacts(
     transport = request.query.get("transport") or None
     query = request.query.get("q") or None
     sub_transport = request.query.get("sub_transport")
-    contacts = hub.get_contacts(transport, query=query)
+    loop = asyncio.get_running_loop()
+    contacts = await loop.run_in_executor(
+        None, functools.partial(hub.get_contacts, transport, query=query),
+    )
     # Adapters don't tag their contacts with sub_transport today, so we
     # derive it from stored DM history: include a contact on a given
     # sub_transport only if we've actually exchanged DMs with that peer
@@ -640,7 +650,9 @@ async def handle_contacts(
         peer_subs: dict[str, set[str]] = {}
         if transport and hasattr(hub, "get_peer_sub_transports"):
             try:
-                peer_subs = hub.get_peer_sub_transports(transport)
+                peer_subs = await loop.run_in_executor(
+                    None, functools.partial(hub.get_peer_sub_transports, transport),
+                )
             except Exception:
                 peer_subs = {}
 
@@ -667,7 +679,9 @@ async def handle_message_stats(
     hub = plugin.app.get_plugin("messaging_hub")
     if not hub or not hasattr(hub, "get_stats"):
         return _ok({"stats": {}})
-    return _ok({"stats": hub.get_stats()})
+    loop = asyncio.get_running_loop()
+    stats = await loop.run_in_executor(None, hub.get_stats)
+    return _ok({"stats": stats})
 
 
 async def handle_conversations(
@@ -680,9 +694,15 @@ async def handle_conversations(
         return _ok({"conversations": []})
     transport = request.query.get("transport") or None
     sub_transport = request.query.get("sub_transport")
-    return _ok({"conversations": hub.get_conversations(
-        transport=transport, sub_transport=sub_transport,
-    )})
+    loop = asyncio.get_running_loop()
+    conversations = await loop.run_in_executor(
+        None,
+        functools.partial(
+            hub.get_conversations,
+            transport=transport, sub_transport=sub_transport,
+        ),
+    )
+    return _ok({"conversations": conversations})
 
 
 async def handle_conversation_messages(
@@ -703,11 +723,15 @@ async def handle_conversation_messages(
         before = float(before_str) if before_str else None
     except (ValueError, TypeError):
         return _error("before must be a numeric timestamp", 400)
-    return _ok({
-        "messages": hub.get_conversation_messages(
+    loop = asyncio.get_running_loop()
+    msgs = await loop.run_in_executor(
+        None,
+        functools.partial(
+            hub.get_conversation_messages,
             contact_id, limit=limit, before=before,
         ),
-    })
+    )
+    return _ok({"messages": msgs})
 
 
 async def handle_message_search(
@@ -727,9 +751,15 @@ async def handle_message_search(
         return _error("limit must be an integer", 400)
     transport = request.query.get("transport") or None
     sub_transport = request.query.get("sub_transport")
-    return _ok({"messages": hub.search_messages(
-        query, limit=limit, transport=transport, sub_transport=sub_transport,
-    )})
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(
+        None,
+        functools.partial(
+            hub.search_messages,
+            query, limit=limit, transport=transport, sub_transport=sub_transport,
+        ),
+    )
+    return _ok({"messages": results})
 
 
 async def handle_delete_conversation(
@@ -743,7 +773,10 @@ async def handle_delete_conversation(
     contact_id = request.match_info["contact_id"]
     if not contact_id:
         return _error("contact_id required", 400)
-    deleted = hub.delete_conversation(contact_id)
+    loop = asyncio.get_running_loop()
+    deleted = await loop.run_in_executor(
+        None, functools.partial(hub.delete_conversation, contact_id),
+    )
     return _ok({"deleted": deleted})
 
 
@@ -762,7 +795,10 @@ async def handle_mark_read(
     contact_id = body.get("contact_id", "")
     if not contact_id:
         return _error("contact_id required", 400)
-    updated = hub.mark_read(contact_id)
+    loop = asyncio.get_running_loop()
+    updated = await loop.run_in_executor(
+        None, functools.partial(hub.mark_read, contact_id),
+    )
     return _ok({"updated": updated})
 
 
@@ -776,9 +812,15 @@ async def handle_unread_counts(
         return _ok({"unread": {}})
     transport = request.query.get("transport") or None
     sub_transport = request.query.get("sub_transport")
-    return _ok({"unread": hub.get_unread_counts(
-        transport=transport, sub_transport=sub_transport,
-    )})
+    loop = asyncio.get_running_loop()
+    unread = await loop.run_in_executor(
+        None,
+        functools.partial(
+            hub.get_unread_counts,
+            transport=transport, sub_transport=sub_transport,
+        ),
+    )
+    return _ok({"unread": unread})
 
 
 # ── Space tracker ────────────────────────────────────────────────────

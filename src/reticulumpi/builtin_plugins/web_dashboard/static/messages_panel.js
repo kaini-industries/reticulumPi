@@ -339,9 +339,12 @@
         if (!r) { _showConvsError('network error'); return; }
         if (!r.ok) { _showConvsError(r.error || 'request failed'); return; }
         _clearConvsError();
-        _conversations = r.data.conversations || [];
+        _conversations = (r.data && r.data.conversations) || [];
         _hasFreshData = true;
         _renderConversations();
+      }).catch(function (err) {
+        console.error('[' + cfg.rootId + '] _fetchConversations:', err);
+        _showConvsError('unexpected error');
       });
     }
 
@@ -384,16 +387,20 @@
     function _fetchContacts() {
       return apiRetry('/api/messages/contacts' + _qs()).then(function (r) {
         if (!r || !r.ok) return;
-        _contacts = r.data.contacts || [];
+        _contacts = (r.data && r.data.contacts) || [];
         _renderDestSelect();
+      }).catch(function (err) {
+        console.error('[' + cfg.rootId + '] _fetchContacts:', err);
       });
     }
 
     function _fetchUnread() {
       return apiRetry('/api/messages/unread' + _qs()).then(function (r) {
         if (!r || !r.ok) return;
-        _unreadCounts = r.data.unread || {};
+        _unreadCounts = (r.data && r.data.unread) || {};
         _updateUnreadUI();
+      }).catch(function (err) {
+        console.error('[' + cfg.rootId + '] _fetchUnread:', err);
       });
     }
 
@@ -417,6 +424,8 @@
         // Channels drive the pinned per-channel broadcast rows.
         _renderConversations();
         _renderDestSelect();
+      }).catch(function (err) {
+        console.error('[' + cfg.rootId + '] _fetchChannels:', err);
       });
     }
 
@@ -431,6 +440,9 @@
         _updateUnreadUI();
         if (_activeContactId) _renderThread();
         return;
+      }
+      if (_dom.convs && _conversations.length === 0) {
+        _dom.convs.innerHTML = '<div class="msg-convs-loading">Loading…</div>';
       }
       _fetchConversations();
       _fetchUnread();
@@ -451,6 +463,14 @@
       // ticks so the user's results aren't wiped from under them, which
       // would also let the debounce cache no-op a retyped identical query.
       if (_dom.search && _dom.search.value.trim()) return;
+      // Don't run the keyed-diff render from WS ticks when the panel is
+      // collapsed and no conversations have been fetched yet — the empty
+      // rows array would keep the container :empty, showing the CSS
+      // "No conversations" placeholder and preventing the first real
+      // fetch from populating it.
+      if (!_expanded && _conversations.length === 0) return;
+      var loading = _dom.convs.querySelector('.msg-convs-loading');
+      if (loading) loading.remove();
       // Pin one broadcast row per active Meshtastic channel (Primary,
       // private channels, etc.).  Panels without channel support fall
       // back to a single broadcast row using the legacy id shape.
@@ -1421,7 +1441,9 @@
           _unreadCounts = {};
         }
         _updateUnreadUI();
-        _renderConversations();
+        try { _renderConversations(); } catch (err) {
+          console.error('[' + cfg.rootId + '] render in update():', err);
+        }
       }
     }
 

@@ -1486,6 +1486,12 @@ body {
   text-align: center;
 }
 .msg-convs-error:hover { background: rgba(217,119,6,0.14); }
+.msg-convs-loading {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 2rem 0.5rem;
+}
 
 /* Message bubble */
 .msg-bubble {
