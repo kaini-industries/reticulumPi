@@ -55,10 +55,6 @@ def _make_plugin(config: dict | None = None) -> SignalOperationsPlugin:
     plugin._snapshot_dirty = True
     plugin._signal_db = []
     plugin._db_path = ":memory:"
-    if plugin._receiver_lat is None:
-        plugin._receiver_lat = None
-    if plugin._receiver_lon is None:
-        plugin._receiver_lon = None
     return plugin
 
 
@@ -525,16 +521,17 @@ class TestResetAndSnapshot:
         p.reset_baseline()
         assert p._baseline_db == {} and p._active_signals == {}
 
-    def test_broadcast_returns_sigops_key(self):
+    def test_broadcast_returns_raw_snapshot(self):
         p = _make_plugin()
         result = p.broadcast_snapshot()
-        assert "sigops" in result
+        assert "stats" in result
+        assert "contacts" in result
 
     def test_snapshot_includes_contacts(self):
         p = _make_plugin()
         p._upsert_contact("aircraft", "A1", "src")
         p._snapshot_dirty = True
-        snap = p.broadcast_snapshot()["sigops"]
+        snap = p.broadcast_snapshot()
         assert len(snap["contacts"]) == 1
 
 
@@ -636,4 +633,128 @@ class TestPersistence:
         with sqlite3.connect(path) as conn:
             rows = conn.execute("SELECT event_type, description FROM correlation_events").fetchall()
         assert rows[0] == ("test_event", "testing")
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# H6: Detection pipeline integration
+# ---------------------------------------------------------------------------
+
+class TestDetectionPipeline:
+    def test_baseline_then_detect(self):
+        p = _make_plugin()
+        bins = [100_000_000, 100_010_000, 100_020_000, 100_030_000, 100_040_000]
+        quiet = [-90.0] * 5
+        for _ in range(60):
+            p._update_baseline(bins, quiet)
+        loud = [-90.0, -50.0, -45.0, -48.0, -90.0]
+        signals = p._find_signals(bins, loud, time.time())
+        assert len(signals) >= 1
+        sig = signals[0]
+        assert sig.center_freq_hz == 100_020_000
+        assert sig.peak_power_db == -45.0
+        assert sig.bandwidth_hz > 0
+
+    def test_classify_detected_signal(self):
+        p = _make_plugin()
+        p._signal_db = [{
+            "name": "TestSignal",
+            "freq_min_mhz": 99.0,
+            "freq_max_mhz": 101.0,
+            "bandwidth_khz": 30,
+        }]
+        sig = DetectedSignal(100_000_000, 30_000, -50.0, time.time())
+        name, conf = p._classify_signal(sig)
+        assert name == "TestSignal"
+        assert conf > 0.3
+
+    def test_pipeline_saves_to_db(self):
+        p, path = _make_plugin_with_db()
+        p._signal_db = [{
+            "name": "FM",
+            "freq_min_mhz": 99.0,
+            "freq_max_mhz": 101.0,
+            "bandwidth_khz": 200,
+        }]
+        sig = DetectedSignal(100_000_000, 200_000, -50.0, time.time())
+        name, conf = p._classify_signal(sig)
+        p._db_save_observation(sig, name, conf)
+        dets = p.get_detections()
+        assert len(dets["detections"]) == 1
+        assert dets["detections"][0]["classification"] == "FM"
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# M12: Stale signal eviction
+# ---------------------------------------------------------------------------
+
+class TestEvictStaleSignals:
+    def test_evicts_old_signals(self):
+        p = _make_plugin()
+        old_sig = SignalTrack(
+            center_freq_hz=100_000_000,
+            bandwidth_hz=10_000,
+            peak_power_db=-50.0,
+            first_seen=time.time() - 600,
+            last_seen=time.time() - 400,
+        )
+        p._active_signals[100_000_000] = old_sig
+        p._evict_stale_signals()
+        assert len(p._active_signals) == 0
+
+    def test_keeps_fresh_signals(self):
+        p = _make_plugin()
+        fresh = SignalTrack(
+            center_freq_hz=200_000_000,
+            bandwidth_hz=10_000,
+            peak_power_db=-45.0,
+            first_seen=time.time() - 60,
+            last_seen=time.time(),
+        )
+        p._active_signals[200_000_000] = fresh
+        p._evict_stale_signals()
+        assert len(p._active_signals) == 1
+
+
+# ---------------------------------------------------------------------------
+# H2: _on_sigops_detection handler
+# ---------------------------------------------------------------------------
+
+class TestSigopsDetectionHandler:
+    def test_saves_observation(self):
+        p, path = _make_plugin_with_db()
+        p._on_sigops_detection("sigops.signal_detected", {
+            "source": "acars_decoder",
+            "signal_type": "ACARS",
+            "freq_hz": 131_550_000,
+            "bandwidth_hz": 2400,
+            "power_db": -60.0,
+            "confidence": 0.95,
+            "timestamp": time.time(),
+        })
+        assert p._stats["signals_detected_total"] == 1
+        dets = p.get_detections()
+        assert len(dets["detections"]) == 1
+        assert dets["detections"][0]["classification"] == "ACARS"
+        os.unlink(path)
+
+    def test_skips_spectrum_scanner_source(self):
+        p, path = _make_plugin_with_db()
+        p._on_sigops_detection("sigops.signal_detected", {
+            "source": "spectrum_scanner",
+            "signal_type": "unknown",
+        })
+        assert p._stats["signals_detected_total"] == 0
+        os.unlink(path)
+
+    def test_handles_type_fallback(self):
+        p, path = _make_plugin_with_db()
+        p._on_sigops_detection("sigops.signal_detected", {
+            "source": "weather_alert",
+            "type": "weather_alert",
+            "confidence": 0.8,
+            "timestamp": time.time(),
+        })
+        assert p._stats["signals_detected_total"] == 1
         os.unlink(path)

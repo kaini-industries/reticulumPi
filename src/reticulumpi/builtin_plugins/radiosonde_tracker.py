@@ -309,7 +309,7 @@ class RadiosondeTracker(SignalPluginBase):
                     "alt_m": alt,
                 })
 
-            if self._receiver_lat is not None:
+            if self._receiver_lat is not None and self._receiver_lon is not None:
                 from reticulumpi.geo import haversine_km, bearing_deg
                 sonde["distance_km"] = round(
                     haversine_km(self._receiver_lat, self._receiver_lon, lat, lon), 1,
@@ -329,7 +329,7 @@ class RadiosondeTracker(SignalPluginBase):
             try:
                 self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
                     "source": "radiosonde_tracker",
-                    "type": "radiosonde",
+                    "signal_type": "radiosonde",
                     "timestamp": now,
                     "confidence": 1.0,
                     "position": {"lat": lat, "lon": lon} if lat and lon else None,

@@ -410,7 +410,7 @@ class NOAAAPTDecoder(SignalPluginBase):
                 try:
                     self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
                         "source": "noaa_apt_decoder",
-                        "type": "satellite_image",
+                        "signal_type": "satellite_image",
                         "timestamp": time.time(),
                         "confidence": quality_score,
                         "position": None,

@@ -203,26 +203,29 @@ class SignalOperationsPlugin(PluginBase):
 
     def _subscribe_events(self) -> None:
         sub = self.event_bus.subscribe
+        sub_off = self.event_bus.subscribe_offloaded
         sub(events.SPECTRUM_SWEEP, self._on_spectrum_sweep)
-        sub(events.ADSB_AIRCRAFT_DETECTED, self._on_adsb)
-        sub(events.ADSB_AIRCRAFT_LOST, self._on_adsb_lost)
-        sub(events.ADSB_EMERGENCY_SQUAWK, self._on_adsb_emergency)
-        sub(events.ACARS_MESSAGE_DECODED, self._on_acars)
-        sub(events.AIS_VESSEL_DETECTED, self._on_ais)
-        sub(events.AIS_VESSEL_LOST, self._on_ais_lost)
-        sub(events.RADIOSONDE_DETECTED, self._on_radiosonde)
-        sub(events.RADIOSONDE_BURST, self._on_radiosonde)
-        sub(events.RADIOSONDE_LOST, self._on_radiosonde_lost)
-        sub(events.WEATHER_ALERT_RECEIVED, self._on_weather_alert)
-        sub(events.LORA_PEER_ANNOUNCE_RECEIVED, self._on_lora_peer)
-        sub(events.ISM_DEVICE_DETECTED, self._on_ism_device)
-        sub(events.ISM_DEVICE_LOST, self._on_ism_lost)
+        sub_off(events.SIGOPS_SIGNAL_DETECTED, self._on_sigops_detection)
+        sub_off(events.ADSB_AIRCRAFT_DETECTED, self._on_adsb)
+        sub_off(events.ADSB_AIRCRAFT_LOST, self._on_adsb_lost)
+        sub_off(events.ADSB_EMERGENCY_SQUAWK, self._on_adsb_emergency)
+        sub_off(events.ACARS_MESSAGE_DECODED, self._on_acars)
+        sub_off(events.AIS_VESSEL_DETECTED, self._on_ais)
+        sub_off(events.AIS_VESSEL_LOST, self._on_ais_lost)
+        sub_off(events.RADIOSONDE_DETECTED, self._on_radiosonde)
+        sub_off(events.RADIOSONDE_BURST, self._on_radiosonde)
+        sub_off(events.RADIOSONDE_LOST, self._on_radiosonde_lost)
+        sub_off(events.WEATHER_ALERT_RECEIVED, self._on_weather_alert)
+        sub_off(events.LORA_PEER_ANNOUNCE_RECEIVED, self._on_lora_peer)
+        sub_off(events.ISM_DEVICE_DETECTED, self._on_ism_device)
+        sub_off(events.ISM_DEVICE_LOST, self._on_ism_lost)
         sub(events.GPS_FIX_UPDATED, self._on_gps_fix)
         sub(events.GPS_FIX_RECEIVED, self._on_gps_fix)
 
     def _unsubscribe_events(self) -> None:
         unsub = self.event_bus.unsubscribe
         unsub(events.SPECTRUM_SWEEP, self._on_spectrum_sweep)
+        unsub(events.SIGOPS_SIGNAL_DETECTED, self._on_sigops_detection)
         unsub(events.ADSB_AIRCRAFT_DETECTED, self._on_adsb)
         unsub(events.ADSB_AIRCRAFT_LOST, self._on_adsb_lost)
         unsub(events.ADSB_EMERGENCY_SQUAWK, self._on_adsb_emergency)
@@ -246,6 +249,22 @@ class SignalOperationsPlugin(PluginBase):
         if lat is not None and lon is not None:
             self._receiver_lat = float(lat)
             self._receiver_lon = float(lon)
+
+    def _on_sigops_detection(self, _event_type: str, data: dict) -> None:
+        source = data.get("source", "")
+        if source == "spectrum_scanner":
+            return
+        sig = DetectedSignal(
+            center_freq_hz=int(data.get("freq_hz", 0)),
+            bandwidth_hz=int(data.get("bandwidth_hz", 0)),
+            peak_power_db=float(data.get("power_db", 0.0)),
+            timestamp=data.get("timestamp", time.time()),
+        )
+        name = data.get("signal_type", data.get("type", ""))
+        conf = float(data.get("confidence", 0.0))
+        self._db_save_observation(sig, name, conf)
+        self._stats["signals_detected_total"] += 1
+        self._snapshot_dirty = True
 
     # ── detection engine ─────────────────────────────────────────────
 
@@ -302,7 +321,6 @@ class SignalOperationsPlugin(PluginBase):
         min_bw = self._min_bandwidth_hz
 
         in_signal = False
-        sig_start = 0
         sig_bins: list[tuple[int, float]] = []
         detected: list[DetectedSignal] = []
 
@@ -322,9 +340,7 @@ class SignalOperationsPlugin(PluginBase):
             if baseline is None:
                 continue
             if p > baseline + threshold:
-                if not in_signal:
-                    in_signal = True
-                    sig_start = i
+                in_signal = True
                 sig_bins.append((freq, p))
             elif in_signal:
                 detected.extend(
@@ -348,7 +364,8 @@ class SignalOperationsPlugin(PluginBase):
             return []
         freqs = [b[0] for b in bins]
         powers = [b[1] for b in bins]
-        bw = freqs[-1] - freqs[0]
+        bin_width = freqs[1] - freqs[0] if len(freqs) > 1 else 0
+        bw = freqs[-1] - freqs[0] + bin_width
         if bw < min_bw:
             return []
         peak_idx = powers.index(max(powers))
@@ -489,6 +506,12 @@ class SignalOperationsPlugin(PluginBase):
                 k: v for k, v in extra.items()
                 if k in ("bandwidth_khz", "modulation", "description")
             })
+        freq_mhz = freq_hz / 1e6
+        self._signal_db = [
+            e for e in self._signal_db
+            if not (e.get("freq_min_mhz", 0) <= freq_mhz <= e.get("freq_max_mhz", 0)
+                    and e.get("name") == name)
+        ]
         self._signal_db.append(entry)
 
         user_path = os.path.expanduser(
@@ -499,6 +522,11 @@ class SignalOperationsPlugin(PluginBase):
             if os.path.exists(user_path):
                 with open(user_path) as f:
                     existing = json.load(f)
+            existing = [
+                e for e in existing
+                if not (e.get("freq_min_mhz", 0) <= freq_mhz <= e.get("freq_max_mhz", 0)
+                        and e.get("name") == name)
+            ]
             existing.append(entry)
             os.makedirs(os.path.dirname(user_path), exist_ok=True)
             with open(user_path, "w") as f:
@@ -540,7 +568,14 @@ class SignalOperationsPlugin(PluginBase):
                 return existing
 
             if len(self._contacts) >= self._max_contacts:
-                return Contact(id=cid, contact_type=contact_type, identifier=identifier)
+                self.log.warning(
+                    "Max contacts (%d) reached, dropping %s",
+                    self._max_contacts, identifier,
+                )
+                return Contact(
+                    id=cid, contact_type=contact_type,
+                    identifier=identifier, first_seen=now, last_seen=now,
+                )
 
             contact = Contact(
                 id=cid,
@@ -908,7 +943,7 @@ class SignalOperationsPlugin(PluginBase):
                 )
             self._stats["observations_persisted"] += 1
         except Exception:
-            pass
+            self.log.debug("Failed to save observation", exc_info=True)
 
     def _db_save_correlation(self, entry: dict) -> None:
         try:
@@ -926,7 +961,7 @@ class SignalOperationsPlugin(PluginBase):
                     ),
                 )
         except Exception:
-            pass
+            self.log.debug("Failed to save correlation", exc_info=True)
 
     def _db_flush(self) -> None:
         try:
@@ -965,15 +1000,19 @@ class SignalOperationsPlugin(PluginBase):
                     (cutoff,),
                 )
         except Exception:
-            pass
+            self.log.debug("Failed to purge old records", exc_info=True)
 
     # ── public query methods ─────────────────────────────────────────
 
     def get_overview(self) -> dict[str, Any]:
+        """Lightweight summary with counts.  WS snapshot (broadcast_snapshot)
+        returns full lists instead — different shapes by design."""
+        with self._contacts_lock:
+            active_contacts = len(self._contacts)
         return {
             "stats": dict(self._stats),
             "active_signals": len(self._active_signals),
-            "active_contacts": len(self._contacts),
+            "active_contacts": active_contacts,
             "correlation_events": len(self._correlation_events),
         }
 
@@ -1043,15 +1082,16 @@ class SignalOperationsPlugin(PluginBase):
         except Exception:
             return {"detections": []}
 
-    def get_baseline(self) -> dict[str, Any]:
-        entries = []
-        for freq, power in sorted(self._baseline_db.items()):
-            entries.append({
-                "freq_hz": freq,
-                "freq_mhz": round(freq / 1e6, 4),
-                "power_db": round(power, 1),
-            })
-        return {"bins": entries, "bin_count": len(entries)}
+    def get_baseline(self, limit: int = 2000) -> dict[str, Any]:
+        items = sorted(self._baseline_db.items())
+        total = len(items)
+        if limit:
+            items = items[:limit]
+        entries = [
+            {"freq_hz": f, "freq_mhz": round(f / 1e6, 4), "power_db": round(p, 1)}
+            for f, p in items
+        ]
+        return {"bins": entries, "bin_count": total}
 
     def get_correlations(self, limit: int = 50) -> dict[str, Any]:
         return {
@@ -1113,7 +1153,7 @@ class SignalOperationsPlugin(PluginBase):
         if self._snapshot_dirty:
             self._update_snapshot_cache()
         snap = self.get_snapshot()
-        return {"sigops": snap} if snap else None
+        return snap if snap else None
 
     def _update_snapshot_cache(self) -> None:
         with self._contacts_lock:

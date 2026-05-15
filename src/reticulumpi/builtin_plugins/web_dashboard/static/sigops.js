@@ -71,6 +71,8 @@
     parts.push('<b>' + (s.observations_persisted || 0) + '</b> observations');
     parts.push('<b>' + (s.correlations_total || 0) + '</b> correlations');
     el.innerHTML = parts.join(' &middot; ');
+    var tag = $('sigops-status-tag');
+    if (tag) tag.textContent = contacts.length ? contacts.length + ' contacts' : '';
   }
 
   // ── Contacts table ────────────────────────────────────────────────
@@ -90,7 +92,7 @@
         + '<td>' + _typeDot(c.contact_type) + esc(_typeLabel(c.contact_type)) + '</td>'
         + '<td title="' + esc(c.identifier || '') + '">' + esc(c.display_name || c.identifier || '--') + '</td>'
         + '<td>' + (c.observation_count || 0) + '</td>'
-        + '<td>' + (c.sources ? c.sources.join(', ') : '--') + '</td>'
+        + '<td>' + (c.sources ? esc(c.sources.join(', ')) : '--') + '</td>'
         + '<td>' + (c.distance_nm != null ? c.distance_nm.toFixed(1) + ' nm' : '--') + '</td>'
         + '<td>' + _timeAgo(c.last_seen) + '</td>'
         + '</tr>';
@@ -111,12 +113,12 @@
       var d = devices[i];
       var reading = '';
       if (d.temperature_C != null) reading += d.temperature_C.toFixed(1) + '°C';
-      if (d.humidity != null) reading += (reading ? ' / ' : '') + d.humidity + '%';
+      if (d.humidity != null) reading += (reading ? ' / ' : '') + Number(d.humidity) + '%';
       if (d.battery_ok != null) reading += (reading ? ' / ' : '') + (d.battery_ok ? 'Batt OK' : 'LOW');
       html += '<tr>'
         + '<td>' + esc(d.model || '--') + '</td>'
         + '<td>' + esc(d.id != null ? String(d.id) : '--') + '</td>'
-        + '<td>' + (d.channel != null ? d.channel : '--') + '</td>'
+        + '<td>' + (d.channel != null ? esc(String(d.channel)) : '--') + '</td>'
         + '<td>' + (reading || '--') + '</td>'
         + '<td>' + (d.message_count || 0) + '</td>'
         + '<td>' + _timeAgo(d.last_seen) + '</td>'
@@ -153,18 +155,21 @@
 
   function _renderTypeFilter(data) {
     var el = $('sigops-type-filter');
-    if (!el || el.children.length > 1) return;
-    var types = {};
+    if (!el) return;
+    var existing = {};
+    for (var k = 0; k < el.children.length; k++) {
+      if (el.children[k].value) existing[el.children[k].value] = true;
+    }
     var contacts = data.contacts || [];
     for (var i = 0; i < contacts.length; i++) {
-      types[contacts[i].contact_type] = true;
-    }
-    var keys = Object.keys(types).sort();
-    for (var j = 0; j < keys.length; j++) {
-      var opt = document.createElement('option');
-      opt.value = keys[j];
-      opt.textContent = _typeLabel(keys[j]);
-      el.appendChild(opt);
+      var t = contacts[i].contact_type;
+      if (t && !existing[t]) {
+        var opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = _typeLabel(t);
+        el.appendChild(opt);
+        existing[t] = true;
+      }
     }
   }
 
