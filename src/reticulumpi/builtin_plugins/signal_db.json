@@ -30,13 +30,13 @@
   {"name": "Meteor Scatter M2", "freq_min_mhz": 137.0, "freq_max_mhz": 138.0, "bandwidth_khz": 120, "modulation": "OQPSK", "description": "Meteor-M2 LRPT downlink"},
   {"name": "Davis Weather ISM", "freq_min_mhz": 868.0, "freq_max_mhz": 868.4, "bandwidth_khz": 200, "modulation": "FSK", "description": "Davis Vantage weather stations"},
   {"name": "VHF Business/Federal LMR", "freq_min_mhz": 152.0, "freq_max_mhz": 153.0, "bandwidth_khz": 0, "modulation": "NBFM/P25", "description": "VHF business and federal land mobile radio"},
-  {"name": "Military UHF SATCOM", "freq_min_mhz": 300.0, "freq_max_mhz": 308.0, "bandwidth_khz": 0, "modulation": "varies", "description": "Military/government UHF satellite uplink"},
+  {"name": "Military UHF SATCOM", "freq_min_mhz": 292.0, "freq_max_mhz": 318.0, "bandwidth_khz": 0, "modulation": "varies", "description": "Military/government UHF satellite uplink"},
   {"name": "UHF Repeater Outputs", "freq_min_mhz": 440.0, "freq_max_mhz": 450.0, "bandwidth_khz": 175, "modulation": "NBFM/DMR", "description": "UHF amateur/LMR repeater output subband"},
   {"name": "UHF TV Band (Low)", "freq_min_mhz": 470.0, "freq_max_mhz": 548.0, "bandwidth_khz": 6000, "modulation": "ATSC", "description": "UHF TV channels 14-30 (ATSC digital)"},
   {"name": "UHF TV Band (High)", "freq_min_mhz": 602.0, "freq_max_mhz": 652.0, "bandwidth_khz": 6000, "modulation": "ATSC", "description": "UHF TV channels 37-44 (ATSC digital)"},
   {"name": "SMR/Public Safety 800", "freq_min_mhz": 851.0, "freq_max_mhz": 869.0, "bandwidth_khz": 0, "modulation": "P25/DMR", "description": "SMR and public safety 800 MHz band"},
   {"name": "Cellular 850 DL", "freq_min_mhz": 869.0, "freq_max_mhz": 894.0, "bandwidth_khz": 0, "modulation": "LTE/NR", "description": "Cellular 850 MHz downlink (LTE Band 5/26)"},
   {"name": "Cellular 900 DL", "freq_min_mhz": 935.0, "freq_max_mhz": 960.0, "bandwidth_khz": 0, "modulation": "GSM/LTE", "description": "Cellular 900 MHz downlink (GSM-900/LTE Band 8)"},
-  {"name": "DME/TACAN", "freq_min_mhz": 962.0, "freq_max_mhz": 1025.0, "bandwidth_khz": 0, "modulation": "pulse", "description": "Distance measuring equipment / TACAN navigation"},
+  {"name": "DME/TACAN", "freq_min_mhz": 962.0, "freq_max_mhz": 1213.0, "bandwidth_khz": 0, "modulation": "pulse", "description": "Distance measuring equipment / TACAN navigation"},
   {"name": "DCS 1800 DL", "freq_min_mhz": 1805.0, "freq_max_mhz": 1880.0, "bandwidth_khz": 0, "modulation": "GSM/LTE", "description": "DCS/GSM-1800 downlink (LTE Band 3)"}
 ]

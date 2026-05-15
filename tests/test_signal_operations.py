@@ -41,6 +41,7 @@ def _make_plugin(config: dict | None = None) -> SignalOperationsPlugin:
     plugin = SignalOperationsPlugin(_make_app(), config or {})
     plugin._active = True
     plugin._baseline_db = {}
+    plugin._baseline_lock = threading.Lock()
     plugin._active_signals = {}
     plugin._signals_lock = threading.Lock()
     plugin._contacts = {}

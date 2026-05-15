@@ -164,6 +164,7 @@ class SignalOperationsPlugin(PluginBase):
         self._active = True
 
         self._baseline_db: dict[int, float] = {}
+        self._baseline_lock = threading.Lock()
         self._active_signals: dict[int, SignalTrack] = {}
         self._signals_lock = threading.Lock()
         self._contacts: dict[str, Contact] = {}
@@ -302,23 +303,26 @@ class SignalOperationsPlugin(PluginBase):
 
     def _update_baseline(self, bins_hz: list, powers_db: list) -> None:
         alpha = self._baseline_alpha
-        for i, freq in enumerate(bins_hz):
-            if i >= len(powers_db):
-                break
-            p = powers_db[i]
-            if p is None:
-                continue
-            prev = self._baseline_db.get(freq)
-            if prev is None:
-                self._baseline_db[freq] = p
-            else:
-                self._baseline_db[freq] = prev + alpha * (p - prev)
+        with self._baseline_lock:
+            for i, freq in enumerate(bins_hz):
+                if i >= len(powers_db):
+                    break
+                p = powers_db[i]
+                if p is None:
+                    continue
+                prev = self._baseline_db.get(freq)
+                if prev is None:
+                    self._baseline_db[freq] = p
+                else:
+                    self._baseline_db[freq] = prev + alpha * (p - prev)
 
     def _find_signals(
         self, bins_hz: list, powers_db: list, ts: float,
     ) -> list[DetectedSignal]:
-        if not self._baseline_db:
-            return []
+        with self._baseline_lock:
+            if not self._baseline_db:
+                return []
+            baseline_snap = dict(self._baseline_db)
         threshold = self._detection_threshold_db
         min_bw = self._min_bandwidth_hz
 
@@ -338,7 +342,7 @@ class SignalOperationsPlugin(PluginBase):
                     sig_bins = []
                     in_signal = False
                 continue
-            baseline = self._baseline_db.get(freq)
+            baseline = baseline_snap.get(freq)
             if baseline is None:
                 continue
             if p > baseline + threshold:
@@ -427,7 +431,7 @@ class SignalOperationsPlugin(PluginBase):
                     "confidence": round(conf, 2),
                 })
             except Exception:
-                pass
+                self.log.debug("Failed to publish signal event", exc_info=True)
 
     # ── classification engine ────────────────────────────────────────
 
@@ -451,7 +455,7 @@ class SignalOperationsPlugin(PluginBase):
                     user_db = json.load(f)
                 self._signal_db.extend(user_db)
         except Exception:
-            pass
+            self.log.debug("Could not load user signal_db", exc_info=True)
 
     def _classify_signal(
         self, sig: DetectedSignal,
@@ -608,7 +612,7 @@ class SignalOperationsPlugin(PluginBase):
                 "source": source,
             })
         except Exception:
-            pass
+            self.log.debug("Failed to publish contact event", exc_info=True)
 
         return contact
 
@@ -823,7 +827,7 @@ class SignalOperationsPlugin(PluginBase):
         try:
             self.event_bus.publish(events.SIGOPS_CORRELATION, entry)
         except Exception:
-            pass
+            self.log.debug("Failed to publish correlation event", exc_info=True)
 
         self._db_save_correlation(entry)
 
@@ -857,7 +861,7 @@ class SignalOperationsPlugin(PluginBase):
                         "identifier": contact.identifier,
                     })
                 except Exception:
-                    pass
+                    self.log.debug("Failed to publish contact lost event", exc_info=True)
 
     def _evict_stale_signals(self) -> None:
         now = time.time()
@@ -1092,7 +1096,8 @@ class SignalOperationsPlugin(PluginBase):
             return {"detections": []}
 
     def get_baseline(self, limit: int = 2000) -> dict[str, Any]:
-        items = sorted(self._baseline_db.items())
+        with self._baseline_lock:
+            items = sorted(self._baseline_db.items())
         total = len(items)
         if limit:
             items = items[:limit]
@@ -1137,7 +1142,8 @@ class SignalOperationsPlugin(PluginBase):
             return {"total_observations": 0}
 
     def reset_baseline(self) -> None:
-        self._baseline_db.clear()
+        with self._baseline_lock:
+            self._baseline_db.clear()
         with self._signals_lock:
             self._active_signals.clear()
 
