@@ -388,6 +388,7 @@
     if (!_toggle._wired) {
       _wireToggle();
       _wireSortHeaders();
+      _wireControls();
       _toggle._wired = true;
     }
 
@@ -398,6 +399,22 @@
 
     if (_body && _body.classList.contains('hidden')) return;
     _render(data);
+  }
+
+  // -- Map controls ---------------------------------------------------------
+  function _wireControls() {
+    var centerBtn = $('adsb-center-receiver');
+    if (centerBtn) {
+      centerBtn.addEventListener('click', function () {
+        if (_lastData && _lastData.stats &&
+            _lastData.stats.receiver_lat != null &&
+            _lastData.stats.receiver_lon != null && _map) {
+          _map.setView(
+            [_lastData.stats.receiver_lat, _lastData.stats.receiver_lon], 11
+          );
+        }
+      });
+    }
   }
 
   // -- Handle resize --------------------------------------------------------
