@@ -471,6 +471,16 @@ class FMReceiver(PluginBase):
         self._locked = False
         return {"locked": False}
 
+    # ── public properties ────────────────────────────────────────────
+
+    @property
+    def is_playing(self) -> bool:
+        return self._playing
+
+    @property
+    def output_rate_hz(self) -> int:
+        return self._output_rate_hz
+
     # ── public API ───────────────────────────────────────────────────
 
     def play(self) -> dict[str, Any]:
@@ -930,9 +940,14 @@ class FMReceiver(PluginBase):
 
     # ── audio client management ──────────────────────────────────────
 
-    def register_audio_client(self, queue: asyncio.Queue) -> None:
+    _MAX_AUDIO_CLIENTS = 8
+
+    def register_audio_client(self, queue: asyncio.Queue) -> bool:
         with self._stream_lock:
+            if len(self._stream_queues) >= self._MAX_AUDIO_CLIENTS:
+                return False
             self._stream_queues.append(queue)
+            return True
 
     def unregister_audio_client(self, queue: asyncio.Queue) -> None:
         with self._stream_lock:
@@ -1060,6 +1075,7 @@ class FMReceiver(PluginBase):
             try:
                 self._launch_rtl_fm()
             except Exception as exc:
+                self._terminate_process()
                 self._set_status("error", f"launch failed: {exc}")
                 self.log.exception("Failed to launch rtl_fm")
                 break

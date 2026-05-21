@@ -42,7 +42,6 @@
 
   // -- VU peak hold --------------------------------------------------------
   var _vuPeak = 0;
-  var _vuLastLevel = 0;
 
   // -- State ----------------------------------------------------------------
   var _expanded = false;
@@ -160,6 +159,7 @@
       _freqInput.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') _onFreqGo();
       });
+      var _scrollTune = _debounce(function () { _onFreqGo(); }, 200);
       _freqInput.addEventListener('wheel', function (e) {
         e.preventDefault();
         var step = _lastData && _lastData.mode === 'wbfm' ? 0.1 : 0.025;
@@ -167,7 +167,7 @@
         var next = cur + (e.deltaY < 0 ? step : -step);
         next = Math.max(_freqMin, Math.min(_freqMax, Math.round(next * 1000) / 1000));
         _freqInput.value = next;
-        _onFreqGo();
+        _scrollTune();
       });
     }
 
@@ -214,23 +214,34 @@
       _sendWs({ action: 'radio_squelch', level: v });
     }, 300));
 
+    var _sendVolWs = _debounce(function () {
+      var v = parseInt(_volumeSlider.value, 10);
+      _sendWs({ action: 'radio_volume', volume: v / 100 });
+    }, 300);
     if (_volumeSlider) _volumeSlider.addEventListener('input', function () {
       var v = parseInt(_volumeSlider.value, 10);
       if (_volumeValue) _volumeValue.textContent = v + '%';
       if (_gainNode) _gainNode.gain.value = v / 100;
-      _sendWs({ action: 'radio_volume', volume: v / 100 });
+      _sendVolWs();
     });
 
+    var _displayScrollFreq = null;
+    var _displayScrollTune = _debounce(function () {
+      if (_displayScrollFreq !== null) {
+        _setPending('tune');
+        _sendWs({ action: 'radio_tune', frequency_mhz: _displayScrollFreq });
+      }
+    }, 200);
     if (_freqDisplay) _freqDisplay.addEventListener('wheel', function (e) {
       e.preventDefault();
       var step = _lastData && _lastData.mode === 'wbfm' ? 0.1 : 0.025;
-      var cur = _lastData ? _lastData.frequency_mhz : 95.5;
+      var cur = _displayScrollFreq !== null ? _displayScrollFreq : (_lastData ? _lastData.frequency_mhz : 95.5);
       var next = cur + (e.deltaY < 0 ? step : -step);
       next = Math.max(_freqMin, Math.min(_freqMax, Math.round(next * 1000) / 1000));
+      _displayScrollFreq = next;
       if (_freqDisplay) _freqDisplay.textContent = next.toFixed(3);
       if (_bandLabel) _bandLabel.textContent = _bandFor(next);
-      _setPending('tune');
-      _sendWs({ action: 'radio_tune', frequency_mhz: next });
+      _displayScrollTune();
     });
 
     if (_lockCb) _lockCb.addEventListener('change', function () {
@@ -247,8 +258,19 @@
     if (_recList) _recList.addEventListener('click', function (e) {
       var del = e.target.closest('.radio-rec-delete');
       if (del && del.dataset.name) {
+        if (del.dataset.confirm !== 'yes') {
+          del.dataset.confirm = 'yes';
+          del.textContent = 'Sure?';
+          setTimeout(function () { del.dataset.confirm = ''; del.textContent = '×'; }, 3000);
+          return;
+        }
+        del.dataset.confirm = '';
+        del.textContent = '×';
         R.api('/api/radio/recordings/' + encodeURIComponent(del.dataset.name), { method: 'DELETE' }).then(function () {
+          _showFeedback('Recording deleted');
           _loadRecordings(true);
+        }).catch(function () {
+          _showFeedback('Delete failed');
         });
         return;
       }
@@ -413,6 +435,30 @@
       if (_freqInput) _freqInput.value = freq.toFixed(3);
       if (_freqDisplay) _freqDisplay.textContent = freq.toFixed(3);
       if (_bandLabel) _bandLabel.textContent = _bandFor(freq);
+    }
+    var mode = _loadLocal('mode');
+    if (typeof mode === 'string' && _modeBtns) {
+      for (var i = 0; i < _modeBtns.length; i++) {
+        _modeBtns[i].classList.toggle('active', _modeBtns[i].getAttribute('data-mode') === mode);
+      }
+    }
+    var gain = _loadLocal('gain');
+    if (_gainSlider) {
+      if (gain !== null && gain !== undefined && typeof gain === 'number') {
+        _gainSlider.value = gain;
+        _gainSlider.disabled = false;
+        if (_gainAuto) _gainAuto.checked = false;
+        if (_gainValue) _gainValue.textContent = gain.toFixed(1) + ' dB';
+      } else {
+        _gainSlider.disabled = true;
+        if (_gainAuto) _gainAuto.checked = true;
+        if (_gainValue) _gainValue.textContent = 'auto';
+      }
+    }
+    var squelch = _loadLocal('squelch');
+    if (typeof squelch === 'number' && _squelchSlider) {
+      _squelchSlider.value = squelch;
+      if (_squelchValue) _squelchValue.textContent = squelch;
     }
   }
 
@@ -751,6 +797,12 @@
       _playing = false;
       return;
     }
+    if (_audioCtx.state === 'suspended') {
+      _audioCtx.resume().catch(function () {
+        _showFeedback('Browser blocked audio — click Play again');
+        _stopAudio();
+      });
+    }
 
     _analyser = _audioCtx.createAnalyser();
     _analyser.fftSize = 256;
@@ -844,6 +896,7 @@
       _gainNode = null;
     }
     if (_animFrame) { cancelAnimationFrame(_animFrame); _animFrame = null; }
+    _vuData = null; _fftData = null; _vuGrad = null; _fftGrad = null;
     if (_playBtn) _playBtn.classList.remove('reconnecting');
     _updatePlayBtn(false);
   }
@@ -874,8 +927,16 @@
   }
 
   // -- Visualizations (throttled to ~20fps) ----------------------------------
+  var _tabHidden = false;
+  document.addEventListener('visibilitychange', function () {
+    _tabHidden = document.hidden;
+    if (!_tabHidden && _playing && !_animFrame) {
+      _animFrame = requestAnimationFrame(_renderLoop);
+    }
+  });
+
   function _renderLoop() {
-    if (!_playing) return;
+    if (!_playing || _tabHidden) { _animFrame = null; return; }
     _frameCount++;
     if (_frameCount % 3 === 0 && _expanded) {
       _renderVu();
@@ -920,7 +981,6 @@
       _vuCtx.fillStyle = '#ffffff';
       _vuCtx.fillRect(peakX - 1, 1, 2, h - 2);
     }
-    _vuLastLevel = level;
     if (_vuDbfs) {
       var dbfs = level > 0.001 ? (20 * Math.log10(level)).toFixed(0) : '--';
       _vuDbfs.textContent = dbfs !== '--' ? dbfs + ' dB' : '--';
@@ -1042,7 +1102,8 @@
 
       if (_deadZoneEl) {
         if (data.dead_zone_warning) {
-          _deadZoneEl.textContent = data.dead_zone_warning;
+          _deadZoneEl.textContent = data.dead_zone_warning + ' — try a different frequency';
+          _deadZoneEl.title = 'Your tuner has a coverage gap in this range. Reception may be poor or absent.';
           _deadZoneEl.classList.remove('hidden');
         } else {
           _deadZoneEl.classList.add('hidden');
@@ -1143,9 +1204,11 @@
     _updateFavStar();
 
     if (!_presetsBuilt) {
+      _presetsBuilt = true;
       R.api('/api/radio/presets').then(function (r) {
         if (r && r.ok) _buildPresets(r.data);
-      });
+        else _presetsBuilt = false;
+      }).catch(function () { _presetsBuilt = false; });
     }
     _loadFavorites();
     _loadRecordings();

@@ -908,9 +908,12 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
         scanner = plugin.app.plugins.get("spectrum_scanner")
         if scanner and hasattr(scanner, "get_presets"):
             return {"type": "spectrum_presets", **scanner.get_presets()}
-    elif action == "radio_tune":
+    elif action.startswith("radio_"):
         fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "tune"):
+        if not fm:
+            return None
+
+        if action == "radio_tune" and hasattr(fm, "tune"):
             freq_mhz = cmd.get("frequency_mhz")
             if freq_mhz is None:
                 return {"type": "radio_error", "error": "frequency_mhz required"}
@@ -926,25 +929,19 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
                 return {"type": "radio_tuned", **result}
             except (ValueError, TypeError) as exc:
                 return {"type": "radio_error", "error": str(exc)}
-    elif action == "radio_play":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "play"):
+        elif action == "radio_play" and hasattr(fm, "play"):
             try:
                 result = fm.play()
                 return {"type": "radio_play", **result}
             except Exception as exc:
                 return {"type": "radio_error", "error": str(exc)}
-    elif action == "radio_stop":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "stop_playback"):
+        elif action == "radio_stop" and hasattr(fm, "stop_playback"):
             try:
                 result = fm.stop_playback()
                 return {"type": "radio_stop", **result}
             except Exception as exc:
                 return {"type": "radio_error", "error": str(exc)}
-    elif action == "radio_gain":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "set_gain"):
+        elif action == "radio_gain" and hasattr(fm, "set_gain"):
             try:
                 gain = cmd.get("gain_db")
                 if gain is not None:
@@ -953,17 +950,13 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
                 return {"type": "radio_gain", **result}
             except (ValueError, TypeError) as exc:
                 return {"type": "radio_error", "error": str(exc)}
-    elif action == "radio_squelch":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "set_squelch"):
+        elif action == "radio_squelch" and hasattr(fm, "set_squelch"):
             try:
                 result = fm.set_squelch(int(cmd.get("level", 0)))
                 return {"type": "radio_squelch", **result}
             except (ValueError, TypeError) as exc:
                 return {"type": "radio_error", "error": str(exc)}
-    elif action == "radio_volume":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "set_volume"):
+        elif action == "radio_volume" and hasattr(fm, "set_volume"):
             try:
                 vol = float(cmd.get("volume", 0.75))
                 if not 0.0 <= vol <= 1.0:
@@ -972,28 +965,19 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
                 return {"type": "radio_volume", **result}
             except (ValueError, TypeError) as exc:
                 return {"type": "radio_error", "error": str(exc)}
-
-    elif action == "radio_lock":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "lock_dongle"):
+        elif action == "radio_lock" and hasattr(fm, "lock_dongle"):
             try:
                 result = fm.lock_dongle()
                 return {"type": "radio_lock", **result}
             except Exception as exc:
                 return {"type": "radio_error", "error": str(exc)}
-
-    elif action == "radio_unlock":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "unlock_dongle"):
+        elif action == "radio_unlock" and hasattr(fm, "unlock_dongle"):
             try:
                 result = fm.unlock_dongle()
                 return {"type": "radio_unlock", **result}
             except Exception as exc:
                 return {"type": "radio_error", "error": str(exc)}
-
-    elif action == "radio_add_favorite":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "add_favorite"):
+        elif action == "radio_add_favorite" and hasattr(fm, "add_favorite"):
             try:
                 fav = fm.add_favorite(
                     label=cmd.get("label", ""),
@@ -1004,35 +988,23 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
                 return {"type": "radio_favorite_added", **fav}
             except (ValueError, TypeError) as exc:
                 return {"type": "radio_error", "error": str(exc)}
-
-    elif action == "radio_remove_favorite":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "remove_favorite"):
+        elif action == "radio_remove_favorite" and hasattr(fm, "remove_favorite"):
             fav_id = cmd.get("favorite_id", "")
             if fm.remove_favorite(fav_id):
                 return {"type": "radio_favorite_removed", "id": fav_id}
             return {"type": "radio_error", "error": "Favorite not found"}
-
-    elif action == "radio_tune_favorite":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "tune_favorite"):
+        elif action == "radio_tune_favorite" and hasattr(fm, "tune_favorite"):
             try:
                 result = fm.tune_favorite(cmd.get("favorite_id", ""))
                 return {"type": "radio_tuned", **result}
             except ValueError as exc:
                 return {"type": "radio_error", "error": str(exc)}
-
-    elif action == "radio_record_start":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "start_recording"):
+        elif action == "radio_record_start" and hasattr(fm, "start_recording"):
             result = fm.start_recording(label=cmd.get("label"))
             if result.get("error"):
                 return {"type": "radio_error", "error": result["error"]}
             return {"type": "radio_record_started", **result}
-
-    elif action == "radio_record_stop":
-        fm = plugin.app.plugins.get("fm_receiver")
-        if fm and hasattr(fm, "stop_recording"):
+        elif action == "radio_record_stop" and hasattr(fm, "stop_recording"):
             result = fm.stop_recording()
             return {"type": "radio_record_stopped", **result}
 

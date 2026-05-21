@@ -221,14 +221,13 @@ async def handle_radio_presets(request: aiohttp.web.Request) -> aiohttp.web.Resp
 
 
 async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.StreamResponse:
-    if not request.get("token"):
-        raise aiohttp.web.HTTPUnauthorized(text="Authentication required")
-
-    plugin = _get_plugin(request)
-    fm = plugin.app.plugins.get("fm_receiver")
-    if not fm:
-        raise aiohttp.web.HTTPNotFound(text="fm_receiver plugin not enabled")
-    if not fm._playing:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    if not fm.is_playing:
         raise aiohttp.web.HTTPConflict(text="Radio is not playing")
 
     fm.set_event_loop(asyncio.get_event_loop())
@@ -245,20 +244,21 @@ async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.Stream
     await response.prepare(request)
 
     wav_header = _build_wav_header(
-        sample_rate=fm._output_rate_hz,
+        sample_rate=fm.output_rate_hz,
         channels=1,
         bits=16,
     )
     await response.write(wav_header)
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-    fm.register_audio_client(queue)
+    if not fm.register_audio_client(queue):
+        raise aiohttp.web.HTTPServiceUnavailable(text="Too many audio clients")
     try:
         while True:
             try:
                 chunk = await asyncio.wait_for(queue.get(), timeout=10.0)
             except asyncio.TimeoutError:
-                if not fm._playing:
+                if not fm.is_playing:
                     break
                 continue
             if chunk is None:
