@@ -41,6 +41,7 @@
   var _placeholderEl = null;
   var _hasReceivedData = false;
   var _cachedBinsHz = null;
+  var _resizeObs = null;
   var _css = {};
 
   // -- Zoom state -----------------------------------------------------------
@@ -182,11 +183,12 @@
       _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
       var wfParent = _wfCanvas.parentElement;
       if (wfParent && typeof ResizeObserver !== 'undefined') {
-        new ResizeObserver(function () {
+        _resizeObs = new ResizeObserver(function () {
           if (!_resizeCanvas()) return;
           var clip = _lastData ? _clip(_lastData, _zoom) : null;
           _bulkPaintFromStore(clip);
-        }).observe(wfParent);
+        });
+        _resizeObs.observe(wfParent);
       }
     }
 
@@ -212,10 +214,8 @@
     _zoomResetEl = $('spectrum-zoom-reset');
     _peakHoldToggleEl = $('spectrum-peakhold-toggle');
 
-    // Drag-to-zoom on line plot
+    // Drag-to-zoom on line plot (window listeners added/removed in drag handlers)
     if (_lineEl) _lineEl.addEventListener('mousedown', _onDragStart);
-    window.addEventListener('mousemove', _onDragMove);
-    window.addEventListener('mouseup', _onDragEnd);
     if (_plotWrap) _plotWrap.addEventListener('dblclick', _onDoubleClickReset);
     if (_zoomResetEl) _zoomResetEl.addEventListener('click', _onZoomChipClick);
     if (_peakHoldToggleEl) _peakHoldToggleEl.addEventListener('click', _onPeakHoldToggle);
@@ -269,6 +269,8 @@
     var frac = (ev.clientX - rect.left) / rect.width;
     if (frac < 0 || frac > 1) return;
     _dragState = { startFrac: frac, curFrac: frac };
+    window.addEventListener('mousemove', _onDragMove);
+    window.addEventListener('mouseup', _onDragEnd);
     ev.preventDefault();
     _renderLine(_lastData, _clip(_lastData, _zoom));
   }
@@ -287,6 +289,8 @@
   }
   function _onDragEnd(ev) {
     if (!_dragState) return;
+    window.removeEventListener('mousemove', _onDragMove);
+    window.removeEventListener('mouseup', _onDragEnd);
     if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
     var start = _dragState.startFrac, end = _dragState.curFrac;
     _dragState = null;
@@ -845,6 +849,12 @@
       _scaleInitialized = false;
       _lastBandSignature = '';
       _needsBulkPaint = true;
+      if (_dragState) {
+        _dragState = null;
+        if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
+        window.removeEventListener('mousemove', _onDragMove);
+        window.removeEventListener('mouseup', _onDragEnd);
+      }
       _setZoom(null, true);
     }
 

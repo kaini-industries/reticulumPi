@@ -76,6 +76,7 @@
   var _cachedBinsHz = null;
   // Zoom: null = full clipped region; else [loMhz, hiMhz] user-selected window.
   var _zoom = null;
+  var _resizeObs = null;
   var _dragState = null;       // {startFrac, curFrac, rectEl} during a drag
   var _dragRafId = null;
   var _zoomResetEl = null;     // "Reset zoom" chip
@@ -163,21 +164,19 @@
       _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
       var wfParent = _wfCanvas.parentElement;
       if (wfParent && typeof ResizeObserver !== 'undefined') {
-        new ResizeObserver(function () {
+        _resizeObs = new ResizeObserver(function () {
           if (!_resizeCanvas()) return;
           if (_lastData) {
             var clip = _clip(_lastData.spectrum || {}, _zoom);
             if (clip) _repaintWaterfallFromHistory(clip);
           }
-        }).observe(wfParent);
+        });
+        _resizeObs.observe(wfParent);
       }
     }
 
     if (_lineEl) {
       _lineEl.addEventListener('mousedown', _onDragStart);
-      // mousemove/up on window so drag still works if the cursor leaves the SVG.
-      window.addEventListener('mousemove', _onDragMove);
-      window.addEventListener('mouseup', _onDragEnd);
     }
     var plotWrap = _body ? _body.querySelector('.lora-spectrum-plot-wrap') : null;
     if (plotWrap) plotWrap.addEventListener('dblclick', _onDoubleClickReset);
@@ -1238,6 +1237,8 @@
     var frac = (ev.clientX - rect.left) / rect.width;
     if (frac < 0 || frac > 1) return;
     _dragState = { startFrac: frac, curFrac: frac };
+    window.addEventListener('mousemove', _onDragMove);
+    window.addEventListener('mouseup', _onDragEnd);
     ev.preventDefault();
     _renderLine(_lastData, _clip(_lastData.spectrum || {}, _zoom));
   }
@@ -1256,6 +1257,8 @@
   }
   function _onDragEnd(ev) {
     if (!_dragState) return;
+    window.removeEventListener('mousemove', _onDragMove);
+    window.removeEventListener('mouseup', _onDragEnd);
     if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
     var start = _dragState.startFrac, end = _dragState.curFrac;
     _dragState = null;
@@ -1458,11 +1461,11 @@
       _chDetailEl.innerHTML += ' (' + esc((ch.det_count / sc * 100).toFixed(1)) + '% of sweeps)';
     }
     var closeBtn = _chDetailEl.querySelector('[data-action="close"]');
-    if (closeBtn) closeBtn.onclick = function () {
+    if (closeBtn) closeBtn.addEventListener('click', function () {
       _selectedChannel = null;
       _chDetailEl.style.display = 'none';
       if (_lastData) _renderAll(_lastData);
-    };
+    });
   }
 
   // -- Interference alerts in meta strip ------------------------------------
@@ -1705,6 +1708,12 @@
       _lastSweepCount = 0;
       _scale.initialized = false;
       _needsBulkPaint = true;
+      if (_dragState) {
+        _dragState = null;
+        if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
+        window.removeEventListener('mousemove', _onDragMove);
+        window.removeEventListener('mouseup', _onDragEnd);
+      }
       _setZoom(null, /*silent=*/true);
       clip = _clip(spec, _zoom);
     }
