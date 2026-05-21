@@ -113,6 +113,7 @@ reticulumpi:
     #  max_sessions: 5
     #  metrics_interval: 5         # WebSocket push interval in seconds
     #  max_websocket_clients: 10
+    #  ws_compress: true             # Enable per-message deflate on WebSocket
     #  lora_region: "US"           # Default LoRa Spectrum panel region.
     #                              # One of: US, EU_868, EU_433, CN, JP, ANZ.
     #                              # Users can override per-browser via the
@@ -591,7 +592,7 @@ reticulumpi:
     #  enabled: false
     #  gain_db: 40.0                    # Default tuner gain (dB); overridden per preset
     #  ppm: 0                           # Tuner frequency correction (ppm)
-    #  waterfall_rows: 256              # In-memory rolling history depth (8-2048)
+    #  waterfall_rows: 512              # In-memory rolling history depth (8-2048)
     #  device_serial: "07143901"        # RTL-SDR USB serial (stable; run rtl_test -t to find)
     #  # device_index: 0               # Numeric index fallback (fragile; prefer device_serial)
     #  max_restarts: 5                  # Subprocess crash-restart cap (per plugin session)

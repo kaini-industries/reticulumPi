@@ -7,12 +7,15 @@ live signed-16-bit PCM audio to the web dashboard via chunked HTTP.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
+import os
 import shutil
 import struct
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from typing import Any
 
@@ -85,9 +88,28 @@ _BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
         "label": "GMRS/FRS",
         "mode": "fm",
         "frequencies": [
-            {"freq_mhz": 462.5625, "label": "GMRS Ch 1"},
-            {"freq_mhz": 462.5875, "label": "GMRS Ch 2"},
-            {"freq_mhz": 462.6125, "label": "GMRS Ch 3"},
+            {"freq_mhz": 462.5625, "label": "Ch 1"},
+            {"freq_mhz": 462.5875, "label": "Ch 2"},
+            {"freq_mhz": 462.6125, "label": "Ch 3"},
+            {"freq_mhz": 462.6375, "label": "Ch 4"},
+            {"freq_mhz": 462.6625, "label": "Ch 5"},
+            {"freq_mhz": 462.6875, "label": "Ch 6"},
+            {"freq_mhz": 462.7125, "label": "Ch 7"},
+            {"freq_mhz": 467.5625, "label": "Ch 8"},
+            {"freq_mhz": 467.5875, "label": "Ch 9"},
+            {"freq_mhz": 467.6125, "label": "Ch 10"},
+            {"freq_mhz": 467.6375, "label": "Ch 11"},
+            {"freq_mhz": 467.6625, "label": "Ch 12"},
+            {"freq_mhz": 467.6875, "label": "Ch 13"},
+            {"freq_mhz": 467.7125, "label": "Ch 14"},
+            {"freq_mhz": 462.5500, "label": "Ch 15"},
+            {"freq_mhz": 462.5750, "label": "Ch 16"},
+            {"freq_mhz": 462.6000, "label": "Ch 17"},
+            {"freq_mhz": 462.6250, "label": "Ch 18"},
+            {"freq_mhz": 462.6500, "label": "Ch 19"},
+            {"freq_mhz": 462.6750, "label": "Ch 20"},
+            {"freq_mhz": 462.7000, "label": "Ch 21"},
+            {"freq_mhz": 462.7250, "label": "Ch 22"},
         ],
     },
     "ism_433": {
@@ -116,6 +138,15 @@ _BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
 
 _CHUNK_BYTES = 4096
 _QUEUE_MAXSIZE = 64
+
+_STATE_FILENAME = "last_state.json"
+_FAVORITES_FILENAME = "favorites.json"
+_MAX_FAVORITES_DEFAULT = 100
+
+_RECORDINGS_DIR = "recordings"
+_MAX_RECORDING_SECONDS_DEFAULT = 3600
+_MAX_RECORDING_SIZE_MB_DEFAULT = 500
+_MAX_RECORDINGS_DEFAULT = 50
 
 
 class FMReceiver(PluginBase):
@@ -199,6 +230,82 @@ class FMReceiver(PluginBase):
             )
         return None
 
+    # ── state persistence ──────────────────────────────────────────
+
+    def _resolve_state_dir(self) -> str:
+        base = os.environ.get(
+            "XDG_DATA_HOME",
+            os.path.expanduser("~/.local/share"),
+        )
+        return os.path.join(base, "reticulumpi", "fm_receiver")
+
+    def _resolve_state_path(self) -> str:
+        return os.path.join(self._resolve_state_dir(), _STATE_FILENAME)
+
+    def _load_state(self) -> None:
+        try:
+            with open(self._resolve_state_path(), encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+
+        freq_mhz = state.get("frequency_mhz")
+        if isinstance(freq_mhz, (int, float)):
+            try:
+                self._validate_frequency(float(freq_mhz))
+                self._frequency_hz = int(freq_mhz * 1_000_000)
+            except ValueError:
+                pass
+
+        mode = state.get("mode")
+        if isinstance(mode, str) and mode.lower() in _VALID_MODES:
+            self._mode = mode.lower()
+            defaults = _MODE_DEFAULTS[self._mode]
+            self._sample_rate_hz = defaults["sample_rate_hz"]
+            self._output_rate_hz = defaults["output_rate_hz"]
+
+        gain_db = state.get("gain_db")
+        if gain_db is None:
+            self._gain_db = None
+        elif isinstance(gain_db, (int, float)) and -10.0 <= gain_db <= 60.0:
+            self._gain_db = float(gain_db)
+
+        squelch = state.get("squelch_level")
+        if isinstance(squelch, (int, float)) and squelch >= 0:
+            self._squelch_level = int(squelch)
+
+        volume = state.get("volume")
+        if isinstance(volume, (int, float)) and 0.0 <= volume <= 1.0:
+            self._volume = float(volume)
+
+        self.log.info(
+            "Restored state: %.3f MHz %s",
+            self._frequency_hz / 1_000_000, self._mode.upper(),
+        )
+
+    def _persist_state(self) -> None:
+        state = {
+            "frequency_mhz": round(self._frequency_hz / 1_000_000, 6),
+            "mode": self._mode,
+            "gain_db": self._gain_db,
+            "squelch_level": self._squelch_level,
+            "volume": round(self._volume, 2),
+            "timestamp": time.time(),
+        }
+        path = self._resolve_state_path()
+        tmp = path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            os.replace(tmp, path)
+        except Exception:
+            self.log.debug("Failed to persist state", exc_info=True)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
     # ── lifecycle ────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -226,6 +333,27 @@ class FMReceiver(PluginBase):
         self._stream_lock = threading.Lock()
         self._event_loop: asyncio.AbstractEventLoop | None = None
 
+        self._favorites: list[dict[str, Any]] = []
+        self._load_favorites()
+
+        self._recording = False
+        self._recording_file = None
+        self._recording_path: str | None = None
+        self._recording_start_ts: float | None = None
+        self._recording_bytes = 0
+        self._recording_label: str | None = None
+        self._rec_lock = threading.Lock()
+        self._max_recording_seconds = int(
+            self.config.get("max_recording_seconds", _MAX_RECORDING_SECONDS_DEFAULT)
+        )
+        self._max_recording_size_bytes = (
+            int(self.config.get("max_recording_size_mb", _MAX_RECORDING_SIZE_MB_DEFAULT))
+            * 1024 * 1024
+        )
+        self._max_recordings = int(
+            self.config.get("max_recordings", _MAX_RECORDINGS_DEFAULT)
+        )
+
         self._active = True
 
         sched = getattr(self.app, "sdr_scheduler", None)
@@ -248,6 +376,8 @@ class FMReceiver(PluginBase):
                 self.log.error("RTL-SDR device resolution failed: %s", exc)
                 self._set_status("error", str(exc))
 
+        self._load_state()
+
         freq_mhz = self._frequency_hz / 1_000_000
         warning = self._check_dead_zone(freq_mhz)
         if warning:
@@ -267,6 +397,8 @@ class FMReceiver(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        if self._recording:
+            self._stop_recording_internal("shutdown")
         self._playing = False
         self._terminate_process()
         self._notify_clients_stopped()
@@ -304,6 +436,8 @@ class FMReceiver(PluginBase):
         preempted_until_ts: float | None,
     ) -> bool:
         self._was_playing_before_yield = self._playing
+        if self._recording:
+            self._stop_recording_internal("preempted")
         self._dongle_active = False
         self._preempted_by = preempted_by
         self._preempted_by_label = preempted_by_label
@@ -357,6 +491,8 @@ class FMReceiver(PluginBase):
     def stop_playback(self) -> dict[str, Any]:
         if not self._playing:
             return {"status": "already_stopped"}
+        if self._recording:
+            self._stop_recording_internal("stop")
         self._playing = False
         self._terminate_process()
         self._notify_clients_stopped()
@@ -366,6 +502,8 @@ class FMReceiver(PluginBase):
     def tune(self, frequency_hz: int, mode: str | None = None) -> dict[str, Any]:
         freq_mhz = frequency_hz / 1_000_000
         self._validate_frequency(freq_mhz)
+        if self._recording:
+            self._stop_recording_internal("tune")
 
         if mode is not None:
             mode = mode.lower()
@@ -387,6 +525,8 @@ class FMReceiver(PluginBase):
             self._notify_clients_stopped()
             self._restart_count = 0
 
+        self._persist_state()
+
         try:
             self.event_bus.publish(events.FM_RECEIVER_TUNED, {
                 "frequency_hz": frequency_hz,
@@ -406,6 +546,7 @@ class FMReceiver(PluginBase):
         if gain_db is not None and not -10.0 <= gain_db <= 60.0:
             raise ValueError(f"gain_db must be -10..60 or null (auto), got {gain_db}")
         self._gain_db = gain_db
+        self._persist_state()
         if self._playing:
             self._terminate_process()
             self._notify_clients_stopped()
@@ -414,6 +555,7 @@ class FMReceiver(PluginBase):
 
     def set_squelch(self, level: int) -> dict[str, Any]:
         self._squelch_level = max(0, int(level))
+        self._persist_state()
         if self._playing:
             self._terminate_process()
             self._notify_clients_stopped()
@@ -422,6 +564,7 @@ class FMReceiver(PluginBase):
 
     def set_volume(self, volume: float) -> dict[str, Any]:
         self._volume = max(0.0, min(1.0, float(volume)))
+        self._persist_state()
         return {"volume": self._volume}
 
     def get_presets(self) -> dict[str, Any]:
@@ -433,6 +576,357 @@ class FMReceiver(PluginBase):
                 "frequencies": p.get("frequencies", []),
             }
         return result
+
+    # ── favorites ────────────────────────────────────────────────────
+
+    def _favorites_path(self) -> str:
+        return os.path.join(self._resolve_state_dir(), _FAVORITES_FILENAME)
+
+    def _load_favorites(self) -> None:
+        try:
+            with open(self._favorites_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._favorites = data
+            else:
+                self._favorites = []
+        except (OSError, ValueError, json.JSONDecodeError):
+            self._favorites = []
+
+    def _save_favorites(self) -> None:
+        path = self._favorites_path()
+        tmp = path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._favorites, f)
+            os.replace(tmp, path)
+        except Exception:
+            self.log.debug("Failed to save favorites", exc_info=True)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    def get_favorites(self) -> list[dict[str, Any]]:
+        return list(self._favorites)
+
+    def add_favorite(
+        self,
+        label: str,
+        frequency_mhz: float,
+        mode: str,
+        gain_db: float | None = None,
+    ) -> dict[str, Any]:
+        max_fav = int(self.config.get("max_favorites", _MAX_FAVORITES_DEFAULT))
+        if len(self._favorites) >= max_fav:
+            raise ValueError(f"Maximum favorites ({max_fav}) reached")
+        mode = mode.lower()
+        if mode not in _VALID_MODES:
+            raise ValueError(f"Invalid mode '{mode}'")
+        self._validate_frequency(frequency_mhz)
+        fav = {
+            "id": str(uuid.uuid4()),
+            "label": label or f"{frequency_mhz:.3f} MHz",
+            "frequency_mhz": round(frequency_mhz, 6),
+            "mode": mode,
+            "gain_db": gain_db,
+            "created_at": time.time(),
+            "last_used_at": None,
+        }
+        self._favorites.append(fav)
+        self._save_favorites()
+        return fav
+
+    def remove_favorite(self, favorite_id: str) -> bool:
+        for i, fav in enumerate(self._favorites):
+            if fav.get("id") == favorite_id:
+                self._favorites.pop(i)
+                self._save_favorites()
+                return True
+        return False
+
+    def update_favorite(self, favorite_id: str, **kwargs: Any) -> dict[str, Any] | None:
+        for fav in self._favorites:
+            if fav.get("id") != favorite_id:
+                continue
+            if "label" in kwargs:
+                fav["label"] = str(kwargs["label"])
+            if "frequency_mhz" in kwargs:
+                freq = float(kwargs["frequency_mhz"])
+                self._validate_frequency(freq)
+                fav["frequency_mhz"] = round(freq, 6)
+            if "mode" in kwargs:
+                mode = str(kwargs["mode"]).lower()
+                if mode not in _VALID_MODES:
+                    raise ValueError(f"Invalid mode '{mode}'")
+                fav["mode"] = mode
+            if "gain_db" in kwargs:
+                fav["gain_db"] = kwargs["gain_db"]
+            self._save_favorites()
+            return fav
+        return None
+
+    def tune_favorite(self, favorite_id: str) -> dict[str, Any]:
+        for fav in self._favorites:
+            if fav.get("id") == favorite_id:
+                fav["last_used_at"] = time.time()
+                self._save_favorites()
+                freq_hz = int(fav["frequency_mhz"] * 1_000_000)
+                return self.tune(freq_hz, mode=fav.get("mode"))
+        raise ValueError(f"Favorite '{favorite_id}' not found")
+
+    # ── recording ────────────────────────────────────────────────────
+
+    def _recordings_dir(self) -> str:
+        return os.path.join(self._resolve_state_dir(), _RECORDINGS_DIR)
+
+    def start_recording(self, label: str | None = None) -> dict[str, Any]:
+        if self._recording:
+            return {"recording": True, "error": "Already recording"}
+        if not self._playing:
+            return {"recording": False, "error": "Not playing"}
+
+        rec_dir = self._recordings_dir()
+        os.makedirs(rec_dir, exist_ok=True)
+
+        existing = self._list_recording_files()
+        if len(existing) >= self._max_recordings:
+            return {
+                "recording": False,
+                "error": f"Maximum recordings ({self._max_recordings}) reached",
+            }
+
+        freq_mhz = self._frequency_hz / 1_000_000
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base = f"{ts}_{freq_mhz:.3f}MHz_{self._mode}"
+        filename = f"{base}.wav"
+        path = os.path.join(rec_dir, filename)
+        n = 1
+        while os.path.exists(path):
+            filename = f"{base}_{n}.wav"
+            path = os.path.join(rec_dir, filename)
+            n += 1
+
+        header = self._build_recording_wav_header()
+        try:
+            f = open(path, "wb")
+            f.write(header)
+            f.flush()
+        except OSError as exc:
+            try:
+                f.close()
+            except Exception:
+                pass
+            return {"recording": False, "error": str(exc)}
+
+        with self._rec_lock:
+            self._recording_file = f
+            self._recording_path = path
+            self._recording_start_ts = time.time()
+            self._recording_bytes = 0
+            self._recording_label = label
+            self._recording = True
+
+        self.log.info("Recording started: %s", filename)
+        try:
+            self.event_bus.publish(events.FM_RECEIVER_RECORDING_STARTED, {
+                "filename": filename,
+                "frequency_mhz": freq_mhz,
+                "mode": self._mode,
+            })
+        except Exception:
+            self.log.debug("event_bus publish failed", exc_info=True)
+
+        return {
+            "recording": True,
+            "filename": filename,
+            "frequency_mhz": freq_mhz,
+            "mode": self._mode,
+        }
+
+    def stop_recording(self) -> dict[str, Any]:
+        if not self._recording:
+            return {"recording": False}
+        return self._stop_recording_internal("user")
+
+    def _stop_recording_internal(self, reason: str = "unknown") -> dict[str, Any]:
+        with self._rec_lock:
+            if not self._recording:
+                return {"recording": False}
+            f, path, data_bytes, start_ts = self._stop_recording_locked()
+
+        if f is not None:
+            self._finalize_recording_file(f, data_bytes)
+
+        duration = time.time() - start_ts if start_ts else 0.0
+        filename = os.path.basename(path) if path else ""
+        self.log.info(
+            "Recording stopped (%s): %s (%.1fs)", reason, filename, duration,
+        )
+        try:
+            self.event_bus.publish(events.FM_RECEIVER_RECORDING_STOPPED, {
+                "filename": filename,
+                "duration_seconds": round(duration, 1),
+                "size_bytes": data_bytes,
+                "reason": reason,
+            })
+        except Exception:
+            self.log.debug("event_bus publish failed", exc_info=True)
+
+        return {
+            "recording": False,
+            "filename": filename,
+            "duration_seconds": round(duration, 1),
+            "size_bytes": data_bytes,
+        }
+
+    def _stop_recording_locked(self):
+        """Extract recording state and clear flags. Caller must hold _rec_lock."""
+        f = self._recording_file
+        path = self._recording_path or ""
+        data_bytes = self._recording_bytes
+        start_ts = self._recording_start_ts or 0.0
+        self._recording = False
+        self._recording_file = None
+        self._recording_path = None
+        self._recording_start_ts = None
+        self._recording_bytes = 0
+        self._recording_label = None
+        return f, path, data_bytes, start_ts
+
+    def _finalize_recording_file(self, f, data_bytes: int) -> None:
+        try:
+            f.seek(4)
+            f.write(struct.pack("<I", 36 + data_bytes))
+            f.seek(40)
+            f.write(struct.pack("<I", data_bytes))
+            f.close()
+        except OSError:
+            self.log.debug("Failed to finalize recording", exc_info=True)
+            try:
+                f.close()
+            except OSError:
+                pass
+
+    def _build_recording_wav_header(self) -> bytes:
+        sample_rate = self._output_rate_hz
+        channels = 1
+        bits = 16
+        byte_rate = sample_rate * channels * (bits // 8)
+        block_align = channels * (bits // 8)
+        return struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36, b"WAVE",
+            b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits,
+            b"data", 0,
+        )
+
+    def _write_recording_chunk(self, chunk: bytes) -> None:
+        with self._rec_lock:
+            if not self._recording or self._recording_file is None:
+                return
+            over_size = (
+                self._recording_bytes + len(chunk) > self._max_recording_size_bytes
+            )
+            over_time = (
+                self._recording_start_ts is not None
+                and time.time() - self._recording_start_ts > self._max_recording_seconds
+            )
+            if over_size or over_time:
+                f, path, data_bytes, start_ts = self._stop_recording_locked()
+            else:
+                self._recording_file.write(chunk)
+                self._recording_bytes += len(chunk)
+                return
+
+        self._finalize_recording_file(f, data_bytes)
+        duration = time.time() - start_ts if start_ts else 0.0
+        filename = os.path.basename(path) if path else ""
+        self.log.info("Recording auto-stopped (limit): %s (%.1fs)", filename, duration)
+        try:
+            self.event_bus.publish(events.FM_RECEIVER_RECORDING_STOPPED, {
+                "filename": filename,
+                "duration_seconds": round(duration, 1),
+                "size_bytes": data_bytes,
+                "reason": "limit",
+            })
+        except Exception:
+            self.log.debug("event_bus publish failed", exc_info=True)
+
+    def _list_recording_files(self) -> list[str]:
+        rec_dir = self._recordings_dir()
+        if not os.path.isdir(rec_dir):
+            return []
+        try:
+            return sorted(
+                f for f in os.listdir(rec_dir)
+                if f.endswith(".wav") and not f.startswith(".")
+            )
+        except OSError:
+            return []
+
+    def get_recordings(self) -> list[dict[str, Any]]:
+        rec_dir = self._recordings_dir()
+        result = []
+        for filename in self._list_recording_files():
+            path = os.path.join(rec_dir, filename)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            duration = 0.0
+            try:
+                with open(path, "rb") as rf:
+                    rf.seek(28)
+                    byte_rate = struct.unpack("<I", rf.read(4))[0]
+                data_bytes = max(0, stat.st_size - 44)
+                if byte_rate > 0:
+                    duration = data_bytes / byte_rate
+            except (OSError, struct.error):
+                pass
+            parts = filename.rsplit(".", 1)[0].split("_")
+            freq_mhz = 0.0
+            mode = ""
+            for part in parts:
+                if part.endswith("MHz"):
+                    try:
+                        freq_mhz = float(part[:-3])
+                    except ValueError:
+                        pass
+                elif part in _VALID_MODES:
+                    mode = part
+            result.append({
+                "filename": filename,
+                "size_bytes": stat.st_size,
+                "created_at": stat.st_mtime,
+                "frequency_mhz": freq_mhz,
+                "mode": mode,
+                "duration_seconds": round(duration, 1),
+            })
+        return result
+
+    def delete_recording(self, filename: str) -> bool:
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise ValueError("Invalid filename")
+        if not filename.endswith(".wav"):
+            raise ValueError("Invalid filename")
+        path = os.path.join(self._recordings_dir(), filename)
+        try:
+            os.unlink(path)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def get_recording_path(self, filename: str) -> str | None:
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return None
+        if not filename.endswith(".wav"):
+            return None
+        path = os.path.join(self._recordings_dir(), filename)
+        if os.path.isfile(path):
+            return path
+        return None
 
     # ── audio client management ──────────────────────────────────────
 
@@ -520,6 +1014,16 @@ class FMReceiver(PluginBase):
             snap["preempted_until_ts"] = self._preempted_until_ts
         snap["squelch_break_count"] = self._squelch_break_count
         snap["signal_history"] = list(self._signal_history)[-30:]
+        if self._recording:
+            snap["recording"] = {
+                "active": True,
+                "duration_seconds": round(
+                    time.time() - (self._recording_start_ts or time.time()), 1,
+                ),
+                "filename": os.path.basename(self._recording_path or ""),
+            }
+        else:
+            snap["recording"] = None
         return snap
 
     def get_status(self) -> dict[str, Any]:
@@ -542,6 +1046,7 @@ class FMReceiver(PluginBase):
         try:
             self._supervisor_loop_inner()
         finally:
+            self._playing = False
             self._supervisor_alive = False
 
     def _supervisor_loop_inner(self) -> None:
@@ -662,6 +1167,9 @@ class FMReceiver(PluginBase):
 
                 self._update_signal_level(chunk)
                 self._push_audio_chunk(chunk)
+
+                if self._recording:
+                    self._write_recording_chunk(chunk)
         except (ValueError, OSError):
             pass
         except Exception:

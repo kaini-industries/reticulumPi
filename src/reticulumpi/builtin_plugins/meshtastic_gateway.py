@@ -2324,9 +2324,7 @@ class MeshtasticGateway(PluginBase):
             is_broadcast = (to_num == _MESH_BROADCAST)
             channel_name = packet.get("channelName")
             if channel_name:
-                channel_idx: Any = self.config.get(
-                    "meshtastic_channel", 0,
-                )
+                channel_idx: Any = channel_name
             else:
                 channel_idx = packet.get("channel", 0)
 
@@ -2416,6 +2414,7 @@ class MeshtasticGateway(PluginBase):
             "source": source_tag,
             "channel": channel_idx,
             "packet_id": packet_id,
+            "snr": packet.get("rxSnr"),
         })
 
     def _on_mesh_connect(self, interface: Any = None, topic: Any = None) -> None:

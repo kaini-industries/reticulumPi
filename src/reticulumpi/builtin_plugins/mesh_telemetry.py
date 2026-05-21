@@ -34,6 +34,8 @@ class MeshTelemetryPlugin(PluginBase):
         self._active = True
         self._peer_metrics: dict[bytes, dict[str, Any]] = {}
         self._peers_lock = threading.Lock()
+        self._broadcast_cache: tuple[float, list] | None = None
+        self._broadcast_cache_ttl = 5.0
 
         app_name = self.config.get("app_name", "reticulumpi")
         aspects = self.config.get("aspects", ["node", "telemetry"])
@@ -73,9 +75,13 @@ class MeshTelemetryPlugin(PluginBase):
         }
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
-        if hasattr(self, "get_peer_metrics"):
-            return self.get_peer_metrics()
-        return None
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+        result = self.get_peer_metrics()
+        self._broadcast_cache = (now, result)
+        return result
 
     def get_peer_metrics(self) -> list[dict[str, Any]]:
         """Return all known peer metrics for API/dashboard consumption."""

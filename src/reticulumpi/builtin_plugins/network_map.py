@@ -110,7 +110,9 @@ class NetworkMapPlugin(PluginBase):
         )
 
         self._broadcast_cache: tuple[float, int, dict] | None = None
-        self._broadcast_cache_ttl = 30.0
+        self._broadcast_cache_ttl = 10.0
+        self._summary_cache: tuple[float, dict] | None = None
+        self._summary_cache_ttl = 120.0
 
         # Background thread for periodic interface stats and DB pruning
         self._start_thread(self._maintenance_loop, "network-map")
@@ -152,7 +154,13 @@ class NetworkMapPlugin(PluginBase):
             mesh["recent_announces"] = self.get_recent_announces()
         has_summary = False
         if want_summary and hasattr(self, "get_mesh_summary"):
-            mesh["summary"] = self.get_mesh_summary()
+            sc = self._summary_cache
+            if sc and (now - sc[0]) < self._summary_cache_ttl:
+                mesh["summary"] = sc[1]
+            else:
+                summary = self.get_mesh_summary()
+                self._summary_cache = (now, summary)
+                mesh["summary"] = summary
             has_summary = True
         result = mesh or None
         self._broadcast_cache = (now, has_summary, result)

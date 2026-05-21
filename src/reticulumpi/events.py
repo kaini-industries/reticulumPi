@@ -165,6 +165,8 @@ NTP_GPS_REFCLOCK_ACTIVE = "ntp.gps_refclock_active"
 # FM/AM radio receiver
 FM_RECEIVER_TUNED = "fm_receiver.tuned"
 FM_RECEIVER_STATUS = "fm_receiver.status"
+FM_RECEIVER_RECORDING_STARTED = "fm_receiver.recording_started"
+FM_RECEIVER_RECORDING_STOPPED = "fm_receiver.recording_stopped"
 
 # SDR scheduler — dongle time-sharing
 SDR_DONGLE_GRANTED = "sdr.dongle.granted"
@@ -197,15 +199,6 @@ WEATHER_ALERT_RECEIVED = "weather_alert.received"
 WEATHER_ALERT_SEVERE = "weather_alert.severe"
 WEATHER_ALERT_EXPIRED = "weather_alert.expired"
 WEATHER_ALERT_STATUS = "weather_alert.status"
-
-# Signal operations — unified signal intelligence
-SIGOPS_SIGNAL_DETECTED = "sigops.signal_detected"
-SIGOPS_SIGNAL_CLASSIFIED = "sigops.signal_classified"
-SIGOPS_SIGNAL_UNKNOWN = "sigops.signal_unknown"
-SIGOPS_CONTACT_NEW = "sigops.contact_new"
-SIGOPS_CONTACT_LOST = "sigops.contact_lost"
-SIGOPS_CORRELATION = "sigops.correlation"
-SIGOPS_STATUS = "sigops.status"
 
 # ISM band decoder (rtl_433)
 ISM_DEVICE_DETECTED = "ism.device_detected"

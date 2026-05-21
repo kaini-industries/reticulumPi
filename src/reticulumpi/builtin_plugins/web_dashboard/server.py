@@ -37,6 +37,7 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
         ]
     )
     app["plugin"] = plugin
+    app["ws_compress"] = plugin.config.get("ws_compress", True)
 
     # API and WebSocket routes
     setup_api_routes(app)
@@ -48,6 +49,7 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
 
     # Serve login.html and index.html directly
     app.router.add_get("/login.html", _serve_login)
+    app.router.add_get("/spectrum.html", _serve_spectrum)
     app.router.add_get("/", _serve_index)
     app.router.add_get("/index.html", _serve_index)
 
@@ -64,6 +66,9 @@ _COMPRESSIBLE = frozenset({
 })
 
 
+_ZLIB_EXECUTOR_THRESHOLD = 32768
+
+
 @aiohttp.web.middleware
 async def compression_middleware(
     request: aiohttp.web.Request,
@@ -74,6 +79,8 @@ async def compression_middleware(
     ct = response.content_type or ""
     if ct in _COMPRESSIBLE and "Content-Encoding" not in response.headers:
         response.enable_compression()
+        if (response.content_length or 0) > _ZLIB_EXECUTOR_THRESHOLD:
+            response.zlib_executor_size = _ZLIB_EXECUTOR_THRESHOLD
     return response
 
 
@@ -167,6 +174,11 @@ def _extract_token(request: aiohttp.web.Request) -> str | None:
 async def _serve_login(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     return aiohttp.web.FileResponse(os.path.join(static_dir, "login.html"))
+
+
+async def _serve_spectrum(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    return aiohttp.web.FileResponse(os.path.join(static_dir, "spectrum.html"))
 
 
 async def _serve_index(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:

@@ -345,7 +345,7 @@
   // rather than falling back to a drift-prone rowIdx * sweep_seconds.
   // generation bumps on load / reset / bin-grid change — panels diff against
   // their last-seen generation to decide when to wipe canvas and bulk-paint.
-  var MAX_HIST_ROWS = 256;
+  var MAX_HIST_ROWS = 512;
 
   function createHistoryStore() {
     return {

@@ -190,13 +190,6 @@ class TestEventEmission:
         event_types = [c[0][0] for c in calls]
         assert events.ISM_DEVICE_DETECTED in event_types
 
-    def test_new_device_emits_sigops(self):
-        p = _make_plugin()
-        p._handle_device(_weather_msg())
-        calls = p.event_bus.publish.call_args_list
-        event_types = [c[0][0] for c in calls]
-        assert events.SIGOPS_SIGNAL_DETECTED in event_types
-
     def test_existing_device_no_detected_event(self):
         p = _make_plugin()
         p._handle_device(_weather_msg())

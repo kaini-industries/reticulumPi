@@ -325,24 +325,6 @@ class RadiosondeTracker(SignalPluginBase):
         if sonde.get("phase") == "ascent" and alt is not None:
             sonde["predicted_burst_alt_m"] = self._predict_burst_alt()
 
-        if self._frame_count % 10 == 0:
-            try:
-                self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
-                    "source": "radiosonde_tracker",
-                    "signal_type": "radiosonde",
-                    "timestamp": now,
-                    "confidence": 1.0,
-                    "position": {"lat": lat, "lon": lon} if lat and lon else None,
-                    "distance_nm": (
-                        round(sonde["distance_km"] / 1.852, 1)
-                        if sonde.get("distance_km") is not None else None
-                    ),
-                    "bearing_deg": sonde.get("bearing_deg"),
-                    "data": {"id": sonde_id, "alt_m": alt, "phase": sonde.get("phase")},
-                })
-            except Exception:
-                pass
-
         self._snapshot_dirty = True
 
     def _derive_wind(

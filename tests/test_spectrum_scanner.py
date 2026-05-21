@@ -72,7 +72,7 @@ class TestValidateConfig:
         assert p._sweep_seconds == 2
         assert p._gain_db == 40.0
         assert p._ppm == 0
-        assert p._waterfall_rows == 128
+        assert p._waterfall_rows == 512
         assert p._device_id == "0"
 
     def test_custom_config_overrides_defaults(self):

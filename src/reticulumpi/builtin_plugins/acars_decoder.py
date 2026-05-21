@@ -229,17 +229,6 @@ class ACARSDecoder(SignalPluginBase):
         except Exception:
             pass
 
-        try:
-            self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
-                "source": "acars_decoder",
-                "signal_type": "ACARS",
-                "tail": tail,
-                "flight": flight,
-                "label": label,
-            })
-        except Exception:
-            pass
-
         self._snapshot_dirty = True
 
     def _maybe_reset_daily(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import struct
 
 import aiohttp.web
@@ -88,9 +89,11 @@ async def handle_radio_tune(request: aiohttp.web.Request) -> aiohttp.web.Respons
         return _error("'frequency_mhz' must be a number", 400)
 
     mode = body.get("mode")
+    if mode is not None and not isinstance(mode, str):
+        return _error("'mode' must be a string", 400)
     try:
         result = fm.tune(int(freq_mhz * 1_000_000), mode=mode)
-    except ValueError as exc:
+    except (ValueError, AttributeError, TypeError) as exc:
         return _error(str(exc), 400)
     return _ok(result)
 
@@ -296,6 +299,193 @@ async def handle_radio_unlock(request: aiohttp.web.Request) -> aiohttp.web.Respo
     return _ok(fm.unlock_dongle())
 
 
+# ── GET /api/radio/favorites ────────────────────────────────────────
+
+
+async def handle_radio_favorites_list(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    return _ok(fm.get_favorites())
+
+
+# ── POST /api/radio/favorites ──────────────────────────────────────
+
+
+async def handle_radio_favorites_add(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+
+    label = body.get("label", "")
+    freq = body.get("frequency_mhz")
+    mode = body.get("mode", "wbfm")
+    gain_db = body.get("gain_db")
+
+    if freq is None:
+        return _error("'frequency_mhz' field required", 400)
+    try:
+        freq = float(freq)
+    except (TypeError, ValueError):
+        return _error("'frequency_mhz' must be a number", 400)
+    if mode is not None and not isinstance(mode, str):
+        return _error("'mode' must be a string", 400)
+    try:
+        fav = fm.add_favorite(label, freq, mode, gain_db)
+    except (ValueError, AttributeError, TypeError) as exc:
+        return _error(str(exc), 400)
+    return _ok(fav)
+
+
+# ── DELETE /api/radio/favorites/{id} ───────────────────────────────
+
+
+async def handle_radio_favorites_delete(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    fav_id = request.match_info.get("fav_id", "")
+    if fm.remove_favorite(fav_id):
+        return _ok({"removed": True})
+    return _error("Favorite not found", 404)
+
+
+# ── PUT /api/radio/favorites/{id} ──────────────────────────────────
+
+
+async def handle_radio_favorites_update(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    fav_id = request.match_info.get("fav_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+    try:
+        updated = fm.update_favorite(fav_id, **body)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    if updated is None:
+        return _error("Favorite not found", 404)
+    return _ok(updated)
+
+
+# ── POST /api/radio/favorites/{id}/tune ────────────────────────────
+
+
+async def handle_radio_favorites_tune(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    fav_id = request.match_info.get("fav_id", "")
+    try:
+        result = fm.tune_favorite(fav_id)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    return _ok(result)
+
+
+# ── POST /api/radio/record/start ────────────────────────────────────
+
+
+async def handle_radio_record_start(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = fm.start_recording(label=body.get("label"))
+    if result.get("error"):
+        return _error(result["error"], 409)
+    return _ok(result)
+
+
+# ── POST /api/radio/record/stop ─────────────────────────────────────
+
+
+async def handle_radio_record_stop(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    return _ok(fm.stop_recording())
+
+
+# ── GET /api/radio/recordings ───────────────────────────────────────
+
+
+async def handle_radio_recordings_list(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    return _ok(fm.get_recordings())
+
+
+# ── GET /api/radio/recordings/{filename} ────────────────────────────
+
+
+async def handle_radio_recording_download(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    if not request.get("token"):
+        return _error("Authentication required", 401)
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    filename = request.match_info.get("filename", "")
+    path = fm.get_recording_path(filename)
+    if path is None:
+        return _error("Recording not found", 404)
+    return aiohttp.web.FileResponse(
+        path,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "audio/wav",
+        },
+    )
+
+
+# ── DELETE /api/radio/recordings/{filename} ─────────────────────────
+
+
+async def handle_radio_recording_delete(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    fm, err = _require_fm(request)
+    if err:
+        return err
+    filename = request.match_info.get("filename", "")
+    try:
+        if fm.delete_recording(filename):
+            return _ok({"deleted": True})
+        return _error("Recording not found", 404)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+
 # ── Route registration ───────────────────────────────────────────────
 
 
@@ -311,3 +501,13 @@ def setup_radio_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/radio/audio", handle_radio_audio)
     app.router.add_post("/api/radio/lock", handle_radio_lock)
     app.router.add_post("/api/radio/unlock", handle_radio_unlock)
+    app.router.add_get("/api/radio/favorites", handle_radio_favorites_list)
+    app.router.add_post("/api/radio/favorites", handle_radio_favorites_add)
+    app.router.add_delete("/api/radio/favorites/{fav_id}", handle_radio_favorites_delete)
+    app.router.add_put("/api/radio/favorites/{fav_id}", handle_radio_favorites_update)
+    app.router.add_post("/api/radio/favorites/{fav_id}/tune", handle_radio_favorites_tune)
+    app.router.add_post("/api/radio/record/start", handle_radio_record_start)
+    app.router.add_post("/api/radio/record/stop", handle_radio_record_stop)
+    app.router.add_get("/api/radio/recordings", handle_radio_recordings_list)
+    app.router.add_get("/api/radio/recordings/{filename}", handle_radio_recording_download)
+    app.router.add_delete("/api/radio/recordings/{filename}", handle_radio_recording_delete)

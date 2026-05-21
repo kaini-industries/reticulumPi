@@ -176,14 +176,6 @@ class AISReceiver(SignalPluginBase):
                 except Exception:
                     pass
 
-                try:
-                    self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
-                        "source": "ais_receiver",
-                        "signal_type": "AIS",
-                        "id": mmsi,
-                    })
-                except Exception:
-                    pass
 
             vessel["last_seen"] = now
             vessel["message_count"] += 1

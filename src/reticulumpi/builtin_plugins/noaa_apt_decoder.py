@@ -407,19 +407,6 @@ class NOAAAPTDecoder(SignalPluginBase):
                     self.event_bus.publish(events.NOAA_APT_DECODE_COMPLETE, image_meta)
                 except Exception:
                     pass
-                try:
-                    self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
-                        "source": "noaa_apt_decoder",
-                        "signal_type": "satellite_image",
-                        "timestamp": time.time(),
-                        "confidence": quality_score,
-                        "position": None,
-                        "distance_nm": None,
-                        "bearing_deg": None,
-                        "data": image_meta,
-                    })
-                except Exception:
-                    pass
         except subprocess.TimeoutExpired:
             self.log.warning("Decode timed out for %s", wav_path)
         except Exception:

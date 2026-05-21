@@ -18,7 +18,7 @@ Example config (under ``plugins:`` in ``/etc/reticulumpi/config.yaml``):
       sweep_seconds: 2         # float; 0.1-60 (sub-second needs rtl_power_fftw)
       gain_db: 40.0            # null = auto
       ppm: 0
-      waterfall_rows: 128
+      waterfall_rows: 512
       device_index: 0
       power_command: rtl_power  # or rtl_power_fftw for faster sweeps
 
@@ -107,7 +107,7 @@ class SpectrumScanner(PluginBase):
     plugin_name = "spectrum_scanner"
     plugin_version = "0.1.0"
     plugin_description = "RTL-SDR spectrum sweep + waterfall feed"
-    broadcast_tier = 2
+    broadcast_tier = None
     broadcast_keys = "spectrum"
     _PRESET_SWITCH_COOLDOWN = 3.0
 
@@ -158,7 +158,7 @@ class SpectrumScanner(PluginBase):
 
         self._ppm = int(cfg.get("ppm", 0))
 
-        wf_rows = int(cfg.get("waterfall_rows", 128))
+        wf_rows = int(cfg.get("waterfall_rows", 512))
         if not 8 <= wf_rows <= 2048:
             raise ValueError(f"waterfall_rows must be 8-2048, got {wf_rows}")
         self._waterfall_rows = wf_rows
@@ -507,28 +507,44 @@ class SpectrumScanner(PluginBase):
             self._snapshot_cache = (self._sweep_count, snap)
             return snap
 
+    _HISTORY_MAX_JSON_BYTES = 16_000_000
+
     def get_history(self) -> dict[str, Any]:
-        """Return the full in-memory waterfall buffer for one-shot backfill.
+        """Return the in-memory waterfall buffer for one-shot backfill.
 
         ``get_snapshot()`` deliberately ships only the last few sweeps to
         keep every WebSocket broadcast small. This method returns the
-        entire rolling buffer (capped by ``waterfall_rows`` in config) so
-        the dashboard can backfill its waterfall canvas on first load —
-        a one-time cost per page open, with no impact on steady-state
-        WS payload size.
+        rolling buffer so the dashboard can backfill its waterfall canvas
+        on first load.
+
+        The number of rows is capped so the serialised JSON stays under
+        ``_HISTORY_MAX_JSON_BYTES`` — wide spans (e.g. 52–2200 MHz)
+        produce 24k+ bins per row, and an uncapped history would exceed
+        browser WebSocket message limits.
         """
         with self._state_lock:
-            # Same decomposition pattern as get_snapshot: parallel arrays
-            # (rows / row_timestamps) stay in lock-step.  rows shape is
-            # unchanged for backward-compat; row_timestamps is the new sibling.
+            n_bins = len(self._bins_hz) if self._bins_hz else 0
+            if n_bins > 0:
+                bytes_per_row = n_bins * 7
+                max_rows = max(
+                    16,
+                    self._HISTORY_MAX_JSON_BYTES // bytes_per_row,
+                )
+            else:
+                max_rows = self._waterfall_rows
+
+            wf = list(self._waterfall)
+            if len(wf) > max_rows:
+                wf = wf[-max_rows:]
+
             hist: dict[str, Any] = {
                 "available": True,
                 "sweep_count": self._sweep_count,
                 "bins_version": self._bins_version,
                 "waterfall_rows": self._waterfall_rows,
-                "rows": [list(powers) for _, powers in self._waterfall],
+                "rows": [list(powers) for _, powers in wf],
                 "row_timestamps": [
-                    round(ts, 3) for ts, _ in self._waterfall
+                    round(ts, 3) for ts, _ in wf
                 ],
             }
             if self._bins_hz:

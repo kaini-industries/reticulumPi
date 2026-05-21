@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=43">
+  <link rel="stylesheet" href="/static/style.css?v=45">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -13,20 +13,37 @@
   <div class="dashboard">
     <!-- Header -->
     <div class="header">
-      <div>
+      <div class="header-top">
         <h1 id="node-name"></h1>
-        <div class="node-info">
-          <span class="badge badge-version" id="version"></span>
-          <span class="badge badge-hash" id="identity-hash"></span>
-          <span class="uptime" id="uptime"></span>
-          <span class="badge badge-inet" id="inet-status" title="Internet connectivity"><span class="inet-dot"></span><span class="inet-label">--</span></span>
-          <span class="badge badge-ip" id="wan-ip" title="WAN IP"></span>
-          <span class="badge badge-ip" id="lan-ip" title="LAN IP"></span>
-          <span class="conn-status conn-wait" id="conn-status" title="Connection status"><span class="conn-dot"></span><span class="conn-label">waiting…</span></span>
+        <div class="header-actions">
+          <a href="/spectrum.html" target="_blank" class="nav-link" id="spectrum-nav-link">Spectrum</a>
+          <button id="logout-btn">Logout</button>
         </div>
       </div>
-      <a href="/spectrum.html" target="_blank" class="nav-link" id="spectrum-nav-link">Spectrum</a>
-      <button id="logout-btn">Logout</button>
+      <div class="header-pods">
+        <div class="header-pod pod-identity">
+          <span class="pod-label">Node</span>
+          <div class="pod-badges">
+            <span class="badge badge-version" id="version"></span>
+            <span class="badge badge-hash" id="identity-hash"></span>
+          </div>
+        </div>
+        <div class="header-pod pod-network">
+          <span class="pod-label">Network</span>
+          <div class="pod-badges">
+            <span class="badge badge-inet" id="inet-status" title="Internet connectivity"><span class="inet-dot"></span><span class="inet-label">--</span></span>
+            <span class="badge badge-ip" id="wan-ip" title="WAN IP"></span>
+            <span class="badge badge-ip" id="lan-ip" title="LAN IP"></span>
+          </div>
+        </div>
+        <div class="header-pod pod-status">
+          <span class="pod-label">Status</span>
+          <div class="pod-badges">
+            <span class="uptime" id="uptime"></span>
+            <span class="conn-status conn-wait" id="conn-status" title="Connection status"><span class="conn-dot"></span><span class="conn-label">waiting…</span></span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Failed plugins alert -->

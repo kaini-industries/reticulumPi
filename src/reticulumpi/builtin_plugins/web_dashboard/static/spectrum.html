@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spectrum — ReticulumPi</title>
+  <link rel="stylesheet" href="/static/style.css?v=43">
+</head>
+<body>
+  <div class="dashboard">
+    <div class="header">
+      <div>
+        <h1><a href="/" class="nav-link">&larr; Dashboard</a></h1>
+      </div>
+      <span class="conn-status conn-wait" id="spec-conn-status"><span class="conn-dot"></span><span class="conn-label">connecting…</span></span>
+    </div>
+
+    <!-- SDR Spectrum (RTL-SDR sweep + waterfall) -->
+    <div class="section" id="spectrum-section" style="display:none">
+      <div class="section-header collapsible" id="spectrum-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> SDR Spectrum</span>
+        <span class="count" id="spectrum-count"></span>
+      </div>
+      <div class="section-body hidden" id="spectrum-body">
+        <div class="spectrum-meta">
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Span</span> <span id="spectrum-span">&mdash;</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Bins</span> <span id="spectrum-bins-info">&mdash;</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Gain</span> <span id="spectrum-gain">&mdash;</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Sweeps</span> <span id="spectrum-sweeps">0</span></span>
+          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Status</span> <span id="spectrum-status">&mdash;</span></span>
+          <span class="freshness" id="spectrum-freshness"></span>
+        </div>
+        <div class="spectrum-plot-wrap">
+          <div class="spectrum-bands" id="spectrum-bands" title="Frequency band allocations — hover a band for details"></div>
+          <svg id="spectrum-line" class="spectrum-line" viewBox="0 0 800 160" preserveAspectRatio="none"></svg>
+          <canvas id="spectrum-waterfall" class="spectrum-waterfall"></canvas>
+          <div class="spectrum-overlay" id="spectrum-overlay"></div>
+          <div class="spectrum-hover" id="spectrum-hover"></div>
+          <div class="spectrum-zoom-reset" id="spectrum-zoom-reset" style="display:none">Full band</div>
+        </div>
+        <div class="spectrum-controls-row"><div class="spectrum-legend-toggle" id="spectrum-legend-toggle" title="Show / hide band legend"><span class="chevron">&#9656;</span> Band legend</div><button class="spectrum-peakhold-toggle" id="spectrum-peakhold-toggle" title="Toggle peak hold trace">Peak hold</button></div>
+        <div class="spectrum-legend hidden" id="spectrum-legend"></div>
+        <div class="spectrum-scale" id="spectrum-scale"></div>
+      </div>
+    </div>
+
+    <!-- LoRa Spectrum (zoomed, project-aware view of the LoRa ISM band) -->
+    <div class="section" id="lora-spectrum-section" style="display:none">
+      <div class="section-header collapsible" id="lora-spectrum-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> LoRa Spectrum</span>
+        <span class="count" id="lora-spectrum-count"></span>
+      </div>
+      <div class="section-body hidden" id="lora-spectrum-body">
+        <div class="lora-spectrum-meta" id="lora-spectrum-meta"></div>
+        <div class="lora-channel-grid-wrap" id="lora-channel-grid-wrap" style="display:none">
+          <div class="lora-channel-grid-section">
+            <div class="lora-channel-grid-label">Uplink 125 kHz (ch 0–63)</div>
+            <div class="lora-channel-grid" id="lora-channel-grid-up"></div>
+          </div>
+          <div class="lora-channel-grid-section">
+            <div class="lora-channel-grid-label">Downlink 500 kHz (ch 64–71)</div>
+            <div class="lora-channel-grid" id="lora-channel-grid-dn"></div>
+          </div>
+          <div class="lora-channel-detail" id="lora-channel-detail" style="display:none"></div>
+        </div>
+        <div class="lora-spectrum-plot-wrap">
+          <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
+          <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
+          <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall"></canvas>
+          <div class="lora-spectrum-overlay" id="lora-spectrum-overlay"></div>
+          <div class="lora-spectrum-hover" id="lora-spectrum-hover"></div>
+          <div class="lora-spec-zoom-reset" id="lora-spec-zoom-reset" style="display:none">Reset zoom</div>
+        </div>
+        <div class="lora-spectrum-scale" id="lora-spectrum-scale"></div>
+        <div class="lora-stats-panel" id="lora-stats-panel" style="display:none">
+          <div class="lora-stats-row">
+            <div class="lora-nf-trend" id="lora-nf-trend"></div>
+            <div class="lora-ch-util" id="lora-ch-util"></div>
+          </div>
+          <div class="lora-ch-timeline" id="lora-ch-timeline" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- LoRa Link Tester -->
+    <div class="section" id="link-tester-section" style="display:none">
+      <div class="section-header collapsible" id="link-tester-toggle" title="Click to expand">
+        <span><span class="chevron">&#9656;</span> LoRa Link Tester</span>
+        <span class="link-tester-pill" id="link-tester-pill">--</span>
+      </div>
+      <div class="section-body hidden" id="link-tester-body">
+        <div class="lt-controls">
+          <label class="lt-label">Target
+            <input type="text" id="link-tester-target" class="lt-input" placeholder="!abcd1234" spellcheck="false">
+          </label>
+          <label class="lt-label">Count
+            <input type="number" id="link-tester-count" class="lt-input lt-input-sm" value="20" min="1" max="1000">
+          </label>
+          <button id="link-tester-start-btn" class="lt-btn lt-btn-start">Start</button>
+          <button id="link-tester-stop-btn" class="lt-btn lt-btn-stop" disabled>Stop</button>
+          <button id="link-tester-clear-btn" class="lt-btn">Clear</button>
+        </div>
+        <div id="link-tester-summary" class="lt-summary">No data yet</div>
+        <div class="lt-chart-wrap">
+          <div class="lt-chart-label">Round-Trip Time</div>
+          <svg id="link-tester-rtt-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart"></svg>
+        </div>
+        <div class="lt-chart-wrap">
+          <div class="lt-chart-label">Signal Quality</div>
+          <svg id="link-tester-signal-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart"></svg>
+        </div>
+        <div class="lt-log-wrap">
+          <table class="data-table lt-log">
+            <thead><tr><th>#</th><th>Time</th><th>RTT</th><th>RSSI</th><th>SNR</th><th>Status</th></tr></thead>
+            <tbody id="link-tester-log-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=36"></script>
+  <script src="/static/spectrum_common.js?v=1"></script>
+  <script src="/static/spectrum.js?v=9"></script>
+  <script src="/static/lora_spectrum.js?v=18"></script>
+  <script src="/static/link_tester.js?v=1"></script>
+  <script src="/static/spectrum_page.js?v=3"></script>
+</body>
+</html>

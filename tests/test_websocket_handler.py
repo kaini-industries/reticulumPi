@@ -1108,7 +1108,7 @@ class TestSetupWebsocketRoutes:
 
         setup_websocket_routes(app)
 
-        app.router.add_get.assert_called_once_with("/ws/metrics", websocket_metrics)
+        assert app.router.add_get.call_count == 2
         assert len(app.on_startup) == 1
         assert len(app.on_shutdown) == 1
 
@@ -1686,3 +1686,113 @@ class TestHandleWsSpectrumPreset:
         assert result is not None
         assert result["type"] == "spectrum_preset_error"
         assert "boom" in result["error"]
+
+
+class TestHandleWsPingPong:
+    def test_ping_returns_pong_with_timestamp(self):
+        plugin = MagicMock()
+        raw = json.dumps({"action": "ping", "ts": 1700000000000})
+        result = _handle_ws_command(raw, plugin)
+        assert result == {"type": "pong", "ts": 1700000000000}
+
+    def test_ping_without_ts_defaults_to_zero(self):
+        plugin = MagicMock()
+        raw = json.dumps({"action": "ping"})
+        result = _handle_ws_command(raw, plugin)
+        assert result == {"type": "pong", "ts": 0}
+
+    def test_ping_does_not_touch_plugin(self):
+        plugin = MagicMock()
+        _handle_ws_command(json.dumps({"action": "ping", "ts": 42}), plugin)
+        plugin.app.plugins.get.assert_not_called()
+
+
+class TestWebSocketCompression:
+    def test_compress_enabled_by_default(self):
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
+        _ws_clients.clear()
+
+        ws_kwargs = []
+
+        def capture_ws(*args, **kwargs):
+            ws = MagicMock()
+            ws.prepare = AsyncMock()
+            ws.__aiter__ = lambda self: _empty_async_iter()
+            ws_kwargs.append(kwargs)
+            return ws
+
+        with patch("aiohttp.web.WebSocketResponse", side_effect=capture_ws):
+            asyncio.run(websocket_metrics(request))
+
+        assert any(kw.get("compress") == 15 for kw in ws_kwargs)
+        _ws_clients.clear()
+
+    def test_compress_disabled_via_config(self):
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
+        request.app["ws_compress"] = False
+        _ws_clients.clear()
+
+        ws_kwargs = []
+
+        def capture_ws(*args, **kwargs):
+            ws = MagicMock()
+            ws.prepare = AsyncMock()
+            ws.__aiter__ = lambda self: _empty_async_iter()
+            ws_kwargs.append(kwargs)
+            return ws
+
+        with patch("aiohttp.web.WebSocketResponse", side_effect=capture_ws):
+            asyncio.run(websocket_metrics(request))
+
+        assert any(kw.get("compress") == 0 for kw in ws_kwargs)
+        _ws_clients.clear()
+
+
+class TestPrevPayloadBytes:
+    def _make_plugin(self):
+        plugin = MagicMock()
+        plugin.config = {"metrics_interval": 0.05}
+        plugin.app.reticulum = MagicMock()
+        plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
+        plugin.app.plugins = {}
+        plugin.app.internet_probe = None
+        return plugin
+
+    def test_first_cycle_zero_second_cycle_has_previous_length(self):
+        """prev_payload_bytes is 0 on first cycle, then reflects prior cycle's size."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = self._make_plugin()
+        _ws_clients.clear()
+
+        ws = MagicMock()
+        messages = []
+
+        async def capture_send(msg):
+            messages.append(msg)
+            if len(messages) >= 2:
+                raise asyncio.CancelledError()
+
+        ws.send_str = capture_send
+        _ws_clients.add(ws)
+
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+
+        async def run():
+            try:
+                await wsh._broadcast_metrics(app)
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+
+        assert len(messages) >= 2
+
+        first = json.loads(messages[0])
+        assert first["data"]["ws_stats"]["prev_payload_bytes"] == 0
+
+        second = json.loads(messages[1])
+        assert second["data"]["ws_stats"]["prev_payload_bytes"] == len(messages[0])
+
+        _ws_clients.clear()

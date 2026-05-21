@@ -154,19 +154,6 @@ class ISMDecoder(SignalPluginBase):
                 })
             except Exception:
                 pass
-            try:
-                self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
-                    "source": "ism_decoder",
-                    "signal_type": "ism_device",
-                    "timestamp": now,
-                    "confidence": 1.0,
-                    "position": None,
-                    "distance_nm": None,
-                    "bearing_deg": None,
-                    "data": {"key": key, "model": model, "id": dev_id},
-                })
-            except Exception:
-                pass
 
         dev = self._devices[key]
         dev["last_seen"] = now

@@ -312,7 +312,10 @@ class MessageStore:
         if channel is not None:
             metadata = dict(metadata) if metadata else {}
             metadata.setdefault("channel", channel)
-        meta_json = json.dumps(metadata) if metadata else None
+        try:
+            meta_json = json.dumps(metadata) if metadata else None
+        except (TypeError, ValueError):
+            meta_json = json.dumps(metadata, default=str) if metadata else None
         contact_id = self._compute_contact_id(
             direction, msg_type, transport, from_id, to_id,
             sub_transport=sub_transport, channel=channel,
@@ -516,6 +519,19 @@ class MessageStore:
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
+    def get_queued_sent(self, max_age_s: float | None = None) -> list[dict[str, Any]]:
+        """Return sent messages still in 'queued' status, oldest first."""
+        clauses = ["direction = 'sent'", "status = 'queued'"]
+        params: list[Any] = []
+        if max_age_s is not None:
+            clauses.append("timestamp > ?")
+            params.append(time.time() - max_age_s)
+        where = " WHERE " + " AND ".join(clauses)
+        sql = f"SELECT * FROM messages{where} ORDER BY timestamp ASC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def get_stats(self) -> dict[str, Any]:
         """Return aggregate counts by transport and direction."""
         with self._lock:
@@ -551,46 +567,51 @@ class MessageStore:
         recent first.
         """
         clauses: list[str] = []
+        m_clauses: list[str] = []
         params: list[Any] = []
         if transport:
             clauses.append("transport = ?")
+            m_clauses.append("m.transport = ?")
             params.append(transport)
         if sub_transport is not None:
             clauses.append("sub_transport = ?")
+            m_clauses.append("m.sub_transport = ?")
             params.append(sub_transport)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        # Group on every non-aggregate column so the per-group value is
-        # deterministic. ``transport``, ``sub_transport``, and ``msg_type``
-        # are functionally dependent on ``contact_id`` (baked into the
-        # contact_id itself for broadcasts; invariant per-peer for DMs),
-        # so adding them to GROUP BY doesn't fragment groups — it just
-        # tells SQLite we promise they're constant within a group.
-        # COALESCE keeps a NULL sub_transport (from pre-migration rows)
-        # from bucketing separately to the ``''`` default.
+        m_where = (" WHERE " + " AND ".join(m_clauses)) if m_clauses else ""
         sql = f"""
-            SELECT contact_id,
-                   transport,
-                   COALESCE(sub_transport, '') AS sub_transport,
-                   msg_type,
-                   MAX(timestamp) AS last_ts,
+            WITH latest_text AS (
+                SELECT contact_id, text AS last_text,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY contact_id ORDER BY timestamp DESC
+                       ) AS rn
+                FROM messages{where}
+            )
+            SELECT m.contact_id,
+                   m.transport,
+                   COALESCE(m.sub_transport, '') AS sub_transport,
+                   m.msg_type,
+                   MAX(m.timestamp) AS last_ts,
                    MAX(CASE
-                       WHEN direction = 'received' THEN from_name
-                       ELSE to_name
+                       WHEN m.direction = 'received' THEN m.from_name
+                       ELSE m.to_name
                    END) AS contact_name,
                    SUM(CASE
-                       WHEN direction = 'received' AND read = 0 THEN 1
+                       WHEN m.direction = 'received' AND m.read = 0 THEN 1
                        ELSE 0
                    END) AS unread_count,
-                   (SELECT m2.text FROM messages m2
-                    WHERE m2.contact_id = messages.contact_id
-                    ORDER BY m2.timestamp DESC LIMIT 1
-                   ) AS last_text
-            FROM messages{where}
-            GROUP BY contact_id, transport, COALESCE(sub_transport, ''), msg_type
+                   lt.last_text
+            FROM messages m
+            LEFT JOIN latest_text lt
+                ON lt.contact_id = m.contact_id AND lt.rn = 1
+            {m_where}
+            GROUP BY m.contact_id, m.transport,
+                     COALESCE(m.sub_transport, ''), m.msg_type
             ORDER BY last_ts DESC
         """
+        all_params = params + params if params else []
         with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._conn.execute(sql, all_params).fetchall()
         return [
             {
                 "contact_id": r["contact_id"],
@@ -1210,10 +1231,16 @@ class MeshtasticAdapter(TransportAdapter):
             return {str(k): v for k, v in self._pending_delivery.items()}
 
     def start(self) -> None:
-        self._hub.event_bus.subscribe_offloaded(
+        # Synchronous subscribe: the callback does a SQLite INSERT which
+        # blocks the gateway's publisher thread for ~10-50ms.  This is
+        # preferable to subscribe_offloaded() whose bounded semaphore
+        # silently drops messages under event-bus backpressure — the
+        # gateway's own parsing is already complete by the time it
+        # publishes, so a brief block is harmless.
+        self._hub.event_bus.subscribe(
             events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event
         )
-        self._hub.event_bus.subscribe_offloaded(
+        self._hub.event_bus.subscribe(
             events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event
         )
 
@@ -1461,7 +1488,7 @@ class MeshCoreAdapter(TransportAdapter):
             return dict(self._pending_delivery)
 
     def start(self) -> None:
-        self._hub.event_bus.subscribe_offloaded(
+        self._hub.event_bus.subscribe(
             events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event
         )
         self._hub.event_bus.subscribe(
@@ -1613,6 +1640,7 @@ class MessagingHubPlugin(PluginBase):
             self.config.get("db_path", _DEFAULT_DB_PATH)
         )
         self._store = MessageStore(db_path)
+        self._recover_queued_messages()
         self._history_limit = self.config.get(
             "message_history_limit", _DEFAULT_HISTORY_LIMIT
         )
@@ -1656,9 +1684,8 @@ class MessagingHubPlugin(PluginBase):
         self.event_bus.subscribe(
             events.MESSAGE_SENT, self._invalidate_broadcast_cache
         )
-        self.event_bus.subscribe(
-            events.MESSAGE_STATUS_CHANGED, self._invalidate_broadcast_cache
-        )
+        # MESSAGE_STATUS_CHANGED intentionally omitted — status updates
+        # (delivered/read) don't change conversation summaries.
         self._delivery_timeout = float(
             self.config.get("delivery_timeout", 300)
         )
@@ -1840,11 +1867,13 @@ class MessagingHubPlugin(PluginBase):
             return self._queue_outbound(transport, text, destination, kwargs)
 
         result = adapter.send(text, destination, **kwargs)
-        # Some adapters (Meshtastic, MeshCore) can detect "not_connected" at
-        # send time even though is_available() returned True — queue those too.
+        # Some adapters return retryable failures at send time even though
+        # is_available() was True — e.g. "not_connected" (Meshtastic/MeshCore
+        # radio flap) or "Path not found, requested" (LXMF async path
+        # discovery over LoRa).  Queue these for the periodic retry loop.
         if (
             not result.get("sent")
-            and result.get("reason", "") in {"not_connected", "not connected"}
+            and self._is_retryable_reason(result.get("reason", ""))
         ):
             return self._queue_outbound(transport, text, destination, kwargs)
 
@@ -1928,6 +1957,55 @@ class MessagingHubPlugin(PluginBase):
         return {**result, "msg_id": msg_id}
 
     # ── Outbound retry queue ───────────────────────────────────────
+
+    def _recover_queued_messages(self) -> int:
+        """Rebuild in-memory outbound queues from SQLite after restart."""
+        rows = self._store.get_queued_sent(max_age_s=self._outbound_max_age_s)
+        recovered = expired = 0
+        for row in rows:
+            transport = row["transport"]
+            meta = row.get("metadata") or {}
+            kwargs: dict[str, Any] = {
+                "msg_type": row.get("msg_type", "direct"),
+                "sub_transport": row.get("sub_transport", ""),
+                "to_name": row.get("to_name"),
+                "metadata": meta if meta else None,
+            }
+            channel = meta.get("channel") if isinstance(meta, dict) else None
+            if channel is not None:
+                kwargs["channel"] = channel
+
+            entry = {
+                "msg_id": row["id"],
+                "text": row["text"],
+                "destination": row.get("to_id", ""),
+                "kwargs": kwargs,
+                "queued_at": row["timestamp"],
+                "attempts": 0,
+            }
+            q = self._outbound_queues.setdefault(transport, deque())
+            if len(q) >= self._outbound_max_per_transport:
+                self._store.update_status(row["id"], "expired")
+                expired += 1
+                continue
+            q.append(entry)
+            recovered += 1
+
+        if recovered or expired:
+            self.log.info(
+                "Recovered %d queued messages from store (%d expired)",
+                recovered, expired,
+            )
+        return recovered
+
+    _RETRYABLE_REASONS = frozenset({"not_connected", "not connected"})
+
+    @staticmethod
+    def _is_retryable_reason(reason: str) -> bool:
+        """Check whether a send-failure reason warrants queueing for retry."""
+        if reason in MessagingHubPlugin._RETRYABLE_REASONS:
+            return True
+        return reason.lower().startswith("path not found")
 
     def _queue_outbound(
         self,
@@ -2135,7 +2213,7 @@ class MessagingHubPlugin(PluginBase):
                 })
                 self._register_delivery_tracking(adapter, item["msg_id"], result)
                 sent += 1
-            elif result.get("reason", "") in {"not_connected", "not connected"}:
+            elif self._is_retryable_reason(result.get("reason", "")):
                 with self._outbound_lock:
                     self._outbound_queues.setdefault(transport, deque()).append(item)
                 requeued += 1
@@ -2289,11 +2367,29 @@ class MessagingHubPlugin(PluginBase):
                 self.expire_queued_outbound()
             except Exception:
                 self.log.exception("Error expiring queued outbound messages")
-            # Check every 60 seconds
-            for _ in range(60):
-                if not self._active:
-                    return
-                time.sleep(1)
+            # Periodic drain: retry queued sends for any connected transport.
+            # The primary drain fires on transport-reconnect events, but those
+            # are registered via subscribe_offloaded() and can be dropped
+            # under event-bus backpressure.  This ensures queued messages are
+            # retried within 60s even if the reconnect event was lost.
+            with self._lock:
+                transports = list(self._adapters.keys())
+            for transport in transports:
+                try:
+                    sent, requeued, expired = self._drain_outbound_queue(transport)
+                    if sent or expired:
+                        self.log.info(
+                            "Periodic drain for %s: sent=%d requeued=%d expired=%d",
+                            transport, sent, requeued, expired,
+                        )
+                except Exception:
+                    self.log.debug(
+                        "Error in periodic drain for %s", transport, exc_info=True,
+                    )
+            # 15s interval — fast enough for LXMF path-found retries
+            # (path requests resolve in 2-10s over LoRa), low overhead
+            # (one deque check + lock per transport per tick).
+            self._sleep_while_active(15.0)
 
     # ── Queries (used by dashboard API) ────────────────────────────
 
@@ -2437,6 +2533,8 @@ class MessagingHubPlugin(PluginBase):
             result["transports"] = self.get_transports()
         if hasattr(self, "get_unread_counts_grouped"):
             result["unread"] = self.get_unread_counts_grouped()
+        if hasattr(self, "get_conversations"):
+            result["conversations"] = self.get_conversations()
         snapshot = result or None
         self._broadcast_cache = (now, snapshot)
         return snapshot

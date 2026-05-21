@@ -658,6 +658,12 @@
       return pl + (pl === 1 ? ' hop' : ' hops');
     }
 
+    function _snrLabel(m) {
+      var snr = m.metadata && m.metadata.snr;
+      if (snr === null || snr === undefined) return '';
+      return Number(snr).toFixed(1) + ' dB';
+    }
+
     function _reactionsHtml(m) {
       var reactions = m.metadata && m.metadata.reactions;
       if (!reactions || !reactions.length) return '';
@@ -686,13 +692,17 @@
       var hops = !isSent ? _hopsLabel(m) : '';
       var hopsHtml = hops
         ? '<span class="msg-hops">' + esc(hops) + '</span>' : '';
+      var snr = !isSent ? _snrLabel(m) : '';
+      var snrHtml = snr
+        ? '<span class="msg-snr">' + esc(snr) + '</span>' : '';
       var idAttr = (m.id !== null && m.id !== undefined)
         ? ' data-msg-id="' + esc(String(m.id)) + '"' : '';
+      var tsAttr = m.timestamp ? ' data-ts="' + m.timestamp + '"' : '';
       return '<div class="msg-bubble ' + (isSent ? 'sent' : 'received') + '"'
-           + idAttr + '>'
+           + idAttr + tsAttr + '>'
            + '<div class="msg-meta"><span>' + esc(sender) + '</span>'
            + '<span>' + esc(time) + '</span>'
-           + hopsHtml
+           + hopsHtml + snrHtml
            + '<span class="msg-status">' + statusHtml + '</span>'
            + '</div>'
            + '<div class="msg-text">' + esc(m.text || '') + '</div>'
@@ -726,7 +736,6 @@
 
     function _appendBubbleToChat(row) {
       if (!_dom.chat) return;
-      // Clear the "no messages" placeholder on first append.
       var placeholder = _dom.chat.querySelector('.msg-empty-notice');
       if (placeholder) placeholder.remove();
       var atBottom = (_dom.chat.scrollTop + _dom.chat.clientHeight
@@ -734,7 +743,22 @@
       var tmp = document.createElement('div');
       tmp.innerHTML = _bubbleHtml(row);
       var bubble = tmp.firstChild;
-      if (bubble) _dom.chat.appendChild(bubble);
+      if (!bubble) return;
+      // Insert at the correct chronological position so out-of-order
+      // arrivals (common with multi-hop mesh) display correctly.
+      var ts = row.timestamp || 0;
+      var inserted = false;
+      var children = _dom.chat.children;
+      for (var i = children.length - 1; i >= 0; i--) {
+        var childTs = parseFloat(children[i].getAttribute('data-ts')) || 0;
+        if (childTs <= ts) {
+          var next = children[i + 1] || null;
+          _dom.chat.insertBefore(bubble, next);
+          inserted = true;
+          break;
+        }
+      }
+      if (!inserted) _dom.chat.insertBefore(bubble, children[0] || null);
       if (atBottom) _dom.chat.scrollTop = _dom.chat.scrollHeight;
     }
 
@@ -1445,6 +1469,20 @@
           console.error('[' + cfg.rootId + '] render in update():', err);
         }
       }
+      if (wsPayload.conversations) {
+        var mine = wsPayload.conversations.filter(function (c) {
+          if (c.transport !== cfg.transport) return false;
+          if (cfg.subTransport !== null && cfg.subTransport !== undefined) {
+            if ((c.sub_transport || '') !== cfg.subTransport) return false;
+          }
+          return true;
+        });
+        if (mine.length > 0 || _conversations.length === 0) {
+          _conversations = mine;
+          _hasFreshData = true;
+          _renderConversations();
+        }
+      }
     }
 
     function _isFlatUnreadMap(obj) {
@@ -1514,8 +1552,15 @@
       var activeMatch = _activeContactId && row.contact_id === _activeContactId;
 
       if (activeMatch && _expanded) {
-        // Thread messages are stored newest-first in this panel.
-        _threadMessages.unshift(row);
+        // Insert into newest-first array at the sorted position so
+        // out-of-order arrivals stay chronologically correct.
+        var ts = row.timestamp || 0;
+        var insertIdx = 0;
+        for (var j = 0; j < _threadMessages.length; j++) {
+          if ((_threadMessages[j].timestamp || 0) >= ts) { insertIdx = j + 1; }
+          else break;
+        }
+        _threadMessages.splice(insertIdx, 0, row);
         _appendBubbleToChat(row);
         if (isReceived) {
           // Always POST /read, not just when the local unread map
@@ -1627,10 +1672,8 @@
         _maxBytes = (entry && entry.max_message_bytes) || null;
         if (_dom.section) _dom.section.style.display = _available ? '' : 'none';
         if (entry && entry.address) _renderTransportAddress(entry.address);
+        if (_available) _fetchConversations();
       });
-      // Fetch unread counts so badges appear on collapsed headers.
-      // Conversations and channels are deferred to first expand via
-      // _refresh() which fetches when _hasFreshData is false.
       _fetchUnread();
     }
 

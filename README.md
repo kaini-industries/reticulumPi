@@ -7,9 +7,8 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 ## Features
 
 - **Plugin system** -- add capabilities by dropping Python files into a directory
-- **45 built-in plugins** -- messaging, mesh networking, LoRa diagnostics, RTL-SDR radio, signal intelligence, ADS-B aircraft tracking, AIS marine tracking, ACARS aviation messages, NOAA weather satellite imagery, radiosonde balloon tracking, weather alerts, satellite tracking, GPS telemetry, NTP time sync, spectrum analysis, FM receiver, MeshCore bridging, and more
-- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, interface management, routing table visualization, mesh topology, sensor sparklines, chat messaging, spectrum waterfall, ADS-B radar, AIS marine map, GPS map, satellite tracking, signal operations console, node tracker, and weather alerts
-- **Signal intelligence** -- unified detection, classification, and correlation engine across all signal plugins with SQLite persistence, RF baseline profiling, and a 120+ entry signal classification database
+- **44 built-in plugins** -- messaging, mesh networking, LoRa diagnostics, RTL-SDR radio, ADS-B aircraft tracking, AIS marine tracking, ACARS aviation messages, NOAA weather satellite imagery, radiosonde balloon tracking, weather alerts, satellite tracking, GPS telemetry, NTP time sync, spectrum analysis, FM receiver, MeshCore bridging, and more
+- **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, interface management, routing table visualization, mesh topology, sensor sparklines, chat messaging, spectrum waterfall with full-page view, ADS-B radar, AIS marine map, GPS map, satellite tracking, node tracker, and weather alerts
 - **SDR dongle scheduler** -- priority-based time-sharing of RTL-SDR dongles across multiple signal plugins (weather alerts > satellite passes > continuous decoders), so a single $25 dongle can power ADS-B, AIS, ACARS, FM, spectrum, and weather monitoring
 - **RTL-SDR radio** -- spectrum waterfall, LoRa band scanning, ADS-B aircraft tracking, AIS marine vessel tracking, ACARS aviation messages, NOAA satellite images, radiosonde balloon tracking, SAME weather alerts, ISM band device decoding, and FM/AM receiver using cheap USB SDR dongles
 - **Multi-mesh bridging** -- bidirectional relay between Meshtastic and MeshCore networks with loop prevention and rate limiting
@@ -32,7 +31,7 @@ ReticulumPi wraps the Reticulum cryptographic networking stack in a plugin-based
 
 | Guide | Description |
 |-------|-------------|
-| **[Built-in Plugins](docs/plugins.md)** | All 45 plugins with configuration options |
+| **[Built-in Plugins](docs/plugins.md)** | All 44 plugins with configuration options |
 | **[Plugin Development](docs/plugin-development.md)** | Write your own plugin (lifecycle, events, LXMF, SQLite, testing) |
 | **[API Reference](docs/api-reference.md)** | REST API and WebSocket endpoint documentation |
 | **[Connectivity Guide](docs/connectivity-guide.md)** | LoRa, serial, packet radio, I2P hardware and setup |
@@ -259,7 +258,6 @@ The web dashboard provides real-time monitoring and management of your Reticulum
 | **LoRa Link Tester** | RF link quality probe/ACK measurements to Meshtastic peers |
 | **SDR Spectrum** | RTL-SDR waterfall sweep with configurable presets |
 | **LoRa Spectrum** | Dedicated LoRa-band spectrum scanner |
-| **Signal Operations** | Unified signal detection, classification, correlation, and RF baseline profiling |
 | **ADS-B Radar** | Aircraft tracking with position, altitude, and heading (RTL-SDR + dump1090) |
 | **AIS Marine** | Vessel tracking with MMSI, ship type, speed, and heading (RTL-SDR + AIS-catcher) |
 | **ACARS Decoder** | Aviation message decoding with flight, label, and message text (RTL-SDR + acarsdec) |
@@ -267,7 +265,7 @@ The web dashboard provides real-time monitoring and management of your Reticulum
 | **Radiosonde Tracker** | Weather balloon tracking with altitude, temperature, humidity, and wind (RS41/DFM) |
 | **NOAA Satellite** | Weather satellite APT image capture during overhead passes (NOAA 15/18/19) |
 | **ISM Decoder** | IoT device, weather station, and TPMS decoding via rtl_433 |
-| **VHF Radio** | FM/AM radio receiver with tuning, squelch, and audio streaming |
+| **VHF Radio** | FM/AM radio receiver with tuning, squelch, favorites, recording, and audio streaming |
 | **GPS Telemetry** | Live GPS fix, satellite count, and accuracy metrics |
 | **Node Tracker** | Search, track, and filter mesh nodes on the map with persistent chips |
 | **Node Map** | Leaflet map showing node position from GPS with tracker overlay |
@@ -561,7 +559,7 @@ Reticulum can communicate over virtually any medium -- WiFi, Ethernet, LoRa radi
 | RNode LoRa | $15--150 | 1--100+ km | Off-grid mesh |
 | Meshtastic | $20--60 | 1--50+ km | LoRa mesh with existing Meshtastic network |
 | MeshCore | $20--60 | 1--50+ km | LoRa mesh with MeshCore network |
-| RTL-SDR | $25--35 | Receive only | Spectrum, ADS-B, AIS, ACARS, weather radio, NOAA satellite, radiosondes, ISM devices, FM radio |
+| RTL-SDR | $25--35 | Receive only | Spectrum, ADS-B, AIS, ACARS, weather radio, NOAA satellite, radiosondes, ISM devices, FM/AM radio |
 | Serial / HC-12 | $5--50 | Varies | Cheap radio links |
 | KISS TNC | $35--500 | 10--50 km | Amateur radio |
 | I2P | Free | Global | Anonymous networking |
@@ -573,7 +571,7 @@ For complete hardware recommendations, configuration examples, frequency guides,
 
 ## Built-in Plugins
 
-ReticulumPi ships with 45 built-in plugins. Enable any combination in your `config.yaml`:
+ReticulumPi ships with 44 built-in plugins. Enable any combination in your `config.yaml`:
 
 **Core & Messaging**
 
@@ -615,14 +613,13 @@ ReticulumPi ships with 45 built-in plugins. Enable any combination in your `conf
 | **lora_decode** | LoRa PHY-layer codec -- Gray, interleave, Hamming FEC, whiten, CRC |
 | **lora_analysis** | LoRaWAN-aware signal processing utilities |
 | **spectrum_scanner** | RTL-SDR spectrum sweep + waterfall feed |
-| **fm_receiver** | FM/AM radio receiver via RTL-SDR |
+| **fm_receiver** | FM/AM radio receiver via RTL-SDR with favorites and recording |
 | **adsb_radar** | ADS-B aircraft tracker using RTL-SDR and dump1090 |
 
 **Signal Intelligence (RTL-SDR)**
 
 | Plugin | Description |
 |--------|-------------|
-| **signal_operations** | Unified signal detection, classification, correlation, and SQLite persistence |
 | **ism_decoder** | ISM band device decoder (weather stations, TPMS, IoT) via rtl_433 |
 | **acars_decoder** | ACARS aircraft message decoder via acarsdec |
 | **ais_receiver** | AIS marine vessel tracker via AIS-catcher or rtl_ais |
@@ -764,12 +761,9 @@ The web dashboard exposes 100+ REST API endpoints and a WebSocket endpoint. All 
 | `GET` | `/api/space` | Satellite positions, launches, space weather |
 | `POST` | `/api/radio/tune` | Tune FM/AM radio to frequency |
 | `GET` | `/api/radio/audio` | Audio stream from FM receiver |
+| `GET,POST` | `/api/radio/favorites` | FM station favorites list and add |
+| `POST,GET` | `/api/radio/recording` | Start/stop recording, list/download recordings |
 | `GET` | `/api/spectrum/presets` | Spectrum scanner preset list |
-| `GET` | `/api/sigops` | Signal operations overview (contact count, detection stats) |
-| `GET` | `/api/sigops/contacts` | Signal contact list with classification and last-seen |
-| `GET` | `/api/sigops/detections` | Detected signals with frequency, bandwidth, modulation |
-| `GET` | `/api/sigops/baseline` | RF environment baseline profile |
-| `POST` | `/api/sigops/classify` | Manually classify a detected signal |
 | `GET` | `/api/config` | Sanitized read-only config view |
 | `WS` | `/ws` | WebSocket for real-time updates (metrics, mesh deltas, messages, spectrum, signals) |
 
@@ -787,7 +781,7 @@ reticulumPi/
 ├── CONTRIBUTING.md                 # How to contribute
 ├── SECURITY.md                     # Security policy and best practices
 ├── docs/
-│   ├── plugins.md                  # Built-in plugin reference (all 45 plugins)
+│   ├── plugins.md                  # Built-in plugin reference (all 44 plugins)
 │   ├── plugin-development.md       # Plugin development guide (full walkthrough)
 │   ├── api-reference.md            # REST API & WebSocket documentation
 │   ├── connectivity-guide.md       # Hardware, radio, and interface guide
@@ -858,9 +852,7 @@ reticulumPi/
 │       ├── spectrum_scanner.py     # RTL-SDR sweep-based waterfall
 │       ├── fm_receiver.py          # FM/AM radio receiver via rtl_fm
 │       ├── adsb_radar.py           # ADS-B aircraft tracker (dump1090)
-│       ├── signal_operations.py    # Signal detection, classification + SQLite persistence
 │       ├── signal_plugin_base.py   # Base class for SDR-scheduler-managed signal plugins
-│       ├── signal_db.json          # 120+ entry signal classification database
 │       ├── ism_decoder.py          # ISM band decoder via rtl_433
 │       ├── acars_decoder.py        # ACARS aircraft message decoder via acarsdec
 │       ├── ais_receiver.py         # AIS marine vessel tracker via AIS-catcher
@@ -883,8 +875,7 @@ reticulumPi/
 │       │   ├── api_services.py     # Service API handlers (LoRa, messaging, alerts, sensors)
 │       │   ├── api_mesh.py         # Mesh network API (nodes, routing, reachability)
 │       │   ├── api_interfaces.py   # Interface management API (toggle, add)
-│       │   ├── api_radio.py        # Radio API (FM tuning, audio stream)
-│       │   ├── api_sigops.py       # Signal operations API (contacts, detections, baseline)
+│       │   ├── api_radio.py        # Radio API (FM tuning, favorites, recording, audio)
 │       │   ├── websocket_handler.py # WebSocket broadcast (delta mode)
 │       │   ├── broadcast_registry.py # Tiered plugin data collection for WebSocket
 │       │   ├── ssl_utils.py        # SSL/TLS certificate utilities
@@ -895,9 +886,10 @@ reticulumPi/
 │       │       ├── routing.js      # Routing table panel
 │       │       ├── lora.js         # LoRa diagnostics panel
 │       │       ├── lora_spectrum.js # LoRa spectrum panel
+│       │       ├── spectrum.html   # Full-page spectrum waterfall view
 │       │       ├── spectrum.js     # SDR spectrum waterfall panel
+│       │       ├── spectrum_page.js # Standalone spectrum page logic
 │       │       ├── spectrum_common.js # Shared spectrum rendering
-│       │       ├── sigops.js       # Signal operations panel
 │       │       ├── meshtastic.js   # Meshtastic panel
 │       │       ├── meshcore.js     # MeshCore panel
 │       │       ├── mesh_bridge_panel.js # Mesh bridge panel
@@ -987,7 +979,6 @@ reticulumPi/
     ├── test_spectrum_scanner.py     # Spectrum scanner tests
     ├── test_fm_receiver.py          # FM receiver tests
     ├── test_adsb_radar.py           # ADS-B radar tests
-    ├── test_signal_operations.py    # Signal ops detection + classification tests
     ├── test_ism_decoder.py          # ISM decoder tests
     ├── test_hotspot_monitor.py      # Hotspot monitor tests
     ├── test_gps_telemetry.py        # GPS telemetry tests
@@ -996,6 +987,7 @@ reticulumPi/
     ├── test_routing_api.py          # Routing API endpoint tests
     ├── test_web_dashboard.py        # Dashboard auth + API tests
     ├── test_websocket_handler.py    # WebSocket broadcast + delta tests
+    ├── test_broadcast_registry.py   # Broadcast registry tests
     ├── test_api_write_endpoints.py  # API write endpoint tests
     └── test_server_middleware.py    # Server middleware + auth bypass tests
 ```
@@ -1060,11 +1052,9 @@ Plugins can be enabled/disabled at runtime via `app.enable_plugin(name)` / `app.
 
 - **Targeted reachability scoring**: Instead of scoring all known nodes (expensive path lookups), the frontend sends only the hashes of nodes currently visible on screen. The API scores just those, keeping response times fast even with large networks.
 
-- **Modular frontend**: The dashboard frontend is split into 32 panel-specific JavaScript modules (mesh.js, routing.js, adsb.js, ais.js, acars.js, sigops.js, spectrum.js, etc.) loaded from a core `app.js` coordinator, enabling independent development and lazy initialization of each dashboard section.
+- **Modular frontend**: The dashboard frontend is split into panel-specific JavaScript modules (mesh.js, routing.js, adsb.js, ais.js, acars.js, spectrum.js, etc.) loaded from a core `app.js` coordinator, enabling independent development and lazy initialization of each dashboard section.
 
 - **SDR dongle scheduler** (`sdr_scheduler.py`): A priority-based time-sharing system that lets multiple signal plugins share a single RTL-SDR dongle. Three priority tiers -- critical (weather alerts), scheduled (satellite passes, radiosonde windows), and background (continuous decoders like AIS, ACARS) -- ensure safety-of-life signals always preempt background monitoring. Plugins implement `SignalPluginBase` and the scheduler handles dongle lifecycle, preemption, and cooldown between handoffs.
-
-- **Signal operations engine** (`signal_operations.py`): A unified detection, classification, and correlation layer across all signal plugins. Subscribes to events from spectrum, ADS-B, AIS, ACARS, ISM, and other sources; maintains a contact model in SQLite; profiles an RF baseline to detect anomalous signals; and classifies unknowns against a 120+ entry signal database (`signal_db.json`). The dashboard's Signal Operations panel surfaces all of this.
 
 - **Internet probe** (`internet_probe.py`): A lightweight connectivity monitor using TCP connect checks with asymmetric hysteresis (multiple failures to go offline, single success to recover). Publishes `INTERNET_ONLINE` / `INTERNET_OFFLINE` events so plugins can gracefully degrade without internet access.
 

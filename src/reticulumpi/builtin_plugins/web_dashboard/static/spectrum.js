@@ -930,8 +930,9 @@
     if (!name) return;
     // Disable buttons during switch
     Object.keys(_presetBtns).forEach(function (k) { _presetBtns[k].disabled = true; });
-    if (R.ws && R.ws.readyState === WebSocket.OPEN) {
-      R.ws.send(JSON.stringify({ action: 'spectrum_switch_preset', preset: name }));
+    var _cmdWs = R.spectrumWs || R.ws;
+    if (_cmdWs && _cmdWs.readyState === WebSocket.OPEN) {
+      _cmdWs.send(JSON.stringify({ action: 'spectrum_switch_preset', preset: name }));
     }
   }
 

@@ -125,14 +125,8 @@ body {
 
 /* Header */
 .header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 1rem;
   margin-bottom: 1.5rem;
   padding-bottom: 1rem;
-  border-bottom: none;
   position: relative;
   overflow: hidden;
 }
@@ -161,12 +155,72 @@ body {
   text-shadow: 0 0 8px var(--glow-pink);
 }
 
-.header .node-info {
+.header-top {
   display: flex;
-  gap: 1rem;
   align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+.header-pods {
+  display: flex;
+  gap: 0.75rem;
   flex-wrap: wrap;
 }
+.header-pod {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.65rem 0.45rem;
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.pod-identity { border-left: 3px solid var(--accent); }
+.pod-network  { border-left: 3px solid var(--cyan); }
+.pod-status   { border-left: 3px solid var(--green); }
+
+.header-pod::before {
+  content: '';
+  position: absolute;
+  top: -1px; left: -1px;
+  width: 10px; height: 10px;
+  border-top: 1px solid;
+  border-left: 1px solid;
+  opacity: 0.25;
+  pointer-events: none;
+}
+.pod-identity::before { border-color: var(--accent); }
+.pod-network::before  { border-color: var(--cyan); }
+.pod-status::before   { border-color: var(--green); }
+
+.pod-label {
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.pod-identity .pod-label { color: var(--accent); }
+.pod-network .pod-label  { color: var(--cyan); }
+.pod-status .pod-label   { color: var(--green); }
+
+.pod-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.pod-badges .conn-status { margin-left: 0; }
 
 .badge {
   display: inline-block;
@@ -332,7 +386,7 @@ body {
 /* Metric cards grid */
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(7, 1fr);
   gap: 0.6rem;
   margin-bottom: 1rem;
 }
@@ -2796,10 +2850,15 @@ body {
 
 .hidden { display: none; }
 
+/* ========== Responsive — Metrics collapse ========== */
+@media (max-width: 900px) {
+  .metrics-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
 /* ========== Responsive — Tablet ========== */
 @media (max-width: 768px) {
   .dashboard { padding: 1rem 0.75rem; }
-  .metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
+  .metrics-grid { grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
 
   /* Tables: horizontal scroll on every table */
   .section > .data-table,
@@ -2842,20 +2901,26 @@ body {
   .lora-radio-metrics { grid-template-columns: repeat(2, 1fr); }
 }
 
+/* ========== Responsive — Header pods (tablet) ========== */
+@media (max-width: 700px) {
+  .pod-network { flex: 1 1 100%; }
+  .pod-identity, .pod-status { flex: 1; }
+}
+
 /* ========== Responsive — Phone ========== */
 @media (max-width: 480px) {
   .dashboard { padding: 0.5rem; }
 
   /* Header */
-  .header { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
-  .header h1 { font-size: 1.1rem; }
-  .header .node-info { gap: 0.5rem; }
+  .header-top { gap: 0.5rem; }
+  .header-pods { flex-direction: column; gap: 0.5rem; }
+  .header-pod { flex: none; width: 100%; }
+  .header h1 { font-size: 1.1rem; animation: none; }
   .badge { font-size: 0.65rem; padding: 0.1rem 0.35rem; }
   .badge-inet { font-size: 0.62rem; padding: 0.1rem 0.35rem; }
   .badge-ip { font-size: 0.6rem; padding: 0.08rem 0.3rem; }
   .header .uptime { font-size: 0.75rem; }
   #logout-btn { font-size: 0.7rem; padding: 0.25rem 0.5rem; }
-  .header h1 { animation: none; }
 
   /* Metrics */
   .metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 0.4rem; margin-bottom: 0.75rem; }
@@ -5072,7 +5137,7 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
 .nt-chip-mc .nt-chip-remove { color: rgba(255, 107, 107, 0.7); }
 .nt-source-badge { font-size: 0.6rem; vertical-align: middle; }
 
-/* ── Signal Operations panel ─────────────────────────────────────── */
+/* ── Metric summary ────────────────────────────────────────────── */
 .metric-summary {
   padding: 0.6rem 1rem;
   font-size: 0.85rem;

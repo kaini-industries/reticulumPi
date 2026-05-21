@@ -945,3 +945,28 @@ class TestBackwardCompatibility:
         assert plugin._auto_enabled is False
         assert len(plugin._threads) == 1
         plugin.stop()
+
+
+class TestBroadcastCache:
+    def test_returns_cached_within_ttl(self, mock_app, base_config):
+        plugin = _start_plugin(mock_app, base_config)
+        result1 = plugin.broadcast_snapshot()
+        assert result1 is not None
+
+        result2 = plugin.broadcast_snapshot()
+        assert result2 is result1
+        plugin.stop()
+
+    def test_refreshes_after_ttl(self, mock_app, base_config):
+        plugin = _start_plugin(mock_app, base_config)
+        result1 = plugin.broadcast_snapshot()
+        assert result1 is not None
+
+        plugin._broadcast_cache = (
+            plugin._broadcast_cache[0] - plugin._broadcast_cache_ttl - 1,
+            plugin._broadcast_cache[1],
+        )
+
+        result2 = plugin.broadcast_snapshot()
+        assert result2 is not result1
+        plugin.stop()

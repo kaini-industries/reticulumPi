@@ -59,6 +59,12 @@ class TransportHealthPlugin(PluginBase):
         self._init_db()
         self._load_from_db()
 
+        self._last_history_record: float = 0.0
+        self._history_record_interval: float = float(
+            self.config.get("history_record_interval", 300)
+        )
+        self._prune_cycle_count: int = 0
+
         self._start_thread(self._monitor_loop, "transport-health")
 
         self.log.info(
@@ -242,10 +248,14 @@ class TransportHealthPlugin(PluginBase):
                         {"hash": hex_hash, "paths_via": info["count"]},
                     )
 
-        # Persist and prune
         self._persist_to_db()
-        self._record_history(now)
-        self._prune_history()
+        if now - self._last_history_record >= self._history_record_interval:
+            self._record_history(now)
+            self._last_history_record = now
+        self._prune_cycle_count += 1
+        if self._prune_cycle_count >= 60:
+            self._prune_history()
+            self._prune_cycle_count = 0
 
     @staticmethod
     def _classify_status(
@@ -395,6 +405,10 @@ class TransportHealthPlugin(PluginBase):
                     PRIMARY KEY (hash, timestamp)
                 )
             """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_ts "
+                "ON transport_node_history(timestamp)"
+            )
 
     def _load_from_db(self) -> None:
         try:
@@ -478,12 +492,28 @@ class TransportHealthPlugin(PluginBase):
             "history_retention_hours", _DEFAULT_HISTORY_HOURS
         )
         cutoff = time.time() - (retention * 3600)
+        max_rows = self.config.get("max_history_rows", 500_000)
         try:
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute(
                     "DELETE FROM transport_node_history WHERE timestamp < ?",
                     (cutoff,),
                 )
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM transport_node_history"
+                ).fetchone()[0]
+                if count > max_rows:
+                    excess = count - max_rows
+                    conn.execute(
+                        "DELETE FROM transport_node_history WHERE rowid IN ("
+                        "  SELECT rowid FROM transport_node_history "
+                        "  ORDER BY timestamp ASC LIMIT ?"
+                        ")",
+                        (excess,),
+                    )
+                    self.log.info(
+                        "Pruned %d excess history rows (cap: %d)", excess, max_rows,
+                    )
                 # Remove nodes not seen in retention period
                 conn.execute(
                     "DELETE FROM transport_nodes WHERE last_seen < ?",

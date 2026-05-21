@@ -371,23 +371,6 @@ class WeatherAlert(SignalPluginBase):
                 except Exception:
                     pass
 
-        try:
-            self.event_bus.publish(events.SIGOPS_SIGNAL_DETECTED, {
-                "source": "weather_alert",
-                "signal_type": "weather_alert",
-                "timestamp": now,
-                "confidence": decode_confidence,
-                "position": None,
-                "distance_nm": None,
-                "bearing_deg": None,
-                "data": {
-                    "event_code": event_code,
-                    "severity": severity,
-                    "fips_codes": fips_codes,
-                },
-            })
-        except Exception:
-            pass
 
     def _check_expired(self) -> None:
         now = time.time()

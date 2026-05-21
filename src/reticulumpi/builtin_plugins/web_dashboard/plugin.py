@@ -55,6 +55,10 @@ class WebDashboardPlugin(PluginBase):
         if not isinstance(max_ws, int) or max_ws < 1:
             raise ValueError("max_websocket_clients must be a positive integer")
 
+        ws_compress = self.config.get("ws_compress", True)
+        if not isinstance(ws_compress, bool):
+            raise ValueError("ws_compress must be a boolean")
+
         ssl_config = self.config.get("ssl", {})
         if not isinstance(ssl_config, dict):
             raise ValueError("ssl must be a dict")

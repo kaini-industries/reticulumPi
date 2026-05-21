@@ -134,3 +134,39 @@ def test_get_status(mock_dest, mock_transport, mock_app, plugin_config):
     assert status["active"] is True
     assert status["peer_count"] == 0
     plugin.stop()
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
+def test_broadcast_cache_returns_cached_within_ttl(mock_dest, mock_transport, mock_app, plugin_config):
+    from reticulumpi.builtin_plugins.mesh_telemetry import MeshTelemetryPlugin
+
+    plugin = MeshTelemetryPlugin(mock_app, plugin_config)
+    plugin.start()
+    result1 = plugin.broadcast_snapshot()
+    result2 = plugin.broadcast_snapshot()
+    assert result2 is result1
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
+def test_broadcast_cache_refreshes_after_ttl(mock_dest, mock_transport, mock_app, plugin_config):
+    from reticulumpi.builtin_plugins.mesh_telemetry import MeshTelemetryPlugin
+    import RNS.vendor.umsgpack as umsgpack
+
+    plugin = MeshTelemetryPlugin(mock_app, plugin_config)
+    plugin.start()
+    plugin.record_peer_metrics(b"\xaa" * 16, umsgpack.packb({"name": "A"}))
+    result1 = plugin.broadcast_snapshot()
+
+    plugin._broadcast_cache = (
+        plugin._broadcast_cache[0] - plugin._broadcast_cache_ttl - 1,
+        plugin._broadcast_cache[1],
+    )
+
+    plugin.record_peer_metrics(b"\xbb" * 16, umsgpack.packb({"name": "B"}))
+    result2 = plugin.broadcast_snapshot()
+    assert result2 is not result1
+    assert len(result2) == 2
+    plugin.stop()

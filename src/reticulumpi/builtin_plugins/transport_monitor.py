@@ -132,6 +132,8 @@ class TransportMonitorPlugin(PluginBase):
     def start(self) -> None:
         self._active = True
         self._lock = threading.Lock()
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl = 5.0
         self._check_interval = self.config.get("check_interval", 15)
         self._down_threshold = self.config.get("down_threshold", 60)
         self._auto_teardown = self.config.get("auto_teardown_fallback", True)
@@ -298,7 +300,13 @@ class TransportMonitorPlugin(PluginBase):
             }
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
-        return self.get_hub_health()
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
+        result = self.get_hub_health()
+        self._broadcast_cache = (now, result)
+        return result
 
     # --- Primary/fallback internals (unchanged) ---
 

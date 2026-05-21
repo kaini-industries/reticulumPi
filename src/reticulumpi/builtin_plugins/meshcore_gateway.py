@@ -80,6 +80,8 @@ class MeshCoreGateway(PluginBase):
 
     def start(self) -> None:
         self._lock = threading.Lock()
+        self._broadcast_cache: tuple[float, dict] | None = None
+        self._broadcast_cache_ttl = 5.0
 
         # Stats
         self._msgs_received = 0
@@ -567,9 +569,11 @@ class MeshCoreGateway(PluginBase):
                 if msg_type == "broadcast":
                     parsed_name, parsed_body = self._split_channel_sender(text)
                     if parsed_name:
-                        from_name = parsed_name
-                        from_key = self._resolve_name_to_key(parsed_name)
-                        text = parsed_body
+                        resolved_key = self._resolve_name_to_key(parsed_name)
+                        if resolved_key:
+                            from_name = parsed_name
+                            from_key = resolved_key
+                            text = parsed_body
 
             if not text.strip():
                 return
@@ -848,6 +852,10 @@ class MeshCoreGateway(PluginBase):
             }
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        now = time.monotonic()
+        cached = self._broadcast_cache
+        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+            return cached[1]
         result = {}
         if hasattr(self, "get_status"):
             s = self.get_status()
@@ -861,6 +869,8 @@ class MeshCoreGateway(PluginBase):
             c = self.get_contacts()
             if c is not None:
                 result["meshcore_contacts"] = c
+        if result:
+            self._broadcast_cache = (now, result)
         return result or None
 
     def get_device_info(self) -> dict[str, Any]:

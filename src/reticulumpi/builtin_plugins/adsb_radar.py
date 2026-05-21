@@ -572,13 +572,6 @@ class AdsbRadarPlugin(PluginBase):
                 "squawk": squawk_val,
                 "callsign": callsign or None,
             })
-            self._publish(events.SIGOPS_SIGNAL_DETECTED, {
-                "source": "adsb_radar",
-                "signal_type": "ADS-B_EMERGENCY",
-                "icao": icao,
-                "squawk": squawk_val,
-                "callsign": callsign or None,
-            })
 
     # ── maintenance ───────────────────────────────────────────────────
 

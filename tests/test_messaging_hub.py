@@ -801,6 +801,28 @@ class TestMessagingHubPlugin:
         with pytest.raises(ValueError, match="message_history_limit"):
             MessagingHubPlugin(mock_app, config)
 
+    def test_broadcast_snapshot_includes_conversations(self, hub_plugin):
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "test"
+        adapter.display_name = "Test"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": True}
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+
+        hub_plugin._store.store(
+            transport="test", direction="received", msg_type="direct",
+            text="hello", from_id="alice1", from_name="Alice",
+        )
+
+        snapshot = hub_plugin.broadcast_snapshot(cycle_count=0)
+        assert snapshot is not None
+        assert "transports" in snapshot
+        assert "unread" in snapshot
+        assert "conversations" in snapshot
+        assert len(snapshot["conversations"]) == 1
+        assert snapshot["conversations"][0]["contact_name"] == "Alice"
+
 
 # ═══════════════════════════════════════════════════════════════════
 # LXMFAdapter
@@ -1873,3 +1895,205 @@ class TestOutboundQueueEvents:
         assert sent <= 1
         assert requeued >= 4
         assert sent + requeued + expired == 5
+
+
+class TestRetryableReasons:
+    """Verify _is_retryable_reason correctly identifies queueable failures."""
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "not_connected",
+            "not connected",
+            "Path not found, requested",
+            "path not found",
+            "Path not found, something else",
+        ],
+    )
+    def test_retryable(self, reason):
+        assert MessagingHubPlugin._is_retryable_reason(reason) is True
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "timeout",
+            "invalid_dest",
+            "rate_limited",
+            "",
+            "some other error",
+        ],
+    )
+    def test_not_retryable(self, reason):
+        assert MessagingHubPlugin._is_retryable_reason(reason) is False
+
+    def test_send_message_queues_path_not_found(self, hub_plugin):
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "lxmf"
+        adapter.display_name = "LXMF"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {
+            "sent": False,
+            "reason": "Path not found, requested",
+        }
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+
+        result = hub_plugin.send_message("lxmf", "hello", "aabbccdd")
+
+        assert result.get("queued") is True
+        stored = hub_plugin._store.get_message(result["msg_id"])
+        assert stored["status"] == "queued"
+
+    def test_drain_requeues_path_not_found(self, hub_plugin):
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "lxmf"
+        adapter.display_name = "LXMF"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {
+            "sent": False,
+            "reason": "Path not found, requested",
+        }
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+
+        hub_plugin.send_message("lxmf", "hello", "aabbccdd")
+
+        sent, requeued, expired = hub_plugin._drain_outbound_queue("lxmf")
+        assert requeued == 1
+        assert sent == 0
+
+
+class TestQueueRecoveryOnRestart:
+    """Verify queued messages are recovered from SQLite on hub restart."""
+
+    def test_recover_queued_messages(self, mock_app, tmp_path):
+        db_path = str(tmp_path / "hub.db")
+        config = {
+            "db_path": db_path,
+            "message_history_limit": 100,
+            "lxmf": {"enabled": False},
+            "meshtastic": {"enabled": False},
+            "meshcore": {"enabled": False},
+        }
+
+        # Start hub, queue a message, stop.
+        hub1 = MessagingHubPlugin(mock_app, config)
+        hub1.start()
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "test"
+        adapter.display_name = "Test"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": False, "reason": "not_connected"}
+        adapter.get_contacts.return_value = []
+        hub1.register_adapter(adapter)
+        result = hub1.send_message("test", "survive restart", "dest-1")
+        assert result.get("queued") is True
+        msg_id = result["msg_id"]
+        hub1.stop()
+
+        # Restart hub with same DB — message should be recovered.
+        hub2 = MessagingHubPlugin(mock_app, config)
+        hub2.start()
+        from collections import deque
+        q = hub2._outbound_queues.get("test", deque())
+        assert len(q) == 1
+        assert q[0]["msg_id"] == msg_id
+        assert q[0]["text"] == "survive restart"
+        assert q[0]["destination"] == "dest-1"
+        hub2.stop()
+
+    def test_recover_skips_expired(self, mock_app, tmp_path):
+        db_path = str(tmp_path / "hub.db")
+        config = {
+            "db_path": db_path,
+            "message_history_limit": 100,
+            "outbound_queue_ttl_seconds": 1,
+            "lxmf": {"enabled": False},
+            "meshtastic": {"enabled": False},
+            "meshcore": {"enabled": False},
+        }
+
+        hub1 = MessagingHubPlugin(mock_app, config)
+        hub1.start()
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "test"
+        adapter.display_name = "Test"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": False, "reason": "not_connected"}
+        adapter.get_contacts.return_value = []
+        hub1.register_adapter(adapter)
+        hub1.send_message("test", "old message", "dest-1")
+        hub1.stop()
+
+        # Wait for TTL to expire.
+        time.sleep(1.1)
+
+        hub2 = MessagingHubPlugin(mock_app, config)
+        hub2.start()
+        from collections import deque
+        q = hub2._outbound_queues.get("test", deque())
+        assert len(q) == 0
+        hub2.stop()
+
+    def test_recover_respects_per_transport_limit(self, mock_app, tmp_path):
+        db_path = str(tmp_path / "hub.db")
+        config = {
+            "db_path": db_path,
+            "message_history_limit": 100,
+            "outbound_queue_max": 2,
+            "lxmf": {"enabled": False},
+            "meshtastic": {"enabled": False},
+            "meshcore": {"enabled": False},
+        }
+
+        hub1 = MessagingHubPlugin(mock_app, config)
+        hub1.start()
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "test"
+        adapter.display_name = "Test"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": False, "reason": "not_connected"}
+        adapter.get_contacts.return_value = []
+        hub1.register_adapter(adapter)
+        for i in range(5):
+            hub1.send_message("test", f"msg-{i}", "dest-1")
+        hub1.stop()
+
+        hub2 = MessagingHubPlugin(mock_app, config)
+        hub2.start()
+        from collections import deque
+        q = hub2._outbound_queues.get("test", deque())
+        assert len(q) <= 2
+        hub2.stop()
+
+
+class TestGetQueuedSent:
+    """Verify MessageStore.get_queued_sent filtering."""
+
+    def test_returns_only_queued_sent(self, store):
+        store.store(transport="t", direction="sent", msg_type="direct",
+                    text="a", status="queued")
+        store.store(transport="t", direction="sent", msg_type="direct",
+                    text="b", status="sent")
+        store.store(transport="t", direction="received", msg_type="direct",
+                    text="c", status="received")
+
+        rows = store.get_queued_sent()
+        assert len(rows) == 1
+        assert rows[0]["text"] == "a"
+
+    def test_max_age_filters_old(self, store):
+        store.store(transport="t", direction="sent", msg_type="direct",
+                    text="old", status="queued")
+        # Backdate the row.
+        store._conn.execute(
+            "UPDATE messages SET timestamp = ? WHERE text = 'old'",
+            (time.time() - 1000,),
+        )
+        store._conn.commit()
+
+        rows = store.get_queued_sent(max_age_s=60)
+        assert len(rows) == 0
+
+        rows = store.get_queued_sent(max_age_s=2000)
+        assert len(rows) == 1

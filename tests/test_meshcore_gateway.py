@@ -707,3 +707,32 @@ class TestAdvertisements:
         assert plugin._last_advert_time == 0
 
         plugin.stop()
+
+
+class TestBroadcastCache:
+    def test_returns_cached_within_ttl(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        plugin.start()
+
+        result1 = plugin.broadcast_snapshot()
+        assert result1 is not None
+
+        result2 = plugin.broadcast_snapshot()
+        assert result2 is result1
+        plugin.stop()
+
+    def test_refreshes_after_ttl(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        plugin.start()
+
+        result1 = plugin.broadcast_snapshot()
+        assert result1 is not None
+
+        plugin._broadcast_cache = (
+            plugin._broadcast_cache[0] - plugin._broadcast_cache_ttl - 1,
+            plugin._broadcast_cache[1],
+        )
+
+        result2 = plugin.broadcast_snapshot()
+        assert result2 is not result1
+        plugin.stop()
