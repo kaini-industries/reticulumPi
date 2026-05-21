@@ -21,8 +21,8 @@ _SLOW_THRESHOLD = 0.2
 class BroadcastRegistry:
 
     def __init__(self, metrics_interval: float = 5.0) -> None:
-        self._budget = metrics_interval * 0.75
-        self._tier1_budget = self._budget * 0.70
+        self._tier1_budget = metrics_interval * 0.75 * 0.70
+        self._tier2_budget = metrics_interval * 0.75 * 0.30
 
     def _run_plugin(
         self,
@@ -36,10 +36,10 @@ class BroadcastRegistry:
             result = p.broadcast_snapshot(cycle_count=cycle_count)
         except Exception:
             result = None
-        elapsed = time.monotonic() - t
-        if elapsed > _SLOW_THRESHOLD:
+        elapsed_ms = (time.monotonic() - t) * 1000
+        if elapsed_ms > _SLOW_THRESHOLD * 1000:
             log.warning(
-                "Slow broadcast plugin %s: %.0fms", name, elapsed * 1000,
+                "Slow broadcast plugin %s: %.0fms", name, elapsed_ms,
             )
 
         if result is None:
@@ -60,8 +60,9 @@ class BroadcastRegistry:
         self,
         all_plugins: dict[str, Any],
         cycle_count: int,
+        *,
+        skip_budget: bool = False,
     ) -> dict[str, Any]:
-        t0 = time.monotonic()
         data: dict[str, Any] = {}
         skipped: list[str] = []
 
@@ -72,13 +73,15 @@ class BroadcastRegistry:
                 by_tier[tier].append((name, p))
 
         for tier in (0, 1, 2):
-            cutoff = (
-                float("inf") if tier == 0
-                else self._tier1_budget if tier == 1
-                else self._budget
-            )
+            tier_start = time.monotonic()
+            if skip_budget or tier == 0:
+                cutoff_secs = float("inf")
+            elif tier == 1:
+                cutoff_secs = self._tier1_budget
+            else:
+                cutoff_secs = self._tier2_budget
             for name, p in by_tier[tier]:
-                if (time.monotonic() - t0) >= cutoff:
+                if (time.monotonic() - tier_start) >= cutoff_secs:
                     skipped.append(name)
                     continue
                 self._run_plugin(name, p, cycle_count, data)

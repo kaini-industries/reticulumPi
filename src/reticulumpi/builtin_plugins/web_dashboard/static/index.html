@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=42">
+  <link rel="stylesheet" href="/static/style.css?v=43">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -25,6 +25,7 @@
           <span class="conn-status conn-wait" id="conn-status" title="Connection status"><span class="conn-dot"></span><span class="conn-label">waiting…</span></span>
         </div>
       </div>
+      <a href="/spectrum.html" target="_blank" class="nav-link" id="spectrum-nav-link">Spectrum</a>
       <button id="logout-btn">Logout</button>
     </div>
 
@@ -66,6 +67,30 @@
           <div class="value" id="m-disk">--<span class="unit">%</span></div>
         </div>
         <div class="metric-spark" id="spark-disk"></div>
+      </div>
+      <div class="metric-card" id="card-ws-latency">
+        <div class="label">WS Latency</div>
+        <div class="metric-body">
+          <div class="metric-ring" id="ring-ws-latency" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="value" id="m-ws-latency">--<span class="unit">ms</span></div>
+        </div>
+        <div class="metric-spark" id="spark-ws-latency"></div>
+      </div>
+      <div class="metric-card" id="card-ws-msgrate">
+        <div class="label">Msg Rate</div>
+        <div class="metric-body">
+          <div class="metric-ring" id="ring-ws-msgrate" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="value" id="m-ws-msgrate">--<span class="unit">/s</span></div>
+        </div>
+        <div class="metric-spark" id="spark-ws-msgrate"></div>
+      </div>
+      <div class="metric-card" id="card-ws-clients">
+        <div class="label">WS Clients</div>
+        <div class="metric-body">
+          <div class="metric-ring" id="ring-ws-clients" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="value" id="m-ws-clients">--</div>
+        </div>
+        <div class="metric-spark" id="spark-ws-clients"></div>
       </div>
     </div>
 
@@ -870,73 +895,6 @@
       </div>
     </div>
 
-    <!-- SDR Spectrum (RTL-SDR sweep + waterfall) -->
-    <div class="section" id="spectrum-section" style="display:none">
-      <div class="section-header collapsible" id="spectrum-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> SDR Spectrum</span>
-        <span class="count" id="spectrum-count"></span>
-      </div>
-      <div class="section-body hidden" id="spectrum-body">
-        <div class="spectrum-meta">
-          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Span</span> <span id="spectrum-span">&mdash;</span></span>
-          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Bins</span> <span id="spectrum-bins-info">&mdash;</span></span>
-          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Gain</span> <span id="spectrum-gain">&mdash;</span></span>
-          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Sweeps</span> <span id="spectrum-sweeps">0</span></span>
-          <span class="spectrum-meta-item"><span class="spectrum-meta-label">Status</span> <span id="spectrum-status">&mdash;</span></span>
-          <span class="freshness" id="spectrum-freshness"></span>
-        </div>
-        <div class="spectrum-plot-wrap">
-          <div class="spectrum-bands" id="spectrum-bands" title="Frequency band allocations — hover a band for details"></div>
-          <svg id="spectrum-line" class="spectrum-line" viewBox="0 0 800 160" preserveAspectRatio="none"></svg>
-          <canvas id="spectrum-waterfall" class="spectrum-waterfall"></canvas>
-          <div class="spectrum-overlay" id="spectrum-overlay"></div>
-          <div class="spectrum-hover" id="spectrum-hover"></div>
-          <div class="spectrum-zoom-reset" id="spectrum-zoom-reset" style="display:none">Full band</div>
-        </div>
-        <div class="spectrum-controls-row"><div class="spectrum-legend-toggle" id="spectrum-legend-toggle" title="Show / hide band legend"><span class="chevron">&#9656;</span> Band legend</div><button class="spectrum-peakhold-toggle" id="spectrum-peakhold-toggle" title="Toggle peak hold trace">Peak hold</button></div>
-        <div class="spectrum-legend hidden" id="spectrum-legend"></div>
-        <div class="spectrum-scale" id="spectrum-scale"></div>
-      </div>
-    </div>
-
-    <!-- LoRa Spectrum (zoomed, project-aware view of the LoRa ISM band) -->
-    <div class="section" id="lora-spectrum-section" style="display:none">
-      <div class="section-header collapsible" id="lora-spectrum-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> LoRa Spectrum</span>
-        <span class="count" id="lora-spectrum-count"></span>
-      </div>
-      <div class="section-body hidden" id="lora-spectrum-body">
-        <div class="lora-spectrum-meta" id="lora-spectrum-meta"></div>
-        <div class="lora-channel-grid-wrap" id="lora-channel-grid-wrap" style="display:none">
-          <div class="lora-channel-grid-section">
-            <div class="lora-channel-grid-label">Uplink 125 kHz (ch 0–63)</div>
-            <div class="lora-channel-grid" id="lora-channel-grid-up"></div>
-          </div>
-          <div class="lora-channel-grid-section">
-            <div class="lora-channel-grid-label">Downlink 500 kHz (ch 64–71)</div>
-            <div class="lora-channel-grid" id="lora-channel-grid-dn"></div>
-          </div>
-          <div class="lora-channel-detail" id="lora-channel-detail" style="display:none"></div>
-        </div>
-        <div class="lora-spectrum-plot-wrap">
-          <div class="lora-spectrum-bands" id="lora-spectrum-bands"></div>
-          <svg id="lora-spectrum-line" class="lora-spectrum-line" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
-          <canvas id="lora-spectrum-waterfall" class="lora-spectrum-waterfall"></canvas>
-          <div class="lora-spectrum-overlay" id="lora-spectrum-overlay"></div>
-          <div class="lora-spectrum-hover" id="lora-spectrum-hover"></div>
-          <div class="lora-spec-zoom-reset" id="lora-spec-zoom-reset" style="display:none">Reset zoom</div>
-        </div>
-        <div class="lora-spectrum-scale" id="lora-spectrum-scale"></div>
-        <div class="lora-stats-panel" id="lora-stats-panel" style="display:none">
-          <div class="lora-stats-row">
-            <div class="lora-nf-trend" id="lora-nf-trend"></div>
-            <div class="lora-ch-util" id="lora-ch-util"></div>
-          </div>
-          <div class="lora-ch-timeline" id="lora-ch-timeline" style="display:none"></div>
-        </div>
-      </div>
-    </div>
-
     <!-- ADS-B Radar (aircraft tracker via RTL-SDR + dump1090) -->
     <div class="section" id="adsb-section" style="display:none">
       <div class="section-header collapsible" id="adsb-toggle" title="Click to expand">
@@ -992,8 +950,11 @@
             <input type="number" id="radio-freq-input" class="radio-freq-input"
                    step="0.025" min="52" max="2200" placeholder="MHz" />
             <button id="radio-freq-go" class="radio-btn radio-btn-sm">Go</button>
+            <button id="radio-fav-btn" class="radio-btn radio-btn-sm radio-fav-btn" title="Add to favorites">&#9734;</button>
           </div>
         </div>
+
+        <svg id="radio-dial-svg" class="radio-dial" viewBox="0 0 400 28" preserveAspectRatio="none"></svg>
 
         <div class="radio-mode-bar" id="radio-mode-bar">
           <button data-mode="wbfm" class="radio-mode-btn active">WFM</button>
@@ -1002,6 +963,8 @@
           <button data-mode="usb" class="radio-mode-btn">USB</button>
           <button data-mode="lsb" class="radio-mode-btn">LSB</button>
         </div>
+
+        <div class="radio-band-selector" id="radio-band-selector"></div>
 
         <div class="radio-controls">
           <div class="radio-control-row">
@@ -1024,6 +987,8 @@
 
         <div class="radio-playback-row">
           <button id="radio-play-btn" class="radio-btn radio-play-btn">&#9654; Play</button>
+          <button id="radio-rec-btn" class="radio-btn radio-rec-btn" disabled title="Record">&#9679; Rec</button>
+          <span class="radio-rec-timer hidden" id="radio-rec-timer">00:00</span>
           <div class="radio-meters">
             <div class="radio-signal-meter">
               <label class="radio-meter-label">Signal</label>
@@ -1035,13 +1000,29 @@
             <div class="radio-vu-meter">
               <label class="radio-meter-label">Audio</label>
               <canvas id="radio-vu-canvas" width="140" height="20"></canvas>
+              <span class="radio-value radio-vu-dbfs" id="radio-vu-dbfs">--</span>
             </div>
           </div>
         </div>
+        <div class="radio-signal-sparkline" id="radio-signal-sparkline"></div>
 
         <canvas id="radio-fft-canvas" class="radio-fft-canvas" width="400" height="48"></canvas>
 
         <div class="radio-presets" id="radio-presets"></div>
+
+        <div class="radio-favorites" id="radio-favorites" style="display:none">
+          <div class="radio-favorites-header">
+            <span>Favorites</span>
+          </div>
+          <div class="radio-favorites-list" id="radio-favorites-list"></div>
+        </div>
+
+        <div class="radio-recordings" id="radio-recordings" style="display:none">
+          <div class="radio-recordings-header">
+            <span>Recordings</span>
+          </div>
+          <div class="radio-recordings-list" id="radio-recordings-list"></div>
+        </div>
 
       </div>
     </div>
@@ -1166,65 +1147,6 @@
       </div>
     </div>
 
-    <!-- Signal Operations -->
-    <div class="section awaiting-data" id="sigops-section" style="display:none">
-      <div class="section-header collapsible" id="sigops-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> Signal Operations <span class="svc-tag svc-tag-sigops">SIGOPS</span></span>
-        <span class="svc-status" id="sigops-status-tag"></span>
-      </div>
-      <div class="section-body hidden" id="sigops-body">
-        <div class="metric-summary" id="sigops-stats"></div>
-
-        <!-- Contacts sub-section -->
-        <div class="sigops-subsection">
-          <div class="sigops-subheader collapsible" id="sigops-contacts-toggle">
-            <span><span class="chevron">&#9656;</span> Active Contacts <span class="count" id="sigops-contacts-count">0</span></span>
-            <select id="sigops-type-filter" class="sigops-filter"><option value="">All types</option></select>
-          </div>
-          <div class="hidden" id="sigops-contacts-body">
-            <div class="table-scroll" style="max-height:400px">
-              <table class="data-table">
-                <thead><tr>
-                  <th data-sort="contact_type">Type</th>
-                  <th data-sort="display_name">Name</th>
-                  <th data-sort="observation_count">Obs</th>
-                  <th>Sources</th>
-                  <th data-sort="distance_nm">Distance</th>
-                  <th data-sort="last_seen">Last Seen</th>
-                </tr></thead>
-                <tbody id="sigops-contacts-table"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <!-- ISM Devices sub-section -->
-        <div class="sigops-subsection" id="sigops-ism-wrap" style="display:none">
-          <div class="sigops-subheader collapsible" id="sigops-ism-toggle">
-            <span><span class="chevron">&#9656;</span> ISM Devices <span class="count" id="sigops-ism-count">0</span></span>
-          </div>
-          <div class="hidden" id="sigops-ism-body">
-            <div class="table-scroll" style="max-height:300px">
-              <table class="data-table">
-                <thead><tr><th>Model</th><th>ID</th><th>Ch</th><th>Reading</th><th>Msgs</th><th>Last Seen</th></tr></thead>
-                <tbody id="sigops-ism-table"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <!-- Correlations sub-section -->
-        <div class="sigops-subsection">
-          <div class="sigops-subheader collapsible" id="sigops-correlations-toggle">
-            <span><span class="chevron">&#9656;</span> Correlation Events</span>
-          </div>
-          <div class="hidden" id="sigops-correlations-body">
-            <div id="sigops-correlations-list" class="sigops-feed" style="max-height:250px;overflow-y:auto"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- Plugins (collapsed by default) -->
     <div class="section" id="plugins-section">
       <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
@@ -1279,7 +1201,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=33"></script>
+  <script src="/static/app.js?v=36"></script>
   <script src="/static/messages_panel.js?v=8"></script>
   <script src="/static/messages_lxmf.js?v=1"></script>
   <script src="/static/mqtt_feed.js?v=1"></script>
@@ -1296,9 +1218,6 @@
   <script src="/static/map.js?v=6"></script>
   <script src="/static/gps.js?v=3"></script>
   <script src="/static/space.js?v=2"></script>
-  <script src="/static/spectrum_common.js?v=1"></script>
-  <script src="/static/spectrum.js?v=9"></script>
-  <script src="/static/lora_spectrum.js?v=18"></script>
   <script src="/static/adsb.js?v=1"></script>
   <script src="/static/radio.js?v=1"></script>
   <script src="/static/ntp.js?v=1"></script>
@@ -1309,6 +1228,5 @@
   <script src="/static/acars.js?v=1"></script>
   <script src="/static/radiosonde.js?v=1"></script>
   <script src="/static/noaa.js?v=1"></script>
-  <script src="/static/sigops.js?v=1"></script>
 </body>
 </html>

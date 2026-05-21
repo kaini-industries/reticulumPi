@@ -223,8 +223,12 @@
 
   // --- Metrics ---
 
-  var _metricHistory = { cpu: [], temp: [], mem: [], disk: [] };
+  var _metricHistory = { cpu: [], temp: [], mem: [], disk: [], ws_latency: [], ws_msgrate: [], ws_clients: [] };
   var _METRIC_HISTORY_MAX = 30;
+  var _wsLatency = null;
+  var _wsMsgRateWindow = [];
+  var _wsPingTimer = null;
+  var _wsMaxClients = 10;
 
   function pushMetricHistory(key, value) {
     if (value == null) return;
@@ -294,6 +298,41 @@
     renderMetricSparkline('spark-disk', _metricHistory.disk);
 
     updateHeaderHealth(metrics);
+  }
+
+  function updateWsStats(wsStats) {
+    if (wsStats) {
+      _wsMaxClients = wsStats.max_clients || 10;
+      var clients = wsStats.clients;
+      var clientWarn = Math.round(_wsMaxClients * 0.7);
+      var clientCrit = Math.round(_wsMaxClients * 0.9);
+      setMetric('m-ws-clients', clients, '', clientWarn, clientCrit);
+      var clientRing = $('ring-ws-clients');
+      if (clientRing) clientRing.style.setProperty('--pct', Math.min(100, (clients / _wsMaxClients) * 100));
+      pushMetricHistory('ws_clients', clients);
+      renderMetricSparkline('spark-ws-clients', _metricHistory.ws_clients);
+    }
+
+    if (_wsLatency !== null) {
+      setMetric('m-ws-latency', _wsLatency, 'ms', 200, 400);
+      var latRing = $('ring-ws-latency');
+      if (latRing) latRing.style.setProperty('--pct', Math.min(100, (_wsLatency / 500) * 100));
+      pushMetricHistory('ws_latency', _wsLatency);
+      renderMetricSparkline('spark-ws-latency', _metricHistory.ws_latency);
+    }
+
+    var now = Date.now();
+    while (_wsMsgRateWindow.length && _wsMsgRateWindow[0] < now - 10000) _wsMsgRateWindow.shift();
+    var rate = _wsMsgRateWindow.length / 10;
+    var rateDisplay = rate.toFixed(1);
+    var rateEl = $('m-ws-msgrate');
+    if (rateEl) rateEl.innerHTML = esc(rateDisplay) + '<span class="unit">/s</span>';
+    var rateCard = document.getElementById('card-ws-msgrate');
+    if (rateCard) rateCard.className = 'metric-card ' + (rate < 0.05 ? 'metric-warn' : 'metric-ok');
+    var rateRing = $('ring-ws-msgrate');
+    if (rateRing) rateRing.style.setProperty('--pct', Math.min(100, (rate / 2) * 100));
+    pushMetricHistory('ws_msgrate', rate);
+    renderMetricSparkline('spark-ws-msgrate', _metricHistory.ws_msgrate);
   }
 
   // --- Plugins ---
@@ -1100,6 +1139,7 @@
 
   var _nodeLoaded = false;
   function fetchNode() {
+    if (!$('node-name')) return;
     apiRetry('/api/node').then(function(r) {
       if (!r || !r.ok) return;
       _nodeLoaded = true;
@@ -1228,6 +1268,7 @@
       updateInternetStatus(d.internet);
     }
     if (d.metrics) updateMetrics(d.metrics);
+    updateWsStats(d.ws_stats || null);
     if (d.interfaces) {
       updateInterfaces(d.interfaces);
       if (RPI.updateLoraRadio) RPI.updateLoraRadio(d.interfaces, null);
@@ -1272,8 +1313,6 @@
       if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(d.messaging);
     }
     if (d.space && RPI.space && RPI.space.update) RPI.space.update(d.space);
-    if (d.spectrum && RPI.spectrum && RPI.spectrum.update) RPI.spectrum.update(d.spectrum);
-    if ((d.spectrum || d.lora_scanner) && RPI.loraSpectrum && RPI.loraSpectrum.update) RPI.loraSpectrum.update(d);
     if (d.gps && RPI.updateGps) RPI.updateGps(d.gps);
     if (d.gps && d.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(d.gps.last_fix);
     if (d.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(d.adsb);
@@ -1286,8 +1325,6 @@
     if (d.acars && RPI.updateAcars) RPI.updateAcars(d.acars);
     if (d.radiosonde && RPI.updateRadiosonde) RPI.updateRadiosonde(d.radiosonde);
     if (d.noaa_apt && RPI.updateNoaa) RPI.updateNoaa(d.noaa_apt);
-    if (d.sigops && RPI.sigops && RPI.sigops.update) RPI.sigops.update(d.sigops);
-    if (d.ism && RPI.sigops && RPI.sigops.updateIsm) RPI.sigops.updateIsm(d.ism);
   }
 
   function connectWS() {
@@ -1306,40 +1343,22 @@
       _prevTraffic = {};
       prevIfaces = {};
       if (!_nodeLoaded) fetchNode();
+      if (_wsPingTimer) clearInterval(_wsPingTimer);
+      _wsPingTimer = setInterval(function() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({action: 'ping', ts: Date.now()}));
+        }
+      }, 5000);
     };
 
     ws.onmessage = function(ev) {
+      var _now = Date.now();
+      _wsMsgRateWindow.push(_now);
+      while (_wsMsgRateWindow.length && _wsMsgRateWindow[0] < _now - 10000) _wsMsgRateWindow.shift();
       try {
         var msg = JSON.parse(ev.data);
-        if (msg.type === 'spectrum_history' && msg.data) {
-          if (RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
-            RPI.spectrumCommon.historyStore.loadHistory(msg.data);
-          }
-          return;
-        }
-        if (msg.type === 'link_tester_history' && msg.data) {
-          if (RPI.linkTesterHistoryLoad) RPI.linkTesterHistoryLoad(msg.data);
-          return;
-        }
-        if (msg.type === 'lora_scanner_history' && msg.data) {
-          if (RPI.spectrumCommon && RPI.spectrumCommon.loraHistoryStore) {
-            RPI.spectrumCommon.loraHistoryStore.loadHistory(msg.data);
-          }
-          if (msg.data.channel_power_history && RPI.loraSpectrum && RPI.loraSpectrum.loadChannelHistory) {
-            RPI.loraSpectrum.loadChannelHistory(msg.data.channel_power_history);
-          }
-          return;
-        }
-        if (msg.type === 'spectrum_preset_switched') {
-          if (RPI.spectrum && RPI.spectrum.handlePresetSwitched) {
-            RPI.spectrum.handlePresetSwitched(msg);
-          }
-          return;
-        }
-        if (msg.type === 'spectrum_preset_error') {
-          if (RPI.spectrum && RPI.spectrum.handlePresetError) {
-            RPI.spectrum.handlePresetError(msg.error || 'Preset switch failed');
-          }
+        if (msg.type === 'pong' && msg.ts) {
+          _wsLatency = Date.now() - msg.ts;
           return;
         }
         if (msg.type && msg.type.indexOf('radio_') === 0) {
@@ -1369,17 +1388,6 @@
             for (var _wi = 0; _wi < _wsReadyCallbacks.length; _wi++) _wsReadyCallbacks[_wi]();
             _wsReadyCallbacks = [];
           }
-          // Ring buffer ingestion must be immediate so both spectrum
-          // panels read a consistent snapshot on the next render.
-          if (msg.data.spectrum
-              && RPI.spectrumCommon && RPI.spectrumCommon.historyStore) {
-            RPI.spectrumCommon.historyStore.ingestTick(msg.data.spectrum);
-          }
-          var loraData = msg.data.lora_scanner;
-          if (loraData
-              && RPI.spectrumCommon && RPI.spectrumCommon.loraHistoryStore) {
-            RPI.spectrumCommon.loraHistoryStore.ingestTick(loraData);
-          }
           // Batch DOM updates into the next animation frame.
           RPI._pendingUpdate = msg.data;
           if (!RPI._rafPending) {
@@ -1397,6 +1405,12 @@
 
     ws.onclose = function() {
       _wsFirstTick = false;
+      if (_wsPingTimer) { clearInterval(_wsPingTimer); _wsPingTimer = null; }
+      _wsLatency = null;
+      _wsMsgRateWindow = [];
+      setMetric('m-ws-latency', null, 'ms');
+      setMetric('m-ws-msgrate', null, '/s');
+      setMetric('m-ws-clients', null, '');
       if (RPI.onMessagingConnectionLost) RPI.onMessagingConnectionLost();
       scheduleReconnect();
     };
@@ -1434,7 +1448,8 @@
 
   // --- Events ---
 
-  $('logout-btn').addEventListener('click', function() {
+  var _el;
+  if (_el = $('logout-btn')) _el.addEventListener('click', function() {
     api('/api/auth/logout', {method: 'POST'}).finally(function() {
       window.location.href = '/login.html';
     });
@@ -1466,7 +1481,7 @@
     }
   });
 
-  $('config-toggle').addEventListener('click', function() {
+  if (_el = $('config-toggle')) _el.addEventListener('click', function() {
     var content = $('config-content');
     var btn = $('config-toggle');
     if (content.classList.contains('hidden')) {
@@ -1493,7 +1508,7 @@
 
   // Routing table -- event delegation (replaces per-render listener binding)
   // Hash cell click-to-copy
-  $('routing-table-body').addEventListener('click', function(ev) {
+  if (_el = $('routing-table-body')) _el.addEventListener('click', function(ev) {
     var cell = ev.target.closest('.hash-cell');
     if (!cell) return;
     var full = cell.getAttribute('title');
@@ -1504,7 +1519,7 @@
     }
   });
   // Pagination button clicks
-  $('routing-pagination').addEventListener('click', function(ev) {
+  if (_el = $('routing-pagination')) _el.addEventListener('click', function(ev) {
     var btn = ev.target.closest('button[data-rt-page]');
     if (!btn || btn.disabled) return;
     var pg = parseInt(btn.getAttribute('data-rt-page'));
@@ -1515,7 +1530,7 @@
   });
 
   // Routing table toggle
-  $('routing-table-toggle').addEventListener('click', function() {
+  if (_el = $('routing-table-toggle')) _el.addEventListener('click', function() {
     var wrapper = $('routing-table-wrapper');
     var btn = $('routing-table-toggle');
     if (RPI._rtTableOpen()) {
@@ -1553,7 +1568,7 @@
   }
 
   // Routing table filters (debounced)
-  $('rt-search').addEventListener('input', function() {
+  if (_el = $('rt-search')) _el.addEventListener('input', function() {
     var timer = RPI._rtDebounceTimer();
     if (timer) clearTimeout(timer);
     var val = this.value;
@@ -1564,20 +1579,20 @@
     }, 300));
   });
 
-  $('rt-iface-filter').addEventListener('change', function() {
+  if (_el = $('rt-iface-filter')) _el.addEventListener('change', function() {
     RPI._setRtIfaceFilter(this.value);
     RPI._setRtPage(1);
     RPI.fetchRoutingTable();
   });
 
-  $('rt-hops-filter').addEventListener('change', function() {
+  if (_el = $('rt-hops-filter')) _el.addEventListener('change', function() {
     RPI._setRtHopsFilter(this.value);
     RPI._setRtPage(1);
     RPI.fetchRoutingTable();
   });
 
   // Mesh filter tabs -- event delegation
-  $('mesh-filter-bar').addEventListener('click', function(ev) {
+  if (_el = $('mesh-filter-bar')) _el.addEventListener('click', function(ev) {
     var tab = ev.target.closest('[data-mesh-view]');
     if (!tab) return;
     var view = tab.getAttribute('data-mesh-view');
@@ -1594,7 +1609,7 @@
   });
 
   // Mesh search -- debounced input
-  $('mesh-search').addEventListener('input', function() {
+  if (_el = $('mesh-search')) _el.addEventListener('input', function() {
     var input = this;
     var timer = RPI._meshSearchTimer();
     if (timer) clearTimeout(timer);
@@ -1606,7 +1621,7 @@
   });
 
   // Mesh pagination -- event delegation for page buttons
-  $('mesh-show-more').addEventListener('click', function(ev) {
+  if (_el = $('mesh-show-more')) _el.addEventListener('click', function(ev) {
     var btn = ev.target.closest('[data-mesh-page]');
     if (!btn) return;
     var pg = parseInt(btn.getAttribute('data-mesh-page'));
@@ -1616,12 +1631,11 @@
     }
   });
   // Mesh table row clicks -- event delegation
-  $('mesh-table').addEventListener('click', function(ev) {
+  if (_el = $('mesh-table')) _el.addEventListener('click', function(ev) {
     var row = ev.target.closest('tr[data-hash]');
     if (!row) return;
     var hash = row.getAttribute('data-hash');
     if (!hash) return;
-    // Find the node in current data
     var nodes = RPI._meshNodes();
     var node = null;
     for (var i = 0; i < nodes.length; i++) {
@@ -1630,7 +1644,7 @@
     if (node) RPI.toggleNodeDetail(node, hash);
   });
   // LoRa table row clicks -- event delegation
-  $('lora-table').addEventListener('click', function(ev) {
+  if (_el = $('lora-table')) _el.addEventListener('click', function(ev) {
     var row = ev.target.closest('tr[data-lora-hash]');
     if (!row) return;
     var hash = row.getAttribute('data-lora-hash');
@@ -1639,12 +1653,12 @@
     RPI._setLoraExpandedHash(curHash === hash ? null : hash);
     RPI.updateLoraNodes(RPI._loraNodes());
   });
-  $('peer-show-more').addEventListener('click', function() {
+  if (_el = $('peer-show-more')) _el.addEventListener('click', function() {
     var peers = Object.values(RPI._meshPeers());
     if (RPI._peerVisible() >= peers.length) {
-      RPI._setPeerVisible(RPI._peerPageSize());  // collapse back
+      RPI._setPeerVisible(RPI._peerPageSize());
     } else {
-      RPI._setPeerVisible(RPI._peerVisible() + RPI._peerPageSize());  // show next page
+      RPI._setPeerVisible(RPI._peerVisible() + RPI._peerPageSize());
     }
     RPI.updatePeerTelemetry(peers);
   });
@@ -1660,7 +1674,7 @@
       });
     })(mshSortHeaders[mi]);
   }
-  $('meshtastic-show-more').addEventListener('click', function() {
+  if (_el = $('meshtastic-show-more')) _el.addEventListener('click', function() {
     if (RPI.meshtasticShowMore) RPI.meshtasticShowMore();
   });
 
@@ -1674,7 +1688,7 @@
       });
     })(loraSortHeaders[li]);
   }
-  $('lora-neighbors-show-more').addEventListener('click', function() {
+  if (_el = $('lora-neighbors-show-more')) _el.addEventListener('click', function() {
     if (RPI.loraNeighborsShowMore) RPI.loraNeighborsShowMore();
   });
 
@@ -1687,7 +1701,7 @@
       });
     })(mcSortHeaders[mci]);
   }
-  $('meshcore-show-more').addEventListener('click', function() {
+  if (_el = $('meshcore-show-more')) _el.addEventListener('click', function() {
     if (RPI.meshcoreShowMore) RPI.meshcoreShowMore();
   });
 
@@ -1703,8 +1717,8 @@
   }
 
   // Interface management -- event delegation (CSP blocks inline handlers)
-  $('restart-btn').addEventListener('click', doRestart);
-  $('interfaces-table').addEventListener('change', function(ev) {
+  if (_el = $('restart-btn')) _el.addEventListener('click', doRestart);
+  if (_el = $('interfaces-table')) _el.addEventListener('change', function(ev) {
     var cb = ev.target;
     if (cb.tagName === 'INPUT' && cb.dataset.iface) {
       window._toggleIface(cb.dataset.iface);
@@ -1712,7 +1726,7 @@
   });
 
   // LoRa announce mode -- event delegation (select is dynamically rendered)
-  $('lora-section').addEventListener('change', function(ev) {
+  if (_el = $('lora-section')) _el.addEventListener('change', function(ev) {
     if (ev.target.id === 'lora-announce-mode') {
       window._setLoraAnnounceMode(ev.target.value);
     }

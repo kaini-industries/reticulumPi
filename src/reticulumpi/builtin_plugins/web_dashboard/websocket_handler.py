@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import functools
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import aiohttp.web
+
 
 from reticulumpi.builtin_plugins.web_dashboard.broadcast_registry import (
     BroadcastRegistry,
@@ -24,10 +26,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 def _diff_payload(data: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any]:
-    """Return only keys whose value object changed since last broadcast."""
+    """Return only keys whose value changed since last broadcast."""
     result = {}
     for key, value in data.items():
-        if value is not prev.get(key):
+        if value != prev.get(key):
             result[key] = value
     return result
 
@@ -262,6 +264,7 @@ def _enrich_transport_traffic(transport_data: dict, interfaces: list[dict]) -> N
 def setup_websocket_routes(app: aiohttp.web.Application) -> None:
     """Register WebSocket routes."""
     app.router.add_get("/ws/metrics", websocket_metrics)
+    app.router.add_get("/ws/spectrum", websocket_spectrum)
     app.on_startup.append(_start_broadcast_task)
     app.on_shutdown.append(_stop_broadcast_task)
 
@@ -269,6 +272,8 @@ def setup_websocket_routes(app: aiohttp.web.Application) -> None:
 _ws_clients: set[aiohttp.web.WebSocketResponse] = set()
 _ws_last_activity: dict[aiohttp.web.WebSocketResponse, float] = {}
 _broadcast_task: asyncio.Task | None = None
+
+
 # Loop + plugin refs captured at startup so cross-thread event-bus
 # callbacks can push straight into the WS broadcast path without polling.
 _ws_loop: asyncio.AbstractEventLoop | None = None
@@ -278,6 +283,166 @@ _ws_plugin: Any | None = None
 # Prevents overlapping collections from saturating the default pool.
 _broadcast_executor: concurrent.futures.ThreadPoolExecutor | None = None
 _collection_running = threading.Event()
+
+# ── Spectrum-dedicated WS ───────────────────────────────────────────
+
+_spectrum_clients: set[aiohttp.web.WebSocketResponse] = set()
+_spectrum_task: asyncio.Task | None = None
+
+
+async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
+    """Dedicated WebSocket for spectrum/waterfall panels."""
+    plugin = request.app["plugin"]
+    max_clients = plugin.config.get("max_websocket_clients", 10)
+
+    _auth_hdr = request.headers.get("Authorization", "")
+    token = _auth_hdr[7:] if _auth_hdr.startswith("Bearer ") else request.cookies.get("session")
+    if not token or not plugin._auth.validate_token(token):
+        ws = aiohttp.web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close(code=4001, message=b"Authentication required")
+        return ws
+
+    if len(_spectrum_clients) >= max_clients:
+        ws = aiohttp.web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close(code=4002, message=b"Too many connections")
+        return ws
+
+    compress = 15 if request.app.get("ws_compress", True) else 0
+    ws = aiohttp.web.WebSocketResponse(heartbeat=60.0, compress=compress)
+    await ws.prepare(request)
+
+    for name, msg_type in [
+        ("spectrum_scanner", "spectrum_history"),
+        ("lora_scanner", "lora_scanner_history"),
+        ("lora_link_tester", "link_tester_history"),
+    ]:
+        p = plugin.app.get_plugin(name)
+        if p and hasattr(p, "get_history"):
+            try:
+                hist = p.get_history()
+            except Exception:
+                hist = {"available": False}
+            try:
+                await ws.send_str(json.dumps({"type": msg_type, "data": hist}))
+            except Exception:
+                log.debug("Failed to send %s hello", msg_type, exc_info=True)
+
+    snap_data: dict[str, Any] = {}
+    for name, key in [
+        ("spectrum_scanner", "spectrum"),
+        ("lora_scanner", "lora_scanner"),
+        ("lora_link_tester", "link_tester"),
+    ]:
+        p = plugin.app.get_plugin(name)
+        if p and hasattr(p, "get_snapshot"):
+            try:
+                snap = p.get_snapshot()
+                if snap is not None:
+                    snap_data[key] = snap
+            except Exception:
+                pass
+    if snap_data:
+        try:
+            await ws.send_str(json.dumps({"type": "update", "data": snap_data}))
+        except Exception:
+            log.debug("Failed to send initial snapshot", exc_info=True)
+
+    _spectrum_clients.add(ws)
+    log.debug("Spectrum WS client connected (%d total)", len(_spectrum_clients))
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.ERROR:
+                break
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                resp = _handle_ws_command(msg.data, plugin)
+                if resp is not None:
+                    await ws.send_str(json.dumps(resp))
+    finally:
+        _spectrum_clients.discard(ws)
+        log.info(
+            "Spectrum WS disconnected (code=%s, %d remaining)",
+            ws.close_code, len(_spectrum_clients),
+        )
+    return ws
+
+
+def _collect_spectrum_data(plugin: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for name, key in [
+        ("spectrum_scanner", "spectrum"),
+        ("lora_scanner", "lora_scanner"),
+        ("lora_link_tester", "link_tester"),
+    ]:
+        p = plugin.app.get_plugin(name)
+        if p and hasattr(p, "get_snapshot"):
+            try:
+                snap = p.get_snapshot()
+                if snap is not None:
+                    data[key] = snap
+            except Exception:
+                pass
+        elif p and hasattr(p, "broadcast_snapshot"):
+            try:
+                snap = p.broadcast_snapshot(cycle_count=0)
+                if snap is not None:
+                    data[key] = snap
+            except Exception:
+                pass
+    return data
+
+
+async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
+    plugin = app["plugin"]
+    interval = plugin.config.get("metrics_interval", 5)
+    prev_data: dict[str, Any] = {}
+    loop = asyncio.get_running_loop()
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            if not _spectrum_clients:
+                continue
+
+            data = await loop.run_in_executor(
+                _broadcast_executor, _collect_spectrum_data, plugin,
+            )
+            if not data:
+                continue
+
+            diff = _diff_payload(data, prev_data)
+            prev_data = data
+            if not diff:
+                continue
+
+            message = json.dumps({
+                "type": "update",
+                "data": diff,
+                "timestamp": time.time(),
+            })
+
+            clients = list(_spectrum_clients)
+
+            async def _send(ws: aiohttp.web.WebSocketResponse) -> bool:
+                try:
+                    await ws.send_str(message)
+                    return True
+                except Exception:
+                    return False
+
+            results = await asyncio.gather(*(_send(ws) for ws in clients))
+            for ws, ok in zip(clients, results):
+                if not ok:
+                    _spectrum_clients.discard(ws)
+
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            log.exception("Error in spectrum broadcast")
+            await asyncio.sleep(1)
+
 
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Handle WebSocket connections for live metrics streaming."""
@@ -300,55 +465,9 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
         await ws.close(code=4002, message=b"Too many connections")
         return ws
 
-    ws = aiohttp.web.WebSocketResponse(heartbeat=60.0)
+    compress = 15 if request.app.get("ws_compress", True) else 0
+    ws = aiohttp.web.WebSocketResponse(heartbeat=60.0, compress=compress)
     await ws.prepare(request)
-
-    # Send the spectrum history buffer BEFORE joining the broadcast pool so
-    # a live update tick can't race ahead of the initial backfill.  The
-    # frontend's shared spectrumCommon.historyStore absorbs this frame and
-    # bumps its generation, which triggers a one-shot bulk paint in each
-    # spectrum panel.
-    scanner = plugin.app.get_plugin("spectrum_scanner")
-    if scanner and hasattr(scanner, "get_history"):
-        try:
-            history_payload = scanner.get_history()
-        except Exception:
-            history_payload = {"available": False, "rows": []}
-        try:
-            await ws.send_str(json.dumps({
-                "type": "spectrum_history",
-                "data": history_payload,
-            }))
-        except Exception:
-            log.debug("Failed to send spectrum history hello", exc_info=True)
-
-    lora_scanner = plugin.app.get_plugin("lora_scanner")
-    if lora_scanner and hasattr(lora_scanner, "get_history"):
-        try:
-            lora_hist = lora_scanner.get_history()
-        except Exception:
-            lora_hist = {"available": False, "rows": []}
-        try:
-            await ws.send_str(json.dumps({
-                "type": "lora_scanner_history",
-                "data": lora_hist,
-            }))
-        except Exception:
-            log.debug("Failed to send lora_scanner history hello", exc_info=True)
-
-    link_tester = plugin.app.get_plugin("lora_link_tester")
-    if link_tester and hasattr(link_tester, "get_history"):
-        try:
-            lt_hist = link_tester.get_history()
-        except Exception:
-            lt_hist = {"available": False}
-        try:
-            await ws.send_str(json.dumps({
-                "type": "link_tester_history",
-                "data": lt_hist,
-            }))
-        except Exception:
-            log.debug("Failed to send link_tester history hello", exc_info=True)
 
     # Send a full data snapshot so every panel populates immediately
     # instead of waiting up to 5s for the next broadcast cycle.
@@ -356,12 +475,18 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     try:
         data, _, _ = await loop.run_in_executor(
             None,
-            _collect_broadcast_data,
-            plugin,
-            0,
-            _last_mesh_announce_ts,
-            _mesh_version,
+            functools.partial(
+                _collect_broadcast_data,
+                plugin, 0, _last_mesh_announce_ts, _mesh_version,
+                initial=True,
+            ),
         )
+        data["ws_stats"] = {
+            "clients": len(_ws_clients) + 1,
+            "max_clients": plugin.config.get("max_websocket_clients", 10),
+            "collect_ms": 0,
+            "prev_payload_bytes": 0,
+        }
         await ws.send_str(json.dumps({
             "type": "update",
             "data": data,
@@ -398,6 +523,14 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
 
 _last_mesh_announce_ts: float = 0
 _mesh_version: int = 0
+_broadcast_registry: BroadcastRegistry | None = None
+
+
+def _get_registry(interval: float) -> BroadcastRegistry:
+    global _broadcast_registry
+    if _broadcast_registry is None:
+        _broadcast_registry = BroadcastRegistry(metrics_interval=interval)
+    return _broadcast_registry
 
 
 def _collect_broadcast_data(
@@ -405,6 +538,7 @@ def _collect_broadcast_data(
     cycle_count: int,
     last_mesh_announce_ts: float,
     mesh_version: int,
+    initial: bool = False,
 ) -> tuple[dict[str, Any], float, int]:
     """Collect all plugin data synchronously.  Runs in a thread executor.
 
@@ -412,7 +546,7 @@ def _collect_broadcast_data(
     time budget, then post-processes to preserve the frontend contract.
     """
     interval = plugin.config.get("metrics_interval", 5)
-    registry = BroadcastRegistry(metrics_interval=interval)
+    registry = _get_registry(interval)
 
     plugin_statuses: dict[str, Any] = {}
     for name, p in plugin.app.plugins.items():
@@ -423,7 +557,7 @@ def _collect_broadcast_data(
 
     interfaces = _collect_interfaces(plugin.app.reticulum)
 
-    data = registry.collect(plugin.app.plugins, cycle_count)
+    data = registry.collect(plugin.app.plugins, cycle_count, skip_budget=initial)
 
     data["plugins"] = plugin_statuses
     data["interfaces"] = interfaces
@@ -486,6 +620,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     interval = plugin.config.get("metrics_interval", 5)
     _cycle_count = 0
     _prev_data: dict[str, Any] = {}
+    _prev_payload_len = 0
     loop = asyncio.get_running_loop()
 
     while True:
@@ -520,16 +655,27 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
             collect_elapsed = time.monotonic() - t_collect
 
+            data["ws_stats"] = {
+                "clients": len(_ws_clients),
+                "max_clients": plugin.config.get("max_websocket_clients", 10),
+                "collect_ms": round(collect_elapsed * 1000, 1),
+                "prev_payload_bytes": _prev_payload_len,
+            }
+
             diff_data = _diff_payload(data, _prev_data)
             _prev_data = data
             if not diff_data:
                 continue
 
-            message = json.dumps({
+            _encode_payload = {
                 "type": "update",
                 "data": diff_data,
                 "timestamp": time.time(),
-            })
+            }
+            message = await loop.run_in_executor(
+                _broadcast_executor, json.dumps, _encode_payload,
+            )
+            _prev_payload_len = len(message)
 
             # Fan out to all clients concurrently (mirrors _push_to_clients).
             clients = list(_ws_clients)
@@ -593,7 +739,7 @@ _push_sem: asyncio.Semaphore | None = None
 
 
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor, _push_sem
+    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _push_sem
     _ws_loop = asyncio.get_running_loop()
     _ws_plugin = app["plugin"]
     _push_sem = asyncio.Semaphore(8)
@@ -601,6 +747,7 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         max_workers=1, thread_name_prefix="ws-broadcast",
     )
     _broadcast_task = asyncio.create_task(_broadcast_metrics(app))
+    _spectrum_task = asyncio.create_task(_spectrum_broadcast_loop(app))
     try:
         from reticulumpi import events as _events
         event_bus = _ws_plugin.app.event_bus
@@ -616,7 +763,7 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
 
 
 async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _ws_loop, _ws_plugin, _broadcast_executor
+    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _broadcast_registry
     try:
         if _ws_plugin is not None:
             event_bus = _ws_plugin.app.event_bus
@@ -627,6 +774,13 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_internet_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
+    if _spectrum_task:
+        _spectrum_task.cancel()
+        try:
+            await _spectrum_task
+        except asyncio.CancelledError:
+            pass
+        _spectrum_task = None
     if _broadcast_task:
         _broadcast_task.cancel()
         try:
@@ -636,6 +790,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
         _broadcast_task = None
     _ws_loop = None
     _ws_plugin = None
+    _broadcast_registry = None
     if _broadcast_executor is not None:
         _broadcast_executor.shutdown(wait=True, cancel_futures=True)
         _broadcast_executor = None
@@ -644,6 +799,9 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
         await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
     _ws_clients.clear()
     _ws_last_activity.clear()
+    for ws in list(_spectrum_clients):
+        await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
+    _spectrum_clients.clear()
 
 
 def _lookup_message_row(msg_id: Any) -> dict | None:
@@ -732,6 +890,8 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
     except Exception:
         return
     action = cmd.get("action")
+    if action == "ping":
+        return {"type": "pong", "ts": cmd.get("ts", 0)}
     if action == "spectrum_switch_preset":
         scanner = plugin.app.plugins.get("spectrum_scanner")
         if scanner and hasattr(scanner, "switch_preset"):
@@ -755,9 +915,16 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
             if freq_mhz is None:
                 return {"type": "radio_error", "error": "frequency_mhz required"}
             try:
-                result = fm.tune(int(float(freq_mhz) * 1_000_000), mode=cmd.get("mode"))
+                freq_hz = int(float(freq_mhz) * 1_000_000)
+            except (ValueError, OverflowError, TypeError):
+                return {"type": "radio_error", "error": "invalid frequency_mhz"}
+            mode = cmd.get("mode")
+            if mode is not None and not isinstance(mode, str):
+                return {"type": "radio_error", "error": "mode must be a string"}
+            try:
+                result = fm.tune(freq_hz, mode=mode)
                 return {"type": "radio_tuned", **result}
-            except ValueError as exc:
+            except (ValueError, TypeError) as exc:
                 return {"type": "radio_error", "error": str(exc)}
     elif action == "radio_play":
         fm = plugin.app.plugins.get("fm_receiver")
@@ -823,6 +990,51 @@ def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
                 return {"type": "radio_unlock", **result}
             except Exception as exc:
                 return {"type": "radio_error", "error": str(exc)}
+
+    elif action == "radio_add_favorite":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "add_favorite"):
+            try:
+                fav = fm.add_favorite(
+                    label=cmd.get("label", ""),
+                    frequency_mhz=float(cmd.get("frequency_mhz", 0)),
+                    mode=cmd.get("mode", "wbfm"),
+                    gain_db=cmd.get("gain_db"),
+                )
+                return {"type": "radio_favorite_added", **fav}
+            except (ValueError, TypeError) as exc:
+                return {"type": "radio_error", "error": str(exc)}
+
+    elif action == "radio_remove_favorite":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "remove_favorite"):
+            fav_id = cmd.get("favorite_id", "")
+            if fm.remove_favorite(fav_id):
+                return {"type": "radio_favorite_removed", "id": fav_id}
+            return {"type": "radio_error", "error": "Favorite not found"}
+
+    elif action == "radio_tune_favorite":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "tune_favorite"):
+            try:
+                result = fm.tune_favorite(cmd.get("favorite_id", ""))
+                return {"type": "radio_tuned", **result}
+            except ValueError as exc:
+                return {"type": "radio_error", "error": str(exc)}
+
+    elif action == "radio_record_start":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "start_recording"):
+            result = fm.start_recording(label=cmd.get("label"))
+            if result.get("error"):
+                return {"type": "radio_error", "error": result["error"]}
+            return {"type": "radio_record_started", **result}
+
+    elif action == "radio_record_stop":
+        fm = plugin.app.plugins.get("fm_receiver")
+        if fm and hasattr(fm, "stop_recording"):
+            result = fm.stop_recording()
+            return {"type": "radio_record_stopped", **result}
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
