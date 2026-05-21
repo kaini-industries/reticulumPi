@@ -1530,6 +1530,10 @@ class TestCollectBroadcastDataDirect:
 class TestCollectBroadcastBudget:
     """Test that _collect_broadcast_data respects the time budget."""
 
+    def setup_method(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+        wsh._broadcast_registry = None
+
     @staticmethod
     def _mock_broadcast_plugin(tier, keys, snapshot_return):
         p = MagicMock()

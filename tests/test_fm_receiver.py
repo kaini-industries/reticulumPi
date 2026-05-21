@@ -20,7 +20,6 @@ import pytest
 from reticulumpi.builtin_plugins.fm_receiver import (
     _CHUNK_BYTES,
     _FAVORITES_FILENAME,
-    _MAX_RECORDINGS_DEFAULT,
     _MODE_DEFAULTS,
     _RECORDINGS_DIR,
     _STATE_FILENAME,
