@@ -303,24 +303,21 @@ def _apply_patches(meshchat_module):
     except Exception as exc:
         print(f"{_TAG} Warning: could not patch resend throttle ({exc})")
 
-    # --- Patch 7: Default to OPPORTUNISTIC for low-bandwidth interfaces ---
-    # MeshChat defaults to DIRECT delivery (multi-packet link handshake), which
-    # fails over LoRa at 3.12 kbps.  When no explicit method is requested and
-    # the next-hop interface is low-bandwidth (< 100 kbps), use OPPORTUNISTIC
-    # (single packet) instead.
+    # --- Patch 7: Default to OPPORTUNISTIC delivery ---
+    # MeshChat defaults to DIRECT delivery (multi-packet link handshake),
+    # which often times out over transport hubs and LoRa alike.
+    # OPPORTUNISTIC sends a single encrypted packet and is more reliable
+    # for relayed paths.  When no explicit method is requested, default to
+    # OPPORTUNISTIC.  Users can still select Direct/Propagated from the UI.
     try:
-        import RNS  # noqa: F811
-
         RMC = meshchat_module.ReticulumMeshChat
         _original_send = RMC.send_message
-
-        _LOW_BW_THRESHOLD = 100_000  # bits per second
 
         async def _patched_send(self, destination_hash, content, image_field=None,
                                 audio_field=None, file_attachments_field=None,
                                 delivery_method=None):
-            # If no explicit method, check if dest was heard over LoRa (has RF metrics)
             if delivery_method is None:
+                delivery_method = "opportunistic"
                 try:
                     import database as _db
                     dest_hex = destination_hash if isinstance(destination_hash, str) else destination_hash.hex()
@@ -328,15 +325,20 @@ def _apply_patches(meshchat_module):
                         _db.Announce.destination_hash == dest_hex
                     )
                     if announce and announce.rssi is not None:
-                        delivery_method = "opportunistic"
                         print(
-                            f"{_TAG} Auto-selected OPPORTUNISTIC for "
+                            f"{_TAG} Auto-OPPORTUNISTIC for "
                             f"<{dest_hex[:12]}> "
-                            f"(LoRa announce: RSSI {announce.rssi} dBm, "
+                            f"(LoRa: RSSI {announce.rssi} dBm, "
                             f"SNR {announce.snr} dB)"
                         )
+                    else:
+                        print(
+                            f"{_TAG} Auto-OPPORTUNISTIC for "
+                            f"<{dest_hex[:12]}> "
+                            f"(no direct link history)"
+                        )
                 except Exception:
-                    pass  # Fall through to MeshChat's default logic
+                    pass
 
             return await _original_send(
                 self, destination_hash, content,
@@ -347,7 +349,7 @@ def _apply_patches(meshchat_module):
             )
 
         RMC.send_message = _patched_send
-        print(f"{_TAG} Patched send_message() with auto-OPPORTUNISTIC for low-bandwidth interfaces")
+        print(f"{_TAG} Patched send_message() with auto-OPPORTUNISTIC default")
     except Exception as exc:
         print(f"{_TAG} Warning: could not patch send_message ({exc})")
 
