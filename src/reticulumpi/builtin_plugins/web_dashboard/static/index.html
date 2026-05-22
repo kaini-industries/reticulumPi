@@ -946,9 +946,8 @@
 
     <!-- FM/AM Radio Receiver -->
     <div class="section" id="radio-section" style="display:none">
-      <div class="section-header collapsible" id="radio-toggle" title="Click to expand">
-        <span><span class="chevron">&#9656;</span> FM/AM Radio <span class="radio-lock-icon" id="radio-lock-icon" style="display:none" title="Dongle locked">&#128274;</span></span>
-        <span class="radio-shortcuts-hint" title="Keyboard: Arrow Up/Down = tune, Space = play/stop, 1-9 = presets">?</span>
+      <div class="section-header collapsible" id="radio-toggle">
+        <span><span class="chevron">&#9656;</span> FM/AM Radio <span class="radio-lock-icon" id="radio-lock-icon" style="display:none">&#128274;</span></span>
         <span class="count" id="radio-status-badge"></span>
       </div>
       <div class="section-body hidden" id="radio-body">
@@ -968,7 +967,7 @@
             <input type="number" id="radio-freq-input" class="radio-freq-input"
                    step="0.025" min="52" max="2200" placeholder="MHz" />
             <button id="radio-freq-go" class="radio-btn radio-btn-sm">Go</button>
-            <button id="radio-fav-btn" class="radio-btn radio-btn-sm radio-fav-btn" title="Add to favorites">&#9734;</button>
+            <button id="radio-fav-btn" class="radio-btn radio-btn-sm radio-fav-btn">&#9734;</button>
           </div>
         </div>
 
@@ -1005,7 +1004,7 @@
 
         <div class="radio-playback-row">
           <button id="radio-play-btn" class="radio-btn radio-play-btn">&#9654; Play</button>
-          <button id="radio-rec-btn" class="radio-btn radio-rec-btn" disabled title="Record">&#9679; Rec</button>
+          <button id="radio-rec-btn" class="radio-btn radio-rec-btn" disabled>&#9679; Rec</button>
           <span class="radio-rec-timer hidden" id="radio-rec-timer">00:00</span>
           <div class="radio-meters">
             <div class="radio-signal-meter">

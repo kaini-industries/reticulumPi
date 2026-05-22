@@ -727,11 +727,12 @@
     // rowIdx * sweep_seconds approximation — the latter drifts badly on
     // wide spans where each sweep takes longer than sweep_seconds, and
     // lies outright for rows from before a scanner restart.
-    var rowIdx = Math.floor(fracY * WF_ROWS);
+    var rowIdx = Math.min(Math.floor(fracY * WF_ROWS), WF_ROWS - 1);
     var rowTs = SC.historyStore.rowTimestamps[rowIdx];
     var agoSec = (rowTs != null) ? (Date.now() / 1000 - rowTs) : null;
-    // dB value: prefer the latest sweep's reading at that bin.
-    var db = _lastData.latest_powers_db ? _lastData.latest_powers_db[idx] : null;
+    var rowPowers = SC.historyStore.rows[rowIdx];
+    var db = (rowPowers && rowPowers[idx] != null && isFinite(rowPowers[idx]))
+           ? rowPowers[idx] : null;
     var dbStr = (db != null && isFinite(db)) ? db.toFixed(1) + ' dB' : '—';
     // '—' when we hover over a blank pixel below the filled region (no row
     // stored), or when the backend didn't ship timestamps.  Honest silence

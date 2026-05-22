@@ -4698,19 +4698,6 @@ body {
 .radio-status-unavailable { color: var(--text-muted); }
 .radio-status-paused { color: var(--yellow); }
 
-.radio-shortcuts-hint {
-  display: inline-block;
-  width: 16px; height: 16px;
-  line-height: 16px;
-  text-align: center;
-  font-size: 10px;
-  border-radius: 50%;
-  background: var(--surface-light, #1e2235);
-  color: var(--text-muted);
-  cursor: help;
-  margin-left: 6px;
-  vertical-align: middle;
-}
 
 .radio-preemption-banner {
   background: rgba(255, 182, 39, 0.15);

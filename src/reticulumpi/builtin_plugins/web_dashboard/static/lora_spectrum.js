@@ -1129,26 +1129,20 @@
 
     var freqMhz = clip.loMhz + fracX * (clip.hiMhz - clip.loMhz);
 
-    // dB value at the nearest bin in the clipped slice.
     var n = clip.hiIdx - clip.loIdx + 1;
     var binIdx = clip.loIdx + Math.min(n - 1, Math.max(0, Math.round(fracX * (n - 1))));
-    var powers = spec.latest_powers_db;
-    var db = (powers && powers[binIdx] != null && isFinite(powers[binIdx])) ? powers[binIdx] : null;
-    var dbStr = (db != null) ? db.toFixed(1) + ' dB' : '—';
 
-    // Row 0 = newest sweep; older rows below.  Prefer the server-supplied
-    // per-row timestamp over rowIdx * sweep_seconds — the latter drifts on
-    // wide spans whose sweeps take longer than sweep_seconds, and lies
-    // outright across a scanner restart.  Display '—' when we hover over
-    // a blank pixel below the filled region, or when the backend didn't
-    // ship timestamps.
-    var rowIdx = Math.floor(fracY * WF_ROWS);
+    var rowIdx = Math.min(Math.floor(fracY * WF_ROWS), WF_ROWS - 1);
     var rowTs = _store().rowTimestamps[rowIdx];
     var agoSec = (rowTs != null) ? (Date.now() / 1000 - rowTs) : null;
     var ageStr;
     if (agoSec == null) ageStr = '—';
     else if (rowIdx === 0 && agoSec < 2) ageStr = 'now';
     else ageStr = SC.formatAge(agoSec);
+
+    var rowPowers = _store().rows[rowIdx];
+    var db = (rowPowers && rowPowers[binIdx] != null && isFinite(rowPowers[binIdx])) ? rowPowers[binIdx] : null;
+    var dbStr = (db != null) ? db.toFixed(1) + ' dB' : '—';
 
     var headerLine = freqMhz.toFixed(3) + ' MHz · ' + dbStr + ' · ' + ageStr;
     var bandLine = SC.loraBandLine(freqMhz, {

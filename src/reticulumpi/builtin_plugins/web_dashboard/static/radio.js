@@ -289,78 +289,6 @@
       }
     });
 
-    document.addEventListener('keydown', function (e) {
-      if (!_expanded) return;
-      var tag = document.activeElement ? document.activeElement.tagName : '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-
-      var step = _lastData && _lastData.mode === 'wbfm' ? 0.1 : 0.025;
-      var cur = _lastData ? _lastData.frequency_mhz : 95.5;
-      var next;
-
-      switch (e.key) {
-        case 'ArrowUp':
-          e.preventDefault();
-          next = Math.min(_freqMax, Math.round((cur + step) * 1000) / 1000);
-          _setPending('tune');
-          _sendWs({ action: 'radio_tune', frequency_mhz: next });
-          break;
-        case 'ArrowDown':
-          e.preventDefault();
-          next = Math.max(_freqMin, Math.round((cur - step) * 1000) / 1000);
-          _setPending('tune');
-          _sendWs({ action: 'radio_tune', frequency_mhz: next });
-          break;
-        case 'ArrowRight':
-          e.preventDefault();
-          next = Math.min(_freqMax, Math.round((cur + step * 10) * 1000) / 1000);
-          _setPending('tune');
-          _sendWs({ action: 'radio_tune', frequency_mhz: next });
-          break;
-        case 'ArrowLeft':
-          e.preventDefault();
-          next = Math.max(_freqMin, Math.round((cur - step * 10) * 1000) / 1000);
-          _setPending('tune');
-          _sendWs({ action: 'radio_tune', frequency_mhz: next });
-          break;
-        case ' ':
-          e.preventDefault();
-          _onPlayStop();
-          break;
-        case 'm':
-        case 'M':
-          e.preventDefault();
-          if (_lastData) {
-            var modes = ['wbfm','fm','am','usb','lsb'];
-            var idx = modes.indexOf(_lastData.mode);
-            var nextMode = modes[(idx + 1) % modes.length];
-            _setPending('tune');
-            _sendWs({ action: 'radio_tune', frequency_mhz: cur, mode: nextMode });
-          }
-          break;
-        case 'r':
-        case 'R':
-          e.preventDefault();
-          _onRecordToggle();
-          break;
-        case 'Escape':
-          e.preventDefault();
-          _expanded = false;
-          if (_body) _body.classList.add('hidden');
-          var chev = _toggle ? _toggle.querySelector('.chevron') : null;
-          if (chev) chev.innerHTML = '&#9656;';
-          break;
-        default:
-          if (e.key >= '1' && e.key <= '9') {
-            var presetBtns = _presetsEl ? _presetsEl.querySelectorAll('.radio-preset-btn') : [];
-            var pi = parseInt(e.key, 10) - 1;
-            if (pi < presetBtns.length) {
-              e.preventDefault();
-              presetBtns[pi].click();
-            }
-          }
-      }
-    });
   }
 
   // -- Helpers --------------------------------------------------------------
@@ -519,11 +447,10 @@
     var html = '';
     for (var i = 0; i < _favorites.length; i++) {
       var f = _favorites[i];
-      html += '<div class="radio-fav-item" data-id="' + esc(f.id) + '" title="' +
-              esc(f.frequency_mhz.toFixed(3) + ' MHz ' + (f.mode || '').toUpperCase()) + '">' +
+      html += '<div class="radio-fav-item" data-id="' + esc(f.id) + '">' +
               '<span class="radio-fav-label">' + esc(f.label || f.frequency_mhz.toFixed(3)) + '</span>' +
               '<span class="radio-fav-freq">' + f.frequency_mhz.toFixed(3) + '</span>' +
-              '<button class="radio-fav-delete" data-id="' + esc(f.id) + '" title="Remove">&times;</button>' +
+              '<button class="radio-fav-delete" data-id="' + esc(f.id) + '">&times;</button>' +
               '</div>';
     }
     _favList.innerHTML = html;
@@ -610,9 +537,9 @@
         '<span class="radio-rec-item-info">' + esc(r.filename) +
         '<span class="radio-rec-meta">' + durStr + ' &middot; ' + sizeStr + '</span></span>' +
         '<a class="radio-rec-download" href="/api/radio/recordings/' +
-        encodeURIComponent(r.filename) + '" title="Download">&#8681;</a>' +
+        encodeURIComponent(r.filename) + '">&#8681;</a>' +
         '<button class="radio-rec-delete" data-name="' + esc(r.filename) +
-        '" title="Delete">&times;</button></div>';
+        '">&times;</button></div>';
     }
     _recList.innerHTML = html;
   }
@@ -646,8 +573,7 @@
     var html = '';
     for (var i = 0; i < _BANDS.length; i++) {
       var b = _BANDS[i];
-      html += '<button class="radio-band-btn" data-idx="' + i + '" title="' +
-              esc(b.lo + '-' + b.hi + ' MHz') + '">' + esc(b.label) + '</button>';
+      html += '<button class="radio-band-btn" data-idx="' + i + '">' + esc(b.label) + '</button>';
     }
     _bandSelector.innerHTML = html;
     _bandSelector.addEventListener('click', function (e) {
@@ -1204,7 +1130,6 @@
     _updateFavStar();
 
     if (!_presetsBuilt) {
-      _presetsBuilt = true;
       R.api('/api/radio/presets').then(function (r) {
         if (r && r.ok) _buildPresets(r.data);
         else _presetsBuilt = false;
