@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok
@@ -150,7 +152,10 @@ async def handle_interfaces(request: aiohttp.web.Request) -> aiohttp.web.Respons
     rns_instance = getattr(plugin.app, "reticulum", None)
 
     try:
-        interfaces = _collect_interfaces(rns_instance)
+        loop = asyncio.get_running_loop()
+        interfaces = await loop.run_in_executor(
+            None, _collect_interfaces, rns_instance,
+        )
     except Exception as exc:
         return _ok({"interfaces": [], "error": f"Partial collection: {exc}"})
 

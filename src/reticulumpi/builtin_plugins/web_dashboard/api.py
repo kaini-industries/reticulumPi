@@ -8,6 +8,7 @@ Domain-specific handlers are in:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -339,11 +340,7 @@ async def handle_metrics(request: aiohttp.web.Request) -> aiohttp.web.Response:
     return _ok({"message": "system_monitor plugin not available", "metrics": {}})
 
 
-async def handle_plugins(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    """GET /api/plugins — all plugins with statuses."""
-    plugin = _get_plugin(request)
-    app = plugin.app
-
+def _collect_plugin_statuses(app: Any) -> dict[str, Any]:
     plugins_data = {}
     for name, p in app.plugins.items():
         try:
@@ -357,6 +354,16 @@ async def handle_plugins(request: aiohttp.web.Request) -> aiohttp.web.Response:
             "status": status,
             "address": _get_plugin_address(p),
         }
+    return plugins_data
+
+
+async def handle_plugins(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/plugins — all plugins with statuses."""
+    plugin = _get_plugin(request)
+    app = plugin.app
+
+    loop = asyncio.get_running_loop()
+    plugins_data = await loop.run_in_executor(None, _collect_plugin_statuses, app)
 
     failed = [
         {"name": name, "error": reason} for name, reason in app._failed_plugins

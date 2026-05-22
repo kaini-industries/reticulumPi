@@ -61,7 +61,7 @@ class BroadcastRegistry:
         all_plugins: dict[str, Any],
         cycle_count: int,
         *,
-        skip_budget: bool = False,
+        budget_multiplier: float = 1.0,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {}
         skipped: list[str] = []
@@ -74,12 +74,12 @@ class BroadcastRegistry:
 
         for tier in (0, 1, 2):
             tier_start = time.monotonic()
-            if skip_budget or tier == 0:
+            if tier == 0:
                 cutoff_secs = float("inf")
             elif tier == 1:
-                cutoff_secs = self._tier1_budget
+                cutoff_secs = self._tier1_budget * budget_multiplier
             else:
-                cutoff_secs = self._tier2_budget
+                cutoff_secs = self._tier2_budget * budget_multiplier
             for name, p in by_tier[tier]:
                 if (time.monotonic() - tier_start) >= cutoff_secs:
                     skipped.append(name)

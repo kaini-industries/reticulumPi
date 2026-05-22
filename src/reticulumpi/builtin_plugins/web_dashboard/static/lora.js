@@ -103,6 +103,11 @@
     var container = $('lora-radio-info');
     if (!container) return;
 
+    if (loraDiag && loraDiag.announce_mode) {
+      _currentLoraAnnounceMode = loraDiag.announce_mode.current || _currentLoraAnnounceMode;
+    }
+    if (!interfaces) return;
+
     // Find RNode interfaces
     var rnodes = [];
     for (var i = 0; i < interfaces.length; i++) {

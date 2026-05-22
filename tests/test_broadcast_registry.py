@@ -60,22 +60,22 @@ class TestPerTierBudget:
         assert "gps" in data
 
 
-class TestSkipBudget:
-    def test_skip_budget_collects_all_plugins(self):
-        """With skip_budget=True, no plugins should be skipped regardless of time."""
+class TestBudgetMultiplier:
+    def test_high_multiplier_collects_all_plugins(self):
+        """With a large budget_multiplier, no plugins should be skipped."""
         registry = BroadcastRegistry(metrics_interval=0.01)
         plugins = {
             "t0": _make_plugin(0, "sys", delay=0.05, result={"cpu": 50}),
             "t1": _make_plugin(1, "mesh", delay=0.05, result={"peers": []}),
             "t2": _make_plugin(2, "gps", delay=0.05, result={"lat": 0}),
         }
-        data = registry.collect(plugins, cycle_count=0, skip_budget=True)
+        data = registry.collect(plugins, cycle_count=0, budget_multiplier=100.0)
         assert "sys" in data
         assert "mesh" in data
         assert "gps" in data
 
     def test_normal_budget_can_skip(self):
-        """Without skip_budget, a tiny budget should skip slow plugins."""
+        """With default budget multiplier, a tiny budget should skip slow plugins."""
         registry = BroadcastRegistry(metrics_interval=0.01)
         plugins = {
             "t1_slow": _make_plugin(1, "mesh", delay=0.1, result={"peers": []}),

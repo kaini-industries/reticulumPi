@@ -1759,18 +1759,32 @@
 
   // If we reached this page, the cookie is valid.
   fetchNode();
-  fetchCritical();
   connectWS();
 
-  // Always fetch secondary data once (meshtastic status/nodes, mesh
-  // telemetry, etc. are not pushed via WS).  Delay slightly so the
-  // critical tier and WS connection start first.
-  setTimeout(fetchSecondary, 500);
+  // WS delivers a full initial snapshot covering metrics, interfaces,
+  // transport, connectivity, routing, meshtastic, meshcore, gps, adsb, etc.
+  // Only fall back to HTTP if WS hasn't delivered data within 2s.
+  var _criticalFallbackFired = false;
+  var _criticalFallback = setTimeout(function() {
+    _criticalFallbackFired = true;
+    fetchCritical();
+    setTimeout(fetchSecondary, 500);
+  }, 2000);
 
-  // WS-uncovered data: fetch after first WS tick, or after 3s fallback
+  // Once WS is ready, cancel HTTP fallback and fetch only WS-uncovered data.
   var _wsUncoveredTimer = setTimeout(fetchWsUncovered, 3000);
   onWsReady(function() {
+    clearTimeout(_criticalFallback);
     clearTimeout(_wsUncoveredTimer);
+    if (!_criticalFallbackFired) {
+      // Full plugin detail and LoRa config are not in the WS snapshot
+      apiRetry('/api/plugins').then(function(r) {
+        if (r && r.ok) updatePlugins(r.data.plugins, r.data.failed_plugins);
+      });
+      apiRetry('/api/lora').then(function(r) {
+        if (r && r.ok && RPI.updateLoraRadio) RPI.updateLoraRadio(null, r.data);
+      });
+    }
     fetchWsUncovered();
   });
 

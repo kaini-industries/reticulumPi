@@ -473,8 +473,10 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     # instead of waiting up to 5s for the next broadcast cycle.
     loop = asyncio.get_running_loop()
     try:
+        if _collection_running.is_set():
+            await asyncio.sleep(0.5)
         data, _, _ = await loop.run_in_executor(
-            None,
+            _broadcast_executor,
             functools.partial(
                 _collect_broadcast_data,
                 plugin, 0, _last_mesh_announce_ts, _mesh_version,
@@ -557,7 +559,10 @@ def _collect_broadcast_data(
 
     interfaces = _collect_interfaces(plugin.app.reticulum)
 
-    data = registry.collect(plugin.app.plugins, cycle_count, skip_budget=initial)
+    data = registry.collect(
+        plugin.app.plugins, cycle_count,
+        budget_multiplier=3.0 if initial else 1.0,
+    )
 
     data["plugins"] = plugin_statuses
     data["interfaces"] = interfaces
@@ -746,6 +751,17 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
     _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="ws-broadcast",
     )
+
+    # Warm plugin caches so the first client gets fast responses
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            _broadcast_executor,
+            functools.partial(_collect_broadcast_data, app["plugin"], 0, 0, 0),
+        )
+        log.info("Broadcast cache warmed on startup")
+    except Exception:
+        log.debug("Cache warm-up failed (non-fatal)", exc_info=True)
+
     _broadcast_task = asyncio.create_task(_broadcast_metrics(app))
     _spectrum_task = asyncio.create_task(_spectrum_broadcast_loop(app))
     try:
