@@ -16,7 +16,9 @@ htmlcov/
 # IDE
 .vscode/
 .idea/
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/commands/
 
 # OS
 .DS_Store
