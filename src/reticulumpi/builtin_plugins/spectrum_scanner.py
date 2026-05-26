@@ -163,6 +163,17 @@ class SpectrumScanner(PluginBase):
             raise ValueError(f"waterfall_rows must be 8-2048, got {wf_rows}")
         self._waterfall_rows = wf_rows
 
+        nf_pct = int(cfg.get("noise_floor_percentile", 25))
+        if not 5 <= nf_pct <= 50:
+            raise ValueError(f"noise_floor_percentile must be 5-50, got {nf_pct}")
+        self._noise_floor_percentile = nf_pct
+
+        self._peak_threshold_db = float(cfg.get("peak_threshold_db", 10.0))
+        if not 1.0 <= self._peak_threshold_db <= 30.0:
+            raise ValueError(
+                f"peak_threshold_db must be 1.0-30.0, got {self._peak_threshold_db}"
+            )
+
         self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
         self._power_command = str(cfg.get("power_command", "rtl_power"))
         self._max_restarts = int(cfg.get("max_restarts", 5))
@@ -507,7 +518,8 @@ class SpectrumScanner(PluginBase):
             self._snapshot_cache = (self._sweep_count, snap)
             return snap
 
-    _HISTORY_MAX_JSON_BYTES = 16_000_000
+    _HISTORY_MAX_JSON_BYTES = 32_000_000
+    _DOWNSAMPLE_BIN_THRESHOLD = 500
 
     def get_history(self) -> dict[str, Any]:
         """Return the in-memory waterfall buffer for one-shot backfill.
@@ -524,12 +536,16 @@ class SpectrumScanner(PluginBase):
         """
         with self._state_lock:
             n_bins = len(self._bins_hz) if self._bins_hz else 0
+            downsample = n_bins > self._DOWNSAMPLE_BIN_THRESHOLD
+
             if n_bins > 0:
-                bytes_per_row = n_bins * 7
-                max_rows = max(
-                    16,
-                    self._HISTORY_MAX_JSON_BYTES // bytes_per_row,
-                )
+                bytes_full = n_bins * 7
+                if downsample:
+                    bytes_half = bytes_full // 2
+                    avg_bytes = int(0.25 * bytes_full + 0.75 * bytes_half)
+                else:
+                    avg_bytes = bytes_full
+                max_rows = max(16, self._HISTORY_MAX_JSON_BYTES // avg_bytes)
             else:
                 max_rows = self._waterfall_rows
 
@@ -537,19 +553,33 @@ class SpectrumScanner(PluginBase):
             if len(wf) > max_rows:
                 wf = wf[-max_rows:]
 
+            full_res_start = max(0, len(wf) - len(wf) // 4) if downsample else 0
+
+            rows_out = []
+            for i, (_, powers) in enumerate(wf):
+                if downsample and i < full_res_start:
+                    rows_out.append(list(powers[::2]))
+                else:
+                    rows_out.append(list(powers))
+
             hist: dict[str, Any] = {
                 "available": True,
                 "sweep_count": self._sweep_count,
                 "bins_version": self._bins_version,
                 "waterfall_rows": self._waterfall_rows,
-                "rows": [list(powers) for _, powers in wf],
+                "rows": rows_out,
                 "row_timestamps": [
                     round(ts, 3) for ts, _ in wf
                 ],
             }
+            if downsample and full_res_start > 0:
+                hist["downsample_factor"] = 2
+                hist["full_res_start_idx"] = full_res_start
             if self._bins_hz:
                 hist["bin_count"] = len(self._bins_hz)
                 hist["bins_hz"] = list(self._bins_hz)
+                if downsample and full_res_start > 0:
+                    hist["bins_hz_half"] = list(self._bins_hz[::2])
             if self._analyzer is not None:
                 hist["channel_power_history"] = self._analyzer.get_channel_power_history()
             return hist
@@ -768,8 +798,8 @@ class SpectrumScanner(PluginBase):
     def _detect_peaks(
         self, freqs: list[int], powers: list[float | None], noise_floor: float,
     ) -> list[dict[str, Any]]:
-        """Find local maxima above noise_floor + 10 dB.  Returns up to 20 peaks."""
-        threshold = noise_floor + 10.0
+        """Find local maxima above noise_floor + threshold.  Returns up to 20 peaks."""
+        threshold = noise_floor + self._peak_threshold_db
         peaks: list[dict[str, Any]] = []
         n = len(powers)
         for i in range(n):
@@ -818,7 +848,11 @@ class SpectrumScanner(PluginBase):
         valid = [p for p in powers if p is not None]
         if valid:
             valid_sorted = sorted(valid)
-            nf = valid_sorted[len(valid_sorted) // 2]  # median as noise floor
+            idx = min(
+                int(len(valid_sorted) * self._noise_floor_percentile / 100),
+                len(valid_sorted) - 1,
+            )
+            nf = valid_sorted[idx]
             detected = self._detect_peaks(freqs, powers, nf)
         else:
             detected = []

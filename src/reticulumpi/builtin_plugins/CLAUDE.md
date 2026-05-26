@@ -38,3 +38,8 @@ Not a single file -- it's a full sub-package:
 3. Add config section to `config/reticulumpi/config.example.yaml`
 4. Add entry to `docs/plugins.md`
 5. Reference `example_plugin.py` for the minimal scaffold
+
+## Scoped Test Command
+
+Single plugin: `.venv/bin/pytest tests/test_<plugin_name>.py -v`
+Dashboard suite: `.venv/bin/pytest tests/test_websocket_handler.py tests/test_api_write_endpoints.py tests/test_broadcast_registry.py tests/test_web_dashboard.py -v`

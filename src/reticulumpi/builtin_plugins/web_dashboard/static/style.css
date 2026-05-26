@@ -4950,6 +4950,33 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
 .weather-alert-severe  { background: #e65100; color: #fff; }
 .weather-alert-moderate { background: #f9a825; color: #000; }
 
+/* ── Stale data banner ──────────────────────────────────── */
+.stale-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--yellow);
+  color: #000;
+  text-align: center;
+  padding: 6px 12px;
+  font-size: 0.85em;
+  font-weight: 500;
+  position: sticky;
+  top: 0;
+  z-index: 1050;
+}
+.stale-refresh-btn {
+  background: rgba(0, 0, 0, 0.15);
+  color: #000;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.stale-refresh-btn:hover { background: rgba(0, 0, 0, 0.25); }
+
 /* ── Signal plugin panels ────────────────────────────────── */
 .radiosonde-cards {
   display: flex;

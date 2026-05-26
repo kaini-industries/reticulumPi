@@ -128,6 +128,17 @@
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/reticulum/reticulumPi && echo '--- Node State ---' && printf 'rnsd: ' && systemctl is-active rnsd 2>/dev/null && printf 'reticulumpi: ' && systemctl is-active reticulumpi 2>/dev/null && echo && echo '--- Recent Commits ---' && git log --oneline -3 && echo && echo '--- Uncommitted Changes ---' && git diff --stat HEAD 2>/dev/null | tail -5 && MARKER=$(grep -oP '(?<=Last reviewed: )\\d{4}-\\d{2}-\\d{2}' CLAUDE.md 2>/dev/null) && if [ -z \"$MARKER\" ]; then echo && echo 'CLAUDE.md has no review marker -- consider running /review-claude'; elif [ $(( ($(date +%s) - $(date -d \"$MARKER\" +%s)) / 86400 )) -gt 90 ]; then echo && echo \"CLAUDE.md last reviewed $MARKER ($(( ($(date +%s) - $(date -d \"$MARKER\" +%s)) / 86400 )) days ago) -- consider running /review-claude\"; fi; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",

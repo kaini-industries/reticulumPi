@@ -1,6 +1,7 @@
 """Tests for the AlertSystem plugin."""
 
 import os
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -104,14 +105,20 @@ def test_plugin_crash_event_triggers_alert(mock_app, plugin_config):
     from reticulumpi.builtin_plugins.alert_system import AlertSystemPlugin
 
     alerts = []
-    mock_app.event_bus.subscribe("alert.triggered", lambda e, d: alerts.append(d))
+    received = threading.Event()
+
+    def _on_alert(event, data):
+        alerts.append(data)
+        received.set()
+
+    mock_app.event_bus.subscribe("alert.triggered", _on_alert)
 
     plugin = AlertSystemPlugin(mock_app, plugin_config)
     plugin.start()
 
-    # Simulate plugin crash event
     mock_app.event_bus.publish("plugin.crashed", {"name": "bad_plugin", "error": "boom"})
 
+    assert received.wait(timeout=5), "alert.triggered was not fired"
     assert len(alerts) == 1
     assert "bad_plugin" in alerts[0]["message"]
     plugin.stop()

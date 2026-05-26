@@ -453,6 +453,17 @@ async def handle_spectrum_switch_preset(
     if not scanner or not hasattr(scanner, "switch_preset"):
         return _error("spectrum_scanner plugin not enabled", 404)
 
+    from .api_services import _check_send_rate_limit
+
+    remote_ip = request.remote or "unknown"
+    ok, retry_after = _check_send_rate_limit(
+        plugin, f"preset:{remote_ip}", max_per_window=3, window_seconds=30.0,
+    )
+    if not ok:
+        resp = _error("Too many preset switches — try again shortly", 429)
+        resp.headers["Retry-After"] = str(int(retry_after) + 1)
+        return resp
+
     try:
         body = await request.json()
     except Exception:

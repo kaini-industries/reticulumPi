@@ -117,6 +117,12 @@
 
   var _sectionUpdated = {};  // sectionId -> timestamp (seconds)
   var _STALE_THRESHOLD = 30; // seconds before marking stale
+  var _GLOBAL_STALE_THRESHOLD = 60;
+  var _lastWsUpdate = 0;
+  var _lastHttpUpdate = 0;
+  var _lastSnapshotRequest = 0;
+  var _tabHiddenSince = 0;
+  var _TAB_STALE_SECONDS = 30;
 
   function markUpdated(sectionId) {
     _sectionUpdated[sectionId] = Date.now() / 1000;
@@ -136,6 +142,47 @@
     }
   }
   setInterval(_refreshFreshness, 2000);
+
+  function _showStaleBanner() {
+    var el = document.getElementById('stale-banner');
+    if (el) el.style.display = 'flex';
+  }
+
+  function _hideStaleBanner() {
+    var el = document.getElementById('stale-banner');
+    if (el && el.style.display !== 'none') el.style.display = 'none';
+  }
+
+  function _requestSnapshot() {
+    var now = Date.now() / 1000;
+    if (now - _lastSnapshotRequest < 10) return;
+    _lastSnapshotRequest = now;
+    if (RPI.ws && RPI.ws.readyState === WebSocket.OPEN) {
+      RPI.ws.send(JSON.stringify({action: 'request_snapshot'}));
+    }
+  }
+
+  function _checkStaleness() {
+    var latest = Math.max(_lastWsUpdate, _lastHttpUpdate);
+    if (!latest) return;
+    var age = (Date.now() / 1000) - latest;
+    if (age > _GLOBAL_STALE_THRESHOLD) _showStaleBanner();
+    else if (age < _STALE_THRESHOLD) _hideStaleBanner();
+  }
+  setInterval(_checkStaleness, 10000);
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      _tabHiddenSince = Date.now() / 1000;
+    } else if (_tabHiddenSince > 0) {
+      var away = (Date.now() / 1000) - _tabHiddenSince;
+      _tabHiddenSince = 0;
+      if (away >= _TAB_STALE_SECONDS) {
+        _checkStaleness();
+        _requestSnapshot();
+      }
+    }
+  });
 
   // --- Rendering ---
 
@@ -1157,7 +1204,7 @@
 
   function fetchCritical() {
     apiRetry('/api/metrics').then(function(r) {
-      if (r && r.ok) updateMetrics(r.data);
+      if (r && r.ok) { _lastHttpUpdate = Date.now() / 1000; updateMetrics(r.data); }
     });
 
     var _ifaceResult = null, _loraResult = null;
@@ -1338,6 +1385,8 @@
     ws.onopen = function() {
       reconnectDelay = 1000;
       setConnStatus('live');
+      _hideStaleBanner();
+      _tabHiddenSince = 0;
       stopPolling();
       // Reset traffic rate tracking so we don't compute stale deltas
       _prevTraffic = {};
@@ -1366,15 +1415,18 @@
           return;
         }
         if (msg.type === 'message' && msg.data) {
+          _lastWsUpdate = Date.now() / 1000;
           if (RPI.onMessagingEvent) RPI.onMessagingEvent(msg.data);
           if (RPI.onMqttFeedMessage) RPI.onMqttFeedMessage(msg.data);
           return;
         }
         if (msg.type === 'message_status' && msg.data) {
+          _lastWsUpdate = Date.now() / 1000;
           if (RPI.onMessagingStatus) RPI.onMessagingStatus(msg.data);
           return;
         }
         if (msg.type === 'reaction' && msg.data) {
+          _lastWsUpdate = Date.now() / 1000;
           if (RPI.onMessagingReaction) RPI.onMessagingReaction(msg.data);
           return;
         }
@@ -1383,6 +1435,7 @@
           return;
         }
         if (msg.type === 'update' && msg.data) {
+          _lastWsUpdate = Date.now() / 1000;
           if (!_wsFirstTick) {
             _wsFirstTick = true;
             for (var _wi = 0; _wi < _wsReadyCallbacks.length; _wi++) _wsReadyCallbacks[_wi]();
@@ -1397,6 +1450,7 @@
               var d = RPI._pendingUpdate;
               if (!d) return;
               _applyUpdate(d);
+              _checkStaleness();
             });
           }
         }
@@ -1449,6 +1503,9 @@
   // --- Events ---
 
   var _el;
+  if (_el = $('stale-refresh-btn')) _el.addEventListener('click', function() {
+    _requestSnapshot();
+  });
   if (_el = $('logout-btn')) _el.addEventListener('click', function() {
     api('/api/auth/logout', {method: 'POST'}).finally(function() {
       window.location.href = '/login.html';

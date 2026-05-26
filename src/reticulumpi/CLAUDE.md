@@ -33,3 +33,7 @@ cli.py -> app.py -> config.py
 **events.py** -- append-only. Never rename or remove existing constants.
 
 **announce_dispatcher.py** -- batched announce scheduling to prevent network flooding.
+
+## Scoped Test Commands
+
+Core modules only: `.venv/bin/pytest tests/test_app.py tests/test_event_bus.py tests/test_plugin_loader.py tests/test_config.py -v`

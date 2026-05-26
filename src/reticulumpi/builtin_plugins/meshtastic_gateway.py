@@ -896,6 +896,7 @@ class MeshtasticGateway(PluginBase):
         # Device info probe (for dashboard device card & LoRa neighbors)
         self._cached_device_info: dict[str, Any] | None = None
         self._cached_lora_neighbors: list[dict[str, Any]] = []
+        # CPython GIL: dict.__setitem__ on str keys is atomic; writes are unsynchronized
         self._node_name_cache: dict[str, dict[str, str]] = {}  # {id: {longName, shortName, hwModel}}
         self._name_cache_path: str = ""  # set after storage_path is known
         self._device_info_cache_time: float = 0
@@ -924,7 +925,9 @@ class MeshtasticGateway(PluginBase):
         self._cache_ttl: float = float(self.config.get("cache_ttl", 600))
 
         self._broadcast_cache: tuple[float, dict] | None = None
-        self._broadcast_cache_ttl: float = 4.0
+        self._broadcast_cache_ttl: float = 10.0
+        self._nodes_cache: tuple[float, list] | None = None
+        self._nodes_cache_ttl: float = 10.0
 
         # Packet dedup — same message can arrive via both MQTT and serial,
         # and MQTT bridges can replay packets many minutes apart. Keep a
@@ -1355,6 +1358,8 @@ class MeshtasticGateway(PluginBase):
                 self.log.debug("Error closing Meshtastic interface", exc_info=True)
             self._mesh_interface = None
             self._connected = False
+            self._nodes_cache = None
+            self._broadcast_cache = None
             if self._mode == MODE_SERIAL:
                 self._cached_device_info = None
                 self._cached_lora_neighbors = []
@@ -2669,85 +2674,108 @@ class MeshtasticGateway(PluginBase):
     def get_status(self) -> dict[str, Any]:
         """Return current gateway status for monitoring and API."""
         with self._lock:
-            # During auto-reconnect grace period, report as connected so
-            # the dashboard doesn't flash "(off)" on brief MQTT drops.
+            active = self._active
+            mode = self._mode
             connected = self._connected
-            if (
-                not connected
-                and self._active
-                and self._mesh_interface is not None
-                and self._last_disconnect_time > 0
-            ):
-                grace = self.config.get("reconnect_grace_period", 90)
-                elapsed = time.monotonic() - self._last_disconnect_time
-                if elapsed < grace:
-                    connected = True
+            iface = self._mesh_interface
+            mqtt_suspended = self._mqtt_suspended
+            msgs_mesh_to_lxmf = self._msgs_mesh_to_lxmf
+            msgs_lxmf_to_mesh = self._msgs_lxmf_to_mesh
+            msgs_hub_to_mesh = self._msgs_hub_to_mesh
+            msgs_rate_limited = self._msgs_rate_limited
+            connect_count = self._connect_count
+            reconnect_failures = self._reconnect_failures
+            last_mesh_msg_time = self._last_mesh_msg_time
+            last_lxmf_msg_time = self._last_lxmf_msg_time
+            lxmf_recipients = len(self._recipient_hashes)
+            send_min_interval = self._send_min_interval
+            mqtt_node_num = self._mqtt_node_num
+            mqtt_long_name = self._mqtt_long_name
+            mqtt_short_name = self._mqtt_short_name
+            last_disconnect_time = self._last_disconnect_time
+            fw_watchdog_enabled = self._fw_watchdog_enabled
+            fw_hang_detected = self._fw_hang_detected
+            last_device_activity = self._last_device_activity
+            fw_silence_timeout = self._fw_silence_timeout
+            fw_total_hangs = self._fw_total_hangs
+            fw_total_resets = self._fw_total_resets
+            fw_auto_reset = self._fw_auto_reset
+            fw_reset_timestamps = list(self._fw_reset_timestamps)
+            fw_max_resets_per_hour = self._fw_max_resets_per_hour
 
-            status: dict[str, Any] = {
-                "active": self._active,
-                "mode": self._mode,
-                "connected": connected,
-                "mqtt_suspended": self._mqtt_suspended,
-                "meshtastic_channel": self.config.get("meshtastic_channel", 0),
-                "msgs_mesh_to_lxmf": self._msgs_mesh_to_lxmf,
-                "msgs_lxmf_to_mesh": self._msgs_lxmf_to_mesh,
-                "msgs_hub_to_mesh": self._msgs_hub_to_mesh,
-                "msgs_rate_limited": self._msgs_rate_limited,
-                "connect_count": self._connect_count,
-                "reconnect_failures": self._reconnect_failures,
-                "last_mesh_msg_time": self._last_mesh_msg_time,
-                "last_lxmf_msg_time": self._last_lxmf_msg_time,
-                "lxmf_recipients": len(self._recipient_hashes),
+        if (
+            not connected
+            and active
+            and iface is not None
+            and last_disconnect_time > 0
+        ):
+            grace = self.config.get("reconnect_grace_period", 90)
+            elapsed = time.monotonic() - last_disconnect_time
+            if elapsed < grace:
+                connected = True
+
+        status: dict[str, Any] = {
+            "active": active,
+            "mode": mode,
+            "connected": connected,
+            "mqtt_suspended": mqtt_suspended,
+            "meshtastic_channel": self.config.get("meshtastic_channel", 0),
+            "msgs_mesh_to_lxmf": msgs_mesh_to_lxmf,
+            "msgs_lxmf_to_mesh": msgs_lxmf_to_mesh,
+            "msgs_hub_to_mesh": msgs_hub_to_mesh,
+            "msgs_rate_limited": msgs_rate_limited,
+            "connect_count": connect_count,
+            "reconnect_failures": reconnect_failures,
+            "last_mesh_msg_time": last_mesh_msg_time,
+            "last_lxmf_msg_time": last_lxmf_msg_time,
+            "lxmf_recipients": lxmf_recipients,
+        }
+        if mode == MODE_SERIAL:
+            status["serial_port"] = self.config.get("serial_port", "auto")
+        else:
+            mqtt_cfg = self.config.get("mqtt", {})
+            status["mqtt_broker"] = mqtt_cfg.get("broker", _MQTT_DEFAULTS["broker"])
+            status["mqtt_topic"] = mqtt_cfg.get(
+                "root_topic", _MQTT_DEFAULTS["root_topic"]
+            )
+            if mqtt_node_num:
+                status["node_id"] = f"!{mqtt_node_num:08x}"
+                status["long_name"] = mqtt_long_name
+                status["short_name"] = mqtt_short_name
+
+        if send_min_interval > 0:
+            status["rate_limit_per_min"] = round(60.0 / send_min_interval, 1)
+
+        if connected and iface:
+            try:
+                nodes = getattr(iface, "nodes", None) or {}
+                status["meshtastic_nodes"] = len(nodes)
+            except Exception:
+                if self.log:
+                    self.log.debug("Error reading node count for status", exc_info=True)
+
+        if fw_watchdog_enabled:
+            now_mono = time.monotonic()
+            silence = (
+                int(now_mono - last_device_activity)
+                if last_device_activity else None
+            )
+            status["firmware_watchdog"] = {
+                "enabled": True,
+                "hang_detected": fw_hang_detected,
+                "silence_seconds": silence,
+                "silence_timeout": int(fw_silence_timeout),
+                "total_hangs": fw_total_hangs,
+                "total_resets": fw_total_resets,
+                "auto_reset": fw_auto_reset,
+                "resets_last_hour": len([
+                    t for t in fw_reset_timestamps
+                    if t > now_mono - 3600
+                ]),
+                "max_resets_per_hour": fw_max_resets_per_hour,
             }
-            # Mode-specific connection details
-            if self._mode == MODE_SERIAL:
-                status["serial_port"] = self.config.get("serial_port", "auto")
-            else:
-                mqtt_cfg = self.config.get("mqtt", {})
-                status["mqtt_broker"] = mqtt_cfg.get("broker", _MQTT_DEFAULTS["broker"])
-                status["mqtt_topic"] = mqtt_cfg.get(
-                    "root_topic", _MQTT_DEFAULTS["root_topic"]
-                )
-                if self._mqtt_node_num:
-                    status["node_id"] = f"!{self._mqtt_node_num:08x}"
-                    status["long_name"] = self._mqtt_long_name
-                    status["short_name"] = self._mqtt_short_name
 
-            # Rate limit info
-            if self._send_min_interval > 0:
-                status["rate_limit_per_min"] = round(60.0 / self._send_min_interval, 1)
-
-            if self._connected and self._mesh_interface:
-                try:
-                    nodes = getattr(self._mesh_interface, "nodes", None) or {}
-                    status["meshtastic_nodes"] = len(nodes)
-                except Exception:
-                    if self.log:
-                        self.log.debug("Error reading node count for status", exc_info=True)
-
-            # Firmware watchdog status
-            if self._fw_watchdog_enabled:
-                now_mono = time.monotonic()
-                silence = (
-                    int(now_mono - self._last_device_activity)
-                    if self._last_device_activity else None
-                )
-                status["firmware_watchdog"] = {
-                    "enabled": True,
-                    "hang_detected": self._fw_hang_detected,
-                    "silence_seconds": silence,
-                    "silence_timeout": int(self._fw_silence_timeout),
-                    "total_hangs": self._fw_total_hangs,
-                    "total_resets": self._fw_total_resets,
-                    "auto_reset": self._fw_auto_reset,
-                    "resets_last_hour": len([
-                        t for t in self._fw_reset_timestamps
-                        if t > now_mono - 3600
-                    ]),
-                    "max_resets_per_hour": self._fw_max_resets_per_hour,
-                }
-
-            return status
+        return status
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
         now = time.monotonic()
@@ -2782,105 +2810,111 @@ class MeshtasticGateway(PluginBase):
         Merges nodes from the MQTT interface and the serial listener so
         contacts from both sources appear in the Messages panel.
         """
+        nc = self._nodes_cache
+        if nc is not None and (time.monotonic() - nc[0]) < self._nodes_cache_ttl:
+            return nc[1]
+
         with self._lock:
-            seen: dict[str, dict[str, Any]] = {}
-
-            # 1. MQTT interface nodes
-            if self._connected and self._mesh_interface:
-                # Snapshot: the library mutates this dict from its own thread
-                # outside our lock, so iterating live races ("dictionary changed
-                # size during iteration").
-                try:
-                    raw_nodes = dict(getattr(self._mesh_interface, "nodes", None) or {})
-                except RuntimeError:
-                    raw_nodes = {}
-                for node_id, node_data in raw_nodes.items():
-                    user = node_data.get("user", {})
-                    position = node_data.get("position", {})
-                    long_name = user.get("longName") or ""
-                    short_name = user.get("shortName") or ""
-                    hw_model = user.get("hwModel") or ""
-                    if long_name and long_name != node_id:
-                        self._node_name_cache[node_id] = {
-                            "longName": long_name,
-                            "shortName": short_name,
-                            "hwModel": hw_model,
-                        }
-                    entry: dict[str, Any] = {
-                        "id": node_id,
-                        "long_name": long_name or None,
-                        "short_name": short_name or None,
-                        "hw_model": hw_model or None,
-                        "snr": node_data.get("snr"),
-                        "last_heard": node_data.get("lastHeard"),
-                        "latitude": position.get("latitude"),
-                        "longitude": position.get("longitude"),
-                        "via_mqtt": True,
-                        "via_lora": False,
-                    }
-                    if node_data.get("isSelf"):
-                        entry["is_self"] = True
-                        entry["via_mqtt"] = False
-                        entry["via_lora"] = True
-                    seen[node_id] = entry
-
-            # 2. Serial listener nodes (LoRa-heard, may not be on MQTT)
+            connected = self._connected
+            iface = self._mesh_interface
             listener = self._serial_listener
-            if listener is not None:
-                try:
-                    serial_nodes = dict(getattr(listener, "nodes", None) or {})
-                except RuntimeError:
-                    serial_nodes = {}
-                for node_id, node_data in serial_nodes.items():
-                    user = node_data.get("user", {})
-                    position = node_data.get("position", {})
-                    long_name = user.get("longName") or ""
-                    short_name = user.get("shortName") or ""
-                    hw_model = user.get("hwModel") or ""
-                    if long_name and long_name != node_id:
-                        self._node_name_cache[node_id] = {
-                            "longName": long_name,
-                            "shortName": short_name,
-                            "hwModel": hw_model,
-                        }
-                    serial_via_mqtt = bool(
-                        node_data.get("via_mqtt") or node_data.get("viaMqtt")
-                    )
-                    serial_via_lora = not serial_via_mqtt
-                    if node_data.get("isSelf"):
-                        serial_via_mqtt = False
-                        serial_via_lora = True
-                    if node_id in seen:
-                        existing = seen[node_id]
-                        # Merge transport flags from both sources
-                        existing["via_mqtt"] = existing.get("via_mqtt", False) or serial_via_mqtt
-                        existing["via_lora"] = existing.get("via_lora", False) or serial_via_lora
-                        # Prefer non-generic name from serial over MQTT
-                        ex_name = existing.get("long_name") or ""
-                        if (ex_name.startswith("Meshtastic ")
-                                and long_name
-                                and not long_name.startswith("Meshtastic ")):
-                            existing["long_name"] = long_name
-                            existing["short_name"] = short_name or existing["short_name"]
-                            existing["hw_model"] = hw_model or existing["hw_model"]
-                    else:
-                        entry = {
-                            "id": node_id,
-                            "long_name": long_name or None,
-                            "short_name": short_name or None,
-                            "hw_model": hw_model or None,
-                            "snr": node_data.get("snr"),
-                            "last_heard": node_data.get("lastHeard"),
-                            "latitude": position.get("latitude"),
-                            "longitude": position.get("longitude"),
-                            "via_mqtt": serial_via_mqtt,
-                            "via_lora": serial_via_lora,
-                        }
-                        if node_data.get("isSelf"):
-                            entry["is_self"] = True
-                        seen[node_id] = entry
 
-            return list(seen.values())
+        raw_mqtt: dict = {}
+        if connected and iface:
+            try:
+                raw_mqtt = dict(getattr(iface, "nodes", None) or {})
+            except Exception:
+                pass
+
+        raw_serial: dict = {}
+        if listener is not None:
+            try:
+                raw_serial = dict(getattr(listener, "nodes", None) or {})
+            except Exception:
+                pass
+
+        seen: dict[str, dict[str, Any]] = {}
+
+        for node_id, node_data in raw_mqtt.items():
+            user = node_data.get("user", {})
+            position = node_data.get("position", {})
+            long_name = user.get("longName") or ""
+            short_name = user.get("shortName") or ""
+            hw_model = user.get("hwModel") or ""
+            if long_name and long_name != node_id:
+                self._node_name_cache[node_id] = {
+                    "longName": long_name,
+                    "shortName": short_name,
+                    "hwModel": hw_model,
+                }
+            entry: dict[str, Any] = {
+                "id": node_id,
+                "long_name": long_name or None,
+                "short_name": short_name or None,
+                "hw_model": hw_model or None,
+                "snr": node_data.get("snr"),
+                "last_heard": node_data.get("lastHeard"),
+                "latitude": position.get("latitude"),
+                "longitude": position.get("longitude"),
+                "via_mqtt": True,
+                "via_lora": False,
+            }
+            if node_data.get("isSelf"):
+                entry["is_self"] = True
+                entry["via_mqtt"] = False
+                entry["via_lora"] = True
+            seen[node_id] = entry
+
+        for node_id, node_data in raw_serial.items():
+            user = node_data.get("user", {})
+            position = node_data.get("position", {})
+            long_name = user.get("longName") or ""
+            short_name = user.get("shortName") or ""
+            hw_model = user.get("hwModel") or ""
+            if long_name and long_name != node_id:
+                self._node_name_cache[node_id] = {
+                    "longName": long_name,
+                    "shortName": short_name,
+                    "hwModel": hw_model,
+                }
+            serial_via_mqtt = bool(
+                node_data.get("via_mqtt") or node_data.get("viaMqtt")
+            )
+            serial_via_lora = not serial_via_mqtt
+            if node_data.get("isSelf"):
+                serial_via_mqtt = False
+                serial_via_lora = True
+            if node_id in seen:
+                existing = seen[node_id]
+                existing["via_mqtt"] = existing.get("via_mqtt", False) or serial_via_mqtt
+                existing["via_lora"] = existing.get("via_lora", False) or serial_via_lora
+                ex_name = existing.get("long_name") or ""
+                if (ex_name.startswith("Meshtastic ")
+                        and long_name
+                        and not long_name.startswith("Meshtastic ")):
+                    existing["long_name"] = long_name
+                    existing["short_name"] = short_name or existing["short_name"]
+                    existing["hw_model"] = hw_model or existing["hw_model"]
+            else:
+                entry = {
+                    "id": node_id,
+                    "long_name": long_name or None,
+                    "short_name": short_name or None,
+                    "hw_model": hw_model or None,
+                    "snr": node_data.get("snr"),
+                    "last_heard": node_data.get("lastHeard"),
+                    "latitude": position.get("latitude"),
+                    "longitude": position.get("longitude"),
+                    "via_mqtt": serial_via_mqtt,
+                    "via_lora": serial_via_lora,
+                }
+                if node_data.get("isSelf"):
+                    entry["is_self"] = True
+                seen[node_id] = entry
+
+        result = list(seen.values())
+        self._nodes_cache = (time.monotonic(), result)
+        return result
 
     def get_lora_neighbors(self) -> list[dict[str, Any]]:
         """Return LoRa-only neighbors from the physical radio's NodeDB.

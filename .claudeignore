@@ -18,3 +18,4 @@ src/reticulumpi/builtin_plugins/web_dashboard/static/vendor/
 *.woff2
 .git/
 AUDIT-*.md
+*.db

@@ -96,6 +96,13 @@ class MessageStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        # Separate read-only connection: WAL mode supports concurrent
+        # readers, so read queries no longer block behind writes.
+        self._read_conn = sqlite3.connect(
+            db_path, check_same_thread=False, timeout=10,
+        )
+        self._read_conn.execute("PRAGMA query_only=ON")
+        self._read_conn.row_factory = sqlite3.Row
         # Wall-clock timestamps can jump backwards (NTP correction, manual
         # clock changes). Track the highest timestamp we've written so we
         # can keep the stored message order monotonic even across a jump.
@@ -214,6 +221,12 @@ class MessageStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_sub_transport "
             "ON messages(transport, sub_transport)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_conv_cover "
+            "ON messages(contact_id, timestamp DESC, transport, "
+            "sub_transport, direction, msg_type, read, from_name, "
+            "to_name)"
         )
         # One-time cleanup (idempotent): pre-channel-split Meshtastic
         # broadcast rows can't be re-bucketed by channel, so drop them.
@@ -428,11 +441,10 @@ class MessageStore:
 
     def get_status(self, msg_id: int) -> str | None:
         """Return the current delivery status for *msg_id*, or None."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT status FROM messages WHERE id = ?", (msg_id,)
-            ).fetchone()
-            return row[0] if row else None
+        row = self._read_conn.execute(
+            "SELECT status FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+        return row[0] if row else None
 
     def prune(self, max_messages: int) -> int:
         """Delete oldest messages beyond *max_messages* PER (transport, sub_transport).
@@ -507,16 +519,14 @@ class MessageStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT * FROM messages{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_message(self, msg_id: int) -> dict[str, Any] | None:
         """Retrieve a single message by ID."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM messages WHERE id = ?", (msg_id,)
-            ).fetchone()
+        row = self._read_conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
         return self._row_to_dict(row) if row else None
 
     def get_queued_sent(self, max_age_s: float | None = None) -> list[dict[str, Any]]:
@@ -528,20 +538,18 @@ class MessageStore:
             params.append(time.time() - max_age_s)
         where = " WHERE " + " AND ".join(clauses)
         sql = f"SELECT * FROM messages{where} ORDER BY timestamp ASC"
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_stats(self) -> dict[str, Any]:
         """Return aggregate counts by transport and direction."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT transport, direction, COUNT(*) as cnt "
-                "FROM messages GROUP BY transport, direction"
-            ).fetchall()
-            total = self._conn.execute(
-                "SELECT COUNT(*) FROM messages"
-            ).fetchone()[0]
+        rows = self._read_conn.execute(
+            "SELECT transport, direction, COUNT(*) as cnt "
+            "FROM messages GROUP BY transport, direction"
+        ).fetchall()
+        total = self._read_conn.execute(
+            "SELECT COUNT(*) FROM messages"
+        ).fetchone()[0]
         by_transport: dict[str, int] = {}
         by_direction: dict[str, int] = {}
         for r in rows:
@@ -610,8 +618,7 @@ class MessageStore:
             ORDER BY last_ts DESC
         """
         all_params = params + params if params else []
-        with self._lock:
-            rows = self._conn.execute(sql, all_params).fetchall()
+        rows = self._read_conn.execute(sql, all_params).fetchall()
         return [
             {
                 "contact_id": r["contact_id"],
@@ -644,8 +651,7 @@ class MessageStore:
             f"WHERE contact_id = ?{time_clause} "
             "ORDER BY timestamp DESC LIMIT ?"
         )
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def search_messages(
@@ -670,8 +676,7 @@ class MessageStore:
             f"SELECT * FROM messages WHERE {where} "
             "ORDER BY timestamp DESC LIMIT ?"
         )
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def mark_read(self, contact_id: str) -> int:
@@ -716,8 +721,7 @@ class MessageStore:
             f"SELECT contact_id, COUNT(*) AS cnt FROM messages "
             f"WHERE {where} GROUP BY contact_id"
         )
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        rows = self._read_conn.execute(sql, params).fetchall()
         return {r["contact_id"]: r["cnt"] for r in rows}
 
     def get_unread_counts_grouped(self) -> dict[str, dict[str, int]]:
@@ -733,8 +737,7 @@ class MessageStore:
             "WHERE direction = 'received' AND read = 0 "
             "GROUP BY transport, sub, contact_id"
         )
-        with self._lock:
-            rows = self._conn.execute(sql).fetchall()
+        rows = self._read_conn.execute(sql).fetchall()
         grouped: dict[str, dict[str, int]] = {}
         for r in rows:
             key = f"{r['transport']}:{r['sub']}" if r["sub"] else r["transport"]
@@ -758,8 +761,7 @@ class MessageStore:
             "WHERE transport = ? AND msg_type = 'direct'"
         )
         out: dict[str, set[str]] = {}
-        with self._lock:
-            rows = self._conn.execute(sql, (transport,)).fetchall()
+        rows = self._read_conn.execute(sql, (transport,)).fetchall()
         for r in rows:
             peer = r["peer_id"]
             if not peer or peer == "self":
@@ -768,7 +770,8 @@ class MessageStore:
         return out
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connections."""
+        self._read_conn.close()
         self._conn.close()
 
     # ── Helpers ────────────────────────────────────────────────────

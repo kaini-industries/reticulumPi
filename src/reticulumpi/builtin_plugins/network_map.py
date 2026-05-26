@@ -110,9 +110,20 @@ class NetworkMapPlugin(PluginBase):
         )
 
         self._broadcast_cache: tuple[float, int, dict] | None = None
-        self._broadcast_cache_ttl = 10.0
+        self._broadcast_cache_ttl = 15.0
         self._summary_cache: tuple[float, dict] | None = None
         self._summary_cache_ttl = 120.0
+
+        self._announces_dirty = threading.Event()
+        self._announces_dirty.set()
+        self._recent_announces_cache: list[dict[str, Any]] | None = None
+        self._recent_announces_time: float = 0.0
+        self._recent_announces_ttl = 5.0
+
+        self._read_conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._read_conn.row_factory = sqlite3.Row
+        self._read_conn.execute("PRAGMA journal_mode=WAL")
+        self._read_db_lock = threading.Lock()
 
         # Background thread for periodic interface stats and DB pruning
         self._start_thread(self._maintenance_loop, "network-map")
@@ -129,6 +140,12 @@ class NetworkMapPlugin(PluginBase):
         for sub_id in getattr(self, "_sub_ids", []):
             self.announce_dispatcher.unsubscribe(sub_id)
         self._join_threads()
+        read_conn = getattr(self, "_read_conn", None)
+        if read_conn:
+            try:
+                read_conn.close()
+            except Exception:
+                pass
 
     def get_status(self) -> dict[str, Any]:
         return {
@@ -151,7 +168,12 @@ class NetworkMapPlugin(PluginBase):
         if hasattr(self, "get_node_count"):
             mesh["node_count"] = self.get_node_count()
         if hasattr(self, "get_recent_announces"):
-            mesh["recent_announces"] = self.get_recent_announces()
+            ra_age = now - self._recent_announces_time
+            if self._announces_dirty.is_set() or ra_age >= self._recent_announces_ttl or self._recent_announces_cache is None:
+                self._recent_announces_cache = self.get_recent_announces()
+                self._recent_announces_time = now
+                self._announces_dirty.clear()
+            mesh["recent_announces"] = self._recent_announces_cache
         has_summary = False
         if want_summary and hasattr(self, "get_mesh_summary"):
             sc = self._summary_cache
@@ -361,8 +383,8 @@ class NetworkMapPlugin(PluginBase):
         """
         now = time.time()
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.row_factory = sqlite3.Row
+            with self._read_db_lock:
+                conn = self._read_conn
 
                 # Single-pass aggregation for totals, hops, activity, growth, nearby
                 agg = conn.execute(
@@ -388,7 +410,6 @@ class NetworkMapPlugin(PluginBase):
                     },
                 ).fetchone()
 
-                # App breakdown (separate query — different result shape)
                 app_rows = conn.execute(
                     "SELECT COALESCE(app_name, '') AS app, COUNT(*) AS cnt "
                     "FROM known_nodes GROUP BY app ORDER BY cnt DESC"
@@ -430,8 +451,8 @@ class NetworkMapPlugin(PluginBase):
         instead of scanning the full in-memory dict.
         """
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.row_factory = sqlite3.Row
+            with self._read_db_lock:
+                conn = self._read_conn
                 rows = conn.execute(
                     "SELECT * FROM known_nodes WHERE last_seen > ? "
                     "ORDER BY last_seen DESC LIMIT ?",
@@ -610,6 +631,7 @@ class NetworkMapPlugin(PluginBase):
         # _nodes_lock is released here — event publishing and DB writes
         # happen outside the lock to avoid deadlocks with event handlers.
         self._pending_upserts[destination_hash] = node_info
+        self._announces_dirty.set()
 
         if is_new:
             self.log.info(

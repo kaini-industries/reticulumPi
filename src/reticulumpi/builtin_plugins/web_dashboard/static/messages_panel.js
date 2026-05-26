@@ -1672,9 +1672,9 @@
         _maxBytes = (entry && entry.max_message_bytes) || null;
         if (_dom.section) _dom.section.style.display = _available ? '' : 'none';
         if (entry && entry.address) _renderTransportAddress(entry.address);
-        if (_available) _fetchConversations();
+        if (_available && !_hasFreshData) _fetchConversations();
       });
-      _fetchUnread();
+      if (!_hasFreshData) _fetchUnread();
     }
 
     // Register for cross-panel channel refresh so join/delete from the

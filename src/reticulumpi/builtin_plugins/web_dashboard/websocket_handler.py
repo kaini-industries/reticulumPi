@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import concurrent.futures
 import functools
 import json
@@ -32,6 +33,24 @@ def _diff_payload(data: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any]:
         if value != prev.get(key):
             result[key] = value
     return result
+
+
+# ── Per-WS preset switch rate limiting ──────────────────────────────
+_ws_preset_rate: dict[int, collections.deque] = {}
+_WS_PRESET_MAX = 3
+_WS_PRESET_WINDOW = 30.0
+
+
+def _ws_preset_rate_ok(ws_id: int) -> bool:
+    now = time.monotonic()
+    times = _ws_preset_rate.setdefault(ws_id, collections.deque())
+    cutoff = now - _WS_PRESET_WINDOW
+    while times and times[0] < cutoff:
+        times.popleft()
+    if len(times) >= _WS_PRESET_MAX:
+        return False
+    times.append(now)
+    return True
 
 
 # ── RNode config cache ──────────────────────────────────────────────
@@ -271,6 +290,8 @@ def setup_websocket_routes(app: aiohttp.web.Application) -> None:
 
 _ws_clients: set[aiohttp.web.WebSocketResponse] = set()
 _ws_last_activity: dict[aiohttp.web.WebSocketResponse, float] = {}
+_ws_last_snapshot: dict[int, float] = {}
+_last_global_snapshot: float = 0.0
 _broadcast_task: asyncio.Task | None = None
 
 
@@ -357,11 +378,12 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
             if msg.type == aiohttp.WSMsgType.ERROR:
                 break
             if msg.type == aiohttp.WSMsgType.TEXT:
-                resp = _handle_ws_command(msg.data, plugin)
+                resp = _handle_ws_command(msg.data, plugin, ws=ws)
                 if resp is not None:
                     await ws.send_str(json.dumps(resp))
     finally:
         _spectrum_clients.discard(ws)
+        _ws_preset_rate.pop(id(ws), None)
         log.info(
             "Spectrum WS disconnected (code=%s, %d remaining)",
             ws.close_code, len(_spectrum_clients),
@@ -397,7 +419,9 @@ def _collect_spectrum_data(plugin: Any) -> dict[str, Any]:
 async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
+    resync_every = int(plugin.config.get("spectrum_resync_cycles", 12))
     prev_data: dict[str, Any] = {}
+    cycle_count = 0
     loop = asyncio.get_running_loop()
 
     while True:
@@ -412,14 +436,18 @@ async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
             if not data:
                 continue
 
-            diff = _diff_payload(data, prev_data)
+            cycle_count += 1
+            if resync_every > 0 and cycle_count % resync_every == 0:
+                payload = data
+            else:
+                payload = _diff_payload(data, prev_data)
             prev_data = data
-            if not diff:
+            if not payload:
                 continue
 
             message = json.dumps({
                 "type": "update",
-                "data": diff,
+                "data": payload,
                 "timestamp": time.time(),
             })
 
@@ -442,6 +470,45 @@ async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
         except Exception:
             log.exception("Error in spectrum broadcast")
             await asyncio.sleep(1)
+
+
+async def _handle_snapshot_request(
+    ws: aiohttp.web.WebSocketResponse, plugin: Any
+) -> None:
+    """Send a full data snapshot in response to a client request."""
+    global _last_global_snapshot
+    now = time.time()
+    if now - _last_global_snapshot < 2.0:
+        return
+    if now - _ws_last_snapshot.get(id(ws), 0) < 10:
+        return
+    _ws_last_snapshot[id(ws)] = now
+    _last_global_snapshot = now
+    loop = asyncio.get_running_loop()
+    try:
+        if _collection_running.is_set():
+            await asyncio.sleep(0.15)
+        data, _, _ = await loop.run_in_executor(
+            _broadcast_executor,
+            functools.partial(
+                _collect_broadcast_data,
+                plugin, 0, _last_mesh_announce_ts, _mesh_version,
+                initial=True,
+            ),
+        )
+        data["ws_stats"] = {
+            "clients": len(_ws_clients),
+            "max_clients": plugin.config.get("max_websocket_clients", 10),
+            "collect_ms": 0,
+            "prev_payload_bytes": 0,
+        }
+        await ws.send_str(json.dumps({
+            "type": "update",
+            "data": data,
+            "timestamp": time.time(),
+        }))
+    except Exception:
+        log.debug("Failed to send snapshot on request", exc_info=True)
 
 
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
@@ -474,7 +541,7 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     loop = asyncio.get_running_loop()
     try:
         if _collection_running.is_set():
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.15)
         data, _, _ = await loop.run_in_executor(
             _broadcast_executor,
             functools.partial(
@@ -508,12 +575,24 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
                 log.debug("WebSocket error: %s", ws.exception())
                 break
             if msg.type == aiohttp.WSMsgType.TEXT:
-                resp = _handle_ws_command(msg.data, plugin)
+                try:
+                    parsed = json.loads(msg.data)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                if (
+                    isinstance(parsed, dict)
+                    and parsed.get("action") == "request_snapshot"
+                ):
+                    await _handle_snapshot_request(ws, plugin)
+                    continue
+                resp = _handle_ws_command(parsed or msg.data, plugin, ws=ws)
                 if resp is not None:
                     await ws.send_str(json.dumps(resp))
     finally:
         _ws_clients.discard(ws)
         _ws_last_activity.pop(ws, None)
+        _ws_last_snapshot.pop(id(ws), None)
+        _ws_preset_rate.pop(id(ws), None)
         log.info(
             "WebSocket disconnected (code=%s, %d remaining)",
             ws.close_code,
@@ -896,19 +975,24 @@ def _on_reaction_event(event_type: str, data: dict) -> None:
         pass
 
 
-def _handle_ws_command(raw: str, plugin: Any) -> dict | None:
+def _handle_ws_command(raw: dict | str, plugin: Any, ws: Any = None) -> dict | None:
     """Process a JSON command from a WebSocket client.
 
     Returns an optional response dict to send back to the caller.
     """
-    try:
-        cmd = json.loads(raw)
-    except Exception:
-        return
+    if isinstance(raw, dict):
+        cmd = raw
+    else:
+        try:
+            cmd = json.loads(raw)
+        except Exception:
+            return
     action = cmd.get("action")
     if action == "ping":
         return {"type": "pong", "ts": cmd.get("ts", 0)}
     if action == "spectrum_switch_preset":
+        if ws is not None and not _ws_preset_rate_ok(id(ws)):
+            return {"type": "spectrum_preset_error", "error": "Rate limited — try again shortly"}
         scanner = plugin.app.plugins.get("spectrum_scanner")
         if scanner and hasattr(scanner, "switch_preset"):
             preset_name = cmd.get("preset", "")
