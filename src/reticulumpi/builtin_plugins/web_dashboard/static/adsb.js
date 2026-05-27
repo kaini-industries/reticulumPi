@@ -242,7 +242,9 @@
         parts.push('Rx: ' + stats.receiver_lat.toFixed(4) + ', ' + stats.receiver_lon.toFixed(4));
       }
       if (data.status && data.status !== 'running') {
-        parts.push('<span class="adsb-status-' + esc(data.status) + '">' + esc(data.status) + '</span>');
+        var label = esc(data.status);
+        if (data.error) label += ': ' + esc(data.error);
+        parts.push('<span class="adsb-status-' + esc(data.status) + '">' + label + '</span>');
       }
       _statsEl.innerHTML = parts.filter(Boolean).join(' &middot; ');
     }
