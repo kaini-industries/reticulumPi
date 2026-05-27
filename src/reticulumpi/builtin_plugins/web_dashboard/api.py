@@ -9,6 +9,7 @@ Domain-specific handlers are in:
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -138,6 +139,14 @@ def _error(message: str, status: int = 400) -> aiohttp.web.Response:
 def _get_plugin(request: aiohttp.web.Request):
     """Get the WebDashboardPlugin from the request's app."""
     return request.app["plugin"]
+
+
+async def _run_sync(fn, *args, **kwargs):
+    """Run a blocking function in the default executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, functools.partial(fn, *args, **kwargs)
+    )
 
 
 # ── Route registration hub ───────────────────────────────────────────
@@ -305,7 +314,7 @@ async def handle_logout(request: aiohttp.web.Request) -> aiohttp.web.Response:
 async def handle_status(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/status — full app status."""
     plugin = _get_plugin(request)
-    status = plugin.app.get_status()
+    status = await _run_sync(plugin.app.get_status)
     return _ok(status)
 
 
@@ -382,7 +391,7 @@ async def handle_plugin_detail(request: aiohttp.web.Request) -> aiohttp.web.Resp
         return _error(f"Plugin '{name}' not found", 404)
 
     try:
-        status = p.get_status()
+        status = await _run_sync(p.get_status)
     except Exception:
         status = {"error": "status collection failed"}
 
@@ -456,8 +465,10 @@ async def handle_spectrum_switch_preset(
     from .api_services import _check_send_rate_limit
 
     remote_ip = request.remote or "unknown"
-    ok, retry_after = _check_send_rate_limit(
-        plugin, f"preset:{remote_ip}", max_per_window=3, window_seconds=30.0,
+    ok, retry_after = await _run_sync(
+        _check_send_rate_limit,
+        plugin, f"preset:{remote_ip}",
+        max_per_window=3, window_seconds=30.0,
     )
     if not ok:
         resp = _error("Too many preset switches — try again shortly", 429)

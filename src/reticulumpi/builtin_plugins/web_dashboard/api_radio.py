@@ -7,7 +7,7 @@ import struct
 
 import aiohttp.web
 
-from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok
+from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok, _run_sync
 
 
 def _get_fm_receiver(request: aiohttp.web.Request):
@@ -61,7 +61,7 @@ async def handle_radio_status(request: aiohttp.web.Request) -> aiohttp.web.Respo
     fm, err = _require_fm(request)
     if err:
         return err
-    return _ok(fm.get_snapshot())
+    return _ok(await _run_sync(fm.get_snapshot))
 
 
 # ── POST /api/radio/tune ────────────────────────────────────────────
@@ -91,7 +91,9 @@ async def handle_radio_tune(request: aiohttp.web.Request) -> aiohttp.web.Respons
     if mode is not None and not isinstance(mode, str):
         return _error("'mode' must be a string", 400)
     try:
-        result = fm.tune(int(freq_mhz * 1_000_000), mode=mode)
+        result = await _run_sync(
+            fm.tune, int(freq_mhz * 1_000_000), mode=mode
+        )
     except (ValueError, AttributeError, TypeError) as exc:
         return _error(str(exc), 400)
     return _ok(result)
@@ -121,7 +123,7 @@ async def handle_radio_stop(request: aiohttp.web.Request) -> aiohttp.web.Respons
     fm, err = _require_fm(request)
     if err:
         return err
-    result = fm.stop_playback()
+    result = await _run_sync(fm.stop_playback)
     return _ok(result)
 
 
@@ -147,7 +149,7 @@ async def handle_radio_gain(request: aiohttp.web.Request) -> aiohttp.web.Respons
         except (TypeError, ValueError):
             return _error("'gain_db' must be a number or null", 400)
     try:
-        result = fm.set_gain(gain_db)
+        result = await _run_sync(fm.set_gain, gain_db)
     except ValueError as exc:
         return _error(str(exc), 400)
     return _ok(result)
@@ -175,7 +177,7 @@ async def handle_radio_squelch(request: aiohttp.web.Request) -> aiohttp.web.Resp
         level = int(level)
     except (TypeError, ValueError):
         return _error("'level' must be an integer", 400)
-    result = fm.set_squelch(level)
+    result = await _run_sync(fm.set_squelch, level)
     return _ok(result)
 
 
@@ -251,8 +253,10 @@ async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.Stream
     await response.write(wav_header)
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-    if not fm.register_audio_client(queue):
-        raise aiohttp.web.HTTPServiceUnavailable(text="Too many audio clients")
+    if not await _run_sync(fm.register_audio_client, queue):
+        raise aiohttp.web.HTTPServiceUnavailable(
+            text="Too many audio clients"
+        )
     try:
         while True:
             try:
@@ -267,7 +271,7 @@ async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.Stream
     except (asyncio.CancelledError, ConnectionResetError, ConnectionAbortedError):
         pass
     finally:
-        fm.unregister_audio_client(queue)
+        await _run_sync(fm.unregister_audio_client, queue)
 
     return response
 
@@ -282,7 +286,7 @@ async def handle_radio_lock(request: aiohttp.web.Request) -> aiohttp.web.Respons
     fm, err2 = _require_fm(request)
     if err2:
         return err2
-    return _ok(fm.lock_dongle())
+    return _ok(await _run_sync(fm.lock_dongle))
 
 
 # ── POST /api/radio/unlock ──────────────────────────────────────────
@@ -295,7 +299,7 @@ async def handle_radio_unlock(request: aiohttp.web.Request) -> aiohttp.web.Respo
     fm, err2 = _require_fm(request)
     if err2:
         return err2
-    return _ok(fm.unlock_dongle())
+    return _ok(await _run_sync(fm.unlock_dongle))
 
 
 # ── GET /api/radio/favorites ────────────────────────────────────────
@@ -395,7 +399,7 @@ async def handle_radio_favorites_tune(request: aiohttp.web.Request) -> aiohttp.w
         return err
     fav_id = request.match_info.get("fav_id", "")
     try:
-        result = fm.tune_favorite(fav_id)
+        result = await _run_sync(fm.tune_favorite, fav_id)
     except ValueError as exc:
         return _error(str(exc), 400)
     return _ok(result)
@@ -415,7 +419,7 @@ async def handle_radio_record_start(request: aiohttp.web.Request) -> aiohttp.web
         body = await request.json()
     except Exception:
         body = {}
-    result = fm.start_recording(label=body.get("label"))
+    result = await _run_sync(fm.start_recording, label=body.get("label"))
     if result.get("error"):
         return _error(result["error"], 409)
     return _ok(result)
@@ -431,7 +435,7 @@ async def handle_radio_record_stop(request: aiohttp.web.Request) -> aiohttp.web.
     fm, err = _require_fm(request)
     if err:
         return err
-    return _ok(fm.stop_recording())
+    return _ok(await _run_sync(fm.stop_recording))
 
 
 # ── GET /api/radio/recordings ───────────────────────────────────────

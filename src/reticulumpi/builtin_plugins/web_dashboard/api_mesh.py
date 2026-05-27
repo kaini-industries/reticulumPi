@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -13,6 +14,7 @@ from reticulumpi.builtin_plugins.web_dashboard.api import (
     _error,
     _get_plugin,
     _ok,
+    _run_sync,
 )
 
 
@@ -38,7 +40,8 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
 
     # Check if paginated method is available (new) — fall back to full list
     if not hasattr(network_map, "get_known_nodes_paginated"):
-        return _ok({"nodes": network_map.get_known_nodes(),
+        nodes = await _run_sync(network_map.get_known_nodes)
+        return _ok({"nodes": nodes,
                      "local_services": local_services})
 
     try:
@@ -57,7 +60,8 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
 
     # If per_page=0, return full list for legacy callers
     if per_page == 0:
-        return _ok({"nodes": network_map.get_known_nodes(),
+        nodes = await _run_sync(network_map.get_known_nodes)
+        return _ok({"nodes": nodes,
                      "local_services": local_services})
 
     sort = request.query.get("sort", "last_seen")
@@ -68,7 +72,8 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
     app_filter = request.query.get("app", "")
     view = request.query.get("view", "")
 
-    result = network_map.get_known_nodes_paginated(
+    result = await _run_sync(
+        network_map.get_known_nodes_paginated,
         page=page, per_page=per_page, sort=sort, order=order,
         search=search, app_filter=app_filter, view=view,
     )
@@ -85,7 +90,7 @@ async def handle_mesh_summary(request: aiohttp.web.Request) -> aiohttp.web.Respo
                      "total_nodes": 0, "app_breakdown": {},
                      "hop_distribution": {}, "activity_stats": {},
                      "growth": {}, "nearby": 0})
-    return _ok(network_map.get_mesh_summary())
+    return _ok(await _run_sync(network_map.get_mesh_summary))
 
 
 async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -94,7 +99,7 @@ async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Res
     telemetry = plugin.app.get_plugin("mesh_telemetry")
     if not telemetry or not hasattr(telemetry, "get_peer_metrics"):
         return _ok({"peers": [], "message": "mesh_telemetry plugin not available"})
-    return _ok({"peers": telemetry.get_peer_metrics()})
+    return _ok({"peers": await _run_sync(telemetry.get_peer_metrics)})
 
 
 async def handle_transport(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -104,10 +109,12 @@ async def handle_transport(request: aiohttp.web.Request) -> aiohttp.web.Response
     if not mon or not hasattr(mon, "get_hub_health"):
         return _ok({"primaries": [], "fallback_active": False, "message": "transport_monitor plugin not available"})
 
-    data = mon.get_hub_health()
+    data = await _run_sync(mon.get_hub_health)
 
     # Enrich hub entries with traffic stats from interface stats
-    traffic_map: dict[str, dict] = _build_traffic_map(plugin)
+    traffic_map: dict[str, dict] = await _run_sync(
+        _build_traffic_map, plugin
+    )
 
     def _enrich(hub: dict) -> None:
         host = hub.get("target_host", "")
@@ -134,7 +141,7 @@ async def handle_connectivity(request: aiohttp.web.Request) -> aiohttp.web.Respo
     conn_mon = plugin.app.get_plugin("connectivity_monitor")
     if not conn_mon or not hasattr(conn_mon, "get_health"):
         return _ok({"issues": [], "message": "connectivity_monitor plugin not available"})
-    return _ok(conn_mon.get_health())
+    return _ok(await _run_sync(conn_mon.get_health))
 
 
 async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -188,7 +195,8 @@ async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
         min_hops = None
         max_hops = None
 
-    data = conn_mon.get_routing_data(
+    data = await _run_sync(
+        conn_mon.get_routing_data,
         page=page,
         per_page=per_page,
         sort=sort,
@@ -207,7 +215,7 @@ async def handle_path_warming(request: aiohttp.web.Request) -> aiohttp.web.Respo
     warmer = plugin.app.get_plugin("path_warmer")
     if not warmer or not hasattr(warmer, "get_warming_stats"):
         return _ok({"message": "path_warmer plugin not available"})
-    return _ok(warmer.get_warming_stats())
+    return _ok(await _run_sync(warmer.get_warming_stats))
 
 
 async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -216,10 +224,9 @@ async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.R
     th = plugin.app.get_plugin("transport_health")
     if not th or not hasattr(th, "get_transport_nodes"):
         return _ok({"nodes": [], "summary": {}, "message": "transport_health plugin not available"})
-    return _ok({
-        "nodes": th.get_transport_nodes(),
-        "summary": th.get_transport_summary(),
-    })
+    nodes = await _run_sync(th.get_transport_nodes)
+    summary = await _run_sync(th.get_transport_summary)
+    return _ok({"nodes": nodes, "summary": summary})
 
 
 async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -249,14 +256,16 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
     conn_mon = plugin.app.get_plugin("connectivity_monitor")
     path_table: list = []
     if conn_mon and hasattr(conn_mon, "get_routing_data"):
-        routing = conn_mon.get_routing_data(per_page=500)
+        routing = await _run_sync(
+            conn_mon.get_routing_data, per_page=500
+        )
         path_table = routing.get("paths", [])
 
     # Transport node health
     th = plugin.app.get_plugin("transport_health")
     transport_nodes: list = []
     if th and hasattr(th, "get_transport_nodes"):
-        transport_nodes = th.get_transport_nodes()
+        transport_nodes = await _run_sync(th.get_transport_nodes)
 
     # Check if caller requested specific hashes (efficient path)
     specific_hashes = request.query.get("hashes", "")
@@ -266,16 +275,23 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
             h.strip().lower().strip("<>")
             for h in specific_hashes.split(",") if h.strip()
         )
-        all_nodes = network_map.get_known_nodes()
+        all_nodes = await _run_sync(network_map.get_known_nodes)
         nodes = [
             n for n in all_nodes
-            if n.get("destination_hash", "").lower().strip("<>") in hash_set
+            if n.get("destination_hash", "").lower().strip("<>")
+            in hash_set
         ]
         scored = score_all_nodes(nodes, path_table, transport_nodes)
-        return _ok({"nodes": scored, "summary": {"total_scored": len(scored), "returned": len(scored)}})
+        return _ok({
+            "nodes": scored,
+            "summary": {
+                "total_scored": len(scored),
+                "returned": len(scored),
+            },
+        })
 
     # Full scoring with pagination
-    nodes = network_map.get_known_nodes()
+    nodes = await _run_sync(network_map.get_known_nodes)
     scored = score_all_nodes(nodes, path_table, transport_nodes)
 
     # Apply search filter
@@ -346,7 +362,6 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
     Query parameters:
         interface: substring filter (e.g. ``RNode`` or ``TCP``)
     """
-    import asyncio
     import json as _json
     import os
 
@@ -417,70 +432,111 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
     if iface_filter:
         paths = [p for p in paths if iface_filter in p.get("interface", "")]
 
-    # Cross-reference with network_map for node names + extra fields
+    # Cross-reference with network_map and score reachability.
+    # All of this acquires threading locks, so offload to the
+    # default executor to avoid blocking the event loop.
     plugin = _get_plugin(request)
-    network_map = plugin.app.get_plugin("network_map")
-    if network_map and hasattr(network_map, "_known_nodes"):
-        with network_map._nodes_lock:
-            known = network_map._known_nodes
-            for p in paths:
-                h = p.get("hash", "")
-                try:
-                    node = known.get(bytes.fromhex(h))
-                    if node:
-                        p["app_name"] = node.get("app_name", "")
-                        p["app_data"] = node.get("app_data_str", "")
-                        p["aspects"] = node.get("aspects", "")
-                        p["announce_count"] = node.get("announce_count", 0)
-                        p["first_seen"] = node.get("first_seen")
-                except (ValueError, TypeError):
-                    pass
 
-    # Score reachability for filtered paths
-    if paths:
-        try:
-            from reticulumpi.reachability import score_all_nodes
-            conn_mon = plugin.app.get_plugin("connectivity_monitor")
-            path_table: list = []
-            if conn_mon and hasattr(conn_mon, "get_routing_data"):
-                routing = conn_mon.get_routing_data(per_page=500)
-                path_table = routing.get("paths", [])
-            th = plugin.app.get_plugin("transport_health")
-            transport_nodes = th.get_transport_nodes() if th and hasattr(th, "get_transport_nodes") else []
-            # Build mini node list for scoring
-            score_nodes = []
-            for p in paths:
-                score_nodes.append({
-                    "destination_hash": "<" + p.get("hash", "") + ">",
-                    "app_name": p.get("app_name", ""),
-                    "app_data": p.get("app_data", ""),
-                    "hops": p.get("hops"),
-                    "last_seen": p.get("timestamp"),
-                    "announce_count": p.get("announce_count", 0),
-                })
-            scored = score_all_nodes(score_nodes, path_table, transport_nodes)
-            score_map = {s["destination_hash"]: s for s in scored}
-            for p in paths:
-                key = "<" + p.get("hash", "") + ">"
-                s = score_map.get(key)
-                if s:
-                    p["score"] = s.get("score", 0)
-                    p["label"] = s.get("label", "unlikely")
-                    p["factors"] = s.get("factors")
-        except Exception:
-            pass  # Scoring is best-effort
+    def _enrich_and_score() -> dict:
+        network_map = plugin.app.get_plugin("network_map")
+        if network_map and hasattr(network_map, "_known_nodes"):
+            with network_map._nodes_lock:
+                known = network_map._known_nodes
+                for p in paths:
+                    h = p.get("hash", "")
+                    try:
+                        node = known.get(bytes.fromhex(h))
+                        if node:
+                            p["app_name"] = node.get(
+                                "app_name", ""
+                            )
+                            p["app_data"] = node.get(
+                                "app_data_str", ""
+                            )
+                            p["aspects"] = node.get(
+                                "aspects", ""
+                            )
+                            p["announce_count"] = node.get(
+                                "announce_count", 0
+                            )
+                            p["first_seen"] = node.get(
+                                "first_seen"
+                            )
+                    except (ValueError, TypeError):
+                        pass
 
-    # Group counts by interface for summary
-    by_iface: dict[str, int] = {}
-    for p in (_paths_cache["data"] or []):
-        iface = p.get("interface", "unknown")
-        by_iface[iface] = by_iface.get(iface, 0) + 1
+        # Score reachability for filtered paths
+        if paths:
+            try:
+                from reticulumpi.reachability import (
+                    score_all_nodes,
+                )
 
-    return _ok({
-        "paths": paths,
-        "total": len(paths),
-        "by_interface": by_iface,
-    })
+                conn_mon = plugin.app.get_plugin(
+                    "connectivity_monitor"
+                )
+                path_table: list = []
+                if conn_mon and hasattr(
+                    conn_mon, "get_routing_data"
+                ):
+                    routing = conn_mon.get_routing_data(
+                        per_page=500
+                    )
+                    path_table = routing.get("paths", [])
+                th = plugin.app.get_plugin("transport_health")
+                transport_nodes = (
+                    th.get_transport_nodes()
+                    if th
+                    and hasattr(th, "get_transport_nodes")
+                    else []
+                )
+                # Build mini node list for scoring
+                score_nodes = []
+                for p in paths:
+                    score_nodes.append({
+                        "destination_hash": (
+                            "<" + p.get("hash", "") + ">"
+                        ),
+                        "app_name": p.get("app_name", ""),
+                        "app_data": p.get("app_data", ""),
+                        "hops": p.get("hops"),
+                        "last_seen": p.get("timestamp"),
+                        "announce_count": p.get(
+                            "announce_count", 0
+                        ),
+                    })
+                scored = score_all_nodes(
+                    score_nodes, path_table, transport_nodes
+                )
+                score_map = {
+                    s["destination_hash"]: s for s in scored
+                }
+                for p in paths:
+                    key = "<" + p.get("hash", "") + ">"
+                    s = score_map.get(key)
+                    if s:
+                        p["score"] = s.get("score", 0)
+                        p["label"] = s.get(
+                            "label", "unlikely"
+                        )
+                        p["factors"] = s.get("factors")
+            except Exception:
+                pass  # Scoring is best-effort
+
+        # Group counts by interface for summary
+        by_iface: dict[str, int] = {}
+        for p in (_paths_cache["data"] or []):
+            iface = p.get("interface", "unknown")
+            by_iface[iface] = by_iface.get(iface, 0) + 1
+
+        return {
+            "paths": paths,
+            "total": len(paths),
+            "by_interface": by_iface,
+        }
+
+    result = await _run_sync(_enrich_and_score)
+    return _ok(result)
 
 
 def setup_mesh_routes(app: aiohttp.web.Application) -> None:

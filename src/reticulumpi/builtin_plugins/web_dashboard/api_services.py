@@ -15,7 +15,7 @@ from collections import deque
 
 import aiohttp.web
 
-from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok
+from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok, _run_sync
 
 
 # ── Send-endpoint rate limiter ─────────────────────────────────────
@@ -73,7 +73,7 @@ async def handle_lora_diagnostics(request: aiohttp.web.Request) -> aiohttp.web.R
     lora = plugin.app.get_plugin("lora_diagnostics")
     if not lora or not hasattr(lora, "get_diagnostics"):
         return _ok({"message": "lora_diagnostics plugin not available"})
-    return _ok(lora.get_diagnostics())
+    return _ok(await _run_sync(lora.get_diagnostics))
 
 
 async def handle_lora_announce_mode(
@@ -100,7 +100,7 @@ async def handle_lora_announce_mode(
         return _error("Missing 'mode' field", 400)
 
     try:
-        result = lora.set_announce_mode(mode)
+        result = await _run_sync(lora.set_announce_mode, mode)
         return _ok(result)
     except ValueError as exc:
         return _error(str(exc), 400)
@@ -118,7 +118,7 @@ async def handle_alerts(request: aiohttp.web.Request) -> aiohttp.web.Response:
     if not alert_sys:
         return _ok({"status": None, "message": "alert_system plugin not available"})
     try:
-        status = alert_sys.get_status()
+        status = await _run_sync(alert_sys.get_status)
     except Exception:
         status = {"error": "status collection failed"}
     return _ok(status)
@@ -139,7 +139,7 @@ async def handle_sensors(request: aiohttp.web.Request) -> aiohttp.web.Response:
     sf = plugin.app.get_plugin("sensor_framework")
     if not sf or not hasattr(sf, "get_latest_readings"):
         return _ok({"sensors": {}, "message": "sensor_framework plugin not available"})
-    return _ok({"sensors": sf.get_latest_readings()})
+    return _ok({"sensors": await _run_sync(sf.get_latest_readings)})
 
 
 async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -161,7 +161,9 @@ async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Res
     except (ValueError, TypeError):
         limit = 60
 
-    history = sf.get_sensor_history(sensor_name, limit=limit)
+    history = await _run_sync(
+        sf.get_sensor_history, sensor_name, limit=limit,
+    )
     return _ok({"sensor": sensor_name, "history": history})
 
 
@@ -171,7 +173,9 @@ async def handle_emergency(request: aiohttp.web.Request) -> aiohttp.web.Response
     eb = plugin.app.get_plugin("emergency_broadcast")
     if not eb or not hasattr(eb, "get_messages"):
         return _ok({"messages": [], "message": "emergency_broadcast plugin not available"})
-    return _ok({"messages": eb.get_messages(), "status": eb.get_status()})
+    messages = await _run_sync(eb.get_messages)
+    status = await _run_sync(eb.get_status)
+    return _ok({"messages": messages, "status": status})
 
 
 # ── NomadNet auth ────────────────────────────────────────────────────
@@ -246,7 +250,7 @@ async def handle_meshtastic_status(
     gw = plugin.app.get_plugin("meshtastic_gateway")
     if not gw or not hasattr(gw, "get_status"):
         return _ok({"available": False, "message": "meshtastic_gateway plugin not enabled"})
-    return _ok(gw.get_status())
+    return _ok(await _run_sync(gw.get_status))
 
 
 async def handle_meshtastic_nodes(
@@ -257,7 +261,7 @@ async def handle_meshtastic_nodes(
     gw = plugin.app.get_plugin("meshtastic_gateway")
     if not gw or not hasattr(gw, "get_meshtastic_nodes"):
         return _ok({"nodes": [], "message": "meshtastic_gateway plugin not enabled"})
-    return _ok({"nodes": gw.get_meshtastic_nodes()})
+    return _ok({"nodes": await _run_sync(gw.get_meshtastic_nodes)})
 
 
 async def handle_meshtastic_device(
@@ -268,7 +272,7 @@ async def handle_meshtastic_device(
     gw = plugin.app.get_plugin("meshtastic_gateway")
     if not gw or not hasattr(gw, "get_device_info"):
         return _ok({"available": False, "message": "meshtastic_gateway plugin not enabled"})
-    return _ok(gw.get_device_info())
+    return _ok(await _run_sync(gw.get_device_info))
 
 
 async def handle_meshtastic_device_reset(
@@ -280,7 +284,7 @@ async def handle_meshtastic_device_reset(
     if not gw or not hasattr(gw, "reset_device"):
         return _error("meshtastic_gateway plugin not enabled", 503)
 
-    result = gw.reset_device()
+    result = await _run_sync(gw.reset_device)
     if result.get("ok"):
         return _ok(result)
     return _error(result.get("reason", "Reset failed"), 400)
@@ -294,7 +298,7 @@ async def handle_meshtastic_lora_neighbors(
     gw = plugin.app.get_plugin("meshtastic_gateway")
     if not gw or not hasattr(gw, "get_lora_neighbors"):
         return _ok({"neighbors": [], "message": "meshtastic_gateway plugin not enabled"})
-    return _ok({"neighbors": gw.get_lora_neighbors()})
+    return _ok({"neighbors": await _run_sync(gw.get_lora_neighbors)})
 
 
 async def handle_meshtastic_channels(
@@ -305,10 +309,13 @@ async def handle_meshtastic_channels(
     gw = plugin.app.get_plugin("meshtastic_gateway")
     if not gw or not hasattr(gw, "get_channels"):
         return _ok({"channels": [], "message": "meshtastic_gateway plugin not enabled"})
+    channels = await _run_sync(gw.get_channels)
     return _ok({
-        "channels": gw.get_channels(),
+        "channels": channels,
         "live": getattr(gw, "channels_live", None),
-        "cache_age_seconds": getattr(gw, "channels_cache_age_seconds", None),
+        "cache_age_seconds": getattr(
+            gw, "channels_cache_age_seconds", None
+        ),
     })
 
 
@@ -336,7 +343,7 @@ async def handle_meshtastic_channel_join(
     if url:
         if not hasattr(gw, "join_channel_url"):
             return _error("Channel URL join not supported", 501)
-        result = gw.join_channel_url(url)
+        result = await _run_sync(gw.join_channel_url, url)
         if result.get("ok"):
             return _ok(result)
         return _error(result.get("reason", "Join failed"), 400)
@@ -355,7 +362,9 @@ async def handle_meshtastic_channel_join(
 
     if not hasattr(gw, "join_channel"):
         return _error("Channel join not supported", 501)
-    result = gw.join_channel(name, psk, index=index)
+    result = await _run_sync(
+        gw.join_channel, name, psk, index=index,
+    )
     if result.get("ok"):
         return _ok(result)
     return _error(result.get("reason", "Join failed"), 400)
@@ -375,7 +384,7 @@ async def handle_meshtastic_channel_delete(
     except (KeyError, ValueError):
         return _error("Invalid channel index", 400)
 
-    result = gw.delete_channel(index)
+    result = await _run_sync(gw.delete_channel, index)
     if result.get("ok"):
         return _ok(result)
     return _error(result.get("reason", "Delete failed"), 400)
@@ -392,7 +401,7 @@ async def handle_meshcore_status(
     gw = plugin.app.get_plugin("meshcore_gateway")
     if not gw or not hasattr(gw, "get_status"):
         return _ok({"available": False, "message": "meshcore_gateway plugin not enabled"})
-    return _ok(gw.get_status())
+    return _ok(await _run_sync(gw.get_status))
 
 
 async def handle_meshcore_contacts(
@@ -403,7 +412,7 @@ async def handle_meshcore_contacts(
     gw = plugin.app.get_plugin("meshcore_gateway")
     if not gw or not hasattr(gw, "get_contacts"):
         return _ok({"contacts": [], "message": "meshcore_gateway plugin not enabled"})
-    return _ok({"contacts": gw.get_contacts()})
+    return _ok({"contacts": await _run_sync(gw.get_contacts)})
 
 
 async def handle_meshcore_device(
@@ -414,7 +423,7 @@ async def handle_meshcore_device(
     gw = plugin.app.get_plugin("meshcore_gateway")
     if not gw or not hasattr(gw, "get_device_info"):
         return _ok({"available": False, "message": "meshcore_gateway plugin not enabled"})
-    return _ok(gw.get_device_info())
+    return _ok(await _run_sync(gw.get_device_info))
 
 
 # ── MeshCore Observer ────────────────────────────────────────────────
@@ -428,7 +437,7 @@ async def handle_meshcore_observer_status(
     obs = plugin.app.get_plugin("meshcore_observer")
     if not obs or not hasattr(obs, "get_status"):
         return _ok({"available": False, "message": "meshcore_observer plugin not enabled"})
-    return _ok({"available": True, **obs.get_status()})
+    return _ok({"available": True, **(await _run_sync(obs.get_status))})
 
 
 # ── Mesh Bridge ──────────────────────────────────────────────────────
@@ -442,7 +451,8 @@ async def handle_mesh_bridge_status(
     bridge = plugin.app.get_plugin("mesh_bridge")
     if not bridge or not hasattr(bridge, "get_status"):
         return _ok({"available": False, "message": "mesh_bridge plugin not enabled"})
-    return _ok({"available": True, **bridge.get_status()})
+    status = await _run_sync(bridge.get_status)
+    return _ok({"available": True, **status})
 
 
 async def handle_mesh_bridge_running(
@@ -460,7 +470,11 @@ async def handle_mesh_bridge_running(
     running = body.get("running")
     if not isinstance(running, bool):
         return _error("'running' field must be a boolean", 400)
-    return _ok(bridge.set_running(running, reason="manual" if not running else None))
+    result = await _run_sync(
+        bridge.set_running, running,
+        reason="manual" if not running else None,
+    )
+    return _ok(result)
 
 
 # ── Messaging Hub ────────────────────────────────────────────────────
@@ -555,8 +569,9 @@ async def handle_send_message(
         ua = request.headers.get("User-Agent", "")
         ua_tag = hashlib.sha1(ua.encode("utf-8", "replace")).hexdigest()[:8] if ua else "none"
         rate_key = f"local:{request.remote or 'unknown'}:{ua_tag}"
-    ok, retry_after = _check_send_rate_limit(
-        plugin, rate_key, max_sends, window_s,
+    ok, retry_after = await _run_sync(
+        _check_send_rate_limit, plugin, rate_key,
+        max_sends, window_s,
     )
     if not ok:
         resp = _error(
@@ -840,7 +855,7 @@ async def handle_space_snapshot(
     if not tracker or not hasattr(tracker, "get_snapshot"):
         return _ok({"available": False, "message": "space_tracker plugin not enabled"})
     try:
-        snap = tracker.get_snapshot()
+        snap = await _run_sync(tracker.get_snapshot)
     except Exception:
         return _error("Failed to gather space_tracker snapshot", 500)
     snap["available"] = True
@@ -858,7 +873,7 @@ async def handle_gps_snapshot(
     gps = plugin.app.get_plugin("gps_telemetry")
     if not gps or not hasattr(gps, "get_snapshot"):
         return _ok({"available": False, "message": "gps_telemetry plugin not enabled"})
-    snap = gps.get_snapshot()
+    snap = await _run_sync(gps.get_snapshot)
     snap["available"] = True
     return _ok(snap)
 
@@ -871,7 +886,7 @@ async def handle_gps_status(
     gps = plugin.app.get_plugin("gps_telemetry")
     if not gps or not hasattr(gps, "get_status"):
         return _ok({"available": False})
-    status = gps.get_status()
+    status = await _run_sync(gps.get_status)
     status["available"] = True
     return _ok(status)
 
@@ -884,7 +899,7 @@ async def handle_gps_satellites(
     gps = plugin.app.get_plugin("gps_telemetry")
     if not gps or not hasattr(gps, "get_snapshot"):
         return _ok({"available": False, "satellites": []})
-    snap = gps.get_snapshot()
+    snap = await _run_sync(gps.get_snapshot)
     return _ok(
         {
             "available": True,
@@ -905,7 +920,7 @@ async def handle_adsb_snapshot(
     if not adsb or not hasattr(adsb, "get_snapshot"):
         return _ok({"available": False, "message": "adsb_radar plugin not enabled"})
     try:
-        snap = adsb.get_snapshot()
+        snap = await _run_sync(adsb.get_snapshot)
     except Exception:
         return _error("Failed to gather adsb_radar snapshot", 500)
     snap["available"] = True
@@ -921,7 +936,7 @@ async def handle_ntp_snapshot(
     if not ntp or not hasattr(ntp, "get_snapshot"):
         return _ok({"available": False, "message": "ntp_server plugin not enabled"})
     try:
-        snap = ntp.get_snapshot()
+        snap = await _run_sync(ntp.get_snapshot)
     except Exception:
         return _error("Failed to gather ntp_server snapshot", 500)
     snap["available"] = True
@@ -937,7 +952,7 @@ async def handle_ntp_sources(
     if not ntp or not hasattr(ntp, "get_snapshot"):
         return _ok({"available": False, "sources": []})
     try:
-        snap = ntp.get_snapshot()
+        snap = await _run_sync(ntp.get_snapshot)
     except Exception:
         return _ok({"available": False, "sources": []})
     return _ok({"available": True, "sources": snap.get("sources", [])})
@@ -955,7 +970,7 @@ async def handle_link_tester_snapshot(
     if not lt or not hasattr(lt, "get_history"):
         return _ok({"available": False, "message": "lora_link_tester plugin not enabled"})
     try:
-        return _ok(lt.get_history())
+        return _ok(await _run_sync(lt.get_history))
     except Exception:
         return _error("Failed to gather link tester data", 500)
 
@@ -972,7 +987,8 @@ async def handle_link_tester_start(
         body = await request.json()
     except Exception:
         body = {}
-    result = lt.start_test(
+    result = await _run_sync(
+        lt.start_test,
         target=body.get("target"),
         count=body.get("count"),
     )
@@ -989,7 +1005,7 @@ async def handle_link_tester_stop(
     lt = plugin.app.get_plugin("lora_link_tester")
     if not lt or not hasattr(lt, "stop_test"):
         return _error("lora_link_tester plugin not available", 503)
-    return _ok(lt.stop_test())
+    return _ok(await _run_sync(lt.stop_test))
 
 
 async def handle_link_tester_clear(
@@ -1000,7 +1016,7 @@ async def handle_link_tester_clear(
     lt = plugin.app.get_plugin("lora_link_tester")
     if not lt or not hasattr(lt, "clear_history"):
         return _error("lora_link_tester plugin not available", 503)
-    return _ok(lt.clear_history())
+    return _ok(await _run_sync(lt.clear_history))
 
 
 # ── Signal plugin endpoints ──────────────────────────────────────────
@@ -1013,7 +1029,7 @@ async def handle_weather_alert(
     wa = plugin.app.get_plugin("weather_alert")
     if not wa:
         return _error("weather_alert plugin not available", 503)
-    return _ok(wa.get_snapshot())
+    return _ok(await _run_sync(wa.get_snapshot))
 
 
 async def handle_weather_alert_active(
@@ -1023,7 +1039,7 @@ async def handle_weather_alert_active(
     wa = plugin.app.get_plugin("weather_alert")
     if not wa:
         return _error("weather_alert plugin not available", 503)
-    snap = wa.get_snapshot()
+    snap = await _run_sync(wa.get_snapshot)
     return _ok(snap.get("active_alert"))
 
 
@@ -1034,7 +1050,7 @@ async def handle_ais(
     ais = plugin.app.get_plugin("ais_receiver")
     if not ais:
         return _error("ais_receiver plugin not available", 503)
-    return _ok(ais.get_snapshot())
+    return _ok(await _run_sync(ais.get_snapshot))
 
 
 async def handle_acars(
@@ -1044,7 +1060,7 @@ async def handle_acars(
     acars = plugin.app.get_plugin("acars_decoder")
     if not acars:
         return _error("acars_decoder plugin not available", 503)
-    return _ok(acars.get_snapshot())
+    return _ok(await _run_sync(acars.get_snapshot))
 
 
 async def handle_radiosonde(
@@ -1054,7 +1070,7 @@ async def handle_radiosonde(
     rs = plugin.app.get_plugin("radiosonde_tracker")
     if not rs:
         return _error("radiosonde_tracker plugin not available", 503)
-    return _ok(rs.get_snapshot())
+    return _ok(await _run_sync(rs.get_snapshot))
 
 
 async def handle_noaa(
@@ -1064,7 +1080,7 @@ async def handle_noaa(
     noaa = plugin.app.get_plugin("noaa_apt_decoder")
     if not noaa:
         return _error("noaa_apt_decoder plugin not available", 503)
-    return _ok(noaa.get_snapshot())
+    return _ok(await _run_sync(noaa.get_snapshot))
 
 
 async def handle_noaa_image(
@@ -1094,7 +1110,7 @@ async def handle_sdr_scheduler(
     sched = getattr(plugin.app, "sdr_scheduler", None)
     if not sched:
         return _error("sdr_scheduler not available", 503)
-    return _ok(sched.get_status())
+    return _ok(await _run_sync(sched.get_status))
 
 
 def setup_service_routes(app: aiohttp.web.Application) -> None:
