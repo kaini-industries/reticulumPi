@@ -11,10 +11,12 @@ import json
 import os
 import tempfile
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from reticulumpi.builtin_plugins.web_dashboard import websocket_handler as wsh_module
 from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _broadcast_metrics,
     _collect_broadcast_data,
@@ -22,12 +24,14 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _enrich_transport_traffic,
     _extract_radio,
     _handle_ws_command,
+    _heartbeat_interval,
     _lookup_message_row,
     _on_alert_event,
     _on_message_event,
     _on_status_event,
     _parse_rnode_config,
     _push_to_clients,
+    _send_with_timeout,
     _start_broadcast_task,
     _stop_broadcast_task,
     _ws_clients,
@@ -47,8 +51,14 @@ def _reset_ws_clients():
     # entries behind and poisons later tests. Required for safe re-ordering
     # and parallel runs.
     _ws_clients.clear()
+    wsh_module._warm_cache_data = {}
+    wsh_module._warm_cache_ts = 0.0
+    wsh_module._last_heartbeat_ts = 0.0
     yield
     _ws_clients.clear()
+    wsh_module._warm_cache_data = {}
+    wsh_module._warm_cache_ts = 0.0
+    wsh_module._last_heartbeat_ts = 0.0
 
 
 # ── _extract_radio tests ───────────────────────────────────────────
@@ -815,7 +825,7 @@ class TestBroadcastDataCollection:
         _ws_clients.clear()
 
     def test_skips_broadcast_when_no_clients(self):
-        """No work is done when _ws_clients is empty."""
+        """No client-facing work is done when _ws_clients is empty and load is high."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
         plugin = self._make_plugin()
@@ -836,10 +846,10 @@ class TestBroadcastDataCollection:
                 cycle_count += 1
                 if cycle_count >= 3:
                     raise asyncio.CancelledError()
-                # Don't actually sleep in tests
                 await original_sleep(0)
 
-            with patch("asyncio.sleep", counted_sleep):
+            with patch("asyncio.sleep", counted_sleep), \
+                 patch.object(wsh, "_heartbeat_interval", return_value=None):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
@@ -1209,37 +1219,33 @@ class TestOnMessageEvent:
             _on_message_event("message_received", {"id": 1})
         loop.call_soon_threadsafe.assert_not_called()
 
-    def test_schedules_push_with_full_row_when_lookup_succeeds(self):
+    def test_schedules_enriched_push_for_message(self):
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
         loop = MagicMock()
-        row = {"id": 9, "contact_id": "peer", "direction": "inbound", "text": "hi"}
         _ws_clients.add(MagicMock())
-        with patch.object(wsh, "_ws_loop", loop), patch.object(
-            wsh, "_lookup_message_row", return_value=row,
-        ):
+        with patch.object(wsh, "_ws_loop", loop):
             _on_message_event("message_received", {"id": 9, "transport": "lxmf"})
         loop.call_soon_threadsafe.assert_called_once()
         args = loop.call_soon_threadsafe.call_args.args
-        assert args[0] is wsh._schedule_push
+        assert args[0] is wsh._schedule_enriched_push
         assert args[1] == "message"
-        assert args[2] == row
+        assert args[2] == "message_received"
+        assert args[3] == {"id": 9, "transport": "lxmf"}
 
-    def test_schedules_fallback_payload_when_row_missing(self):
-        """When the DB doesn't yet have the row, fall back to the thin event dict."""
+    def test_schedules_enriched_push_for_sent_message(self):
+        """Sent messages also use the enriched push path."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
         loop = MagicMock()
         _ws_clients.add(MagicMock())
-        with patch.object(wsh, "_ws_loop", loop), patch.object(
-            wsh, "_lookup_message_row", return_value=None,
-        ):
+        with patch.object(wsh, "_ws_loop", loop):
             _on_message_event("message_sent", {"id": 9, "transport": "lxmf"})
         args = loop.call_soon_threadsafe.call_args.args
-        payload = args[2]
-        assert payload["event"] == "message_sent"
-        assert payload["id"] == 9
-        assert payload["transport"] == "lxmf"
+        assert args[0] is wsh._schedule_enriched_push
+        assert args[1] == "message"
+        assert args[2] == "message_sent"
+        assert args[3] == {"id": 9, "transport": "lxmf"}
 
     def test_swallows_runtime_error_from_closed_loop(self):
         """Shutdown race — loop closed between the check and the submission."""
@@ -1248,9 +1254,7 @@ class TestOnMessageEvent:
         loop = MagicMock()
         loop.call_soon_threadsafe.side_effect = RuntimeError("loop closed")
         _ws_clients.add(MagicMock())
-        with patch.object(wsh, "_ws_loop", loop), patch.object(
-            wsh, "_lookup_message_row", return_value=None,
-        ):
+        with patch.object(wsh, "_ws_loop", loop):
             _on_message_event("message_received", {"id": 1})  # no raise
 
 
@@ -1274,49 +1278,37 @@ class TestOnStatusEvent:
             _on_status_event("message_status_changed", {"id": 1, "status": "sent"})
         loop.call_soon_threadsafe.assert_not_called()
 
-    def test_enriches_payload_with_contact_id_when_row_found(self):
+    def test_schedules_enriched_push_for_status(self):
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
         loop = MagicMock()
-        row = {"id": 5, "contact_id": "peer-1", "sub_transport": "mqtt"}
         _ws_clients.add(MagicMock())
-        with patch.object(wsh, "_ws_loop", loop), patch.object(
-            wsh, "_lookup_message_row", return_value=row,
-        ):
-            _on_status_event(
-                "message_status_changed",
-                {"id": 5, "status": "delivered", "timestamp": 1234.5,
-                 "transport": "meshtastic"},
-            )
+        data = {
+            "id": 5, "status": "delivered", "timestamp": 1234.5,
+            "transport": "meshtastic",
+        }
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_status_event("message_status_changed", data)
         args = loop.call_soon_threadsafe.call_args.args
+        assert args[0] is wsh._schedule_enriched_push
         assert args[1] == "message_status"
-        payload = args[2]
-        assert payload["id"] == 5
-        assert payload["status"] == "delivered"
-        assert payload["timestamp"] == 1234.5
-        assert payload["transport"] == "meshtastic"
-        assert payload["contact_id"] == "peer-1"
-        assert payload["sub_transport"] == "mqtt"
+        assert args[2] == "message_status_changed"
+        assert args[3] == data
 
-    def test_falls_back_to_thin_payload_when_row_missing(self):
-        """Without the row, clients still get the id/status — just no routing hint."""
+    def test_schedules_enriched_push_for_failed_status(self):
+        """Failed statuses also use the enriched push path."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
         loop = MagicMock()
         _ws_clients.add(MagicMock())
-        with patch.object(wsh, "_ws_loop", loop), patch.object(
-            wsh, "_lookup_message_row", return_value=None,
-        ):
-            _on_status_event(
-                "message_status_changed",
-                {"id": 3, "status": "failed"},
-            )
-        payload = loop.call_soon_threadsafe.call_args.args[2]
-        assert payload["id"] == 3
-        assert payload["status"] == "failed"
-        # No row → no routing fields.
-        assert "contact_id" not in payload
-        assert "sub_transport" not in payload
+        data = {"id": 3, "status": "failed"}
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_status_event("message_status_changed", data)
+        args = loop.call_soon_threadsafe.call_args.args
+        assert args[0] is wsh._schedule_enriched_push
+        assert args[1] == "message_status"
+        assert args[2] == "message_status_changed"
+        assert args[3] == data
 
     def test_swallows_runtime_error_from_closed_loop(self):
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
@@ -1324,9 +1316,7 @@ class TestOnStatusEvent:
         loop = MagicMock()
         loop.call_soon_threadsafe.side_effect = RuntimeError("loop closed")
         _ws_clients.add(MagicMock())
-        with patch.object(wsh, "_ws_loop", loop), patch.object(
-            wsh, "_lookup_message_row", return_value=None,
-        ):
+        with patch.object(wsh, "_ws_loop", loop):
             _on_status_event("message_status_changed", {"id": 1, "status": "x"})
 
 
@@ -1448,6 +1438,155 @@ class TestPushToClients:
 
         # With gather, the fast send completes before the slow one wakes up.
         assert order == ["fast", "slow"]
+
+
+# ── _enrich_and_push tests ────────────────────────────────────────
+
+
+class TestEnrichAndPush:
+    def test_message_enriched_with_row(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        row = {"id": 9, "contact_id": "peer", "text": "hi"}
+        ws = MagicMock()
+        ws.send_str = AsyncMock()
+        _ws_clients.add(ws)
+
+        async def run():
+            with patch.object(wsh, "_lookup_message_row", return_value=row), \
+                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+                await wsh._enrich_and_push("message", "message_received", {"id": 9, "transport": "lxmf"})
+
+        asyncio.run(run())
+        sent = json.loads(ws.send_str.call_args.args[0])
+        assert sent["type"] == "message"
+        assert sent["data"]["contact_id"] == "peer"
+
+    def test_message_fallback_when_row_missing(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        ws = MagicMock()
+        ws.send_str = AsyncMock()
+        _ws_clients.add(ws)
+
+        async def run():
+            with patch.object(wsh, "_lookup_message_row", return_value=None), \
+                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+                await wsh._enrich_and_push("message", "message_sent", {"id": 9, "transport": "lxmf"})
+
+        asyncio.run(run())
+        sent = json.loads(ws.send_str.call_args.args[0])
+        assert sent["data"]["event"] == "message_sent"
+        assert sent["data"]["id"] == 9
+
+    def test_status_enriched_with_contact_id(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        row = {"id": 5, "contact_id": "peer-1", "sub_transport": "mqtt"}
+        ws = MagicMock()
+        ws.send_str = AsyncMock()
+        _ws_clients.add(ws)
+
+        async def run():
+            with patch.object(wsh, "_lookup_message_row", return_value=row), \
+                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+                await wsh._enrich_and_push(
+                    "message_status", "message_status_changed",
+                    {"id": 5, "status": "delivered", "timestamp": 1234.5, "transport": "meshtastic"},
+                )
+
+        asyncio.run(run())
+        sent = json.loads(ws.send_str.call_args.args[0])
+        assert sent["data"]["contact_id"] == "peer-1"
+        assert sent["data"]["sub_transport"] == "mqtt"
+
+    def test_status_fallback_without_row(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        ws = MagicMock()
+        ws.send_str = AsyncMock()
+        _ws_clients.add(ws)
+
+        async def run():
+            with patch.object(wsh, "_lookup_message_row", return_value=None), \
+                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+                await wsh._enrich_and_push(
+                    "message_status", "message_status_changed",
+                    {"id": 3, "status": "failed", "contact_id": "peer-2", "sub_transport": "irc"},
+                )
+
+        asyncio.run(run())
+        sent = json.loads(ws.send_str.call_args.args[0])
+        assert sent["data"]["contact_id"] == "peer-2"
+        assert sent["data"]["sub_transport"] == "irc"
+
+    def test_lookup_exception_uses_fallback(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        ws = MagicMock()
+        ws.send_str = AsyncMock()
+        _ws_clients.add(ws)
+
+        async def run():
+            with patch.object(wsh, "_lookup_message_row", side_effect=RuntimeError("db locked")), \
+                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+                await wsh._enrich_and_push("message", "message_received", {"id": 1})
+
+        asyncio.run(run())
+        sent = json.loads(ws.send_str.call_args.args[0])
+        assert sent["data"]["event"] == "message_received"
+
+
+# ── _send_with_timeout tests ──────────────────────────────────────
+
+
+class TestSendWithTimeout:
+    def test_succeeds_within_timeout(self):
+        ws = MagicMock()
+        ws.send_str = AsyncMock()
+
+        async def run():
+            result = await _send_with_timeout(ws, "hello", timeout=1.0)
+            assert result is True
+            ws.send_str.assert_called_once_with("hello")
+
+        asyncio.run(run())
+
+    def test_returns_false_on_timeout(self):
+        async def stall(_msg):
+            await asyncio.sleep(10)
+
+        ws = MagicMock()
+        ws.send_str = stall
+
+        async def run():
+            result = await _send_with_timeout(ws, "hello", timeout=0.05)
+            assert result is False
+
+        asyncio.run(run())
+
+    def test_returns_false_on_connection_error(self):
+        ws = MagicMock()
+        ws.send_str = AsyncMock(side_effect=ConnectionResetError("gone"))
+
+        async def run():
+            result = await _send_with_timeout(ws, "hello", timeout=1.0)
+            assert result is False
+
+        asyncio.run(run())
+
+    def test_returns_false_on_cancelled(self):
+        ws = MagicMock()
+        ws.send_str = AsyncMock(side_effect=asyncio.CancelledError())
+
+        async def run():
+            try:
+                result = await _send_with_timeout(ws, "hello", timeout=1.0)
+                assert result is False
+            except asyncio.CancelledError:
+                pass  # CancelledError may propagate through wait_for
+
+        asyncio.run(run())
 
 
 # ── _collect_broadcast_data tests ─────────────────────────────────
@@ -1652,6 +1791,23 @@ class TestBroadcastOverlapGuard:
             wsh._ws_clients.discard(ws_mock)
 
 
+class TestHandleWsCommandGuards:
+    def test_none_action_returns_none(self):
+        plugin = MagicMock()
+        result = _handle_ws_command({"no_action": True}, plugin)
+        assert result is None
+
+    def test_empty_action_returns_none(self):
+        plugin = MagicMock()
+        result = _handle_ws_command({"action": ""}, plugin)
+        assert result is None
+
+    def test_missing_action_via_raw_string(self):
+        plugin = MagicMock()
+        result = _handle_ws_command('{"data": "x"}', plugin)
+        assert result is None
+
+
 class TestHandleWsSpectrumPreset:
     def _make_plugin(self, scanner=None):
         plugin = MagicMock()
@@ -1800,3 +1956,331 @@ class TestPrevPayloadBytes:
         assert second["data"]["ws_stats"]["prev_payload_bytes"] == len(messages[0])
 
         _ws_clients.clear()
+
+
+class TestNoBareWsSendStr:
+    """Guard against bare ws.send_str() calls that can block the event loop."""
+
+    def test_send_str_only_inside_send_with_timeout(self):
+        source = Path(wsh_module.__file__).read_text()
+        violations = []
+        for i, line in enumerate(source.splitlines(), 1):
+            if ".send_str(" not in line:
+                continue
+            if "wait_for(" in line:
+                continue
+            violations.append(f"  line {i}: {line.strip()}")
+        assert not violations, (
+            "Bare ws.send_str() found — use _send_with_timeout() instead:\n"
+            + "\n".join(violations)
+        )
+
+
+# ── Warm Cache Heartbeat tests ────────────────────────────────────
+
+
+class TestHeartbeatInterval:
+    """Unit tests for _heartbeat_interval() adaptive load scaling."""
+
+    def test_idle_returns_min_interval(self):
+        with patch("os.getloadavg", return_value=(0.5, 0.3, 0.2)):
+            assert _heartbeat_interval() == 30.0
+
+    def test_moderate_load_interpolates(self):
+        with patch("os.getloadavg", return_value=(2.2, 1.0, 0.5)):
+            result = _heartbeat_interval()
+            assert 74.0 < result < 76.0
+
+    def test_high_load_returns_none(self):
+        with patch("os.getloadavg", return_value=(4.0, 3.5, 3.0)):
+            assert _heartbeat_interval() is None
+
+    def test_boundary_low(self):
+        with patch("os.getloadavg", return_value=(1.2, 1.0, 0.8)):
+            assert _heartbeat_interval() == 30.0
+
+    def test_boundary_high(self):
+        with patch("os.getloadavg", return_value=(3.2, 3.0, 2.8)):
+            assert _heartbeat_interval() is None
+
+    def test_os_error_fallback(self):
+        with patch("os.getloadavg", side_effect=OSError("not available")):
+            assert _heartbeat_interval() == 30.0
+
+
+class TestWarmCacheHeartbeat:
+    """Test warm-cache heartbeat in the broadcast loop idle path."""
+
+    @staticmethod
+    def _make_plugin():
+        plugin = MagicMock()
+        plugin.config = {"metrics_interval": 0.05}
+        plugin.app.reticulum = MagicMock()
+        plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
+        plugin.app.plugins = {}
+        plugin.app.internet_probe = None
+        return plugin
+
+    def test_heartbeat_populates_warm_cache_when_idle(self):
+        """No clients + interval elapsed -> cache populated."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = self._make_plugin()
+        _ws_clients.clear()
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        wsh._last_heartbeat_ts = 0.0
+
+        cycle_count = 0
+
+        async def run():
+            nonlocal cycle_count
+            original_sleep = asyncio.sleep
+
+            async def counted_sleep(secs):
+                nonlocal cycle_count
+                cycle_count += 1
+                if cycle_count >= 2:
+                    raise asyncio.CancelledError()
+                await original_sleep(0)
+
+            with patch("asyncio.sleep", counted_sleep), \
+                 patch.object(wsh, "_heartbeat_interval", return_value=0.0):
+                try:
+                    await wsh._broadcast_metrics(app)
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(run())
+
+        assert wsh._warm_cache_data
+        assert "plugins" in wsh._warm_cache_data
+        assert wsh._warm_cache_ts > 0.0
+
+    def test_heartbeat_skipped_under_high_load(self):
+        """_heartbeat_interval returns None -> no collection."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = self._make_plugin()
+        _ws_clients.clear()
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        wsh._last_heartbeat_ts = 0.0
+
+        cycle_count = 0
+
+        async def run():
+            nonlocal cycle_count
+            original_sleep = asyncio.sleep
+
+            async def counted_sleep(secs):
+                nonlocal cycle_count
+                cycle_count += 1
+                if cycle_count >= 3:
+                    raise asyncio.CancelledError()
+                await original_sleep(0)
+
+            with patch("asyncio.sleep", counted_sleep), \
+                 patch.object(wsh, "_heartbeat_interval", return_value=None):
+                try:
+                    await wsh._broadcast_metrics(app)
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(run())
+
+        assert wsh._warm_cache_data == {}
+        assert wsh._warm_cache_ts == 0.0
+
+    def test_heartbeat_respects_interval_spacing(self):
+        """Recent _last_heartbeat_ts -> no collection."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = self._make_plugin()
+        _ws_clients.clear()
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        wsh._last_heartbeat_ts = time.monotonic()
+
+        cycle_count = 0
+
+        async def run():
+            nonlocal cycle_count
+            original_sleep = asyncio.sleep
+
+            async def counted_sleep(secs):
+                nonlocal cycle_count
+                cycle_count += 1
+                if cycle_count >= 3:
+                    raise asyncio.CancelledError()
+                await original_sleep(0)
+
+            with patch("asyncio.sleep", counted_sleep), \
+                 patch.object(wsh, "_heartbeat_interval", return_value=30.0):
+                try:
+                    await wsh._broadcast_metrics(app)
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(run())
+
+        assert wsh._warm_cache_data == {}
+
+
+class TestWarmCacheServing:
+    """Test warm cache is served to connecting clients."""
+
+    def test_initial_connect_uses_warm_cache(self):
+        """Fresh warm cache -> _collect_broadcast_data NOT called."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        wsh._warm_cache_data = {
+            "plugins": {"test": {"active": True}},
+            "interfaces": [],
+            "mesh": {"version": 1},
+        }
+        wsh._warm_cache_ts = time.monotonic()
+
+        sent = []
+
+        async def capture_send(ws, msg):
+            sent.append(msg)
+            return True
+
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
+        _ws_clients.clear()
+
+        ws_mock = MagicMock()
+        ws_mock.prepare = AsyncMock()
+        ws_mock.__aiter__ = lambda self: _empty_async_iter()
+
+        async def run():
+            with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock), \
+                 patch.object(wsh, "_send_with_timeout", side_effect=capture_send), \
+                 patch.object(wsh, "_collect_broadcast_data") as mock_collect:
+                await wsh.websocket_metrics(request)
+                mock_collect.assert_not_called()
+
+        asyncio.run(run())
+
+        assert len(sent) >= 1
+        data = json.loads(sent[0])
+        assert data["type"] == "update"
+        assert "plugins" in data["data"]
+
+    def test_initial_connect_falls_back_when_cache_stale(self):
+        """Cache >90s old -> cold collection path used."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        wsh._warm_cache_data = {"plugins": {}, "interfaces": []}
+        wsh._warm_cache_ts = time.monotonic() - 100.0
+
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
+        _ws_clients.clear()
+
+        ws_mock = MagicMock()
+        ws_mock.prepare = AsyncMock()
+        ws_mock.__aiter__ = lambda self: _empty_async_iter()
+
+        async def run():
+            with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock), \
+                 patch.object(wsh, "_send_with_timeout", new_callable=AsyncMock, return_value=True):
+                await wsh.websocket_metrics(request)
+
+        asyncio.run(run())
+
+    def test_initial_connect_falls_back_when_cache_empty(self):
+        """Empty warm cache -> cold collection path used."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        wsh._warm_cache_data = {}
+        wsh._warm_cache_ts = 0.0
+
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
+        _ws_clients.clear()
+
+        ws_mock = MagicMock()
+        ws_mock.prepare = AsyncMock()
+        ws_mock.__aiter__ = lambda self: _empty_async_iter()
+
+        async def run():
+            with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock), \
+                 patch.object(wsh, "_send_with_timeout", new_callable=AsyncMock, return_value=True):
+                await wsh.websocket_metrics(request)
+
+        asyncio.run(run())
+
+
+class TestWarmCacheLifecycle:
+    """Test warm cache seeding at startup and clearing at shutdown."""
+
+    def test_startup_seeds_warm_cache(self):
+        """_start_broadcast_task stores collection result in warm cache."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        plugin.config = MagicMock()
+        plugin.config.get = MagicMock(return_value=5)
+        plugin.app.reticulum = MagicMock()
+        plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
+        plugin.app.plugins = {}
+        plugin.app.internet_probe = None
+        plugin.app.event_bus = MagicMock()
+
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        app.on_startup = []
+        app.on_shutdown = []
+
+        async def run():
+            await wsh._start_broadcast_task(app)
+            assert wsh._warm_cache_data
+            assert wsh._warm_cache_ts > 0.0
+            assert wsh._last_heartbeat_ts > 0.0
+            # Clean up
+            if wsh._broadcast_executor:
+                wsh._broadcast_executor.shutdown(wait=False)
+                wsh._broadcast_executor = None
+            if wsh._command_executor:
+                wsh._command_executor.shutdown(wait=False)
+                wsh._command_executor = None
+            if wsh._broadcast_task:
+                wsh._broadcast_task.cancel()
+                try:
+                    await wsh._broadcast_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                wsh._broadcast_task = None
+            if hasattr(wsh, "_spectrum_task") and wsh._spectrum_task:
+                wsh._spectrum_task.cancel()
+                try:
+                    await wsh._spectrum_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                wsh._spectrum_task = None
+
+        asyncio.run(run())
+
+    def test_shutdown_clears_warm_cache(self):
+        """_stop_broadcast_task resets warm cache globals."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        wsh._warm_cache_data = {"some": "data"}
+        wsh._warm_cache_ts = 12345.0
+        wsh._last_heartbeat_ts = 12345.0
+        wsh._broadcast_task = None
+        wsh._spectrum_task = None
+        wsh._ws_plugin = None
+        wsh._broadcast_executor = None
+        wsh._command_executor = None
+
+        app = MagicMock()
+
+        async def run():
+            await wsh._stop_broadcast_task(app)
+
+        asyncio.run(run())
+
+        assert wsh._warm_cache_data == {}
+        assert wsh._warm_cache_ts == 0.0
+        assert wsh._last_heartbeat_ts == 0.0

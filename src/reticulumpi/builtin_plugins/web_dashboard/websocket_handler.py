@@ -53,6 +53,24 @@ def _ws_preset_rate_ok(ws_id: int) -> bool:
     return True
 
 
+_WS_SEND_TIMEOUT = 5.0
+
+
+async def _send_with_timeout(
+    ws: aiohttp.web.WebSocketResponse,
+    message: str,
+    timeout: float = _WS_SEND_TIMEOUT,
+) -> bool:
+    try:
+        await asyncio.wait_for(ws.send_str(message), timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        log.warning("WS send timed out after %.1fs, evicting client", timeout)
+        return False
+    except Exception:
+        return False
+
+
 # ── RNode config cache ──────────────────────────────────────────────
 _rnode_config_cache: dict[str, dict] | None = None
 _rnode_config_mtime: float = 0
@@ -303,7 +321,37 @@ _ws_plugin: Any | None = None
 # Dedicated single-worker executor for broadcast data collection.
 # Prevents overlapping collections from saturating the default pool.
 _broadcast_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_command_executor: concurrent.futures.ThreadPoolExecutor | None = None
 _collection_running = threading.Event()
+
+# ── Warm cache heartbeat ──────────────────────────────────────────
+_warm_cache_data: dict[str, Any] = {}
+_warm_cache_ts: float = 0.0
+_last_heartbeat_ts: float = 0.0
+
+_HEARTBEAT_MIN_INTERVAL = 30.0
+_HEARTBEAT_MAX_INTERVAL = 120.0
+_HEARTBEAT_LOAD_LOW = 1.2
+_HEARTBEAT_LOAD_HIGH = 3.2
+_WARM_CACHE_MAX_AGE = 90.0
+
+
+def _heartbeat_interval() -> float | None:
+    """Adaptive heartbeat interval based on 1-minute load average.
+
+    Returns seconds between heartbeats, or None to skip entirely.
+    """
+    try:
+        load1 = os.getloadavg()[0]
+    except OSError:
+        return _HEARTBEAT_MIN_INTERVAL
+    if load1 < _HEARTBEAT_LOAD_LOW:
+        return _HEARTBEAT_MIN_INTERVAL
+    if load1 >= _HEARTBEAT_LOAD_HIGH:
+        return None
+    ratio = (load1 - _HEARTBEAT_LOAD_LOW) / (_HEARTBEAT_LOAD_HIGH - _HEARTBEAT_LOAD_LOW)
+    return _HEARTBEAT_MIN_INTERVAL + ratio * (_HEARTBEAT_MAX_INTERVAL - _HEARTBEAT_MIN_INTERVAL)
+
 
 # ── Spectrum-dedicated WS ───────────────────────────────────────────
 
@@ -345,10 +393,8 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
                 hist = p.get_history()
             except Exception:
                 hist = {"available": False}
-            try:
-                await ws.send_str(json.dumps({"type": msg_type, "data": hist}))
-            except Exception:
-                log.debug("Failed to send %s hello", msg_type, exc_info=True)
+            if not await _send_with_timeout(ws, json.dumps({"type": msg_type, "data": hist})):
+                log.debug("Failed to send %s hello", msg_type)
 
     snap_data: dict[str, Any] = {}
     for name, key in [
@@ -365,10 +411,8 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
             except Exception:
                 pass
     if snap_data:
-        try:
-            await ws.send_str(json.dumps({"type": "update", "data": snap_data}))
-        except Exception:
-            log.debug("Failed to send initial snapshot", exc_info=True)
+        if not await _send_with_timeout(ws, json.dumps({"type": "update", "data": snap_data})):
+            log.debug("Failed to send initial snapshot")
 
     _spectrum_clients.add(ws)
     log.debug("Spectrum WS client connected (%d total)", len(_spectrum_clients))
@@ -378,9 +422,14 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
             if msg.type == aiohttp.WSMsgType.ERROR:
                 break
             if msg.type == aiohttp.WSMsgType.TEXT:
-                resp = _handle_ws_command(msg.data, plugin, ws=ws)
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    _command_executor,
+                    _handle_ws_command, msg.data, plugin, ws,
+                )
                 if resp is not None:
-                    await ws.send_str(json.dumps(resp))
+                    if not await _send_with_timeout(ws, json.dumps(resp)):
+                        break
     finally:
         _spectrum_clients.discard(ws)
         _ws_preset_rate.pop(id(ws), None)
@@ -453,14 +502,9 @@ async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
 
             clients = list(_spectrum_clients)
 
-            async def _send(ws: aiohttp.web.WebSocketResponse) -> bool:
-                try:
-                    await ws.send_str(message)
-                    return True
-                except Exception:
-                    return False
-
-            results = await asyncio.gather(*(_send(ws) for ws in clients))
+            results = await asyncio.gather(
+                *(_send_with_timeout(ws, message) for ws in clients)
+            )
             for ws, ok in zip(clients, results):
                 if not ok:
                     _spectrum_clients.discard(ws)
@@ -486,29 +530,33 @@ async def _handle_snapshot_request(
     _last_global_snapshot = now
     loop = asyncio.get_running_loop()
     try:
-        if _collection_running.is_set():
-            await asyncio.sleep(0.15)
-        data, _, _ = await loop.run_in_executor(
-            _broadcast_executor,
-            functools.partial(
-                _collect_broadcast_data,
-                plugin, 0, _last_mesh_announce_ts, _mesh_version,
-                initial=True,
-            ),
-        )
+        if _warm_cache_data and (time.monotonic() - _warm_cache_ts) < _WARM_CACHE_MAX_AGE:
+            data = _warm_cache_data.copy()
+        else:
+            if _collection_running.is_set():
+                await asyncio.sleep(0.15)
+            data, _, _ = await loop.run_in_executor(
+                _broadcast_executor,
+                functools.partial(
+                    _collect_broadcast_data,
+                    plugin, 0, _last_mesh_announce_ts, _mesh_version,
+                    initial=True,
+                ),
+            )
         data["ws_stats"] = {
             "clients": len(_ws_clients),
             "max_clients": plugin.config.get("max_websocket_clients", 10),
             "collect_ms": 0,
             "prev_payload_bytes": 0,
         }
-        await ws.send_str(json.dumps({
+        if not await _send_with_timeout(ws, json.dumps({
             "type": "update",
             "data": data,
             "timestamp": time.time(),
-        }))
+        })):
+            log.debug("Failed to send snapshot on request")
     except Exception:
-        log.debug("Failed to send snapshot on request", exc_info=True)
+        log.debug("Failed to collect snapshot data", exc_info=True)
 
 
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
@@ -540,29 +588,35 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     # instead of waiting up to 5s for the next broadcast cycle.
     loop = asyncio.get_running_loop()
     try:
-        if _collection_running.is_set():
-            await asyncio.sleep(0.15)
-        data, _, _ = await loop.run_in_executor(
-            _broadcast_executor,
-            functools.partial(
-                _collect_broadcast_data,
-                plugin, 0, _last_mesh_announce_ts, _mesh_version,
-                initial=True,
-            ),
-        )
+        if _warm_cache_data and (time.monotonic() - _warm_cache_ts) < _WARM_CACHE_MAX_AGE:
+            data = _warm_cache_data.copy()
+            log.debug("Serving warm cache to new client (age=%.1fs)",
+                       time.monotonic() - _warm_cache_ts)
+        else:
+            if _collection_running.is_set():
+                await asyncio.sleep(0.15)
+            data, _, _ = await loop.run_in_executor(
+                _broadcast_executor,
+                functools.partial(
+                    _collect_broadcast_data,
+                    plugin, 0, _last_mesh_announce_ts, _mesh_version,
+                    initial=True,
+                ),
+            )
         data["ws_stats"] = {
             "clients": len(_ws_clients) + 1,
             "max_clients": plugin.config.get("max_websocket_clients", 10),
             "collect_ms": 0,
             "prev_payload_bytes": 0,
         }
-        await ws.send_str(json.dumps({
+        if not await _send_with_timeout(ws, json.dumps({
             "type": "update",
             "data": data,
             "timestamp": time.time(),
-        }))
+        })):
+            log.debug("Failed to send initial data snapshot")
     except Exception:
-        log.debug("Failed to send initial data snapshot", exc_info=True)
+        log.debug("Failed to collect initial data snapshot", exc_info=True)
 
     _ws_clients.add(ws)
     _ws_last_activity[ws] = time.time()
@@ -585,9 +639,14 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
                 ):
                     await _handle_snapshot_request(ws, plugin)
                     continue
-                resp = _handle_ws_command(parsed or msg.data, plugin, ws=ws)
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    _command_executor,
+                    _handle_ws_command, parsed or msg.data, plugin, ws,
+                )
                 if resp is not None:
-                    await ws.send_str(json.dumps(resp))
+                    if not await _send_with_timeout(ws, json.dumps(resp)):
+                        break
     finally:
         _ws_clients.discard(ws)
         _ws_last_activity.pop(ws, None)
@@ -698,7 +757,7 @@ def _collect_broadcast_data(
 
 async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     """Periodically broadcast system metrics to all connected WebSocket clients."""
-    global _last_mesh_announce_ts, _mesh_version
+    global _last_mesh_announce_ts, _mesh_version, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts
 
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
@@ -714,6 +773,34 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             _cycle_count += 1
 
             if not _ws_clients:
+                hb_interval = _heartbeat_interval()
+                if hb_interval is not None:
+                    now_mono = time.monotonic()
+                    if (now_mono - _last_heartbeat_ts >= hb_interval
+                            and not _collection_running.is_set()):
+                        _collection_running.set()
+                        try:
+                            data, _last_mesh_announce_ts, _mesh_version = (
+                                await loop.run_in_executor(
+                                    _broadcast_executor,
+                                    _collect_broadcast_data,
+                                    plugin,
+                                    _cycle_count,
+                                    _last_mesh_announce_ts,
+                                    _mesh_version,
+                                )
+                            )
+                            _warm_cache_data = data
+                            _warm_cache_ts = time.monotonic()
+                            _last_heartbeat_ts = _warm_cache_ts
+                            log.debug(
+                                "Warm cache heartbeat: collected %d keys (interval=%.0fs)",
+                                len(data), hb_interval,
+                            )
+                        except Exception:
+                            log.debug("Warm cache heartbeat failed", exc_info=True)
+                        finally:
+                            _collection_running.clear()
                 continue
 
             # Skip this cycle if the previous collection hasn't finished.
@@ -736,6 +823,10 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                 )
             finally:
                 _collection_running.clear()
+
+            _warm_cache_data = data
+            _warm_cache_ts = time.monotonic()
+            _last_heartbeat_ts = _warm_cache_ts
 
             collect_elapsed = time.monotonic() - t_collect
 
@@ -764,14 +855,9 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
             # Fan out to all clients concurrently (mirrors _push_to_clients).
             clients = list(_ws_clients)
 
-            async def _send(ws: aiohttp.web.WebSocketResponse) -> bool:
-                try:
-                    await ws.send_str(message)
-                    return True
-                except Exception:
-                    return False
-
-            results = await asyncio.gather(*(_send(ws) for ws in clients))
+            results = await asyncio.gather(
+                *(_send_with_timeout(ws, message) for ws in clients)
+            )
             now = time.time()
             for ws, ok in zip(clients, results):
                 if not ok:
@@ -823,21 +909,27 @@ _push_sem: asyncio.Semaphore | None = None
 
 
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _push_sem
+    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _command_executor, _push_sem, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts
     _ws_loop = asyncio.get_running_loop()
     _ws_plugin = app["plugin"]
     _push_sem = asyncio.Semaphore(8)
     _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="ws-broadcast",
     )
+    _command_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="ws-command",
+    )
 
-    # Warm plugin caches so the first client gets fast responses
+    # Warm plugin caches and seed the warm cache for instant first-client response
     try:
-        await asyncio.get_running_loop().run_in_executor(
+        data, _, _ = await asyncio.get_running_loop().run_in_executor(
             _broadcast_executor,
             functools.partial(_collect_broadcast_data, app["plugin"], 0, 0, 0),
         )
-        log.info("Broadcast cache warmed on startup")
+        _warm_cache_data = data
+        _warm_cache_ts = time.monotonic()
+        _last_heartbeat_ts = _warm_cache_ts
+        log.info("Broadcast cache warmed on startup (%d keys)", len(data))
     except Exception:
         log.debug("Cache warm-up failed (non-fatal)", exc_info=True)
 
@@ -858,7 +950,7 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
 
 
 async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _broadcast_registry
+    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _command_executor, _broadcast_registry, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts
     try:
         if _ws_plugin is not None:
             event_bus = _ws_plugin.app.event_bus
@@ -886,9 +978,15 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
     _ws_loop = None
     _ws_plugin = None
     _broadcast_registry = None
+    _warm_cache_data = {}
+    _warm_cache_ts = 0.0
+    _last_heartbeat_ts = 0.0
     if _broadcast_executor is not None:
         _broadcast_executor.shutdown(wait=True, cancel_futures=True)
         _broadcast_executor = None
+    if _command_executor is not None:
+        _command_executor.shutdown(wait=True, cancel_futures=True)
+        _command_executor = None
     # Close all WebSocket connections
     for ws in list(_ws_clients):
         await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
@@ -924,15 +1022,11 @@ def _on_message_event(event_type: str, data: dict) -> None:
     """Event-bus callback (runs in any thread). Push to WS asynchronously."""
     if _ws_loop is None or not _ws_clients:
         return
-    row = _lookup_message_row(data.get("id"))
-    # Fall back to the skeletal event payload if the row isn't yet
-    # readable — avoids dropping events during races, and the client
-    # dedupes by id regardless.
-    payload = row if row else {"event": event_type, **data}
     try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "message", payload)
+        _ws_loop.call_soon_threadsafe(
+            _schedule_enriched_push, "message", event_type, data,
+        )
     except RuntimeError:
-        # Loop already closed — happens during shutdown; safe to ignore.
         pass
 
 
@@ -940,27 +1034,10 @@ def _on_status_event(event_type: str, data: dict) -> None:
     """Event-bus callback for MESSAGE_STATUS_CHANGED — same pattern."""
     if _ws_loop is None or not _ws_clients:
         return
-    row = _lookup_message_row(data.get("id"))
-    payload = {
-        "id": data.get("id"),
-        "status": data.get("status"),
-        "timestamp": data.get("timestamp"),
-        "transport": data.get("transport"),
-    }
-    # Prefer the live row — it reflects the post-update state. If the
-    # lookup failed (plugin teardown, rare race), fall back to the
-    # contact_id/sub_transport that messaging_hub included on the event
-    # payload, so the client can still route the status update.
-    if row:
-        payload["contact_id"] = row.get("contact_id")
-        payload["sub_transport"] = row.get("sub_transport", "")
-    else:
-        if "contact_id" in data:
-            payload["contact_id"] = data.get("contact_id")
-        if "sub_transport" in data:
-            payload["sub_transport"] = data.get("sub_transport") or ""
     try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "message_status", payload)
+        _ws_loop.call_soon_threadsafe(
+            _schedule_enriched_push, "message_status", event_type, data,
+        )
     except RuntimeError:
         pass
 
@@ -988,6 +1065,8 @@ def _handle_ws_command(raw: dict | str, plugin: Any, ws: Any = None) -> dict | N
         except Exception:
             return
     action = cmd.get("action")
+    if not action:
+        return None
     if action == "ping":
         return {"type": "pong", "ts": cmd.get("ts", 0)}
     if action == "spectrum_switch_preset":
@@ -1139,8 +1218,51 @@ def _schedule_push(push_type: str, payload: dict) -> None:
     try:
         asyncio.create_task(_push_to_clients(push_type, payload))
     except RuntimeError:
-        # No running loop — shutting down.
         pass
+
+
+def _schedule_enriched_push(
+    push_type: str, event_type: str, data: dict,
+) -> None:
+    """Schedule an async broadcast that enriches the payload before sending."""
+    try:
+        asyncio.create_task(_enrich_and_push(push_type, event_type, data))
+    except RuntimeError:
+        pass
+
+
+async def _enrich_and_push(
+    push_type: str, event_type: str, data: dict,
+) -> None:
+    """Look up the full message row in the executor, then fan out to clients."""
+    loop = asyncio.get_running_loop()
+    msg_id = data.get("id")
+    row = None
+    if msg_id is not None:
+        try:
+            row = await loop.run_in_executor(None, _lookup_message_row, msg_id)
+        except Exception:
+            pass
+
+    if push_type == "message":
+        payload = row if row else {"event": event_type, **data}
+    else:
+        payload = {
+            "id": data.get("id"),
+            "status": data.get("status"),
+            "timestamp": data.get("timestamp"),
+            "transport": data.get("transport"),
+        }
+        if row:
+            payload["contact_id"] = row.get("contact_id")
+            payload["sub_transport"] = row.get("sub_transport", "")
+        else:
+            if "contact_id" in data:
+                payload["contact_id"] = data.get("contact_id")
+            if "sub_transport" in data:
+                payload["sub_transport"] = data.get("sub_transport") or ""
+
+    await _push_to_clients(push_type, payload)
 
 
 async def _push_to_clients(push_type: str, payload: dict) -> None:
@@ -1166,15 +1288,9 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
         })
         clients = list(_ws_clients)
 
-        async def _send_one(ws: aiohttp.web.WebSocketResponse) -> bool:
-            try:
-                await ws.send_str(message)
-                return True
-            except Exception:
-                return False
-
         results = await asyncio.gather(
-            *(_send_one(ws) for ws in clients), return_exceptions=False,
+            *(_send_with_timeout(ws, message) for ws in clients),
+            return_exceptions=False,
         )
         for ws, ok in zip(clients, results):
             if not ok:
