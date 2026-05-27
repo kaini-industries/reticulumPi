@@ -4998,6 +4998,7 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
   cursor: pointer;
 }
 .stale-refresh-btn:hover { background: rgba(0, 0, 0, 0.25); }
+.stale-refresh-btn:disabled { opacity: 0.6; cursor: default; }
 
 /* ── Signal plugin panels ────────────────────────────────── */
 .radiosonde-cards {

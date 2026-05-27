@@ -162,6 +162,25 @@
     }
   }
 
+  function _manualRefresh() {
+    var now = Date.now() / 1000;
+    if (now - _lastSnapshotRequest < 10) return;
+    _lastSnapshotRequest = now;
+    var btn = $('stale-refresh-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+    if (RPI.ws && RPI.ws.readyState === WebSocket.OPEN) {
+      RPI.ws.send(JSON.stringify({action: 'request_snapshot'}));
+    } else {
+      fetchCritical();
+      fetchSecondary();
+      fetchWsUncovered();
+      connectWS();
+    }
+    setTimeout(function() {
+      if (btn) { btn.disabled = false; btn.textContent = 'Refresh'; }
+    }, 3000);
+  }
+
   function _checkStaleness() {
     var latest = Math.max(_lastWsUpdate, _lastHttpUpdate);
     if (!latest) return;
@@ -1568,7 +1587,7 @@
 
   var _el;
   if (_el = $('stale-refresh-btn')) _el.addEventListener('click', function() {
-    _requestSnapshot();
+    _manualRefresh();
   });
   if (_el = $('logout-btn')) _el.addEventListener('click', function() {
     api('/api/auth/logout', {method: 'POST'}).finally(function() {
