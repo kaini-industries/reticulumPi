@@ -2366,7 +2366,7 @@ class TestWarmCacheSummaryLog:
         app = MagicMock()
         app.__getitem__ = lambda self, key: plugin
         wsh._last_heartbeat_ts = 0.0
-        wsh._last_hb_summary_ts = 0.0
+        wsh._last_hb_summary_ts = time.monotonic() - wsh._HB_SUMMARY_INTERVAL - 1
 
         cycle_count = 0
 
