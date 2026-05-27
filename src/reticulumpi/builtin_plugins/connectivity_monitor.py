@@ -108,6 +108,7 @@ class ConnectivityMonitorPlugin(PluginBase):
                 },
                 "link_count": 0,
                 "rate_limited_count": 0,
+                "rate_tracked_count": 0,
                 "blackholed_count": 0,
                 "transport_id": None,
                 "transport_uptime": 0,
@@ -187,11 +188,7 @@ class ConnectivityMonitorPlugin(PluginBase):
                 "path_count": h.get("path_count", 0),
                 "issues": h.get("issues", []),
             },
-            "routing": {
-                "path_count": h.get("path_count", 0),
-                "transport_enabled": h.get("transport_enabled", False),
-                "paths": h.get("paths", []),
-            },
+            "routing": h.get("routing", {}),
         }
 
     def get_routing_data(
@@ -781,6 +778,11 @@ class ConnectivityMonitorPlugin(PluginBase):
                     "timestamps": entry.get("timestamps", []),
                 })
 
+            actively_blocked = sum(
+                1 for re in rate_entries if re.get("blocked_until", 0) > now
+            )
+            rate_tracked_count = len(rate_entries)
+
             # 8. Process blackholed identities
             blackholed_clean: dict[str, Any] = {}
             for identity_hash, info in blackholed.items():
@@ -840,9 +842,10 @@ class ConnectivityMonitorPlugin(PluginBase):
                     )
                     self._publish_event(events.SINGLE_INTERFACE_SPOF)
 
-            if len(rate_entries) > 0:
+            if actively_blocked > 0:
                 routing_diags.append(
-                    f"{len(rate_entries)} destination(s) are rate-limited"
+                    f"{actively_blocked} destination(s) actively rate-limited"
+                    f" ({rate_tracked_count} tracked)"
                 )
 
             if len(blackholed_clean) > 0:
@@ -861,7 +864,8 @@ class ConnectivityMonitorPlugin(PluginBase):
                 "interface_distribution": iface_dist,
                 "freshness": freshness,
                 "link_count": link_count,
-                "rate_limited_count": len(rate_entries),
+                "rate_limited_count": actively_blocked,
+                "rate_tracked_count": rate_tracked_count,
                 "blackholed_count": len(blackholed_clean),
                 "transport_id": transport_id,
                 "transport_uptime": transport_uptime,

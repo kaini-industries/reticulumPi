@@ -95,6 +95,8 @@
     _setStatCard('ri-links', lc, lc > 0 ? 'rs-info' : '');
     var rc = data.rate_limited_count || 0;
     _setStatCard('ri-rate', rc, rc > 0 ? 'rs-warn' : 'rs-ok');
+    var rtc = data.rate_tracked_count || 0;
+    _setStatCard('ri-tracked', rtc, '');
     var bc = data.blackholed_count || 0;
     _setStatCard('ri-blackhole', bc, bc > 0 ? 'rs-warn' : 'rs-ok');
 

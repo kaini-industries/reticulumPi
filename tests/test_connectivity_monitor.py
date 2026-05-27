@@ -470,6 +470,61 @@ class TestRoutingDataCollection:
 
         assert any("rate-limited" in i.lower() for i in issues)
         assert plugin._health["routing"]["rate_limited_count"] == 1
+        assert plugin._health["routing"]["rate_tracked_count"] == 1
+        plugin.stop()
+
+    def test_collect_routing_data_rate_table_counts(self, plugin):
+        """rate_limited_count reflects only actively blocked destinations."""
+        plugin.start()
+        plugin._last_iface_stats = {}
+        now = time.time()
+        plugin.app.reticulum.get_path_table.return_value = [
+            _make_path_entry("aa" * 16, 1, "TCP A"),
+        ]
+        plugin.app.reticulum.get_rate_table.return_value = [
+            {"hash": b"\xaa" * 16, "last": now, "rate_violations": 3,
+             "blocked_until": now + 60, "timestamps": []},
+            {"hash": b"\xbb" * 16, "last": now - 3600, "rate_violations": 1,
+             "blocked_until": now - 10, "timestamps": []},
+            {"hash": b"\xcc" * 16, "last": now - 7200, "rate_violations": 0,
+             "blocked_until": 0, "timestamps": []},
+        ]
+        plugin.app.reticulum.get_link_count.return_value = 0
+        plugin.app.reticulum.get_blackholed_identities.return_value = {}
+
+        issues = plugin._collect_routing_data()
+
+        routing = plugin._health["routing"]
+        assert routing["rate_limited_count"] == 1
+        assert routing["rate_tracked_count"] == 3
+        rate_diags = [i for i in issues if "rate" in i.lower()]
+        assert len(rate_diags) == 1
+        assert "1 destination" in rate_diags[0]
+        assert "3 tracked" in rate_diags[0]
+        plugin.stop()
+
+    def test_collect_routing_data_no_active_blocks(self, plugin):
+        """No diagnostic when rate table has entries but none actively blocked."""
+        plugin.start()
+        plugin._last_iface_stats = {}
+        plugin.app.reticulum.get_path_table.return_value = [
+            _make_path_entry("aa" * 16, 1, "TCP A"),
+        ]
+        plugin.app.reticulum.get_rate_table.return_value = [
+            {"hash": b"\xdd" * 16, "last": time.time() - 3600,
+             "rate_violations": 0, "blocked_until": 0, "timestamps": []},
+            {"hash": b"\xee" * 16, "last": time.time() - 7200,
+             "rate_violations": 0, "blocked_until": 0, "timestamps": []},
+        ]
+        plugin.app.reticulum.get_link_count.return_value = 0
+        plugin.app.reticulum.get_blackholed_identities.return_value = {}
+
+        issues = plugin._collect_routing_data()
+
+        routing = plugin._health["routing"]
+        assert routing["rate_limited_count"] == 0
+        assert routing["rate_tracked_count"] == 2
+        assert not any("rate" in i.lower() for i in issues)
         plugin.stop()
 
     def test_collect_routing_data_rpc_failure(self, plugin):
