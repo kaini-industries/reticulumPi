@@ -439,6 +439,17 @@ class MessageStore:
             self._conn.commit()
             return msg_id
 
+    def find_sent_by_packet_id(self, packet_id: int) -> int | None:
+        """Find the msg_id of a sent Meshtastic message by its packet_id."""
+        row = self._read_conn.execute(
+            "SELECT id FROM messages "
+            "WHERE json_extract(metadata, '$.packet_id') = ? "
+            "AND direction = 'sent' AND transport = 'meshtastic' "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (packet_id,),
+        ).fetchone()
+        return row[0] if row else None
+
     def get_status(self, msg_id: int) -> str | None:
         """Return the current delivery status for *msg_id*, or None."""
         row = self._read_conn.execute(
@@ -1218,6 +1229,9 @@ class MeshtasticAdapter(TransportAdapter):
         # {msg_id: {"timestamp": float}}
         self._pending_delivery: dict[int, dict[str, Any]] = {}
         self._pending_lock = threading.Lock()
+        # Rate-limit outbound read receipts: {contact_id: timestamp}
+        self._last_read_receipt_sent: dict[str, float] = {}
+        self._read_receipt_cooldown = 30.0
 
     def track_pending(self, msg_id: int, ack_tracking: str | None) -> None:
         """Register an outbound message for ack tracking."""
@@ -1246,6 +1260,9 @@ class MeshtasticAdapter(TransportAdapter):
         self._hub.event_bus.subscribe(
             events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event
         )
+        self._hub.event_bus.subscribe(
+            events.MESHTASTIC_READ_RECEIPT_RECEIVED, self._on_read_receipt
+        )
 
     def stop(self) -> None:
         self._hub.event_bus.unsubscribe(
@@ -1253,6 +1270,9 @@ class MeshtasticAdapter(TransportAdapter):
         )
         self._hub.event_bus.unsubscribe(
             events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event
+        )
+        self._hub.event_bus.unsubscribe(
+            events.MESHTASTIC_READ_RECEIPT_RECEIVED, self._on_read_receipt
         )
 
     def _on_reaction_event(self, event_type: str, data: dict[str, Any]) -> None:
@@ -1273,6 +1293,52 @@ class MeshtasticAdapter(TransportAdapter):
             from_name=from_name,
             sub_transport=source,
         )
+
+    def _on_read_receipt(self, event_type: str, data: dict[str, Any]) -> None:
+        """Handle inbound read receipt: resolve packet_id → msg_id, update status."""
+        packet_id = data.get("packet_id")
+        if not packet_id:
+            return
+        msg_id = self._hub._store.find_sent_by_packet_id(packet_id)
+        if msg_id is None:
+            self._hub.log.debug(
+                "Read receipt for unknown packet_id %d — ignoring", packet_id,
+            )
+            return
+        self._hub.log.info(
+            "Read receipt from %s for msg %d (packet_id=%d)",
+            data.get("from_id", "?"), msg_id, packet_id,
+        )
+        self._hub._on_delivery_status_update(msg_id, "meshtastic", "read")
+
+    def send_read_receipt(self, contact_id: str) -> None:
+        """Send a read receipt for the most recent received DM in this thread.
+
+        Rate-limited to at most one per contact per 30 seconds.
+        """
+        now = time.time()
+        if now - self._last_read_receipt_sent.get(contact_id, 0.0) < self._read_receipt_cooldown:
+            return
+        messages = self._hub._store.get_conversation_messages(contact_id, limit=10)
+        packet_id = None
+        peer_id = None
+        for msg in messages:
+            if msg.get("direction") != "received":
+                continue
+            meta = msg.get("metadata") or {}
+            pid = meta.get("packet_id")
+            if pid is not None:
+                packet_id = pid
+                peer_id = msg.get("from_id")
+                break
+        if packet_id is None or not peer_id:
+            return
+        gw = self._hub.app.get_plugin("meshtastic_gateway")
+        if not gw or not hasattr(gw, "send_read_receipt"):
+            return
+        result = gw.send_read_receipt(packet_id, peer_id)
+        if result.get("sent"):
+            self._last_read_receipt_sent[contact_id] = now
 
     def _on_mesh_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Event bus callback for incoming Meshtastic messages."""
@@ -1957,6 +2023,11 @@ class MessagingHubPlugin(PluginBase):
             # Register for delivery tracking if the adapter supports it
             self._register_delivery_tracking(adapter, msg_id, result)
 
+            # Broadcasts have no ACK path — immediately promote to terminal
+            # so they don't sit at "sent" forever.
+            if msg_type == "broadcast" and result.get("ack_tracking") is None:
+                self._on_delivery_status_update(msg_id, transport, "broadcast_sent")
+
         return {**result, "msg_id": msg_id}
 
     # ── Outbound retry queue ───────────────────────────────────────
@@ -2282,7 +2353,9 @@ class MessagingHubPlugin(PluginBase):
 
     # Terminal statuses are final — once set, later updates from slower
     # sources (e.g. 300s stale-pending sweeper) must not overwrite them.
-    _TERMINAL_STATUSES = frozenset({"delivered", "delivery_failed", "failed"})
+    _TERMINAL_STATUSES = frozenset({
+        "delivered", "delivery_failed", "failed", "broadcast_sent", "read",
+    })
     _NON_OVERWRITING_STATUSES = frozenset({"timeout", "expired"})
 
     def _on_delivery_status_update(
@@ -2490,7 +2563,24 @@ class MessagingHubPlugin(PluginBase):
         count = self._store.mark_read(contact_id)
         if count > 0:
             self._broadcast_cache = None
+            self._maybe_send_read_receipt(contact_id)
         return count
+
+    def _maybe_send_read_receipt(self, contact_id: str) -> None:
+        """Send an outbound read receipt if this is a Meshtastic DM with the feature enabled."""
+        if contact_id.startswith("__broadcast_"):
+            return
+        mesh_cfg = self.config.get("meshtastic", {})
+        if not mesh_cfg.get("read_receipts", False):
+            return
+        with self._lock:
+            adapter = self._adapters.get("meshtastic")
+        if not isinstance(adapter, MeshtasticAdapter):
+            return
+        try:
+            adapter.send_read_receipt(contact_id)
+        except Exception:
+            self.log.debug("Error sending read receipt", exc_info=True)
 
     def delete_conversation(self, contact_id: str) -> int:
         """Delete all stored messages for a conversation."""

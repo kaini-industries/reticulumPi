@@ -1,6 +1,9 @@
 """Tests for the config module."""
 
 import socket
+import threading
+
+import yaml
 
 from reticulumpi.config import AppConfig
 
@@ -77,3 +80,55 @@ def test_reticulum_config_dir_expansion(tmp_path):
     config = AppConfig(str(cfg))
     assert "~" not in config.reticulum_config_dir
     assert config.reticulum_config_dir.endswith("my_reticulum")
+
+
+def test_offgrid_mode_default():
+    config = AppConfig()
+    assert config.offgrid_mode is False
+
+
+def test_set_internet_force_offline_persists(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    config = AppConfig(str(cfg))
+    config.set_internet_force_offline(True)
+    assert config.offgrid_mode is True
+    with open(str(cfg), "r") as f:
+        raw = yaml.safe_load(f)
+    assert raw["reticulumpi"]["internet"]["force_offline"] is True
+
+
+def test_persist_skips_on_corrupt_yaml(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    config = AppConfig(str(cfg))
+    cfg.write_text("{{{invalid yaml")
+    config.set_internet_force_offline(True)
+    assert cfg.read_text() == "{{{invalid yaml"
+
+
+def test_persist_no_config_path():
+    config = AppConfig()
+    config.set_internet_force_offline(True)
+    assert config.offgrid_mode is True
+
+
+def test_set_internet_force_offline_thread_safe(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    config = AppConfig(str(cfg))
+    errors = []
+
+    def toggle(val):
+        try:
+            config.set_internet_force_offline(val)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=toggle, args=(i % 2 == 0,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(errors) == 0
+    assert isinstance(config.offgrid_mode, bool)

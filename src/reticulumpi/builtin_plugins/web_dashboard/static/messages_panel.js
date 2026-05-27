@@ -635,8 +635,12 @@
     function _statusGlyph(status) {
       if (status === 'sent')
         return ' <span class="msg-status-sent">&#10003;</span>';
+      if (status === 'broadcast_sent')
+        return ' <span class="msg-status-broadcast-sent">&#10003;&#8226;</span>';
       if (status === 'delivered')
         return ' <span class="msg-status-delivered">&#10003;&#10003;</span>';
+      if (status === 'read')
+        return ' <span class="msg-status-read">&#10003;&#10003;</span>';
       if (status === 'queued')
         return ' <span class="msg-status-queued">&#9203;</span>';
       if (status === 'propagated')

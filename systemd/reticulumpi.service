@@ -31,7 +31,7 @@ TimeoutStopSec=30
 # restricts escalation to exactly those two systemctl commands.
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /home/reticulumpi/.local/share/reticulumpi /home/reticulumpi/.nomadnet /home/reticulumpi/.nomadnet-tui /opt/reticulumpi/meshchat/storage /etc/chrony/conf.d
+ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /home/reticulumpi/.local/share/reticulumpi /home/reticulumpi/.nomadnet /home/reticulumpi/.nomadnet-tui /opt/reticulumpi/meshchat/storage /etc/chrony/conf.d /etc/reticulumpi
 PrivateTmp=yes
 
 # Resource limits — prevent runaway plugins from starving the system

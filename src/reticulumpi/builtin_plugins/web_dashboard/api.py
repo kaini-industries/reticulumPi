@@ -179,6 +179,8 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/plugins/{name}", handle_plugin_detail)
     app.router.add_post("/api/services/restart", handle_services_restart)
     app.router.add_get("/api/config", handle_config)
+    app.router.add_get("/api/offgrid", handle_offgrid_get)
+    app.router.add_post("/api/offgrid", handle_offgrid_set)
     # Spectrum presets
     app.router.add_get("/api/spectrum/presets", handle_spectrum_presets)
     app.router.add_post("/api/spectrum/preset", handle_spectrum_switch_preset)
@@ -511,3 +513,25 @@ async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:
         "plugins": plugins_config,
     }
     return _ok(data)
+
+
+async def handle_offgrid_get(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/offgrid — current off-grid mode state."""
+    plugin = _get_plugin(request)
+    return _ok({"enabled": plugin.app.offgrid_mode})
+
+
+async def handle_offgrid_set(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """POST /api/offgrid — toggle off-grid mode."""
+    plugin = _get_plugin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body")
+    enabled = body.get("enabled")
+    if enabled is None:
+        return _error("'enabled' field required")
+    if not isinstance(enabled, bool):
+        return _error("'enabled' must be a boolean")
+    result = await _run_sync(plugin.app.set_offgrid_mode, enabled)
+    return _ok(result)

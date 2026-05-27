@@ -1939,7 +1939,9 @@ body {
 
 /* Message status indicators */
 .msg-status-sent { color: var(--green); font-size: 0.75rem; }
+.msg-status-broadcast-sent { color: var(--green); font-size: 0.75rem; opacity: 0.7; }
 .msg-status-delivered { color: var(--cyan); font-size: 0.75rem; }
+.msg-status-read { color: var(--blue, #5b9bd5); font-size: 0.75rem; }
 .msg-status-queued { color: var(--text-muted); font-size: 0.75rem; }
 .msg-status-propagated { color: var(--yellow); font-size: 0.75rem; }
 .msg-status-timeout { color: var(--text-muted); font-size: 0.75rem; }
@@ -4935,6 +4937,26 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
   top: 0;
   z-index: 1000;
 }
+.offline-banner.offgrid-active {
+  background: var(--orange, #e67e22);
+}
+
+/* Off Grid toggle in header */
+.offgrid-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 4px);
+  transition: border-color 0.2s, color 0.2s;
+}
+.offgrid-toggle:hover { border-color: var(--orange, #e67e22); color: var(--text); }
+.offgrid-toggle.active { border-color: var(--orange, #e67e22); color: var(--orange, #e67e22); }
+.offgrid-toggle.active .toggle-slider { background: var(--orange, #e67e22); }
 
 /* ── Weather alert banner ────────────────────────────────── */
 .weather-alert-banner {

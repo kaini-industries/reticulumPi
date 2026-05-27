@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 import RNS as _RNS
@@ -1618,3 +1618,96 @@ class TestMqttNodeEviction:
         _MeshtasticMQTTClient._maybe_evict_nodes(client)
 
         assert "!old" in client.nodes  # not evicted yet
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Read receipts
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestReadReceipts:
+    def test_send_read_receipt(self, gateway_plugin):
+        mock_iface = MagicMock()
+        mock_iface.sendData = MagicMock()
+        gateway_plugin._serial_listener = mock_iface
+
+        result = gateway_plugin.send_read_receipt(42, "!aabb1122")
+        assert result["sent"] is True
+        mock_iface.sendData.assert_called_once()
+        call_kwargs = mock_iface.sendData.call_args
+        payload = call_kwargs[0][0]
+        assert payload[0] == 0x01
+        assert int.from_bytes(payload[1:5], "big") == 42
+        assert call_kwargs[1]["destinationId"] == "!aabb1122"
+        assert call_kwargs[1]["wantAck"] is False
+
+    def test_send_read_receipt_no_serial(self, gateway_plugin):
+        gateway_plugin._serial_listener = None
+        result = gateway_plugin.send_read_receipt(42, "!aabb1122")
+        assert result["sent"] is False
+        assert result["reason"] == "serial_interface_unavailable"
+
+    def test_handle_private_app_read_receipt(self, gateway_plugin):
+        packet = {
+            "from": 0xAABB1122,
+            "fromId": "!aabb1122",
+            "decoded": {
+                "portnum": "PRIVATE_APP",
+                "payload": bytes([0x01, 0x00, 0x00, 0x00, 0x2A]),  # packet_id = 42
+            },
+        }
+        gateway_plugin._active = True
+        gateway_plugin._handle_private_app(packet)
+        gateway_plugin.event_bus.publish.assert_called_with(
+            "meshtastic.read_receipt_received",
+            {
+                "from_id": "!aabb1122",
+                "from_name": ANY,
+                "packet_id": 42,
+            },
+        )
+
+    def test_on_mesh_data_dispatches_private_app(self, gateway_plugin):
+        gateway_plugin._active = True
+        packet = {
+            "from": 0x11223344,
+            "fromId": "!11223344",
+            "decoded": {
+                "portnum": "PRIVATE_APP",
+                "payload": bytes([0x01, 0x00, 0x00, 0x01, 0x00]),  # packet_id = 256
+            },
+        }
+        gateway_plugin._on_mesh_data(packet)
+        gateway_plugin.event_bus.publish.assert_called()
+
+    def test_on_mesh_data_ignores_inactive(self, gateway_plugin):
+        gateway_plugin._active = False
+        gateway_plugin.event_bus.publish.reset_mock()
+        packet = {
+            "decoded": {"portnum": "PRIVATE_APP", "payload": bytes([0x01, 0, 0, 0, 1])},
+        }
+        gateway_plugin._on_mesh_data(packet)
+        gateway_plugin.event_bus.publish.assert_not_called()
+
+    def test_handle_private_app_ignores_short_payload(self, gateway_plugin):
+        gateway_plugin.event_bus.publish.reset_mock()
+        packet = {
+            "from": 0xAABB1122,
+            "fromId": "!aabb1122",
+            "decoded": {"portnum": "PRIVATE_APP", "payload": bytes([0x01, 0x00])},
+        }
+        gateway_plugin._handle_private_app(packet)
+        gateway_plugin.event_bus.publish.assert_not_called()
+
+    def test_handle_private_app_ignores_unknown_tag(self, gateway_plugin):
+        gateway_plugin.event_bus.publish.reset_mock()
+        packet = {
+            "from": 0xAABB1122,
+            "fromId": "!aabb1122",
+            "decoded": {
+                "portnum": "PRIVATE_APP",
+                "payload": bytes([0xFF, 0x00, 0x00, 0x00, 0x2A]),
+            },
+        }
+        gateway_plugin._handle_private_app(packet)
+        gateway_plugin.event_bus.publish.assert_not_called()

@@ -33,6 +33,7 @@ FALLBACK_DEACTIVATED = "transport.fallback_deactivated"
 # Internet connectivity
 INTERNET_ONLINE = "internet.online"
 INTERNET_OFFLINE = "internet.offline"
+OFFGRID_MODE_CHANGED = "offgrid.mode_changed"
 
 # Connectivity monitoring
 RNSD_RECOVERED = "connectivity.rnsd_recovered"
@@ -110,6 +111,9 @@ MESHTASTIC_FIRMWARE_RECOVERED = "meshtastic.firmware_recovered"
 
 # Meshtastic emoji reactions
 MESHTASTIC_REACTION_RECEIVED = "meshtastic.reaction_received"
+
+# Meshtastic DM read receipts (PRIVATE_APP portnum)
+MESHTASTIC_READ_RECEIPT_RECEIVED = "meshtastic.read_receipt_received"
 
 # Messaging hub — reactions
 MESSAGE_REACTION_RECEIVED = "messaging.reaction_received"

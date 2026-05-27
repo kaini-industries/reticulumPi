@@ -11,6 +11,10 @@ import asyncio
 import json
 from unittest.mock import MagicMock, patch
 
+from reticulumpi.builtin_plugins.web_dashboard.api import (
+    handle_offgrid_get,
+    handle_offgrid_set,
+)
 from reticulumpi.builtin_plugins.web_dashboard.api_interfaces import (
     _validate_interface_config,
     handle_interface_add,
@@ -1042,3 +1046,43 @@ class TestHandleSendMessage:
 
         assert data["ok"] is True
         hub.send_message.assert_called_once_with("meshtastic", "Mesh message", "!aabbccdd")
+
+
+# ── Off-grid endpoints ────────────────────────────────────────────────
+
+
+class TestOffgridEndpoints:
+    def test_offgrid_get(self):
+        plugin = MagicMock()
+        plugin.app.offgrid_mode = False
+        request = _make_request(plugin_mock=plugin)
+        resp = asyncio.run(handle_offgrid_get(request))
+        data = _parse_response(resp)
+        assert data["ok"] is True
+        assert data["data"]["enabled"] is False
+
+    def test_offgrid_set_valid(self):
+        plugin = MagicMock()
+        plugin.app.set_offgrid_mode.return_value = {"enabled": True}
+        request = _make_request(body={"enabled": True}, plugin_mock=plugin)
+        resp = asyncio.run(handle_offgrid_set(request))
+        data = _parse_response(resp)
+        assert data["ok"] is True
+        assert data["data"]["enabled"] is True
+
+    def test_offgrid_set_non_boolean(self):
+        plugin = MagicMock()
+        request = _make_request(body={"enabled": "true"}, plugin_mock=plugin)
+        resp = asyncio.run(handle_offgrid_set(request))
+        data = _parse_response(resp)
+        assert data["ok"] is False
+        assert "boolean" in data["error"]
+        plugin.app.set_offgrid_mode.assert_not_called()
+
+    def test_offgrid_set_missing_field(self):
+        plugin = MagicMock()
+        request = _make_request(body={}, plugin_mock=plugin)
+        resp = asyncio.run(handle_offgrid_set(request))
+        data = _parse_response(resp)
+        assert data["ok"] is False
+        assert "required" in data["error"]

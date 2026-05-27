@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import tempfile
+import threading
 from typing import Any
 
 import yaml
@@ -62,6 +64,7 @@ class AppConfig:
         if config_path:
             self._load_file(config_path)
         self._validate()
+        self._lock = threading.Lock()
 
     @property
     def config_path(self) -> str | None:
@@ -145,6 +148,52 @@ class AppConfig:
     @property
     def internet(self) -> dict[str, Any]:
         return dict(self._data.get("internet", DEFAULT_CONFIG["internet"]))
+
+    @property
+    def offgrid_mode(self) -> bool:
+        inet = self._data.get("internet", {})
+        return bool(inet.get("force_offline", False))
+
+    def set_internet_force_offline(self, value: bool) -> None:
+        """Update the internet.force_offline flag in memory and persist to disk."""
+        with self._lock:
+            inet = self._data.setdefault("internet", dict(DEFAULT_CONFIG["internet"]))
+            inet["force_offline"] = value
+            try:
+                self._persist()
+            except OSError:
+                log.warning("Could not persist offgrid state (read-only filesystem)")
+
+    def _persist(self) -> None:
+        """Atomically write current config back to the YAML file."""
+        path = self.config_path
+        if not path:
+            return
+        try:
+            with open(path, "r") as f:
+                raw = yaml.safe_load(f) or {}
+        except OSError:
+            raw = {}
+        except yaml.YAMLError:
+            log.warning("Corrupt YAML in %s, skipping persist to avoid data loss", path)
+            return
+        raw.setdefault("reticulumpi", {})
+        raw["reticulumpi"].setdefault("internet", {})
+        raw["reticulumpi"]["internet"]["force_offline"] = self._data.get(
+            "internet", {}
+        ).get("force_offline", False)
+        dir_name = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(dir=dir_name, prefix=".config_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh, default_flow_style=False, sort_keys=False)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     @property
     def plugins(self) -> dict[str, dict[str, Any]]:

@@ -328,6 +328,11 @@ _collection_running = threading.Event()
 _warm_cache_data: dict[str, Any] = {}
 _warm_cache_ts: float = 0.0
 _last_heartbeat_ts: float = 0.0
+_hb_count: int = 0
+_hb_fail: int = 0
+_cache_hits: int = 0
+_last_hb_summary_ts: float = 0.0
+_HB_SUMMARY_INTERVAL = 3600.0
 
 _HEARTBEAT_MIN_INTERVAL = 30.0
 _HEARTBEAT_MAX_INTERVAL = 120.0
@@ -520,7 +525,7 @@ async def _handle_snapshot_request(
     ws: aiohttp.web.WebSocketResponse, plugin: Any
 ) -> None:
     """Send a full data snapshot in response to a client request."""
-    global _last_global_snapshot
+    global _last_global_snapshot, _cache_hits
     now = time.time()
     if now - _last_global_snapshot < 2.0:
         return
@@ -532,6 +537,7 @@ async def _handle_snapshot_request(
     try:
         if _warm_cache_data and (time.monotonic() - _warm_cache_ts) < _WARM_CACHE_MAX_AGE:
             data = _warm_cache_data.copy()
+            _cache_hits += 1
         else:
             if _collection_running.is_set():
                 await asyncio.sleep(0.15)
@@ -561,6 +567,7 @@ async def _handle_snapshot_request(
 
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Handle WebSocket connections for live metrics streaming."""
+    global _cache_hits
     plugin = request.app["plugin"]
     max_clients = plugin.config.get("max_websocket_clients", 10)
 
@@ -590,6 +597,7 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     try:
         if _warm_cache_data and (time.monotonic() - _warm_cache_ts) < _WARM_CACHE_MAX_AGE:
             data = _warm_cache_data.copy()
+            _cache_hits += 1
             log.debug("Serving warm cache to new client (age=%.1fs)",
                        time.monotonic() - _warm_cache_ts)
         else:
@@ -758,6 +766,7 @@ def _collect_broadcast_data(
 async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
     """Periodically broadcast system metrics to all connected WebSocket clients."""
     global _last_mesh_announce_ts, _mesh_version, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts
+    global _hb_count, _hb_fail, _cache_hits, _last_hb_summary_ts
 
     plugin = app["plugin"]
     interval = plugin.config.get("metrics_interval", 5)
@@ -793,14 +802,24 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                             _warm_cache_data = data
                             _warm_cache_ts = time.monotonic()
                             _last_heartbeat_ts = _warm_cache_ts
+                            _hb_count += 1
                             log.debug(
                                 "Warm cache heartbeat: collected %d keys (interval=%.0fs)",
                                 len(data), hb_interval,
                             )
                         except Exception:
+                            _hb_fail += 1
                             log.debug("Warm cache heartbeat failed", exc_info=True)
                         finally:
                             _collection_running.clear()
+                    # Periodic INFO summary (~hourly)
+                    if (now_mono - _last_hb_summary_ts) >= _HB_SUMMARY_INTERVAL:
+                        log.info(
+                            "Warm cache: %d heartbeats, %d failures,"
+                            " %d cache hits (interval=%.0fs)",
+                            _hb_count, _hb_fail, _cache_hits, hb_interval,
+                        )
+                        _last_hb_summary_ts = now_mono
                 continue
 
             # Skip this cycle if the previous collection hasn't finished.
@@ -909,7 +928,7 @@ _push_sem: asyncio.Semaphore | None = None
 
 
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _command_executor, _push_sem, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts
+    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _command_executor, _push_sem, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts, _hb_count, _hb_fail, _cache_hits, _last_hb_summary_ts
     _ws_loop = asyncio.get_running_loop()
     _ws_plugin = app["plugin"]
     _push_sem = asyncio.Semaphore(8)
@@ -945,12 +964,13 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
         event_bus.subscribe(_events.INTERNET_ONLINE, _on_internet_event)
         event_bus.subscribe(_events.INTERNET_OFFLINE, _on_internet_event)
+        event_bus.subscribe(_events.OFFGRID_MODE_CHANGED, _on_offgrid_event)
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
 
 async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
-    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _command_executor, _broadcast_registry, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts
+    global _broadcast_task, _spectrum_task, _ws_loop, _ws_plugin, _broadcast_executor, _command_executor, _broadcast_registry, _warm_cache_data, _warm_cache_ts, _last_heartbeat_ts, _hb_count, _hb_fail, _cache_hits, _last_hb_summary_ts
     try:
         if _ws_plugin is not None:
             event_bus = _ws_plugin.app.event_bus
@@ -959,6 +979,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_reaction_event)
             event_bus.unsubscribe_all(_on_alert_event)
             event_bus.unsubscribe_all(_on_internet_event)
+            event_bus.unsubscribe_all(_on_offgrid_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _spectrum_task:
@@ -981,6 +1002,10 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
     _warm_cache_data = {}
     _warm_cache_ts = 0.0
     _last_heartbeat_ts = 0.0
+    _hb_count = 0
+    _hb_fail = 0
+    _cache_hits = 0
+    _last_hb_summary_ts = 0.0
     if _broadcast_executor is not None:
         _broadcast_executor.shutdown(wait=True, cancel_futures=True)
         _broadcast_executor = None
@@ -1186,6 +1211,14 @@ def _handle_ws_command(raw: dict | str, plugin: Any, ws: Any = None) -> dict | N
         elif action == "radio_record_stop" and hasattr(fm, "stop_recording"):
             result = fm.stop_recording()
             return {"type": "radio_record_stopped", **result}
+    elif action == "set_offgrid_mode":
+        enabled = cmd.get("enabled")
+        if enabled is None:
+            return {"type": "offgrid_error", "error": "'enabled' field required"}
+        if not isinstance(enabled, bool):
+            return {"type": "offgrid_error", "error": "'enabled' must be a boolean"}
+        result = plugin.app.set_offgrid_mode(enabled)
+        return {"type": "offgrid_mode_set", **result}
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
@@ -1202,13 +1235,31 @@ def _on_internet_event(event_type: str, data: dict) -> None:
     """Event-bus callback for INTERNET_ONLINE/OFFLINE — push to WS clients."""
     if _ws_loop is None or not _ws_clients:
         return
+    force_offline = False
+    if _ws_plugin is not None:
+        probe = getattr(_ws_plugin.app, "internet_probe", None)
+        if probe is not None:
+            force_offline = probe.force_offline
     payload = {
         "online": event_type == "internet.online",
         "wan_ip": data.get("wan_ip"),
         "lan_ip": data.get("lan_ip"),
+        "force_offline": force_offline,
     }
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "internet_status", payload)
+    except RuntimeError:
+        pass
+
+
+def _on_offgrid_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for OFFGRID_MODE_CHANGED — push to WS clients."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(
+            _schedule_push, "offgrid_mode_changed", {"enabled": data.get("enabled", False)},
+        )
     except RuntimeError:
         pass
 

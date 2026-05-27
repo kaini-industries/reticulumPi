@@ -239,6 +239,24 @@ class ReticulumPiApp:
             log.warning("Reticulum transport cleanup failed", exc_info=True)
         self.reticulum = None
 
+    @property
+    def offgrid_mode(self) -> bool:
+        if self.internet_probe is not None:
+            return self.internet_probe.force_offline
+        return self.config.offgrid_mode
+
+    def set_offgrid_mode(self, enabled: bool) -> dict[str, Any]:
+        """Toggle off-grid mode: force internet probe offline and persist."""
+        was_enabled = self.offgrid_mode
+        if enabled == was_enabled:
+            return {"enabled": enabled}
+        self.config.set_internet_force_offline(enabled)
+        self.event_bus.publish(events.OFFGRID_MODE_CHANGED, {"enabled": enabled})
+        if self.internet_probe is not None:
+            self.internet_probe.set_force_offline(enabled)
+        log.info("Off-grid mode %s", "enabled" if enabled else "disabled")
+        return {"enabled": enabled}
+
     def get_plugin(self, name: str) -> PluginBase | None:
         """Get a running plugin by name, for inter-plugin communication."""
         return self.plugins.get(name)

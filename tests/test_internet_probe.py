@@ -195,3 +195,77 @@ class TestEventData:
         assert len(received) == 1
         assert "timestamp" in received[0]
         assert isinstance(received[0]["timestamp"], float)
+
+
+class TestSetForceOffline:
+    @patch("reticulumpi.internet_probe.socket.create_connection")
+    def test_transitions_offline(self, mock_conn):
+        mock_sock = MagicMock()
+        mock_conn.return_value = mock_sock
+        probe, bus = _make_probe()
+        probe._set_state(True)
+        assert probe.is_online is True
+
+        published = []
+        bus.subscribe(events.INTERNET_OFFLINE, lambda e, d: published.append(e))
+
+        probe.set_force_offline(True)
+        assert probe.is_online is False
+        assert len(published) == 1
+
+    @patch("reticulumpi.internet_probe.socket.create_connection")
+    def test_disable_wakes_monitor(self, mock_conn):
+        """Disabling force-offline wakes the monitor loop asynchronously."""
+        probe, _ = _make_probe({"force_offline": True, "probe_interval": 300})
+        probe._set_state(False)
+        probe.set_force_offline(False)
+        assert probe._wake_event.is_set()
+
+    def test_force_offline_property(self):
+        probe, _ = _make_probe()
+        assert probe.force_offline is False
+        probe.set_force_offline(True)
+        assert probe.force_offline is True
+        probe.set_force_offline(False)
+        assert probe.force_offline is False
+
+    @patch("reticulumpi.internet_probe.socket.create_connection")
+    def test_run_check_respects_force_offline(self, mock_conn):
+        """A successful probe is discarded if force_offline was set mid-flight."""
+        mock_sock = MagicMock()
+        mock_conn.return_value = mock_sock
+        probe, bus = _make_probe()
+        probe._set_state(False)
+
+        published = []
+        bus.subscribe(events.INTERNET_ONLINE, lambda e, d: published.append(e))
+
+        with probe._lock:
+            probe._force_offline = True
+        probe._run_check()
+
+        assert probe.is_online is False
+        assert len(published) == 0
+
+    @patch("reticulumpi.internet_probe.socket.create_connection")
+    def test_disable_force_offline_monitor_loop_checks(self, mock_conn):
+        """Monitor loop runs a check promptly after force-offline is cleared."""
+        mock_sock = MagicMock()
+        mock_conn.return_value = mock_sock
+        probe, bus = _make_probe({"force_offline": True, "probe_interval": 300})
+        probe._set_state(False)
+
+        published = []
+        bus.subscribe(events.INTERNET_ONLINE, lambda e, d: published.append(e))
+
+        probe.start()
+        try:
+            probe.set_force_offline(False)
+            import time
+            deadline = time.monotonic() + 2.0
+            while not published and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert len(published) == 1
+            assert probe.is_online is True
+        finally:
+            probe.stop()

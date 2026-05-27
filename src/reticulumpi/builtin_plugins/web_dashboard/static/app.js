@@ -1129,22 +1129,76 @@
     }
   }
 
+  var _offgridActive = false;
+  var _lastOnlineState = null;
+
+  function updateOffgridState(enabled) {
+    _offgridActive = !!enabled;
+    var toggle = document.getElementById('offgrid-toggle');
+    var sw = document.getElementById('offgrid-switch');
+    if (toggle) {
+      if (_offgridActive) toggle.classList.add('active');
+      else toggle.classList.remove('active');
+    }
+    if (sw) sw.checked = _offgridActive;
+    var banner = document.getElementById('internet-status-banner');
+    if (banner) {
+      if (_offgridActive) {
+        banner.style.display = 'block';
+        banner.textContent = 'Off Grid Mode Active — internet disabled';
+        banner.classList.add('offgrid-active');
+      } else {
+        banner.classList.remove('offgrid-active');
+        banner.textContent = 'Internet Unavailable — some features are limited';
+        if (_lastOnlineState === true) {
+          banner.style.display = 'none';
+        }
+      }
+    }
+  }
+
+  function initOffgridToggle() {
+    var sw = document.getElementById('offgrid-switch');
+    if (!sw) return;
+    sw.addEventListener('change', function() {
+      var enabled = sw.checked;
+      sw.disabled = true;
+      var reenableTimer = setTimeout(function() { sw.disabled = false; }, 5000);
+      function onResponse() {
+        clearTimeout(reenableTimer);
+        sw.disabled = false;
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({action: 'set_offgrid_mode', enabled: enabled}));
+      } else {
+        api('/api/offgrid', {method: 'POST', body: {enabled: enabled}}).then(onResponse);
+      }
+    });
+  }
+
   function updateInternetStatus(info) {
-    var online, wanIp, lanIp;
+    var online, wanIp, lanIp, forceOffline;
     if (typeof info === 'boolean') {
       online = info;
       wanIp = null;
       lanIp = null;
+      forceOffline = false;
     } else if (info && typeof info === 'object') {
       online = info.online;
       wanIp = info.wan_ip || null;
       lanIp = info.lan_ip || null;
+      forceOffline = !!info.force_offline;
     } else {
       return;
     }
 
+    _lastOnlineState = online;
+    updateOffgridState(forceOffline);
+
     var banner = document.getElementById('internet-status-banner');
-    if (banner) banner.style.display = online ? 'none' : 'block';
+    if (banner && !forceOffline) {
+      banner.style.display = online ? 'none' : 'block';
+    }
 
     var badge = $('inet-status');
     if (badge) {
@@ -1432,6 +1486,16 @@
         }
         if (msg.type === 'internet_status' && msg.data) {
           updateInternetStatus(msg.data);
+          return;
+        }
+        if (msg.type === 'offgrid_mode_changed' && msg.data) {
+          updateOffgridState(msg.data.enabled);
+          return;
+        }
+        if (msg.type === 'offgrid_mode_set') {
+          updateOffgridState(msg.enabled);
+          var _sw = document.getElementById('offgrid-switch');
+          if (_sw) _sw.disabled = false;
           return;
         }
         if (msg.type === 'update' && msg.data) {
@@ -1815,6 +1879,7 @@
   });
 
   // If we reached this page, the cookie is valid.
+  initOffgridToggle();
   fetchNode();
   connectWS();
 

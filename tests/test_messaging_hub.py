@@ -2097,3 +2097,221 @@ class TestGetQueuedSent:
 
         rows = store.get_queued_sent(max_age_s=2000)
         assert len(rows) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Broadcast sent status
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestBroadcastSentStatus:
+    def test_broadcast_send_transitions_to_broadcast_sent(self, hub_plugin):
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "meshtastic"
+        adapter.display_name = "Meshtastic"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": True, "ack_tracking": None, "packet_id": 42}
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+
+        result = hub_plugin.send_message(
+            "meshtastic", "Hello mesh!", "broadcast",
+            msg_type="broadcast", sub_transport="lora",
+        )
+        assert result["sent"] is True
+        msg = hub_plugin._store.get_message(result["msg_id"])
+        assert msg["status"] == "broadcast_sent"
+
+    def test_dm_send_stays_at_sent(self, hub_plugin):
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "meshtastic"
+        adapter.display_name = "Meshtastic"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": True, "ack_tracking": "serial", "packet_id": 99}
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+
+        result = hub_plugin.send_message("meshtastic", "Hi!", "!abcd1234")
+        msg = hub_plugin._store.get_message(result["msg_id"])
+        assert msg["status"] == "sent"
+
+    def test_broadcast_sent_is_terminal(self, store):
+        msg_id = store.store(
+            transport="meshtastic", direction="sent", msg_type="broadcast",
+            text="bcast", status="broadcast_sent",
+        )
+        terminal = MessagingHubPlugin._TERMINAL_STATUSES
+        updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
+        assert updated is False
+        assert store.get_status(msg_id) == "broadcast_sent"
+
+    def test_broadcast_with_ack_tracking_not_promoted(self, hub_plugin):
+        """If a future transport provides ack_tracking for broadcasts, don't promote."""
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "future"
+        adapter.display_name = "Future"
+        adapter.is_available.return_value = True
+        adapter.send.return_value = {"sent": True, "ack_tracking": "radio"}
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+
+        result = hub_plugin.send_message(
+            "future", "broadcast!", "broadcast", msg_type="broadcast",
+        )
+        msg = hub_plugin._store.get_message(result["msg_id"])
+        assert msg["status"] == "sent"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Read receipts
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestFindSentByPacketId:
+    def test_finds_matching_sent_message(self, store):
+        msg_id = store.store(
+            transport="meshtastic", direction="sent", msg_type="direct",
+            text="hello", metadata={"packet_id": 12345},
+        )
+        found = store.find_sent_by_packet_id(12345)
+        assert found == msg_id
+
+    def test_ignores_received_messages(self, store):
+        store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="hi", metadata={"packet_id": 777},
+        )
+        assert store.find_sent_by_packet_id(777) is None
+
+    def test_ignores_other_transports(self, store):
+        store.store(
+            transport="lxmf", direction="sent", msg_type="direct",
+            text="hi", metadata={"packet_id": 888},
+        )
+        assert store.find_sent_by_packet_id(888) is None
+
+    def test_returns_none_for_unknown(self, store):
+        assert store.find_sent_by_packet_id(99999) is None
+
+
+class TestReadReceipts:
+    def test_inbound_read_receipt_updates_status(self, hub_plugin):
+        msg_id = hub_plugin._store.store(
+            transport="meshtastic", direction="sent", msg_type="direct",
+            text="hello", status="delivered",
+            metadata={"packet_id": 42},
+        )
+
+        adapter = MeshtasticAdapter(hub_plugin)
+        adapter._hub = hub_plugin
+        adapter._on_read_receipt("meshtastic.read_receipt_received", {
+            "from_id": "!aabb1122",
+            "packet_id": 42,
+        })
+        assert hub_plugin._store.get_status(msg_id) == "read"
+
+    def test_inbound_read_receipt_unknown_packet_ignored(self, hub_plugin):
+        adapter = MeshtasticAdapter(hub_plugin)
+        adapter._hub = hub_plugin
+        adapter._on_read_receipt("meshtastic.read_receipt_received", {
+            "from_id": "!aabb1122",
+            "packet_id": 99999,
+        })
+
+    def test_read_is_terminal(self, store):
+        msg_id = store.store(
+            transport="meshtastic", direction="sent", msg_type="direct",
+            text="hi", status="read",
+        )
+        terminal = MessagingHubPlugin._TERMINAL_STATUSES
+        updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
+        assert updated is False
+        assert store.get_status(msg_id) == "read"
+
+    def test_outbound_receipt_sent_on_mark_read(self, hub_plugin):
+        hub_plugin.config["meshtastic"] = {"enabled": False, "read_receipts": True}
+        adapter = MeshtasticAdapter(hub_plugin)
+        adapter._hub = hub_plugin
+        hub_plugin._adapters["meshtastic"] = adapter
+
+        hub_plugin._store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="hi there", from_id="!aabb1122",
+            metadata={"packet_id": 55},
+            sub_transport="lora",
+        )
+
+        mock_gw = MagicMock()
+        mock_gw.send_read_receipt.return_value = {"sent": True}
+        hub_plugin.app.get_plugin.return_value = mock_gw
+
+        hub_plugin.mark_read("!aabb1122__lora")
+        mock_gw.send_read_receipt.assert_called_once_with(55, "!aabb1122")
+
+    def test_outbound_receipt_not_sent_for_broadcast(self, hub_plugin):
+        hub_plugin.config["meshtastic"] = {"enabled": False, "read_receipts": True}
+        adapter = MeshtasticAdapter(hub_plugin)
+        adapter._hub = hub_plugin
+        hub_plugin._adapters["meshtastic"] = adapter
+
+        mock_gw = MagicMock()
+        hub_plugin.app.get_plugin.return_value = mock_gw
+
+        hub_plugin._store.store(
+            transport="meshtastic", direction="received", msg_type="broadcast",
+            text="bcast", from_id="!aabb1122",
+            sub_transport="lora", channel=0,
+        )
+
+        hub_plugin.mark_read("__broadcast_meshtastic_lora_ch0__")
+        mock_gw.send_read_receipt.assert_not_called()
+
+    def test_outbound_receipt_not_sent_when_disabled(self, hub_plugin):
+        hub_plugin.config["meshtastic"] = {"enabled": False, "read_receipts": False}
+        adapter = MeshtasticAdapter(hub_plugin)
+        adapter._hub = hub_plugin
+        hub_plugin._adapters["meshtastic"] = adapter
+
+        mock_gw = MagicMock()
+        hub_plugin.app.get_plugin.return_value = mock_gw
+
+        hub_plugin._store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="hi", from_id="!aabb1122",
+            metadata={"packet_id": 77},
+            sub_transport="lora",
+        )
+
+        hub_plugin.mark_read("!aabb1122__lora")
+        mock_gw.send_read_receipt.assert_not_called()
+
+    def test_outbound_receipt_rate_limited(self, hub_plugin):
+        hub_plugin.config["meshtastic"] = {"enabled": False, "read_receipts": True}
+        adapter = MeshtasticAdapter(hub_plugin)
+        adapter._hub = hub_plugin
+        adapter._read_receipt_cooldown = 30.0
+        hub_plugin._adapters["meshtastic"] = adapter
+
+        hub_plugin._store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="hi", from_id="!aabb1122",
+            metadata={"packet_id": 88},
+            sub_transport="lora",
+        )
+
+        mock_gw = MagicMock()
+        mock_gw.send_read_receipt.return_value = {"sent": True}
+        hub_plugin.app.get_plugin.return_value = mock_gw
+
+        hub_plugin.mark_read("!aabb1122__lora")
+        assert mock_gw.send_read_receipt.call_count == 1
+
+        # Second mark within cooldown — should be rate-limited
+        hub_plugin._store.store(
+            transport="meshtastic", direction="received", msg_type="direct",
+            text="again", from_id="!aabb1122",
+            metadata={"packet_id": 89},
+            sub_transport="lora",
+        )
+        hub_plugin.mark_read("!aabb1122__lora")
+        assert mock_gw.send_read_receipt.call_count == 1  # still 1, rate-limited

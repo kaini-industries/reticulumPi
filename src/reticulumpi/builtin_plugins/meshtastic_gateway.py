@@ -406,6 +406,28 @@ class _MeshtasticMQTTClient:
                 if self._logger:
                     self._logger.debug("Error dispatching text via pubsub", exc_info=True)
 
+        # Dispatch PRIVATE_APP packets (read receipts, etc.)
+        if data.portnum == PortNum.PRIVATE_APP:
+            fake_data_packet = {
+                "from": from_num,
+                "fromId": f"!{from_num:08x}",
+                "to": to_num,
+                "toId": f"!{to_num:08x}",
+                "id": packet_id,
+                "decoded": {
+                    "portnum": "PRIVATE_APP",
+                    "payload": bytes(data.payload),
+                },
+            }
+            try:
+                from pubsub import pub
+                pub.sendMessage(
+                    "meshtastic.receive.data", packet=fake_data_packet, interface=self,
+                )
+            except Exception:
+                if self._logger:
+                    self._logger.debug("Error dispatching PRIVATE_APP via pubsub", exc_info=True)
+
     def _decrypt_packet(self, encrypted: bytes, from_num: int, packet_id: int) -> Any:
         """Decrypt a MeshPacket payload using AES-CTR."""
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -1019,6 +1041,7 @@ class MeshtasticGateway(PluginBase):
         from pubsub import pub
 
         pub.subscribe(self._on_mesh_text, "meshtastic.receive.text")
+        pub.subscribe(self._on_mesh_data, "meshtastic.receive.data")
         pub.subscribe(self._on_mesh_connect, "meshtastic.connection.established")
         pub.subscribe(self._on_mesh_disconnect, "meshtastic.connection.lost")
 
@@ -1060,6 +1083,7 @@ class MeshtasticGateway(PluginBase):
             from pubsub import pub
 
             pub.unsubscribe(self._on_mesh_text, "meshtastic.receive.text")
+            pub.unsubscribe(self._on_mesh_data, "meshtastic.receive.data")
             pub.unsubscribe(self._on_mesh_connect, "meshtastic.connection.established")
             pub.unsubscribe(self._on_mesh_disconnect, "meshtastic.connection.lost")
         except Exception:
@@ -3337,6 +3361,81 @@ class MeshtasticGateway(PluginBase):
                     "Error in Meshtastic ACK handler", exc_info=True,
                 )
         return _handler
+
+    # ── Read receipts (PRIVATE_APP portnum) ──────────────────────────
+
+    _READ_RECEIPT_TAG = 0x01
+
+    def send_read_receipt(
+        self,
+        packet_id: int,
+        destination_id: str,
+    ) -> dict[str, Any]:
+        """Send a read-receipt data packet to a Meshtastic peer.
+
+        Uses PRIVATE_APP portnum (256) with a compact binary payload:
+          byte 0:    type tag (0x01 = read receipt)
+          bytes 1-4: packet_id (big-endian uint32)
+        """
+        if not self._check_send_rate_limit():
+            return {"sent": False, "reason": "rate_limited"}
+
+        with self._lock:
+            iface = self._serial_listener
+        if iface is None or not hasattr(iface, "sendData"):
+            return {"sent": False, "reason": "serial_interface_unavailable"}
+
+        payload = bytes([self._READ_RECEIPT_TAG]) + (
+            packet_id & 0xFFFFFFFF
+        ).to_bytes(4, "big")
+
+        try:
+            from meshtastic.protobuf.portnums_pb2 import PortNum
+            iface.sendData(
+                payload,
+                destinationId=destination_id,
+                portNum=PortNum.PRIVATE_APP,
+                wantAck=False,
+            )
+        except Exception as exc:
+            self.log.debug("Failed to send read receipt to %s: %s", destination_id, exc)
+            return {"sent": False, "reason": str(exc)}
+
+        self.log.debug("Sent read receipt to %s (packet_id=%d)", destination_id, packet_id)
+        return {"sent": True}
+
+    def _on_mesh_data(self, packet: dict, interface: Any = None) -> None:
+        """Handle incoming Meshtastic data packets (non-text portnums)."""
+        with self._lock:
+            if not self._active:
+                return
+        try:
+            decoded = packet.get("decoded", {})
+            portnum = decoded.get("portnum")
+            if portnum in ("PRIVATE_APP", 256):
+                self._handle_private_app(packet)
+        except Exception:
+            self.log.debug("Error handling data packet", exc_info=True)
+
+    def _handle_private_app(self, packet: dict) -> None:
+        """Parse PRIVATE_APP packets for read receipts."""
+        decoded = packet.get("decoded", {})
+        payload = decoded.get("payload", b"")
+        if isinstance(payload, (bytes, bytearray)) and len(payload) >= 5:
+            if payload[0] == self._READ_RECEIPT_TAG:
+                read_packet_id = int.from_bytes(payload[1:5], "big")
+                from_id = packet.get("fromId", "")
+                from_num = packet.get("from", 0)
+                node_name = self._resolve_mesh_node_name(from_num)
+                self.log.info(
+                    "Read receipt from %s for packet_id=%d",
+                    from_id or f"!{from_num:08x}", read_packet_id,
+                )
+                self.event_bus.publish(events.MESHTASTIC_READ_RECEIPT_RECEIVED, {
+                    "from_id": from_id,
+                    "from_name": node_name,
+                    "packet_id": read_packet_id,
+                })
 
 
 # ---------------------------------------------------------------------------

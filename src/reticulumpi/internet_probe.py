@@ -54,12 +54,18 @@ class InternetProbe:
         self._wan_ip: str | None = None
         self._lan_ip: str | None = None
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     @property
     def is_online(self) -> bool:
         with self._lock:
             return bool(self._is_online)
+
+    @property
+    def force_offline(self) -> bool:
+        with self._lock:
+            return self._force_offline
 
     @property
     def wan_ip(self) -> str | None:
@@ -77,7 +83,23 @@ class InternetProbe:
                 "online": bool(self._is_online),
                 "wan_ip": self._wan_ip,
                 "lan_ip": self._lan_ip,
+                "force_offline": self._force_offline,
             }
+
+    def set_force_offline(self, enabled: bool) -> None:
+        """Toggle forced-offline mode at runtime.
+
+        When enabling, bypasses hysteresis for immediate offline transition.
+        When disabling, wakes the monitor loop to run a real connectivity
+        check rather than blocking the caller for up to 9s of TCP probes.
+        """
+        with self._lock:
+            self._force_offline = enabled
+            self._consecutive_failures = 0
+        if enabled:
+            self._set_state(False)
+        else:
+            self._wake_event.set()
 
     def probe_once(self) -> bool:
         """Run a single synchronous connectivity check.
@@ -143,13 +165,15 @@ class InternetProbe:
     def stop(self) -> None:
         """Stop the monitoring thread."""
         self._stop_event.set()
+        self._wake_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
 
     def _monitor_loop(self) -> None:
         while not self._stop_event.is_set():
-            self._stop_event.wait(timeout=self._interval)
+            self._wake_event.wait(timeout=self._interval)
+            self._wake_event.clear()
             if self._stop_event.is_set():
                 break
             self._run_check()
@@ -159,6 +183,7 @@ class InternetProbe:
 
         with self._lock:
             was_online = self._is_online
+            force = self._force_offline
             if reachable:
                 self._consecutive_failures = 0
                 consecutive = 0
@@ -166,11 +191,11 @@ class InternetProbe:
                 self._consecutive_failures += 1
                 consecutive = self._consecutive_failures
 
-        if reachable:
+        if reachable and not force:
             if not was_online:
                 self._set_state(True)
                 log.info("Internet connectivity restored")
-        else:
+        elif not reachable:
             if was_online and consecutive >= self._offline_threshold:
                 self._set_state(False)
                 log.warning(

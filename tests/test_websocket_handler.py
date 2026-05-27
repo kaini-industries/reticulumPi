@@ -27,6 +27,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _heartbeat_interval,
     _lookup_message_row,
     _on_alert_event,
+    _on_internet_event,
     _on_message_event,
     _on_status_event,
     _parse_rnode_config,
@@ -54,11 +55,19 @@ def _reset_ws_clients():
     wsh_module._warm_cache_data = {}
     wsh_module._warm_cache_ts = 0.0
     wsh_module._last_heartbeat_ts = 0.0
+    wsh_module._hb_count = 0
+    wsh_module._hb_fail = 0
+    wsh_module._cache_hits = 0
+    wsh_module._last_hb_summary_ts = 0.0
     yield
     _ws_clients.clear()
     wsh_module._warm_cache_data = {}
     wsh_module._warm_cache_ts = 0.0
     wsh_module._last_heartbeat_ts = 0.0
+    wsh_module._hb_count = 0
+    wsh_module._hb_fail = 0
+    wsh_module._cache_hits = 0
+    wsh_module._last_hb_summary_ts = 0.0
 
 
 # ── _extract_radio tests ───────────────────────────────────────────
@@ -2056,6 +2065,46 @@ class TestWarmCacheHeartbeat:
         assert wsh._warm_cache_data
         assert "plugins" in wsh._warm_cache_data
         assert wsh._warm_cache_ts > 0.0
+        assert wsh._hb_count == 1
+
+    def test_heartbeat_failure_increments_hb_fail(self):
+        """Collection exception -> _hb_fail incremented."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = self._make_plugin()
+        _ws_clients.clear()
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        wsh._last_heartbeat_ts = 0.0
+
+        cycle_count = 0
+
+        async def run():
+            nonlocal cycle_count
+            original_sleep = asyncio.sleep
+
+            async def counted_sleep(secs):
+                nonlocal cycle_count
+                cycle_count += 1
+                if cycle_count >= 2:
+                    raise asyncio.CancelledError()
+                await original_sleep(0)
+
+            def boom(*a, **kw):
+                raise RuntimeError("boom")
+
+            with patch("asyncio.sleep", counted_sleep), \
+                 patch.object(wsh, "_heartbeat_interval", return_value=0.0), \
+                 patch.object(wsh, "_collect_broadcast_data", side_effect=boom):
+                try:
+                    await wsh._broadcast_metrics(app)
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(run())
+
+        assert wsh._hb_count == 0
+        assert wsh._hb_fail == 1
 
     def test_heartbeat_skipped_under_high_load(self):
         """_heartbeat_interval returns None -> no collection."""
@@ -2167,6 +2216,7 @@ class TestWarmCacheServing:
         data = json.loads(sent[0])
         assert data["type"] == "update"
         assert "plugins" in data["data"]
+        assert wsh._cache_hits == 1
 
     def test_initial_connect_falls_back_when_cache_stale(self):
         """Cache >90s old -> cold collection path used."""
@@ -2268,6 +2318,10 @@ class TestWarmCacheLifecycle:
         wsh._warm_cache_data = {"some": "data"}
         wsh._warm_cache_ts = 12345.0
         wsh._last_heartbeat_ts = 12345.0
+        wsh._hb_count = 42
+        wsh._hb_fail = 3
+        wsh._cache_hits = 10
+        wsh._last_hb_summary_ts = 99999.0
         wsh._broadcast_task = None
         wsh._spectrum_task = None
         wsh._ws_plugin = None
@@ -2284,3 +2338,224 @@ class TestWarmCacheLifecycle:
         assert wsh._warm_cache_data == {}
         assert wsh._warm_cache_ts == 0.0
         assert wsh._last_heartbeat_ts == 0.0
+        assert wsh._hb_count == 0
+        assert wsh._hb_fail == 0
+        assert wsh._cache_hits == 0
+        assert wsh._last_hb_summary_ts == 0.0
+
+
+class TestWarmCacheSummaryLog:
+    """Test the periodic INFO-level warm cache summary."""
+
+    @staticmethod
+    def _make_plugin():
+        plugin = MagicMock()
+        plugin.config = {"metrics_interval": 0.05}
+        plugin.app.reticulum = MagicMock()
+        plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
+        plugin.app.plugins = {}
+        plugin.app.internet_probe = None
+        return plugin
+
+    def test_hourly_summary_emitted(self):
+        """After _HB_SUMMARY_INTERVAL elapses, an INFO log is produced."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = self._make_plugin()
+        _ws_clients.clear()
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        wsh._last_heartbeat_ts = 0.0
+        wsh._last_hb_summary_ts = 0.0
+
+        cycle_count = 0
+
+        async def run():
+            nonlocal cycle_count
+            original_sleep = asyncio.sleep
+
+            async def counted_sleep(secs):
+                nonlocal cycle_count
+                cycle_count += 1
+                if cycle_count >= 2:
+                    raise asyncio.CancelledError()
+                await original_sleep(0)
+
+            with patch("asyncio.sleep", counted_sleep), \
+                 patch.object(wsh, "_heartbeat_interval", return_value=0.0), \
+                 patch.object(wsh, "log") as mock_log:
+                try:
+                    await wsh._broadcast_metrics(app)
+                except asyncio.CancelledError:
+                    pass
+
+                info_calls = [
+                    c for c in mock_log.info.call_args_list
+                    if "Warm cache:" in str(c)
+                ]
+                assert len(info_calls) == 1
+                msg = info_calls[0][0][0]
+                assert "heartbeats" in msg
+                assert "failures" in msg
+                assert "cache hits" in msg
+
+        asyncio.run(run())
+
+    def test_summary_not_emitted_before_interval(self):
+        """Within _HB_SUMMARY_INTERVAL, no summary log is produced."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = self._make_plugin()
+        _ws_clients.clear()
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        wsh._last_heartbeat_ts = 0.0
+        # Set recent summary timestamp so interval hasn't elapsed
+        wsh._last_hb_summary_ts = time.monotonic()
+
+        cycle_count = 0
+
+        async def run():
+            nonlocal cycle_count
+            original_sleep = asyncio.sleep
+
+            async def counted_sleep(secs):
+                nonlocal cycle_count
+                cycle_count += 1
+                if cycle_count >= 2:
+                    raise asyncio.CancelledError()
+                await original_sleep(0)
+
+            with patch("asyncio.sleep", counted_sleep), \
+                 patch.object(wsh, "_heartbeat_interval", return_value=0.0), \
+                 patch.object(wsh, "log") as mock_log:
+                try:
+                    await wsh._broadcast_metrics(app)
+                except asyncio.CancelledError:
+                    pass
+
+                info_calls = [
+                    c for c in mock_log.info.call_args_list
+                    if "Warm cache:" in str(c)
+                ]
+                assert len(info_calls) == 0
+
+        asyncio.run(run())
+
+
+class TestOffgridWsCommand:
+    def test_set_offgrid_mode(self):
+        plugin = MagicMock()
+        plugin.app.set_offgrid_mode.return_value = {"enabled": True}
+        result = _handle_ws_command(
+            {"action": "set_offgrid_mode", "enabled": True}, plugin,
+        )
+        assert result is not None
+        assert result["type"] == "offgrid_mode_set"
+        assert result["enabled"] is True
+        plugin.app.set_offgrid_mode.assert_called_once_with(True)
+
+    def test_set_offgrid_mode_false(self):
+        plugin = MagicMock()
+        plugin.app.set_offgrid_mode.return_value = {"enabled": False}
+        result = _handle_ws_command(
+            {"action": "set_offgrid_mode", "enabled": False}, plugin,
+        )
+        assert result is not None
+        assert result["type"] == "offgrid_mode_set"
+        assert result["enabled"] is False
+
+    def test_set_offgrid_mode_missing_enabled(self):
+        plugin = MagicMock()
+        result = _handle_ws_command(
+            {"action": "set_offgrid_mode"}, plugin,
+        )
+        assert result is not None
+        assert result["type"] == "offgrid_error"
+        assert "required" in result["error"]
+        plugin.app.set_offgrid_mode.assert_not_called()
+
+    def test_set_offgrid_mode_non_boolean(self):
+        plugin = MagicMock()
+        result = _handle_ws_command(
+            {"action": "set_offgrid_mode", "enabled": "true"}, plugin,
+        )
+        assert result is not None
+        assert result["type"] == "offgrid_error"
+        assert "boolean" in result["error"]
+        plugin.app.set_offgrid_mode.assert_not_called()
+
+
+class TestOnInternetEvent:
+    def test_includes_force_offline_true(self):
+        probe = MagicMock()
+        probe.force_offline = True
+        plugin = MagicMock()
+        plugin.app.internet_probe = probe
+
+        loop = MagicMock()
+        captured = []
+        loop.call_soon_threadsafe.side_effect = lambda fn, *a: captured.append(a)
+        ws = MagicMock()
+
+        wsh_module._ws_loop = loop
+        wsh_module._ws_plugin = plugin
+        _ws_clients.add(ws)
+        try:
+            _on_internet_event("internet.offline", {"wan_ip": None, "lan_ip": "10.0.0.1"})
+            assert len(captured) == 1
+            push_type, payload = captured[0]
+            assert push_type == "internet_status"
+            assert payload["force_offline"] is True
+            assert payload["online"] is False
+        finally:
+            _ws_clients.discard(ws)
+            wsh_module._ws_loop = None
+            wsh_module._ws_plugin = None
+
+    def test_includes_force_offline_false(self):
+        probe = MagicMock()
+        probe.force_offline = False
+        plugin = MagicMock()
+        plugin.app.internet_probe = probe
+
+        loop = MagicMock()
+        captured = []
+        loop.call_soon_threadsafe.side_effect = lambda fn, *a: captured.append(a)
+        ws = MagicMock()
+
+        wsh_module._ws_loop = loop
+        wsh_module._ws_plugin = plugin
+        _ws_clients.add(ws)
+        try:
+            _on_internet_event("internet.online", {"wan_ip": "1.2.3.4", "lan_ip": "10.0.0.1"})
+            assert len(captured) == 1
+            _, payload = captured[0]
+            assert payload["force_offline"] is False
+            assert payload["online"] is True
+        finally:
+            _ws_clients.discard(ws)
+            wsh_module._ws_loop = None
+            wsh_module._ws_plugin = None
+
+    def test_defaults_false_when_no_probe(self):
+        plugin = MagicMock()
+        plugin.app.internet_probe = None
+
+        loop = MagicMock()
+        captured = []
+        loop.call_soon_threadsafe.side_effect = lambda fn, *a: captured.append(a)
+        ws = MagicMock()
+
+        wsh_module._ws_loop = loop
+        wsh_module._ws_plugin = plugin
+        _ws_clients.add(ws)
+        try:
+            _on_internet_event("internet.offline", {"wan_ip": None, "lan_ip": None})
+            assert len(captured) == 1
+            _, payload = captured[0]
+            assert payload["force_offline"] is False
+        finally:
+            _ws_clients.discard(ws)
+            wsh_module._ws_loop = None
+            wsh_module._ws_plugin = None

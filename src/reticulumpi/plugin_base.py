@@ -44,7 +44,8 @@ class PluginBase(ABC):
         self._stop_event = threading.Event()
         self._stop_event.set()  # starts "stopped"
         self._threads: list[threading.Thread] = []
-        self._internet_available: bool = True
+        probe = getattr(app, "internet_probe", None)
+        self._internet_available: bool = probe.is_online if probe is not None else True
         self.event_bus.subscribe(events.INTERNET_ONLINE, self._on_internet_event)
         self.event_bus.subscribe(events.INTERNET_OFFLINE, self._on_internet_event)
         self.validate_config()

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=46">
+  <link rel="stylesheet" href="/static/style.css?v=47">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -20,6 +20,10 @@
       <div class="header-top">
         <h1 id="node-name"></h1>
         <div class="header-actions">
+          <div class="offgrid-toggle" id="offgrid-toggle" title="Off Grid Mode — disable all internet activity">
+            <span class="offgrid-label">Off Grid</span>
+            <label class="toggle-switch"><input type="checkbox" id="offgrid-switch"><span class="toggle-slider"></span></label>
+          </div>
           <a href="/spectrum.html" target="_blank" class="nav-link" id="spectrum-nav-link">Spectrum</a>
           <button id="logout-btn">Logout</button>
         </div>
@@ -1226,7 +1230,7 @@
     </div>
   </div>
 
-  <script defer src="/static/app.js?v=36"></script>
+  <script defer src="/static/app.js?v=37"></script>
   <script defer src="/static/messages_panel.js?v=8"></script>
   <script defer src="/static/messages_lxmf.js?v=1"></script>
   <script defer src="/static/mqtt_feed.js?v=1"></script>
