@@ -16,8 +16,10 @@ from reticulumpi.builtin_plugins.web_dashboard.api import (
     _ok,
     _run_sync,
 )
+from reticulumpi.builtin_plugins.web_dashboard.api_cache import api_cache
 
 
+@api_cache(ttl=10, stale=30, max_entries=20)
 async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/mesh/nodes — known nodes from network_map plugin.
 
@@ -81,6 +83,7 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
     return _ok(result)
 
 
+@api_cache(ttl=30, stale=120)
 async def handle_mesh_summary(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/mesh/summary — aggregate mesh stats for the summary strip."""
     plugin = _get_plugin(request)
@@ -93,6 +96,7 @@ async def handle_mesh_summary(request: aiohttp.web.Request) -> aiohttp.web.Respo
     return _ok(await _run_sync(network_map.get_mesh_summary))
 
 
+@api_cache(ttl=10, stale=30)
 async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/mesh/telemetry — peer metrics from mesh_telemetry plugin."""
     plugin = _get_plugin(request)
@@ -229,6 +233,7 @@ async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.R
     return _ok({"nodes": nodes, "summary": summary})
 
 
+@api_cache(ttl=15, stale=60, max_entries=20)
 async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/reachability — scored node reachability.
 

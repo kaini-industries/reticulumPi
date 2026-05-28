@@ -13,6 +13,8 @@ import threading
 import time
 from collections import deque
 
+from .api_cache import api_cache
+
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok, _run_sync
@@ -253,6 +255,7 @@ async def handle_meshtastic_status(
     return _ok(await _run_sync(gw.get_status))
 
 
+@api_cache(ttl=10, stale=30)
 async def handle_meshtastic_nodes(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
@@ -290,6 +293,7 @@ async def handle_meshtastic_device_reset(
     return _error(result.get("reason", "Reset failed"), 400)
 
 
+@api_cache(ttl=10, stale=30)
 async def handle_meshtastic_lora_neighbors(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
@@ -404,6 +408,7 @@ async def handle_meshcore_status(
     return _ok(await _run_sync(gw.get_status))
 
 
+@api_cache(ttl=10, stale=30)
 async def handle_meshcore_contacts(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
@@ -865,6 +870,7 @@ async def handle_space_snapshot(
 # ── GPS telemetry ────────────────────────────────────────────────────
 
 
+@api_cache(ttl=3, stale=10)
 async def handle_gps_snapshot(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
@@ -878,6 +884,7 @@ async def handle_gps_snapshot(
     return _ok(snap)
 
 
+@api_cache(ttl=5, stale=15)
 async def handle_gps_status(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:

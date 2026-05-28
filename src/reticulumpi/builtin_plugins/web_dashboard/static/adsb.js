@@ -162,7 +162,9 @@
       attributionControl: true
     }).setView([39.8, -98.6], 4);
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    var tileMeta = document.querySelector('meta[name="rpi-tile-url"]');
+    var tileUrl = (tileMeta && tileMeta.content) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    L.tileLayer(tileUrl, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 19
     }).addTo(_map);

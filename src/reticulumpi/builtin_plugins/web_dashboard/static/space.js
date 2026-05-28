@@ -116,7 +116,9 @@
       attributionControl: true,
       worldCopyJump: true
     }).setView([20, 0], 2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    var tileMeta = document.querySelector('meta[name="rpi-tile-url"]');
+    var tileUrl = (tileMeta && tileMeta.content) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    L.tileLayer(tileUrl, {
       attribution: '&copy; OpenStreetMap',
       maxZoom: 6
     }).addTo(_map);

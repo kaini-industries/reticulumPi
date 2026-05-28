@@ -118,6 +118,21 @@ reticulumpi:
     #                              # One of: US, EU_868, EU_433, CN, JP, ANZ.
     #                              # Users can override per-browser via the
     #                              # panel's region dropdown (localStorage).
+    #  tile_cache_entries: 5000    # Browser-side map tile cache limit (SW).
+    #                              # Each tile ~20-30KB. 5000 = ~100-150MB.
+    #  tile_proxy:                 # Server-side tile proxy with disk cache.
+    #    enabled: false            # Opt-in — tiles fetched from OSM by default.
+    #    cache_dir: ~/.local/share/reticulumpi/tile_cache
+    #    max_cache_mb: 500         # Disk budget for cached tiles.
+    #    upstream_url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    #    user_agent: "reticulumpi/0.2 tile-proxy"
+    #    request_timeout: 10       # Upstream fetch timeout in seconds.
+    #    prefetch:                 # Pre-seed tiles around node position.
+    #      enabled: false
+    #      latitude: null          # null = auto-detect from GPS plugin.
+    #      longitude: null
+    #      min_zoom: 6
+    #      max_zoom: 15
     #  ssl:
     #    enabled: false
     #    cert_file: null

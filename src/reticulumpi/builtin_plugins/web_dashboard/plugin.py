@@ -63,6 +63,21 @@ class WebDashboardPlugin(PluginBase):
         if not isinstance(ssl_config, dict):
             raise ValueError("ssl must be a dict")
 
+        tile_cache_entries = self.config.get("tile_cache_entries", 5000)
+        if not isinstance(tile_cache_entries, int) or tile_cache_entries < 100:
+            raise ValueError("tile_cache_entries must be an integer >= 100")
+
+        tile_proxy = self.config.get("tile_proxy", {})
+        if not isinstance(tile_proxy, dict):
+            raise ValueError("tile_proxy must be a dict")
+        if tile_proxy.get("enabled"):
+            max_mb = tile_proxy.get("max_cache_mb", 500)
+            if not isinstance(max_mb, (int, float)) or max_mb < 10:
+                raise ValueError("tile_proxy.max_cache_mb must be >= 10")
+            timeout = tile_proxy.get("request_timeout", 10)
+            if not isinstance(timeout, (int, float)) or timeout < 1:
+                raise ValueError("tile_proxy.request_timeout must be >= 1")
+
         lora_region = self.config.get("lora_region", "US")
         if not isinstance(lora_region, str) or lora_region not in {
             "US", "EU_868", "EU_433", "CN", "JP", "ANZ",
@@ -231,6 +246,8 @@ class WebDashboardPlugin(PluginBase):
             self._loop.close()
 
     async def _start_server(self) -> None:
+        import os
+
         import aiohttp.web
 
         self._runner = aiohttp.web.AppRunner(self._aiohttp_app)
@@ -241,8 +258,47 @@ class WebDashboardPlugin(PluginBase):
         await site.start()
         self.log.info("Web dashboard listening on %s:%d", self._host, self._port)
 
+        # Tile proxy HTTP client session
+        self._tile_session = None
+        tp = self.config.get("tile_proxy", {})
+        if tp.get("enabled"):
+            import aiohttp
+
+            cache_dir = os.path.expanduser(
+                tp.get("cache_dir", "~/.local/share/reticulumpi/tile_cache")
+            )
+            os.makedirs(cache_dir, exist_ok=True)
+            self._tile_cache_dir = cache_dir
+            ua = tp.get("user_agent", "reticulumpi/0.2 tile-proxy")
+            timeout = aiohttp.ClientTimeout(total=tp.get("request_timeout", 10))
+            conn = aiohttp.TCPConnector(limit=2)
+            self._tile_session = aiohttp.ClientSession(
+                connector=conn,
+                timeout=timeout,
+                headers={"User-Agent": ua},
+            )
+            self._tile_upstream = tp.get(
+                "upstream_url",
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            )
+            self._tile_max_bytes = int(tp.get("max_cache_mb", 500)) * 1024 * 1024
+            self.log.info("Tile proxy enabled, cache: %s", cache_dir)
+
         # Start periodic session garbage collection
         self._session_gc_task = asyncio.ensure_future(self._session_gc_loop())
+
+        # Tile prefetch (delayed to let GPS settle)
+        if tp.get("enabled") and tp.get("prefetch", {}).get("enabled"):
+            async def _delayed_prefetch():
+                try:
+                    await asyncio.sleep(30)
+                    from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
+                    await run_prefetch(self)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self.log.exception("Tile prefetch failed")
+            self._prefetch_task = asyncio.ensure_future(_delayed_prefetch())
 
     async def _session_gc_loop(self) -> None:
         """Periodically sweep expired sessions from memory."""
@@ -267,6 +323,15 @@ class WebDashboardPlugin(PluginBase):
                 await self._session_gc_task
             except asyncio.CancelledError:
                 pass
+        if getattr(self, "_prefetch_task", None) and not self._prefetch_task.done():
+            self._prefetch_task.cancel()
+            try:
+                await self._prefetch_task
+            except asyncio.CancelledError:
+                pass
+        if getattr(self, "_tile_session", None):
+            await self._tile_session.close()
+            self._tile_session = None
         if self._runner:
             await self._runner.cleanup()
         # Drain lingering tasks (e.g. aiohttp's compressed-frame writer

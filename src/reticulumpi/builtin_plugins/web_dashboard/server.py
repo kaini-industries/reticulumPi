@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,7 @@ PUBLIC_PATHS = frozenset({
 })
 
 # Static file prefixes that are public
-PUBLIC_PREFIXES = ("/static/",)
+PUBLIC_PREFIXES = ("/static/", "/tiles/")
 
 
 def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
@@ -54,6 +55,10 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
     app.router.add_get("/sw.js", _serve_sw)
     app.router.add_get("/", _serve_index)
     app.router.add_get("/index.html", _serve_index)
+
+    # Tile proxy (opt-in)
+    if plugin.config.get("tile_proxy", {}).get("enabled"):
+        app.router.add_get("/tiles/{z}/{x}/{y}.png", _handle_tile_proxy)
 
     return app
 
@@ -184,14 +189,95 @@ async def _serve_spectrum(request: aiohttp.web.Request) -> aiohttp.web.FileRespo
     return aiohttp.web.FileResponse(os.path.join(static_dir, "spectrum.html"))
 
 
-async def _serve_sw(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
+async def _serve_sw(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    plugin = request.app["plugin"]
+    max_entries = int(plugin.config.get("tile_cache_entries", 5000))
     static_dir = os.path.join(os.path.dirname(__file__), "static")
-    return aiohttp.web.FileResponse(
-        os.path.join(static_dir, "sw.js"),
+    with open(os.path.join(static_dir, "sw.js")) as f:
+        content = f.read()
+    content = content.replace(
+        "var MAX_ENTRIES = 5000;",
+        f"var MAX_ENTRIES = {max_entries};",
+    )
+    return aiohttp.web.Response(
+        text=content,
+        content_type="application/javascript",
         headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
     )
 
 
-async def _serve_index(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
+async def _handle_tile_proxy(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /tiles/{z}/{x}/{y}.png — proxy OSM tiles with local disk cache."""
+    plugin = request.app["plugin"]
+    session = getattr(plugin, "_tile_session", None)
+    if not session:
+        raise aiohttp.web.HTTPServiceUnavailable(text="Tile proxy not initialised")
+
+    try:
+        z_int = int(request.match_info["z"])
+        x_int = int(request.match_info["x"])
+        y_int = int(request.match_info["y"])
+        if z_int < 0 or x_int < 0 or y_int < 0:
+            raise ValueError
+    except ValueError:
+        raise aiohttp.web.HTTPBadRequest(text="Invalid tile coordinates")
+
+    z = str(z_int)
+    x = str(x_int)
+    y = str(y_int)
+
+    cache_dir = getattr(plugin, "_tile_cache_dir", "")
+    tile_path = os.path.join(cache_dir, z, x, f"{y}.png")
+
+    if os.path.isfile(tile_path):
+        return aiohttp.web.FileResponse(
+            tile_path,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    upstream = getattr(plugin, "_tile_upstream", "")
+    url = upstream.replace("{z}", z).replace("{x}", x).replace("{y}", y)
+    url = url.replace("{s}", "a")
+
+    try:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise aiohttp.web.HTTPBadGateway(text=f"Upstream returned {resp.status}")
+            data = await resp.read()
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        raise aiohttp.web.HTTPGatewayTimeout(text="Upstream tile fetch failed")
+
+    tile_dir = os.path.dirname(tile_path)
+    os.makedirs(tile_dir, exist_ok=True)
+    try:
+        import tempfile
+
+        fd, tmp_path = tempfile.mkstemp(dir=tile_dir, suffix=".tmp")
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.rename(tmp_path, tile_path)
+    except OSError:
+        pass
+
+    return aiohttp.web.Response(
+        body=data,
+        content_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+async def _serve_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    plugin = request.app["plugin"]
     static_dir = os.path.join(os.path.dirname(__file__), "static")
+    tp = plugin.config.get("tile_proxy", {})
+    if tp.get("enabled"):
+        with open(os.path.join(static_dir, "index.html")) as f:
+            html = f.read()
+        html = html.replace(
+            "</head>",
+            '<meta name="rpi-tile-url" content="/tiles/{z}/{x}/{y}.png">\n</head>',
+        )
+        return aiohttp.web.Response(text=html, content_type="text/html")
     return aiohttp.web.FileResponse(os.path.join(static_dir, "index.html"))

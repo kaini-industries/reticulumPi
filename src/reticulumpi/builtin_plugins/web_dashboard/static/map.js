@@ -15,6 +15,76 @@
   var _loraNeighborIds = {}; // {id: true} for Meshtastic LoRa neighbor filter
   var _initialFit = false;   // whether we've done the first fitBounds
   var _gpsPos = null;        // [lat, lng] from attached GPS unit
+  var _hasLiveData = false;  // true after first WS/API data arrives
+  var _idbSaveTimer = null;  // debounce timer for IndexedDB writes
+
+  // -- IndexedDB persistence for last-known positions ----------------------
+
+  var IDB_NAME = 'rpi-positions';
+  var IDB_STORE = 'nodes';
+  var IDB_VERSION = 1;
+  var IDB_SAVE_INTERVAL = 30000; // write at most every 30s
+  var _idb = null;
+  var _idbDirty = false;
+  var _idbNodes = [];
+
+  function _openIDB(cb) {
+    if (_idb) { cb(_idb); return; }
+    if (!window.indexedDB) return;
+    var req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = function (e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE, { keyPath: '_key' });
+      }
+    };
+    req.onsuccess = function (e) { _idb = e.target.result; cb(_idb); };
+    req.onerror = function () {};
+  }
+
+  function _loadPositions() {
+    _openIDB(function (db) {
+      var tx = db.transaction(IDB_STORE, 'readonly');
+      var store = tx.objectStore(IDB_STORE);
+      var req = store.getAll();
+      req.onsuccess = function () {
+        var records = req.result;
+        if (!records || !records.length || _hasLiveData) return;
+        _idbNodes = records;
+        _render();
+      };
+    });
+  }
+
+  function _scheduleSave() {
+    _idbDirty = true;
+    if (_idbSaveTimer) return;
+    _idbSaveTimer = setTimeout(function () {
+      _idbSaveTimer = null;
+      if (!_idbDirty) return;
+      _idbDirty = false;
+      _savePositions();
+    }, IDB_SAVE_INTERVAL);
+  }
+
+  function _savePositions() {
+    _openIDB(function (db) {
+      var nodes = _allNodes();
+      var tx = db.transaction(IDB_STORE, 'readwrite');
+      var store = tx.objectStore(IDB_STORE);
+      store.clear();
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (!_hasValidPos(n)) continue;
+        store.put({
+          _key: n._key, source: n.source,
+          latitude: n.latitude, longitude: n.longitude,
+          long_name: n.long_name, short_name: n.short_name,
+          last_heard: n.last_heard, id: n.id
+        });
+      }
+    });
+  }
 
   // -- Custom marker icons -------------------------------------------------
 
@@ -67,7 +137,9 @@
       attributionControl: true
     }).setView([39.8, -98.6], 4);   // default: center of US
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    var tileMeta = document.querySelector('meta[name="rpi-tile-url"]');
+    var tileUrl = (tileMeta && tileMeta.content) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    L.tileLayer(tileUrl, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 19
     }).addTo(_map);
@@ -191,6 +263,9 @@
     for (var k = 0; k < _rnsPeers.length; k++) {
       out.push(_normalizeReticulum(_rnsPeers[k]));
     }
+    for (var n = 0; n < _idbNodes.length; n++) {
+      out.push(_idbNodes[n]);
+    }
     return out;
   }
 
@@ -267,16 +342,27 @@
       var node = withPos[m];
       var icon = _iconFor(node);
       var existing = _markers[node._key];
+      var fp = node.latitude + ',' + node.longitude + ',' + node.last_heard
+        + ',' + (node.snr || '') + ',' + (node.long_name || '') + ',' + node.source;
+      var opacity = _hasLiveData ? 1.0 : 0.5;
       if (existing) {
-        existing.setLatLng([node.latitude, node.longitude]);
-        existing.setPopupContent(_buildPopup(node));
-        existing.setIcon(icon);
+        if (existing._rpi_fp !== fp || existing._rpi_opacity !== opacity) {
+          existing.setLatLng([node.latitude, node.longitude]);
+          existing.setPopupContent(_buildPopup(node));
+          existing.setIcon(icon);
+          existing.setOpacity(opacity);
+          existing._rpi_fp = fp;
+          existing._rpi_opacity = opacity;
+        }
       } else {
         var marker = L.marker([node.latitude, node.longitude], {
           icon: icon,
+          opacity: opacity,
           title: node.long_name || node.short_name || node.id
         });
         marker.bindPopup(_buildPopup(node), { maxWidth: 280 });
+        marker._rpi_fp = fp;
+        marker._rpi_opacity = opacity;
         _markerGroup.addLayer(marker);
         _markers[node._key] = marker;
       }
@@ -300,23 +386,32 @@
 
   function updateMap(nodes) {
     _mshNodes = nodes || [];
+    _hasLiveData = true;
+    _idbNodes = [];
     if (!_map) _initMap();
     if (R.markUpdated) R.markUpdated('map-section');
     _render();
+    _scheduleSave();
   }
 
   function updateMapMeshCore(contacts) {
     _mcContacts = contacts || [];
+    _hasLiveData = true;
+    _idbNodes = [];
     if (!_map) _initMap();
     if (R.markUpdated) R.markUpdated('map-section');
     _render();
+    _scheduleSave();
   }
 
   function updateMapReticulum(peers) {
     _rnsPeers = peers || [];
+    _hasLiveData = true;
+    _idbNodes = [];
     if (!_map) _initMap();
     if (R.markUpdated) R.markUpdated('map-section');
     _render();
+    _scheduleSave();
   }
 
   function updateMapLoraNeighbors(neighbors) {
@@ -400,6 +495,7 @@
     }
   }
   _wireFilterTabs();
+  _loadPositions();
 
   R.refreshMapTrackedFilter = function () {
     if (_filter === 'tracked') _render();
