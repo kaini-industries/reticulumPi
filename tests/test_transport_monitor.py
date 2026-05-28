@@ -1,5 +1,6 @@
 """Tests for the TransportMonitor plugin."""
 
+import subprocess
 import time
 from unittest.mock import MagicMock, patch
 
@@ -969,4 +970,482 @@ class TestBroadcastCache:
 
         result2 = plugin.broadcast_snapshot()
         assert result2 is not result1
+        plugin.stop()
+
+
+# --- TCP auto-manage ---
+
+
+class TestTcpAutoManage:
+    """Tests for the tcp_auto_manage feature."""
+
+    @pytest.fixture
+    def tam_config(self, base_config):
+        base_config["tcp_auto_manage"] = {
+            "enabled": True,
+            "stabilization_seconds": 30,
+        }
+        return base_config
+
+    def test_disabled_by_default(self, mock_app, base_config):
+        plugin = _start_plugin(mock_app, base_config)
+        assert not plugin._tam_enabled
+        plugin.stop()
+
+    def test_enabled_via_config(self, mock_app, tam_config):
+        plugin = _start_plugin(mock_app, tam_config)
+        assert plugin._tam_enabled
+        assert plugin._tam_stabilization == 30
+        plugin.stop()
+
+    def test_config_validation_bad_stabilization(self, mock_app, base_config):
+        from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
+        base_config["tcp_auto_manage"] = {
+            "enabled": True,
+            "stabilization_seconds": 5,
+        }
+        with pytest.raises(ValueError, match="stabilization_seconds"):
+            TransportMonitorPlugin(mock_app, base_config)
+
+    def test_schedule_tcp_disable_on_internet_lost(self, mock_app, tam_config):
+        plugin = _start_plugin(mock_app, tam_config)
+        assert plugin._tam_timer is None
+
+        plugin.on_internet_lost()
+        assert plugin._tam_timer is not None
+        plugin.stop()
+
+    def test_cancel_on_internet_restored(self, mock_app, tam_config):
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin.on_internet_lost()
+        assert plugin._tam_timer is not None
+
+        plugin._internet_available = True
+        plugin.on_internet_available()
+        assert plugin._tam_timer is None
+        plugin.stop()
+
+    def test_no_duplicate_timers(self, mock_app, tam_config):
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin.on_internet_lost()
+        first_timer = plugin._tam_timer
+
+        plugin.on_internet_lost()
+        assert plugin._tam_timer is first_timer
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_disable_on_stabilization_expired(
+        self, mock_subprocess, mock_app, tam_config, tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+        plugin._internet_available = False
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Primary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = true\n"
+            "    target_host = 1.2.3.4\n"
+            "    target_port = 4242\n"
+            "  [[Secondary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = true\n"
+            "    target_host = 5.6.7.8\n"
+            "    target_port = 4242\n"
+            "  [[Auto Discovery]]\n"
+            "    type = AutoInterface\n"
+            "    enabled = true\n"
+        )
+        plugin.app._reticulum_config_dir = str(tmp_path)
+
+        published = []
+        mock_app.event_bus.subscribe(
+            events.TCP_INTERFACES_AUTO_DISABLED,
+            lambda e, d: published.append(d),
+        )
+
+        plugin._on_stabilization_expired()
+
+        assert len(published) == 1
+        assert set(published[0]["interfaces"]) == {"Primary Hub", "Secondary Hub"}
+
+        content = config_file.read_text()
+        assert "enabled = no" in content
+        assert content.count("enabled = no") == 2
+
+        import json
+        state = json.loads((tmp_path / "state.json").read_text())
+        assert set(state["disabled_interfaces"]) == {
+            "Primary Hub", "Secondary Hub",
+        }
+
+        mock_subprocess.run.assert_called()
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_enable_on_internet_restored(
+        self, mock_subprocess, mock_app, tam_config, tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+        plugin._internet_available = True
+
+        import json
+        (tmp_path / "state.json").write_text(
+            json.dumps({"disabled_interfaces": ["Primary Hub"]}),
+        )
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Primary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = false\n"
+            "    target_host = 1.2.3.4\n"
+            "    target_port = 4242\n"
+        )
+        plugin.app._reticulum_config_dir = str(tmp_path)
+
+        published = []
+        mock_app.event_bus.subscribe(
+            events.TCP_INTERFACES_AUTO_ENABLED,
+            lambda e, d: published.append(d),
+        )
+
+        plugin._enable_tcp_interfaces()
+
+        assert len(published) == 1
+        assert published[0]["interfaces"] == ["Primary Hub"]
+
+        content = config_file.read_text()
+        assert "enabled = yes" in content
+
+        assert not (tmp_path / "state.json").exists()
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_startup_recovery_online(
+        self, mock_subprocess, mock_app, tam_config, tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+
+        import json
+        state_path = tmp_path / "state.json"
+        state_path.write_text(
+            json.dumps({"disabled_interfaces": ["Primary Hub"]}),
+        )
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Primary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = false\n"
+            "    target_host = 1.2.3.4\n"
+            "    target_port = 4242\n"
+        )
+
+        tam_config["tcp_auto_manage"]["_state_path_override"] = str(state_path)
+        mock_app._reticulum_config_dir = str(tmp_path)
+        mock_app.internet_available = True
+
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(state_path)
+        plugin._internet_available = True
+        plugin._startup_tcp_recovery()
+
+        content = config_file.read_text()
+        assert "enabled = yes" in content
+        assert not state_path.exists()
+        plugin.stop()
+
+    def test_startup_recovery_offline(self, mock_app, tam_config, tmp_path):
+        import json
+        state_path = tmp_path / "state.json"
+        state_path.write_text(
+            json.dumps({"disabled_interfaces": ["Primary Hub"]}),
+        )
+
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(state_path)
+        plugin._internet_available = False
+
+        plugin._startup_tcp_recovery()
+
+        assert state_path.exists()
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_no_action_when_no_tcp_interfaces(
+        self, mock_subprocess, mock_app, tam_config, tmp_path,
+    ):
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+        plugin._internet_available = False
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Auto Discovery]]\n"
+            "    type = AutoInterface\n"
+            "    enabled = true\n"
+        )
+        plugin.app._reticulum_config_dir = str(tmp_path)
+
+        plugin._on_stabilization_expired()
+
+        mock_subprocess.run.assert_not_called()
+        assert not (tmp_path / "state.json").exists()
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_user_disabled_not_re_enabled(
+        self, mock_subprocess, mock_app, tam_config, tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+
+        import json
+        state_path = tmp_path / "state.json"
+        state_path.write_text(
+            json.dumps({"disabled_interfaces": ["Primary Hub"]}),
+        )
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Primary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = false\n"
+            "    target_host = 1.2.3.4\n"
+            "    target_port = 4242\n"
+            "  [[User Disabled Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = false\n"
+            "    target_host = 9.9.9.9\n"
+            "    target_port = 4242\n"
+        )
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(state_path)
+        plugin._internet_available = True
+        plugin.app._reticulum_config_dir = str(tmp_path)
+
+        plugin._enable_tcp_interfaces()
+
+        content = config_file.read_text()
+        lines = content.split("\n")
+        primary_idx = next(
+            i for i, line in enumerate(lines) if "Primary Hub" in line
+        )
+        user_idx = next(
+            i for i, line in enumerate(lines) if "User Disabled Hub" in line
+        )
+        primary_enabled = next(
+            line for line in lines[primary_idx:user_idx] if "enabled" in line
+        )
+        user_enabled = next(
+            line for line in lines[user_idx:] if "enabled" in line
+        )
+        assert "yes" in primary_enabled
+        assert "false" in user_enabled or "no" in user_enabled
+        plugin.stop()
+
+    def test_state_file_round_trip(self, mock_app, tam_config, tmp_path):
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+
+        plugin._persist_tcp_state(["Hub A", "Hub B"])
+        state = plugin._load_tcp_state()
+        assert state["disabled_interfaces"] == ["Hub A", "Hub B"]
+
+        plugin._clear_tcp_state()
+        assert plugin._load_tcp_state() == {}
+        plugin.stop()
+
+    def test_stabilization_skips_if_internet_back(self, mock_app, tam_config):
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._internet_available = True
+
+        plugin._on_stabilization_expired()
+        assert plugin._tam_timer is None
+        plugin.stop()
+
+    def test_get_hub_health_includes_tcp_auto_manage(
+        self, mock_app, tam_config,
+    ):
+        plugin = _start_plugin(mock_app, tam_config)
+        health = plugin.get_hub_health()
+
+        assert "tcp_auto_manage" in health
+        assert health["tcp_auto_manage"]["enabled"] is True
+        assert health["tcp_auto_manage"]["interfaces_disabled"] is False
+        assert health["tcp_auto_manage"]["disable_pending"] is False
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_restart_rnsd_timeout(self, mock_subprocess, mock_app, tam_config):
+        mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired
+        mock_subprocess.CalledProcessError = subprocess.CalledProcessError
+        mock_subprocess.run.side_effect = subprocess.TimeoutExpired(
+            cmd=["sudo", "systemctl", "restart", "rnsd"], timeout=15,
+        )
+        plugin = _start_plugin(mock_app, tam_config)
+
+        restarting = []
+        recovered = []
+        mock_app.event_bus.subscribe(
+            events.RNSD_RESTARTING, lambda e, d: restarting.append(d),
+        )
+        mock_app.event_bus.subscribe(
+            events.RNSD_RECOVERED, lambda e, d: recovered.append(d),
+        )
+
+        plugin._restart_rnsd("test_timeout")
+        assert len(restarting) == 1
+        assert len(recovered) == 0
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_restart_rnsd_failed(self, mock_subprocess, mock_app, tam_config):
+        mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired
+        mock_subprocess.CalledProcessError = subprocess.CalledProcessError
+        mock_subprocess.run.side_effect = subprocess.CalledProcessError(
+            returncode=1, cmd=["sudo", "systemctl", "restart", "rnsd"],
+            stderr=b"unit not found",
+        )
+        plugin = _start_plugin(mock_app, tam_config)
+
+        restarting = []
+        recovered = []
+        mock_app.event_bus.subscribe(
+            events.RNSD_RESTARTING, lambda e, d: restarting.append(d),
+        )
+        mock_app.event_bus.subscribe(
+            events.RNSD_RECOVERED, lambda e, d: recovered.append(d),
+        )
+
+        plugin._restart_rnsd("test_failed")
+        assert len(restarting) == 1
+        assert len(recovered) == 0
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_restart_rnsd_success_events(
+        self, mock_subprocess, mock_app, tam_config,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        plugin = _start_plugin(mock_app, tam_config)
+
+        restarting = []
+        recovered = []
+        mock_app.event_bus.subscribe(
+            events.RNSD_RESTARTING, lambda e, d: restarting.append(d),
+        )
+        mock_app.event_bus.subscribe(
+            events.RNSD_RECOVERED, lambda e, d: recovered.append(d),
+        )
+
+        plugin._restart_rnsd("test_success")
+        assert len(restarting) == 1
+        assert restarting[0]["reason"] == "test_success"
+        assert len(recovered) == 1
+        assert recovered[0]["reason"] == "test_success"
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_restart_rnsd_cooldown(
+        self, mock_subprocess, mock_app, tam_config,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        plugin = _start_plugin(mock_app, tam_config)
+
+        plugin._restart_rnsd("first")
+        assert mock_subprocess.run.call_count >= 1
+        first_count = mock_subprocess.run.call_count
+
+        plugin._restart_rnsd("second")
+        assert mock_subprocess.run.call_count == first_count
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_disable_reverts_config_on_blocked_restart(
+        self, mock_subprocess, mock_app, tam_config, tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+        plugin._internet_available = False
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Primary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = true\n"
+            "    target_host = 1.2.3.4\n"
+            "    target_port = 4242\n"
+        )
+        plugin.app._reticulum_config_dir = str(tmp_path)
+
+        plugin._last_rnsd_restart = time.monotonic()
+
+        published = []
+        mock_app.event_bus.subscribe(
+            events.TCP_INTERFACES_AUTO_DISABLED,
+            lambda e, d: published.append(d),
+        )
+
+        plugin._on_stabilization_expired()
+
+        assert len(published) == 0
+        assert "enabled = yes" in config_file.read_text()
+        assert not (tmp_path / "state.json").exists()
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_enable_reverts_config_on_blocked_restart(
+        self, mock_subprocess, mock_app, tam_config, tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+        plugin._internet_available = True
+
+        import json
+        state_path = tmp_path / "state.json"
+        state_path.write_text(
+            json.dumps({"disabled_interfaces": ["Primary Hub"]}),
+        )
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Primary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = false\n"
+            "    target_host = 1.2.3.4\n"
+            "    target_port = 4242\n"
+        )
+        plugin.app._reticulum_config_dir = str(tmp_path)
+
+        plugin._last_rnsd_restart = time.monotonic()
+
+        published = []
+        mock_app.event_bus.subscribe(
+            events.TCP_INTERFACES_AUTO_ENABLED,
+            lambda e, d: published.append(d),
+        )
+
+        plugin._enable_tcp_interfaces()
+
+        assert len(published) == 0
+        assert "enabled = no" in config_file.read_text()
+        assert state_path.exists()
         plugin.stop()

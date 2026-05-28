@@ -10,8 +10,11 @@ organically growing the pool beyond the bundled YAML list.
 from __future__ import annotations
 
 import importlib.resources
+import json
+import os
 import random
 import socket
+import subprocess
 import threading
 import time
 from typing import Any
@@ -25,6 +28,7 @@ from reticulumpi.plugin_base import PluginBase
 
 # Timeout for TCP connectivity probes (seconds)
 _PROBE_TIMEOUT = 5
+_RNSD_RESTART_COOLDOWN = 60
 
 # Hub exchange constants
 _HUB_EXCHANGE_APP = "reticulumpi"
@@ -34,6 +38,7 @@ _EXCHANGE_LINK_TIMEOUT = 30  # seconds to wait for link establishment
 _MAX_EXCHANGE_PEERS = 20  # max peers to track from announces
 _DEFAULT_HUB_STALE_HOURS = 24
 _HUB_SWEEP_INTERVAL_TICKS = 10
+_TCP_STATE_FILENAME = "tcp_auto_disable_state.json"
 
 
 class TransportMonitorPlugin(PluginBase):
@@ -129,6 +134,14 @@ class TransportMonitorPlugin(PluginBase):
             if not isinstance(ei, (int, float)) or ei < 60:
                 raise ValueError("auto_discovery.exchange_interval must be >= 60 seconds")
 
+        tam = self.config.get("tcp_auto_manage", {})
+        if not isinstance(tam, dict):
+            raise ValueError("tcp_auto_manage must be a dict")
+        if tam.get("enabled", False):
+            stab = tam.get("stabilization_seconds", 120)
+            if not isinstance(stab, (int, float)) or stab < 30:
+                raise ValueError("tcp_auto_manage.stabilization_seconds must be >= 30")
+
     def start(self) -> None:
         self._active = True
         self._lock = threading.Lock()
@@ -187,16 +200,30 @@ class TransportMonitorPlugin(PluginBase):
             self._start_thread(self._auto_discovery_loop, "hub-pool-manager")
             self._setup_hub_exchange()
 
+        # --- TCP auto-manage ---
+        tam = self.config.get("tcp_auto_manage", {})
+        self._tam_enabled = tam.get("enabled", False)
+        self._tam_stabilization = tam.get("stabilization_seconds", 120)
+        self._tam_timer: threading.Timer | None = None
+        self._tam_state_path = self._resolve_tcp_state_path()
+        self._tam_disabled_names: list[str] = []
+        self._last_rnsd_restart: float = 0.0
+
+        if self._tam_enabled:
+            self._startup_tcp_recovery()
+
         self.log.info(
             "Transport monitor active (%d primary hubs, %d fallback hubs, "
-            "auto_discovery=%s)",
+            "auto_discovery=%s, tcp_auto_manage=%s)",
             len(self._primary_hubs),
             len(self._fallback_hubs),
             "on" if self._auto_enabled else "off",
+            "on" if self._tam_enabled else "off",
         )
 
     def stop(self) -> None:
         self._active = False
+        self._cancel_tcp_disable()
         self._teardown_hub_exchange()
         self._deactivate_fallbacks()
         self._teardown_auto_interfaces()
@@ -297,6 +324,11 @@ class TransportMonitorPlugin(PluginBase):
                     },
                     "exchange_peers": len(self._exchange_peers),
                 },
+                "tcp_auto_manage": {
+                    "enabled": self._tam_enabled,
+                    "interfaces_disabled": bool(self._tam_disabled_names),
+                    "disable_pending": self._tam_timer is not None,
+                },
             }
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
@@ -375,9 +407,247 @@ class TransportMonitorPlugin(PluginBase):
 
     def on_internet_available(self) -> None:
         self.log.info("Internet restored — scheduling immediate hub health check")
+        if self._tam_enabled:
+            self._cancel_tcp_disable()
+            self._enable_tcp_interfaces()
 
     def on_internet_lost(self) -> None:
         self.log.warning("Internet lost — hub probes paused, status frozen")
+        if self._tam_enabled:
+            self._schedule_tcp_disable()
+
+    # --- TCP auto-manage internals ---
+
+    def _resolve_tcp_state_path(self) -> str:
+        base = os.environ.get(
+            "XDG_DATA_HOME", os.path.expanduser("~/.local/share"),
+        )
+        return os.path.join(base, "reticulumpi", _TCP_STATE_FILENAME)
+
+    def _load_tcp_state(self) -> dict:
+        try:
+            with open(self._tam_state_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _persist_tcp_state(self, disabled_names: list[str]) -> None:
+        state = {"disabled_interfaces": disabled_names}
+        try:
+            os.makedirs(os.path.dirname(self._tam_state_path), exist_ok=True)
+            tmp = self._tam_state_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            os.replace(tmp, self._tam_state_path)
+            self._tam_disabled_names = list(disabled_names)
+        except Exception:
+            self.log.warning(
+                "Failed to persist TCP auto-disable state", exc_info=True,
+            )
+
+    def _clear_tcp_state(self) -> None:
+        try:
+            os.remove(self._tam_state_path)
+        except OSError:
+            pass
+        self._tam_disabled_names = []
+
+    def _get_rns_config_path(self) -> str:
+        config_dir = getattr(self.app, "_reticulum_config_dir", None)
+        if not config_dir:
+            config_dir = os.path.expanduser("~/.reticulum")
+        return os.path.join(config_dir, "config")
+
+    def _schedule_tcp_disable(self) -> None:
+        with self._lock:
+            if self._tam_timer is not None:
+                return
+            timer = threading.Timer(
+                self._tam_stabilization, self._on_stabilization_expired,
+            )
+            timer.daemon = True
+            timer.name = "tcp-auto-disable-timer"
+            timer.start()
+            self._tam_timer = timer
+        self.log.info(
+            "TCP auto-disable scheduled in %ds", self._tam_stabilization,
+        )
+
+    def _cancel_tcp_disable(self) -> None:
+        with self._lock:
+            timer = self._tam_timer
+            self._tam_timer = None
+        if timer is not None:
+            timer.cancel()
+            self.log.info("TCP auto-disable cancelled (internet restored)")
+
+    def _on_stabilization_expired(self) -> None:
+        with self._lock:
+            self._tam_timer = None
+        if not self._active:
+            return
+        if self.internet_available:
+            self.log.info(
+                "Stabilization expired but internet is back — skipping disable"
+            )
+            return
+        self.log.warning("Stabilization period expired — disabling TCP interfaces")
+        try:
+            self._disable_tcp_interfaces()
+        except Exception:
+            self.log.exception("Failed to auto-disable TCP interfaces")
+
+    def _disable_tcp_interfaces(self) -> None:
+        from reticulumpi.rns_config import (
+            parse_rns_config, set_interface_enabled, write_rns_config,
+        )
+
+        config_path = self._get_rns_config_path()
+        lines, interfaces = parse_rns_config(config_path)
+
+        to_disable = [
+            e for e in interfaces
+            if e.iface_type == "TCPClientInterface" and e.enabled
+        ]
+        if not to_disable:
+            self.log.info("No enabled TCPClientInterface entries to disable")
+            return
+
+        disabled_names = [e.name for e in to_disable]
+
+        for entry in to_disable:
+            lines = set_interface_enabled(lines, entry, False)
+        write_rns_config(config_path, lines)
+
+        if not self._restart_rnsd("tcp_auto_disable"):
+            self.log.warning(
+                "rnsd restart blocked — reverting config for %d interface(s)",
+                len(disabled_names),
+            )
+            lines, interfaces = parse_rns_config(config_path)
+            by_name = {e.name: e for e in interfaces}
+            for name in disabled_names:
+                entry = by_name.get(name)
+                if entry and not entry.enabled:
+                    lines = set_interface_enabled(lines, entry, True)
+            write_rns_config(config_path, lines)
+            return
+
+        self._persist_tcp_state(disabled_names)
+        self.log.warning(
+            "Auto-disabled %d TCP interface(s): %s",
+            len(disabled_names), ", ".join(disabled_names),
+        )
+        self.event_bus.publish(events.TCP_INTERFACES_AUTO_DISABLED, {
+            "interfaces": disabled_names,
+        })
+
+    def _enable_tcp_interfaces(self) -> None:
+        from reticulumpi.rns_config import (
+            parse_rns_config, set_interface_enabled, write_rns_config,
+        )
+
+        state = self._load_tcp_state()
+        disabled_names = state.get("disabled_interfaces", [])
+        if not disabled_names:
+            return
+
+        config_path = self._get_rns_config_path()
+        lines, interfaces = parse_rns_config(config_path)
+
+        by_name = {e.name: e for e in interfaces}
+        re_enabled = []
+        for name in disabled_names:
+            entry = by_name.get(name)
+            if entry and not entry.enabled:
+                lines = set_interface_enabled(lines, entry, True)
+                re_enabled.append(name)
+
+        if not re_enabled:
+            self._clear_tcp_state()
+            return
+
+        write_rns_config(config_path, lines)
+
+        if not self._restart_rnsd("tcp_auto_enable"):
+            self.log.warning(
+                "rnsd restart blocked — reverting config for %d interface(s)",
+                len(re_enabled),
+            )
+            lines, interfaces = parse_rns_config(config_path)
+            by_name = {e.name: e for e in interfaces}
+            for name in re_enabled:
+                entry = by_name.get(name)
+                if entry and entry.enabled:
+                    lines = set_interface_enabled(lines, entry, False)
+            write_rns_config(config_path, lines)
+            return
+
+        self._clear_tcp_state()
+        self.log.info(
+            "Re-enabled %d TCP interface(s): %s",
+            len(re_enabled), ", ".join(re_enabled),
+        )
+        self.event_bus.publish(events.TCP_INTERFACES_AUTO_ENABLED, {
+            "interfaces": re_enabled,
+        })
+
+    def _restart_rnsd(self, reason: str) -> bool:
+        now = time.monotonic()
+        if now - self._last_rnsd_restart < _RNSD_RESTART_COOLDOWN:
+            self.log.warning("rnsd restart skipped (cooldown), reason: %s", reason)
+            return False
+        self.event_bus.publish(events.RNSD_RESTARTING, {"reason": reason})
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "rnsd"],
+                timeout=15,
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.TimeoutExpired:
+            self.log.warning("rnsd restart timed out")
+            return False
+        except subprocess.CalledProcessError as exc:
+            self.log.error("rnsd restart failed: %s", exc.stderr.decode())
+            return False
+        self._last_rnsd_restart = time.monotonic()
+        if self._wait_for_rnsd():
+            self.event_bus.publish(events.RNSD_RECOVERED, {"reason": reason})
+        return True
+
+    def _wait_for_rnsd(self, timeout: float = 10) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                result = subprocess.run(
+                    ["rnstatus"], capture_output=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
+        self.log.warning("rnsd did not become responsive within %ds", timeout)
+        return False
+
+    def _startup_tcp_recovery(self) -> None:
+        state = self._load_tcp_state()
+        disabled = state.get("disabled_interfaces", [])
+        self._tam_disabled_names = list(disabled)
+        if not disabled:
+            return
+        if self.internet_available:
+            self.log.info(
+                "Internet is online but %d interface(s) were auto-disabled "
+                "— re-enabling: %s", len(disabled), ", ".join(disabled),
+            )
+            self._enable_tcp_interfaces()
+        else:
+            self.log.info(
+                "Internet still offline — %d interface(s) remain "
+                "auto-disabled: %s", len(disabled), ", ".join(disabled),
+            )
 
     def _check_health(self) -> None:
         """Probe all primary hubs and evaluate failover."""

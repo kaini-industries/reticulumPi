@@ -34,6 +34,8 @@ FALLBACK_DEACTIVATED = "transport.fallback_deactivated"
 INTERNET_ONLINE = "internet.online"
 INTERNET_OFFLINE = "internet.offline"
 OFFGRID_MODE_CHANGED = "offgrid.mode_changed"
+TCP_INTERFACES_AUTO_DISABLED = "internet.tcp_auto_disabled"
+TCP_INTERFACES_AUTO_ENABLED = "internet.tcp_auto_enabled"
 
 # Connectivity monitoring
 RNSD_RECOVERED = "connectivity.rnsd_recovered"

@@ -275,6 +275,13 @@ reticulumpi:
     #    # Hub exchange — reticulumPi nodes share hub lists over RNS Links.
     #    # Discovers peers via announces and queries them periodically.
     #    exchange_interval: 900          # Seconds between exchange rounds
+    #  # TCP auto-manage — automatically disables static TCPClientInterface
+    #  # entries in the Reticulum config when the Pi goes offline, stopping
+    #  # noisy retry logs in journalctl. Re-enables when internet returns.
+    #  # Triggers rnsd restart on toggle.
+    #  tcp_auto_manage:
+    #    enabled: false
+    #    stabilization_seconds: 120      # Wait this long after offline detection
 
     # Path Warmer — proactively refreshes paths to known/important nodes.
     # Prevents path expiry for nodes you communicate with regularly.
