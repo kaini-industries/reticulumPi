@@ -1437,7 +1437,16 @@
     if (d.gps && d.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(d.gps.last_fix);
     if (d.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(d.adsb);
     if (d.ntp && RPI.updateNtp) RPI.updateNtp(d.ntp);
-    if (d.hotspot && RPI.updateHotspot) RPI.updateHotspot(d.hotspot);
+    if (d.hotspot) {
+      _stash.hotspot = d.hotspot;
+      if (RPI.updateHotspot) RPI.updateHotspot(d.hotspot, _stash.captive_portal || null);
+    }
+    if (d.captive_portal) {
+      _stash.captive_portal = d.captive_portal;
+      if (_stash.hotspot && isPanelVisible('hotspot-body') && RPI.updateHotspot) {
+        RPI.updateHotspot(_stash.hotspot, d.captive_portal);
+      }
+    }
     if (d.fm_receiver && RPI.updateRadio) RPI.updateRadio(d.fm_receiver);
     if (d.link_tester && RPI.updateLinkTester) RPI.updateLinkTester(d.link_tester);
     if (d.weather_alert && RPI.updateWeatherAlert) RPI.updateWeatherAlert(d.weather_alert);
@@ -1876,6 +1885,9 @@
   // Render from WS stash when a collapsed section is re-expanded
   _sectionOnExpand.sensors = function() { if (_stash.sensors) updateSensors(_stash.sensors); };
   _sectionOnExpand.emergency = function() { if (_stash.emergency) updateEmergency(_stash.emergency); };
+  _sectionOnExpand.hotspot = function() {
+    if (_stash.hotspot && RPI.updateHotspot) RPI.updateHotspot(_stash.hotspot, _stash.captive_portal || null);
+  };
 
   // Register deferred fetches for collapsed sections
   registerDeferredSection('alerts', function() {
