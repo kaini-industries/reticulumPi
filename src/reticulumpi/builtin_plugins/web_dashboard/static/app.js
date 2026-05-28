@@ -2,6 +2,10 @@
 (function() {
   'use strict';
 
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' });
+  }
+
   /* ── Shared namespace ─────────────────────────────────────────────── */
   var RPI = window.RPI = {};
 

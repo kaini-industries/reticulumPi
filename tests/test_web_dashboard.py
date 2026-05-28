@@ -750,6 +750,16 @@ class TestAPIEndpoints:
             assert "Content-Security-Policy" in resp.headers
         event_loop.run_until_complete(_do())
 
+    def test_sw_js_headers(self, client, event_loop):
+        async def _do():
+            resp = await client.get("/sw.js")
+            assert resp.status == 200
+            assert resp.headers.get("Service-Worker-Allowed") == "/"
+            assert resp.headers.get("Cache-Control") == "no-cache"
+            csp = resp.headers.get("Content-Security-Policy", "")
+            assert "worker-src 'self'" in csp
+        event_loop.run_until_complete(_do())
+
     def test_rate_limiting(self, client, event_loop):
         async def _do():
             # Send 5 wrong login attempts

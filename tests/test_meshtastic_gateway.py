@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from unittest.mock import ANY, MagicMock, patch
@@ -606,6 +607,15 @@ class TestGetStatus:
         status = gateway_plugin.get_status()
         assert "rate_limit_per_min" not in status
 
+    def test_serial_available_in_status(self, gateway_plugin):
+        gateway_plugin._serial_listener = MagicMock()
+        status = gateway_plugin.get_status()
+        assert status["serial_available"] is True
+
+        gateway_plugin._serial_listener = None
+        status = gateway_plugin.get_status()
+        assert status["serial_available"] is False
+
 
 # ---------------------------------------------------------------------------
 # TestGetMeshtasticNodes
@@ -721,6 +731,109 @@ class TestGetMeshtasticNodes:
         self_node = next(n for n in nodes if n.get("is_self"))
         assert self_node["via_lora"] is True
         assert self_node["via_mqtt"] is False
+
+
+# ---------------------------------------------------------------------------
+# TestNodeDataCache
+# ---------------------------------------------------------------------------
+
+
+class TestNodeDataCache:
+    def test_persisted_nodes_loaded_on_startup(self, gateway_plugin, tmp_path):
+        cache = {
+            "!cached01": {
+                "id": "!cached01",
+                "long_name": "CachedNode",
+                "short_name": "CN",
+                "hw_model": "RAK4631",
+                "snr": 4.0,
+                "last_heard": 1700000000,
+                "latitude": 30.0,
+                "longitude": -97.0,
+                "via_mqtt": True,
+                "via_lora": False,
+            },
+        }
+        cache_path = str(tmp_path / "node_data_cache.json")
+        with open(cache_path, "w") as f:
+            json.dump(cache, f)
+        gateway_plugin._node_data_cache_path = cache_path
+        gateway_plugin._load_node_data_cache()
+        assert "!cached01" in gateway_plugin._persisted_nodes
+        assert gateway_plugin._persisted_nodes["!cached01"]["long_name"] == "CachedNode"
+
+    def test_persisted_nodes_appear_in_get_meshtastic_nodes(self, gateway_plugin):
+        gateway_plugin._connected = False
+        gateway_plugin._mesh_interface = None
+        gateway_plugin._serial_listener = None
+        gateway_plugin._persisted_nodes = {
+            "!cached01": {
+                "id": "!cached01",
+                "long_name": "CachedNode",
+                "short_name": "CN",
+                "hw_model": "RAK4631",
+                "snr": 4.0,
+                "last_heard": 1700000000,
+                "latitude": 30.0,
+                "longitude": -97.0,
+                "via_mqtt": True,
+                "via_lora": False,
+            },
+        }
+        nodes = gateway_plugin.get_meshtastic_nodes()
+        assert len(nodes) == 1
+        assert nodes[0]["id"] == "!cached01"
+        assert nodes[0]["long_name"] == "CachedNode"
+
+    def test_live_data_overwrites_persisted(self, gateway_plugin):
+        gateway_plugin._connected = True
+        gateway_plugin._mesh_interface = _make_mock_mesh_interface()
+        gateway_plugin._persisted_nodes = {
+            "!abcd1234": {
+                "id": "!abcd1234",
+                "long_name": "OldName",
+                "short_name": "ON",
+                "hw_model": "RAK4631",
+                "snr": 1.0,
+                "last_heard": 1600000000,
+                "latitude": 29.0,
+                "longitude": -96.0,
+                "via_mqtt": True,
+                "via_lora": False,
+            },
+        }
+        nodes = gateway_plugin.get_meshtastic_nodes()
+        node = next(n for n in nodes if n["id"] == "!abcd1234")
+        assert node["long_name"] == "TestNode1"
+        assert node["snr"] == 5.5
+
+    def test_save_and_reload_roundtrip(self, gateway_plugin, tmp_path):
+        cache_path = str(tmp_path / "node_data_cache.json")
+        gateway_plugin._node_data_cache_path = cache_path
+        gateway_plugin._persisted_nodes = {
+            "!round01": {
+                "id": "!round01",
+                "long_name": "RoundTrip",
+                "short_name": "RT",
+                "hw_model": "HELTEC_V3",
+                "snr": 3.5,
+                "last_heard": 1700001000,
+                "latitude": 31.0,
+                "longitude": -98.0,
+                "via_mqtt": False,
+                "via_lora": True,
+            },
+        }
+        gateway_plugin._save_node_data_cache()
+        gateway_plugin._persisted_nodes = {}
+        gateway_plugin._load_node_data_cache()
+        assert "!round01" in gateway_plugin._persisted_nodes
+        assert gateway_plugin._persisted_nodes["!round01"]["long_name"] == "RoundTrip"
+
+    def test_missing_cache_file_no_error(self, gateway_plugin, tmp_path):
+        gateway_plugin._node_data_cache_path = str(tmp_path / "nonexistent.json")
+        gateway_plugin._load_node_data_cache()
+        assert gateway_plugin._persisted_nodes == {}
 
 
 # ---------------------------------------------------------------------------

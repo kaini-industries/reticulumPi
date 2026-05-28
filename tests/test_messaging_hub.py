@@ -1294,14 +1294,26 @@ class TestMeshtasticAdapter:
         hub.event_bus = mock_app.event_bus
 
         gw = MagicMock()
-        gw.get_status.return_value = {"connected": True}
+        gw.get_status.return_value = {"connected": True, "serial_available": False}
         mock_app.get_plugin.return_value = gw
 
         adapter = MeshtasticAdapter(hub)
         assert adapter.is_available() is True
 
-        gw.get_status.return_value = {"connected": False}
+        gw.get_status.return_value = {"connected": False, "serial_available": False}
         assert adapter.is_available() is False
+
+    def test_is_available_serial_fallback(self, mock_app):
+        hub = MagicMock()
+        hub.app = mock_app
+        hub.event_bus = mock_app.event_bus
+
+        gw = MagicMock()
+        gw.get_status.return_value = {"connected": False, "serial_available": True}
+        mock_app.get_plugin.return_value = gw
+
+        adapter = MeshtasticAdapter(hub)
+        assert adapter.is_available() is True
 
     def test_is_available_no_gateway(self, mock_app):
         hub = MagicMock()

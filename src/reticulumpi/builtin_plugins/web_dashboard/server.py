@@ -16,6 +16,7 @@ PUBLIC_PATHS = frozenset({
     "/api/auth/login",
     "/auth/login",
     "/api/version",
+    "/sw.js",
 })
 
 # Static file prefixes that are public
@@ -50,6 +51,7 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
     # Serve login.html and index.html directly
     app.router.add_get("/login.html", _serve_login)
     app.router.add_get("/spectrum.html", _serve_spectrum)
+    app.router.add_get("/sw.js", _serve_sw)
     app.router.add_get("/", _serve_index)
     app.router.add_get("/index.html", _serve_index)
 
@@ -97,6 +99,7 @@ async def security_headers_middleware(
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; connect-src 'self' ws: wss: https://api.planespotters.net; "
+        "worker-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https://*.tile.openstreetmap.org https://api.planespotters.net https://*.plnspttrs.net"
     )
@@ -179,6 +182,14 @@ async def _serve_login(request: aiohttp.web.Request) -> aiohttp.web.FileResponse
 async def _serve_spectrum(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     return aiohttp.web.FileResponse(os.path.join(static_dir, "spectrum.html"))
+
+
+async def _serve_sw(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    return aiohttp.web.FileResponse(
+        os.path.join(static_dir, "sw.js"),
+        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+    )
 
 
 async def _serve_index(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:

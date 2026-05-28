@@ -1512,7 +1512,10 @@ class MeshtasticAdapter(TransportAdapter):
         if not gw:
             return False
         try:
-            return gw.get_status().get("connected", False)
+            status = gw.get_status()
+            if status.get("connected", False):
+                return True
+            return status.get("serial_available", False)
         except Exception:
             return False
 

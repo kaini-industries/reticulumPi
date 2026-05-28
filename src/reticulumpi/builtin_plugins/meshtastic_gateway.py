@@ -973,9 +973,13 @@ class MeshtasticGateway(PluginBase):
         storage_path = os.path.expanduser(self.config.get("storage_path", default_storage))
         os.makedirs(storage_path, exist_ok=True)
 
-        # Load persisted node name cache (survives restarts)
+        # Load persisted caches (survive restarts)
         self._name_cache_path = os.path.join(storage_path, "node_name_cache.json")
         self._load_name_cache()
+        self._node_data_cache_path = os.path.join(storage_path, "node_data_cache.json")
+        self._persisted_nodes: dict[str, dict[str, Any]] = {}
+        self._node_data_save_counter: int = 0
+        self._load_node_data_cache()
 
         identity_path = os.path.join(storage_path, "identity")
         if os.path.isfile(identity_path):
@@ -1062,6 +1066,8 @@ class MeshtasticGateway(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        self._save_node_data_cache()
+        self._save_name_cache()
         # Close persistent serial listener (if any) before joining threads
         try:
             listener = self._serial_listener
@@ -1839,6 +1845,32 @@ class MeshtasticGateway(PluginBase):
                 json.dump(self._node_name_cache, f)
         except Exception:
             self.log.debug("Error saving node name cache", exc_info=True)
+
+    def _load_node_data_cache(self) -> None:
+        """Load persisted node data from disk (survives restarts)."""
+        try:
+            with open(self._node_data_cache_path) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._persisted_nodes = data
+                self.log.debug(
+                    "Loaded %d entries from node data cache", len(data),
+                )
+        except FileNotFoundError:
+            pass
+        except Exception:
+            self.log.debug("Error loading node data cache", exc_info=True)
+
+    def _save_node_data_cache(self) -> None:
+        """Persist current node data to disk."""
+        snapshot = dict(self._persisted_nodes)
+        if not snapshot:
+            return
+        try:
+            with open(self._node_data_cache_path, "w") as f:
+                json.dump(snapshot, f)
+        except Exception:
+            self.log.debug("Error saving node data cache", exc_info=True)
 
     def _extract_lora_neighbors(
         self, iface: Any,
@@ -2726,6 +2758,7 @@ class MeshtasticGateway(PluginBase):
             fw_auto_reset = self._fw_auto_reset
             fw_reset_timestamps = list(self._fw_reset_timestamps)
             fw_max_resets_per_hour = self._fw_max_resets_per_hour
+            serial_listener = self._serial_listener
 
         if (
             not connected
@@ -2742,6 +2775,7 @@ class MeshtasticGateway(PluginBase):
             "active": active,
             "mode": mode,
             "connected": connected,
+            "serial_available": serial_listener is not None,
             "mqtt_suspended": mqtt_suspended,
             "meshtastic_channel": self.config.get("meshtastic_channel", 0),
             "msgs_mesh_to_lxmf": msgs_mesh_to_lxmf,
@@ -2857,7 +2891,7 @@ class MeshtasticGateway(PluginBase):
             except Exception:
                 pass
 
-        seen: dict[str, dict[str, Any]] = {}
+        seen: dict[str, dict[str, Any]] = dict(self._persisted_nodes)
 
         for node_id, node_data in raw_mqtt.items():
             user = node_data.get("user", {})
@@ -2938,6 +2972,13 @@ class MeshtasticGateway(PluginBase):
 
         result = list(seen.values())
         self._nodes_cache = (time.monotonic(), result)
+
+        self._persisted_nodes = {e["id"]: e for e in result if not e.get("is_self")}
+        self._node_data_save_counter += 1
+        if self._node_data_save_counter >= 20:
+            self._node_data_save_counter = 0
+            self._save_node_data_cache()
+
         return result
 
     def get_lora_neighbors(self) -> list[dict[str, Any]]:
