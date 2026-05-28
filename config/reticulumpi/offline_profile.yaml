@@ -121,6 +121,9 @@ reticulumpi:
       max_sessions: 5
       metrics_interval: 2
       max_websocket_clients: 10
+    captive_portal:
+      enabled: true
+      mode: auto
     path_warmer:
       enabled: true
       warm_interval: 120

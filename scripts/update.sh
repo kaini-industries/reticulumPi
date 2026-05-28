@@ -130,6 +130,22 @@ for svc in reticulumpi.service; do
     done
 done
 
+# 3b. Sync sudoers rules if they changed
+for rule in reticulumpi-services reticulumpi-offline reticulumpi-captive-portal; do
+    src="$INSTALL_DIR/config/sudoers.d/$rule"
+    dest="/etc/sudoers.d/$rule"
+    [ -f "$src" ] || continue
+    if [ ! -f "$dest" ] || ! diff -q "$src" "$dest" &>/dev/null; then
+        sudo install -m 0440 "$src" "$dest"
+        if sudo visudo -cf "$dest" >/dev/null 2>&1; then
+            echo "  Updated sudoers rule: $rule"
+        else
+            echo "  WARNING: sudoers syntax check failed for $rule — removing"
+            sudo rm -f "$dest"
+        fi
+    fi
+done
+
 # 4. Ensure all ReadWritePaths directories exist (systemd namespace mount fails otherwise)
 echo "[4/5] Pre-creating ReadWritePaths directories..."
 for svc in reticulumpi.service; do

@@ -208,3 +208,7 @@ WEATHER_ALERT_STATUS = "weather_alert.status"
 ISM_DEVICE_DETECTED = "ism.device_detected"
 ISM_DEVICE_LOST = "ism.device_lost"
 ISM_STATUS = "ism.status"
+
+# Captive portal
+CAPTIVE_PORTAL_ACTIVATED = "captive_portal.activated"
+CAPTIVE_PORTAL_DEACTIVATED = "captive_portal.deactivated"

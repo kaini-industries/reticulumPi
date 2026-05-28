@@ -1113,6 +1113,18 @@ async def handle_sdr_scheduler(
     return _ok(await _run_sync(sched.get_status))
 
 
+async def handle_captive_portal(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/captive_portal — Captive portal status."""
+    plugin = _get_plugin(request)
+    cp = plugin.app.get_plugin("captive_portal")
+    if not cp or not hasattr(cp, "get_status"):
+        return _ok({"available": False, "message": "captive_portal plugin not enabled"})
+    status = await _run_sync(cp.get_status)
+    return _ok({"available": True, **status})
+
+
 def setup_service_routes(app: aiohttp.web.Application) -> None:
     """Register plugin service API routes."""
     # LoRa
@@ -1187,3 +1199,5 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/noaa", handle_noaa)
     app.router.add_get("/api/noaa/image/{filename}", handle_noaa_image)
     app.router.add_get("/api/sdr_scheduler", handle_sdr_scheduler)
+    # Captive portal
+    app.router.add_get("/api/captive_portal", handle_captive_portal)

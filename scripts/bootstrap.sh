@@ -448,6 +448,15 @@ else
     sudo rm -f /etc/sudoers.d/reticulumpi-offline
 fi
 
+echo "  Installing sudoers rule for captive portal..."
+sudo install -m 0440 "$INSTALL_DIR/config/sudoers.d/reticulumpi-captive-portal" /etc/sudoers.d/reticulumpi-captive-portal
+if sudo visudo -cf /etc/sudoers.d/reticulumpi-captive-portal >/dev/null 2>&1; then
+    echo "  Sudoers rule installed and validated"
+else
+    echo "  WARNING: sudoers syntax check failed — removing to prevent lockout"
+    sudo rm -f /etc/sudoers.d/reticulumpi-captive-portal
+fi
+
 echo ""
 echo "=== Bootstrap complete ==="
 echo ""

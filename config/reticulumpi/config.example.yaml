@@ -125,6 +125,19 @@ reticulumpi:
     #    auto_generate: false      # Auto-generate self-signed cert
     #    cert_dir: ~/.config/reticulumpi/web_certs
 
+    # Captive Portal — guides hotspot clients to the web dashboard.
+    # When a device connects to the Wi-Fi hotspot, OS captive portal
+    # detection triggers a splash page with a link to the dashboard.
+    # In "auto" mode the portal only activates when the Pi is offline;
+    # when online, clients get normal internet access.
+    # Requires: dnsmasq serving DNS on the AP interface, hotspot_monitor enabled.
+    #captive_portal:
+    #  enabled: false
+    #  mode: auto                   # auto | always | off
+    #  portal_port: 8081            # HTTP server port (iptables redirects port 80 here)
+    #  dashboard_url: null          # Auto-detected from web_dashboard config
+    #  ap_interface: null           # Auto-detected from hotspot_monitor / hostapd.conf
+
     # Network Map — passively monitors announces to build mesh topology.
     # Discovers all reachable nodes and tracks hop counts over time.
     #network_map:
