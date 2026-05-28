@@ -130,7 +130,20 @@ for svc in reticulumpi.service; do
     done
 done
 
-# 3b. Sync sudoers rules if they changed
+# 3b. Sync helper scripts to /opt/reticulumpi/scripts/
+OPT_SCRIPTS="/opt/reticulumpi/scripts"
+if [ -d "$OPT_SCRIPTS" ]; then
+    for src in "$INSTALL_DIR"/scripts/*_helper.sh; do
+        [ -f "$src" ] || continue
+        dest="$OPT_SCRIPTS/$(basename "$src")"
+        if [ ! -f "$dest" ] || ! diff -q "$src" "$dest" &>/dev/null; then
+            sudo install -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$src" "$dest"
+            echo "  Updated helper script: $(basename "$src")"
+        fi
+    done
+fi
+
+# 3c. Sync sudoers rules if they changed
 for rule in reticulumpi-services reticulumpi-offline reticulumpi-captive-portal; do
     src="$INSTALL_DIR/config/sudoers.d/$rule"
     dest="/etc/sudoers.d/$rule"
