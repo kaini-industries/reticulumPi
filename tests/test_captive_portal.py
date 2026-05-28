@@ -277,10 +277,11 @@ class TestActivationLifecycle:
         assert plugin._portal_active is False
 
     def test_stop_deactivates(self, mock_app):
-        plugin, mock_sp = _make_plugin(mock_app, internet=False)
+        plugin, _ = _make_plugin(mock_app, internet=False)
         assert plugin._portal_active is True
-        mock_sp.run.return_value = MagicMock(returncode=0, stdout="deactivated\n", stderr="")
-        plugin.stop()
+        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
+            mock_sp.run.return_value = MagicMock(returncode=0, stdout="deactivated\n", stderr="")
+            plugin.stop()
         assert plugin._portal_active is False
 
 
@@ -290,17 +291,19 @@ class TestActivationLifecycle:
 
 class TestInternetEvents:
     def test_on_internet_available_deactivates_auto(self, mock_app):
-        plugin, mock_sp = _make_plugin(mock_app, internet=False)
+        plugin, _ = _make_plugin(mock_app, internet=False)
         assert plugin._portal_active is True
-        mock_sp.run.return_value = MagicMock(returncode=0, stdout="deactivated\n", stderr="")
-        plugin.on_internet_available()
+        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
+            mock_sp.run.return_value = MagicMock(returncode=0, stdout="deactivated\n", stderr="")
+            plugin.on_internet_available()
         assert plugin._portal_active is False
 
     def test_on_internet_lost_activates_auto(self, mock_app):
-        plugin, mock_sp = _make_plugin(mock_app, internet=True)
+        plugin, _ = _make_plugin(mock_app, internet=True)
         assert plugin._portal_active is False
-        mock_sp.run.return_value = MagicMock(returncode=0, stdout="activated\n", stderr="")
-        plugin.on_internet_lost()
+        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
+            mock_sp.run.return_value = MagicMock(returncode=0, stdout="activated\n", stderr="")
+            plugin.on_internet_lost()
         assert plugin._portal_active is True
 
     def test_on_internet_available_noop_always(self, mock_app):
