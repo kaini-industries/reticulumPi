@@ -833,19 +833,21 @@
 
     <!-- Node Map -->
     <div class="section awaiting-data" id="map-section">
-      <div class="section-header">
-        <span>Node Map</span>
+      <div class="section-header collapsible" id="map-toggle" title="Click to collapse">
+        <span><span class="chevron">&#9656;</span> Node Map</span>
         <span class="count" id="map-count"></span>
       </div>
-      <div class="map-controls">
-        <button class="mesh-tab" id="map-show-all" title="Show all nodes with position">All Nodes</button>
-        <button class="mesh-tab active" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
-        <button class="mesh-tab" id="map-show-rns" title="Show Reticulum mesh peers only">Reticulum Peers</button>
-        <button class="mesh-tab" id="map-show-tracked" title="Show tracked nodes only">Tracked</button>
-        <button class="mesh-tab" id="map-center-gps" title="Center on GPS location">My Location</button>
-        <span class="map-stats" id="map-stats"></span>
+      <div id="map-body">
+        <div class="map-controls">
+          <button class="mesh-tab" id="map-show-all" title="Show all nodes with position">All Nodes</button>
+          <button class="mesh-tab active" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
+          <button class="mesh-tab" id="map-show-rns" title="Show Reticulum mesh peers only">Reticulum Peers</button>
+          <button class="mesh-tab" id="map-show-tracked" title="Show tracked nodes only">Tracked</button>
+          <button class="mesh-tab" id="map-center-gps" title="Center on GPS location">My Location</button>
+          <span class="map-stats" id="map-stats"></span>
+        </div>
+        <div id="map-container" style="height: 450px; width: 100%;"></div>
       </div>
-      <div id="map-container" style="height: 450px; width: 100%;"></div>
     </div>
 
     <!-- Space Tracker (satellites, launches, space weather) -->

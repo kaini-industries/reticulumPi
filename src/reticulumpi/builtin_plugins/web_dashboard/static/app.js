@@ -3,7 +3,8 @@
   'use strict';
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .catch(function () {});
   }
 
   /* ── Shared namespace ─────────────────────────────────────────────── */
@@ -1613,7 +1614,7 @@
   function registerDeferredSection(name, fn) { _sectionFirstExpand[name] = fn; }
   RPI.registerDeferredSection = registerDeferredSection;
 
-  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot', 'node-tracker'].forEach(function(name) {
+  ['plugins', 'telemetry', 'files', 'alerts', 'sensors', 'emergency', 'mesh-bridge-section', 'hotspot', 'node-tracker', 'map'].forEach(function(name) {
     var toggle = $(name + '-toggle');
     var body = $(name + '-body');
     if (toggle && body) {
@@ -1891,6 +1892,9 @@
   _sectionOnExpand.emergency = function() { if (_stash.emergency) updateEmergency(_stash.emergency); };
   _sectionOnExpand.hotspot = function() {
     if (_stash.hotspot && RPI.updateHotspot) RPI.updateHotspot(_stash.hotspot, _stash.captive_portal || null);
+  };
+  _sectionOnExpand.map = function() {
+    if (RPI._mapInvalidate) RPI._mapInvalidate();
   };
 
   // Register deferred fetches for collapsed sections

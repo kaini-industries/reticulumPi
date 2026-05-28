@@ -125,10 +125,12 @@
 
   // -- Map initialization --------------------------------------------------
 
+  var _tileErrors = 0;
+
   function _initMap() {
     if (_map) return;
     var container = $('map-container');
-    if (!container) return;
+    if (!container || typeof L === 'undefined') return;
 
     _initIcons();
 
@@ -139,10 +141,17 @@
 
     var tileMeta = document.querySelector('meta[name="rpi-tile-url"]');
     var tileUrl = (tileMeta && tileMeta.content) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-    L.tileLayer(tileUrl, {
+    var tl = L.tileLayer(tileUrl, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 19
     }).addTo(_map);
+    tl.on('tileerror', function () {
+      _tileErrors++;
+      if (_tileErrors === 1) {
+        var el = $('map-stats');
+        if (el) el.textContent += ' · tile load error';
+      }
+    });
 
     _markerGroup = L.featureGroup().addTo(_map);
   }
@@ -314,9 +323,18 @@
     }
 
     // Update stats
+    var totalWithPos = 0;
+    for (var tp = 0; tp < nodes.length; tp++) {
+      if (_hasValidPos(nodes[tp])) totalWithPos++;
+    }
     var statsEl = $('map-stats');
     if (statsEl) {
-      statsEl.textContent = withPos.length + ' of ' + nodes.length + ' nodes with position';
+      _tileErrors = 0;
+      if (_filter === 'all') {
+        statsEl.textContent = totalWithPos + ' of ' + nodes.length + ' with position';
+      } else {
+        statsEl.textContent = withPos.length + ' shown · ' + totalWithPos + ' with position';
+      }
     }
     var countEl = $('map-count');
     if (countEl) {
@@ -379,6 +397,7 @@
         _map.fitBounds(_markerGroup.getBounds().pad(0.1));
       }
       _initialFit = true;
+      setTimeout(function () { if (_map) _map.invalidateSize(); }, 100);
     }
   }
 
@@ -516,4 +535,7 @@
   R.updateMapReticulum = updateMapReticulum;
   R.updateMapLoraNeighbors = updateMapLoraNeighbors;
   R.updateMapGps = updateMapGps;
+  R._mapInvalidate = function () {
+    if (_map) setTimeout(function () { _map.invalidateSize(); }, 100);
+  };
 })();

@@ -88,8 +88,7 @@ self.addEventListener('fetch', function (e) {
 });
 
 function _isShellAsset(path) {
-  if (path === '/' || path === '/index.html' || path === '/login.html'
-      || path === '/spectrum.html') return true;
+  if (path === '/login.html') return true;
   if (path.indexOf('/static/') === 0) return true;
   return false;
 }
