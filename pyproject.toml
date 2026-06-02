@@ -11,14 +11,14 @@ requires-python = ">=3.9"
 license = {text = "MIT"}
 dependencies = [
     "rns>=1.2.5,<2.0",
-    "lxmf>=0.9.4,<1.0",
+    "lxmf>=0.9.4,<2.0",
     "pyyaml>=6.0,<8.0",
     "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
 nomadnet = [
-    "nomadnet>=0.5,<1.0",
+    "nomadnet>=0.5,<2.0",
 ]
 dashboard = [
     "aiohttp>=3.9,<4.0",
@@ -33,7 +33,7 @@ sensors = [
 meshtastic = [
     "meshtastic>=2.0,<3.0",
     "paho-mqtt>=2.0,<3.0",
-    "cryptography>=3.0,<5.0",
+    "cryptography>=3.0,<50.0",
 ]
 meshcore = [
     "meshcore>=2.3,<3.0",
