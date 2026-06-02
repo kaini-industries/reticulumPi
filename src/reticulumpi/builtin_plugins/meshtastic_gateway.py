@@ -1481,30 +1481,71 @@ class MeshtasticGateway(PluginBase):
 
     # ── Device info probe (for dashboard device card) ────────────
 
+    def _close_leaked_serial_fd(self) -> None:
+        """Force-close any leaked fd to the device probe port.
+
+        The meshtastic SerialInterface constructor starts a reader thread
+        before waitForConfig().  If the constructor raises, neither the
+        stream nor the reader thread are cleaned up, permanently locking
+        the serial port.  This scans /proc/self/fd for an open handle to
+        our device and closes it so the next open attempt can succeed.
+        """
+        import os
+
+        try:
+            port = os.path.realpath(self._device_probe_port)
+            for fd_name in os.listdir("/proc/self/fd"):
+                try:
+                    if os.readlink(f"/proc/self/fd/{fd_name}") == port:
+                        os.close(int(fd_name))
+                        self.log.info(
+                            "Force-closed leaked fd %s to %s", fd_name, port,
+                        )
+                        return
+                except (OSError, ValueError):
+                    continue
+        except Exception:
+            pass
+
     def _open_serial_interface_with_timeout(self) -> Any | None:
         """Open a Meshtastic SerialInterface with a bounded timeout.
 
         ``SerialInterface()`` blocks until the radio sends a config_complete
         reply.  If the device is unresponsive this hangs indefinitely with
-        no log — which is how we lost visibility into the channel list for
-        7 hours.  Run the constructor on a daemon worker and give up after
+        no log.  Run the constructor on a daemon worker and give up after
         ``_device_probe_open_timeout`` seconds.  On timeout the worker is
-        abandoned; it may keep the tty claimed until its blocking read
-        unblocks, so the next iteration can fail once before recovering —
-        acceptable vs silent permanent hang.
+        signalled via a ``cancelled`` event so it closes the interface when
+        the constructor eventually completes.  If the constructor fails,
+        ``_close_leaked_serial_fd`` cleans up the leaked fd on the next
+        attempt.
         """
         import meshtastic.serial_interface
 
+        self._close_leaked_serial_fd()
+
         timeout_s = self._device_probe_open_timeout
         result: dict[str, Any] = {"iface": None, "error": None}
+        cancelled = threading.Event()
 
         def worker() -> None:
+            iface = None
             try:
-                result["iface"] = meshtastic.serial_interface.SerialInterface(
+                iface = meshtastic.serial_interface.SerialInterface(
                     devPath=self._device_probe_port
                 )
+                result["iface"] = iface
             except Exception as exc:
                 result["error"] = exc
+
+            if cancelled.is_set() and iface is not None:
+                try:
+                    iface.close()
+                except Exception:
+                    pass
+                self.log.info(
+                    "Abandoned serial worker closed interface on %s",
+                    self._device_probe_port,
+                )
 
         t = threading.Thread(
             target=worker, name="meshtastic-serial-open", daemon=True,
@@ -1513,12 +1554,13 @@ class MeshtasticGateway(PluginBase):
         t.join(timeout=timeout_s)
 
         if t.is_alive():
+            cancelled.set()
             self.log.warning(
                 "Meshtastic serial open on %s timed out after %.0fs — "
-                "abandoning worker, retrying in %.0fs",
+                "abandoning worker (will auto-close), retrying in %.0fs",
                 self._device_probe_port,
                 timeout_s,
-                self._device_probe_interval,
+                self._serial_retry_interval,
             )
             return None
         if result["error"] is not None:

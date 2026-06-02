@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from unittest.mock import ANY, MagicMock, patch
 
@@ -1824,3 +1825,112 @@ class TestReadReceipts:
         }
         gateway_plugin._handle_private_app(packet)
         gateway_plugin.event_bus.publish.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestSerialOpenTimeout — _open_serial_interface_with_timeout lock-leak fix
+# ---------------------------------------------------------------------------
+
+
+class TestSerialOpenTimeout:
+    """Verify that abandoned serial-open workers release the port lock."""
+
+    @pytest.fixture
+    def probe_plugin(self, mock_app, mqtt_gw_config):
+        mqtt_gw_config["device_probe_port"] = "/dev/meshtastic"
+        mqtt_gw_config["device_probe_open_timeout"] = 0.3
+        mqtt_gw_config["serial_retry_interval"] = 5
+        plugin = _make_plugin_no_start(mock_app, mqtt_gw_config)
+        plugin._device_probe_port = "/dev/meshtastic"
+        plugin._device_probe_open_timeout = 0.3
+        plugin._serial_retry_interval = 5.0
+        plugin._device_probe_interval = 300.0
+        plugin._lock = threading.Lock()
+        return plugin
+
+    def test_success_within_timeout(self, probe_plugin):
+        """Constructor completes in time — returns interface, close() not called."""
+        mock_iface = MagicMock()
+        _mock_meshtastic_serial.SerialInterface.return_value = mock_iface
+        _mock_meshtastic_serial.SerialInterface.side_effect = None
+
+        result = probe_plugin._open_serial_interface_with_timeout()
+
+        assert result is mock_iface
+        mock_iface.close.assert_not_called()
+
+    def test_timeout_closes_abandoned_interface(self, probe_plugin):
+        """Constructor completes after timeout — worker closes the interface."""
+        mock_iface = MagicMock()
+        gate = threading.Event()
+
+        def slow_constructor(**kwargs):
+            gate.wait(timeout=5)
+            return mock_iface
+
+        _mock_meshtastic_serial.SerialInterface.side_effect = slow_constructor
+
+        result = probe_plugin._open_serial_interface_with_timeout()
+        assert result is None
+
+        gate.set()
+        time.sleep(0.2)
+
+        mock_iface.close.assert_called_once()
+
+    def test_timeout_constructor_error_no_crash(self, probe_plugin):
+        """Constructor errors after timeout — no crash, no close attempt."""
+        gate = threading.Event()
+
+        def slow_error(**kwargs):
+            gate.wait(timeout=5)
+            raise OSError("device vanished")
+
+        _mock_meshtastic_serial.SerialInterface.side_effect = slow_error
+
+        result = probe_plugin._open_serial_interface_with_timeout()
+        assert result is None
+
+        gate.set()
+        time.sleep(0.2)
+
+    def test_constructor_error_within_timeout(self, probe_plugin):
+        """Constructor errors within timeout — returns None, error logged."""
+        _mock_meshtastic_serial.SerialInterface.side_effect = OSError(
+            "[Errno 13] Permission denied"
+        )
+
+        result = probe_plugin._open_serial_interface_with_timeout()
+
+        assert result is None
+
+    def test_log_uses_serial_retry_interval(self, probe_plugin, caplog):
+        """Timeout log message reports serial_retry_interval, not device_probe_interval."""
+        gate = threading.Event()
+
+        def slow_constructor(**kwargs):
+            gate.wait(timeout=5)
+            return MagicMock()
+
+        _mock_meshtastic_serial.SerialInterface.side_effect = slow_constructor
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="reticulumpi.plugin.meshtastic_gateway"):
+            probe_plugin._open_serial_interface_with_timeout()
+
+        gate.set()
+        time.sleep(0.2)
+
+        timeout_msgs = [r for r in caplog.records if "timed out" in r.message]
+        assert len(timeout_msgs) == 1
+        assert "retrying in 5s" in timeout_msgs[0].message
+
+    def test_leaked_fd_cleanup_called_before_open(self, probe_plugin):
+        """_close_leaked_serial_fd is called at the start of each open attempt."""
+        _mock_meshtastic_serial.SerialInterface.return_value = MagicMock()
+        _mock_meshtastic_serial.SerialInterface.side_effect = None
+
+        with patch.object(probe_plugin, "_close_leaked_serial_fd") as mock_cleanup:
+            probe_plugin._open_serial_interface_with_timeout()
+            mock_cleanup.assert_called_once()
