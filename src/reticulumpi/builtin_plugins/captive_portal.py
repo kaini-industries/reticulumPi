@@ -308,7 +308,8 @@ class CaptivePortalPlugin(PluginBase):
         wd = self.app.get_plugin("web_dashboard") if hasattr(self.app, "get_plugin") else None
         if wd:
             port = getattr(wd, "_port", 8080)
-            return f"http://{self._ap_ip}:{port}"
+            scheme = "https" if getattr(wd, "_ssl_context", None) else "http"
+            return f"{scheme}://{self._ap_ip}:{port}"
         return f"http://{self._ap_ip}:8080"
 
     def _resolve_helper_path(self) -> str:

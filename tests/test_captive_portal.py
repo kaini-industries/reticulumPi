@@ -52,6 +52,7 @@ def _make_plugin(mock_app, config=None, internet=False):
 
     wd = MagicMock()
     wd._port = 8080
+    wd._ssl_context = None
 
     def _get_plugin(name):
         return {"hotspot_monitor": hm, "web_dashboard": wd}.get(name)
@@ -429,6 +430,12 @@ class TestResolution:
     def test_resolve_dashboard_url_auto(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
         assert plugin._dashboard_url == "http://10.0.0.1:8080"
+
+    def test_resolve_dashboard_url_https_when_ssl(self, mock_app):
+        plugin, _ = _make_plugin(mock_app, internet=True)
+        wd = mock_app.get_plugin("web_dashboard")
+        wd._ssl_context = MagicMock()
+        assert plugin._resolve_dashboard_url().startswith("https://")
 
     def test_resolve_ssid_from_hotspot_monitor(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
