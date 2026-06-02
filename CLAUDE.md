@@ -7,10 +7,10 @@ Plugin-based Reticulum mesh networking node for Raspberry Pi 5 (ARM64, 4 cores).
 Core orchestrator `src/reticulumpi/app.py` (`ReticulumPiApp`) initializes Reticulum, loads
 plugins via `plugin_loader.py`, starts them in dependency order, manages shutdown in reverse.
 
-Inter-plugin communication: `event_bus.py` (thread-safe pub/sub, ~120 event types in `events.py`).
+Inter-plugin communication: `event_bus.py` (thread-safe pub/sub, ~127 event types in `events.py`).
 
 Two plugin base classes:
-- `PluginBase` (`plugin_base.py`) -- all 44 plugins inherit from this
+- `PluginBase` (`plugin_base.py`) -- all 42 plugins inherit from this
 - `SignalPluginBase` (`signal_plugin_base.py`) -- RTL-SDR signal plugins, adds dongle scheduling
 
 Dashboard: `builtin_plugins/web_dashboard/` -- aiohttp backend + vanilla JS frontend (no build step).
@@ -52,8 +52,8 @@ Debug (no parallelism): `.venv/bin/pytest tests/test_foo.py -v -n0`
 ## Key Directories
 
 - `src/reticulumpi/` -- core modules ([details](src/reticulumpi/CLAUDE.md))
-- `src/reticulumpi/builtin_plugins/` -- 44 plugins ([details](src/reticulumpi/builtin_plugins/CLAUDE.md))
-- `tests/` -- 58 test files ([details](tests/CLAUDE.md))
+- `src/reticulumpi/builtin_plugins/` -- 42 plugins ([details](src/reticulumpi/builtin_plugins/CLAUDE.md))
+- `tests/` -- 70 test files ([details](tests/CLAUDE.md))
 - `scripts/` -- bootstrap.sh, update.sh, offline simulation
 - `config/` -- example YAML configs, Reticulum config templates, systemd units
 - `docs/` -- plugin-development.md, api-reference.md, install-layout.md
