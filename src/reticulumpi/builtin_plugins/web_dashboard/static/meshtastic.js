@@ -189,9 +189,13 @@
     _mshConnected = connected;
     _fwWatchdog = status.firmware_watchdog || null;
     var hangDetected = _fwWatchdog && _fwWatchdog.hang_detected;
+    var openFailing = _fwWatchdog && _fwWatchdog.consecutive_open_failures > 0;
     if (badge) {
       if (hangDetected) {
         badge.textContent = 'firmware hang';
+        badge.className = 'count status-warn';
+      } else if (openFailing) {
+        badge.textContent = 'serial failing (' + _fwWatchdog.consecutive_open_failures + '/' + _fwWatchdog.open_failure_threshold + ')';
         badge.className = 'count status-warn';
       } else {
         badge.textContent = connected ? 'connected' : 'disconnected';
@@ -486,6 +490,13 @@
         label: 'Resets/hr',
         value: wd.resets_last_hour + '/' + (wd.max_resets_per_hour || '∞'),
         cls: wd.resets_last_hour >= (wd.max_resets_per_hour || 999) ? 'metric-crit' : 'metric-warn'
+      });
+    }
+    if (wd.consecutive_open_failures > 0) {
+      stats.push({
+        label: 'Open Fails',
+        value: wd.consecutive_open_failures + '/' + (wd.open_failure_threshold || 3),
+        cls: wd.consecutive_open_failures >= (wd.open_failure_threshold || 3) ? 'metric-crit' : 'metric-warn'
       });
     }
     if (!wd.auto_reset) {

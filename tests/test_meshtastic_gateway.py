@@ -1934,3 +1934,167 @@ class TestSerialOpenTimeout:
         with patch.object(probe_plugin, "_close_leaked_serial_fd") as mock_cleanup:
             probe_plugin._open_serial_interface_with_timeout()
             mock_cleanup.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestStartupHangDetection — detect firmware hang during serial open
+# ---------------------------------------------------------------------------
+
+
+class TestStartupHangDetection:
+    """Verify startup firmware hang detection and USB bus reset recovery."""
+
+    @pytest.fixture
+    def wd_plugin(self, mock_app, mqtt_gw_config):
+        mqtt_gw_config["device_probe_port"] = "/dev/meshtastic"
+        mqtt_gw_config["device_probe_open_timeout"] = 0.1
+        mqtt_gw_config["serial_retry_interval"] = 5
+        mqtt_gw_config["firmware_watchdog"] = {
+            "enabled": True,
+            "open_failure_threshold": 3,
+            "auto_reset": True,
+            "usb_power_cycle": True,
+            "max_resets_per_hour": 3,
+            "silence_timeout": 300,
+            "probe_timeout": 15,
+        }
+        plugin = _make_plugin_no_start(mock_app, mqtt_gw_config)
+        plugin._device_probe_port = "/dev/meshtastic"
+        plugin._device_probe_open_timeout = 0.1
+        plugin._serial_retry_interval = 5.0
+        plugin._device_probe_interval = 300.0
+        plugin._fw_watchdog_enabled = True
+        plugin._fw_open_failure_threshold = 3
+        plugin._fw_consecutive_open_failures = 0
+        plugin._fw_first_open_failure_time = 0.0
+        plugin._fw_auto_reset = True
+        plugin._fw_usb_power_cycle = True
+        plugin._fw_max_resets_per_hour = 3
+        plugin._fw_reset_timestamps = []
+        plugin._fw_hang_detected = False
+        plugin._fw_total_hangs = 0
+        plugin._fw_total_resets = 0
+        plugin._fw_silence_timeout = 300.0
+        plugin._fw_probe_timeout = 15.0
+        plugin._last_device_activity = 0.0
+        plugin._serial_listener = None
+        plugin._mesh_interface = None
+        plugin._lock = threading.Lock()
+        return plugin
+
+    def test_counter_increments_on_failure(self, wd_plugin):
+        assert wd_plugin._fw_consecutive_open_failures == 0
+        wd_plugin._fw_consecutive_open_failures += 1
+        assert wd_plugin._fw_consecutive_open_failures == 1
+        wd_plugin._fw_consecutive_open_failures += 1
+        assert wd_plugin._fw_consecutive_open_failures == 2
+
+    def test_counter_resets_on_success(self, wd_plugin):
+        wd_plugin._fw_consecutive_open_failures = 2
+        wd_plugin._fw_first_open_failure_time = time.monotonic() - 60
+        wd_plugin._fw_consecutive_open_failures = 0
+        wd_plugin._fw_first_open_failure_time = 0.0
+        assert wd_plugin._fw_consecutive_open_failures == 0
+        assert wd_plugin._fw_first_open_failure_time == 0.0
+
+    def test_threshold_triggers_hang_event(self, wd_plugin):
+        wd_plugin._fw_consecutive_open_failures = 3
+        wd_plugin._fw_first_open_failure_time = time.monotonic() - 90
+
+        with (
+            patch.object(wd_plugin, "_attempt_startup_recovery"),
+            patch.object(wd_plugin, "_fw_reset_allowed", return_value=True),
+        ):
+            wd_plugin._handle_startup_firmware_hang()
+
+        wd_plugin.event_bus.publish.assert_called()
+        call_args = wd_plugin.event_bus.publish.call_args
+        assert call_args[0][0] == "meshtastic.firmware_hang"
+        assert call_args[0][1]["reason"] == "serial_open_timeout"
+        assert call_args[0][1]["consecutive_failures"] == 3
+
+    def test_hang_sets_state_flags(self, wd_plugin):
+        wd_plugin._fw_consecutive_open_failures = 3
+        with (
+            patch.object(wd_plugin, "_attempt_startup_recovery"),
+            patch.object(wd_plugin, "_fw_reset_allowed", return_value=True),
+        ):
+            wd_plugin._handle_startup_firmware_hang()
+
+        assert wd_plugin._fw_hang_detected is True
+        assert wd_plugin._fw_total_hangs == 1
+
+    def test_circuit_breaker_blocks_recovery(self, wd_plugin):
+        wd_plugin._fw_consecutive_open_failures = 3
+        wd_plugin._fw_reset_timestamps = [time.monotonic()] * 3
+
+        with patch.object(wd_plugin, "_attempt_startup_recovery") as mock_recover:
+            wd_plugin._handle_startup_firmware_hang()
+            mock_recover.assert_not_called()
+
+    def test_auto_reset_false_skips_recovery(self, wd_plugin):
+        wd_plugin._fw_auto_reset = False
+        wd_plugin._fw_consecutive_open_failures = 3
+
+        with patch.object(wd_plugin, "_attempt_startup_recovery") as mock_recover:
+            wd_plugin._handle_startup_firmware_hang()
+            mock_recover.assert_not_called()
+
+        wd_plugin.event_bus.publish.assert_called()
+
+    def test_startup_recovery_calls_usb_reset(self, wd_plugin):
+        with (
+            patch.object(wd_plugin, "_close_leaked_serial_fd"),
+            patch.object(wd_plugin, "_check_usb_present", return_value=True),
+            patch.object(wd_plugin, "_resolve_usb_device_path", return_value="/dev/bus/usb/004/011"),
+            patch.object(wd_plugin, "_usb_bus_reset", return_value={"ok": True}),
+            patch.object(wd_plugin, "_record_reset") as mock_record,
+            patch.object(wd_plugin, "_post_recovery_wait"),
+        ):
+            wd_plugin._attempt_startup_recovery()
+            mock_record.assert_called_once_with("usb_bus_reset_startup")
+
+    def test_startup_recovery_skips_when_usb_gone(self, wd_plugin):
+        with (
+            patch.object(wd_plugin, "_close_leaked_serial_fd"),
+            patch.object(wd_plugin, "_check_usb_present", return_value=False),
+            patch.object(wd_plugin, "_usb_bus_reset") as mock_reset,
+        ):
+            wd_plugin._attempt_startup_recovery()
+            mock_reset.assert_not_called()
+
+    def test_status_includes_open_failure_fields(self, wd_plugin):
+        wd_plugin._fw_consecutive_open_failures = 2
+        wd_plugin._fw_first_open_failure_time = time.monotonic() - 45
+        wd_plugin._active = True
+        wd_plugin._connected = False
+        wd_plugin._mqtt_suspended = False
+        wd_plugin._msgs_mesh_to_lxmf = 0
+        wd_plugin._msgs_lxmf_to_mesh = 0
+        wd_plugin._msgs_hub_to_mesh = 0
+        wd_plugin._msgs_rate_limited = 0
+        wd_plugin._connect_count = 0
+        wd_plugin._reconnect_failures = 0
+        wd_plugin._last_mesh_msg_time = None
+        wd_plugin._last_lxmf_msg_time = None
+        wd_plugin._recipient_hashes = set()
+        wd_plugin._send_min_interval = 0
+        wd_plugin._mqtt_node_num = 0
+        wd_plugin._mqtt_long_name = ""
+        wd_plugin._mqtt_short_name = ""
+        wd_plugin._last_disconnect_time = 0.0
+        wd_plugin._mode = "mqtt"
+        wd_plugin._last_fw_probe_time = 0.0
+        wd_plugin._fw_probe_interval = 0
+
+        status = wd_plugin.get_status()
+        fw = status["firmware_watchdog"]
+        assert fw["consecutive_open_failures"] == 2
+        assert fw["open_failure_threshold"] == 3
+        assert fw["open_failure_duration_seconds"] is not None
+        assert fw["open_failure_duration_seconds"] >= 44
+
+    def test_validate_config_rejects_zero_threshold(self, mock_app, mqtt_gw_config):
+        mqtt_gw_config["firmware_watchdog"] = {"open_failure_threshold": 0}
+        with pytest.raises(ValueError, match="open_failure_threshold"):
+            _make_plugin_no_start(mock_app, mqtt_gw_config)

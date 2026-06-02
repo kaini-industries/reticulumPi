@@ -393,6 +393,7 @@ reticulumpi:
     #    auto_reset: true              # Attempt device reset on confirmed hang
     #    usb_power_cycle: false        # USB bus reset if soft reboot fails
     #    max_resets_per_hour: 3        # Circuit breaker (0=unlimited)
+    #    open_failure_threshold: 3    # Consecutive serial open timeouts before USB reset
 
     # MeshCore Gateway — bridges MeshCore LoRa mesh with ReticulumPi.
     # Connects to a MeshCore companion radio over USB serial.

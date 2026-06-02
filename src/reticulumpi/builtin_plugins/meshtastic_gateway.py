@@ -830,6 +830,9 @@ class MeshtasticGateway(PluginBase):
         fw_max_resets = fw_wd.get("max_resets_per_hour", 3)
         if not isinstance(fw_max_resets, int) or fw_max_resets < 0:
             raise ValueError("firmware_watchdog.max_resets_per_hour must be >= 0")
+        fw_open_thresh = fw_wd.get("open_failure_threshold", 3)
+        if not isinstance(fw_open_thresh, int) or fw_open_thresh < 1:
+            raise ValueError("firmware_watchdog.open_failure_threshold must be >= 1")
 
         # Validate short_name (optional, max 4 chars)
         short_name = self.config.get("short_name", "")
@@ -914,6 +917,9 @@ class MeshtasticGateway(PluginBase):
         self._fw_hang_detected: bool = False
         self._fw_total_hangs: int = 0
         self._fw_total_resets: int = 0
+        self._fw_open_failure_threshold: int = fw_wd_cfg.get("open_failure_threshold", 3)
+        self._fw_consecutive_open_failures: int = 0
+        self._fw_first_open_failure_time: float = 0.0
 
         # Device info probe (for dashboard device card & LoRa neighbors)
         self._cached_device_info: dict[str, Any] | None = None
@@ -1593,7 +1599,25 @@ class MeshtasticGateway(PluginBase):
         while self._active:
             iface = self._open_serial_interface_with_timeout()
             if iface is None:
-                self._sleep_while_active(self._serial_retry_interval)
+                self._fw_consecutive_open_failures += 1
+                if self._fw_consecutive_open_failures == 1:
+                    self._fw_first_open_failure_time = time.monotonic()
+                self.log.warning(
+                    "Serial open failed (%d/%d consecutive)",
+                    self._fw_consecutive_open_failures,
+                    self._fw_open_failure_threshold,
+                )
+                if (
+                    self._fw_watchdog_enabled
+                    and self._fw_consecutive_open_failures
+                    >= self._fw_open_failure_threshold
+                ):
+                    self._handle_startup_firmware_hang()
+                    self._fw_consecutive_open_failures = 0
+                    self._fw_first_open_failure_time = 0.0
+                    self._sleep_while_active(self._serial_retry_interval * 2)
+                else:
+                    self._sleep_while_active(self._serial_retry_interval)
                 continue
 
             # Publish the listener reference before the first probe so
@@ -1601,6 +1625,8 @@ class MeshtasticGateway(PluginBase):
             # arrival (interface is self._serial_listener → LoRa tag).
             with self._lock:
                 self._serial_listener = iface
+            self._fw_consecutive_open_failures = 0
+            self._fw_first_open_failure_time = 0.0
             self.log.info(
                 "Serial listener active on %s — receiving LoRa messages",
                 self._device_probe_port,
@@ -2284,6 +2310,80 @@ class MeshtasticGateway(PluginBase):
             "total_resets": self._fw_total_resets,
         })
 
+    def _handle_startup_firmware_hang(self) -> None:
+        """Handle a firmware hang detected during serial open (pre-connection).
+
+        Unlike mid-session hangs, there is no localNode for soft reboot —
+        recovery goes straight to USB bus reset.
+        """
+        now = time.monotonic()
+        duration = (
+            int(now - self._fw_first_open_failure_time)
+            if self._fw_first_open_failure_time else None
+        )
+
+        with self._lock:
+            self._fw_hang_detected = True
+            self._fw_total_hangs += 1
+
+        self.log.error(
+            "Firmware hang detected: %d consecutive serial open failures "
+            "over %ss — attempting recovery",
+            self._fw_consecutive_open_failures,
+            duration,
+        )
+
+        self.event_bus.publish(events.MESHTASTIC_FIRMWARE_HANG, {
+            "reason": "serial_open_timeout",
+            "consecutive_failures": self._fw_consecutive_open_failures,
+            "duration_seconds": duration,
+            "total_hangs": self._fw_total_hangs,
+        })
+
+        if not self._fw_auto_reset:
+            self.log.warning(
+                "Firmware hang detected but auto_reset is disabled"
+            )
+            return
+
+        if not self._fw_reset_allowed():
+            self.log.warning(
+                "Firmware hang detected but max_resets_per_hour (%d) reached",
+                self._fw_max_resets_per_hour,
+            )
+            return
+
+        self._attempt_startup_recovery()
+
+    def _attempt_startup_recovery(self) -> None:
+        """Recovery for startup hangs — USB bus reset only (no localNode)."""
+        self.log.info(
+            "Attempting startup recovery via USB bus reset "
+            "(no localNode available for soft reboot)"
+        )
+
+        self._close_leaked_serial_fd()
+
+        if not self._check_usb_present():
+            self.log.error("Startup recovery: USB device not present")
+            return
+
+        usb_path = self._resolve_usb_device_path()
+        if usb_path is None:
+            self.log.error("Startup recovery: USB device path not found in sysfs")
+            return
+
+        result = self._usb_bus_reset(usb_path)
+        if result.get("ok"):
+            self.log.info("Startup recovery: USB bus reset sent (%s)", usb_path)
+            self._record_reset("usb_bus_reset_startup")
+            self._post_recovery_wait()
+        else:
+            self.log.error(
+                "Startup recovery: USB bus reset failed: %s",
+                result.get("reason"),
+            )
+
     # ── Rate limiting ───────────────────────────────────────────────
 
     def _check_send_rate_limit(self) -> bool:
@@ -2800,6 +2900,9 @@ class MeshtasticGateway(PluginBase):
             fw_auto_reset = self._fw_auto_reset
             fw_reset_timestamps = list(self._fw_reset_timestamps)
             fw_max_resets_per_hour = self._fw_max_resets_per_hour
+            fw_consecutive_open_failures = self._fw_consecutive_open_failures
+            fw_open_failure_threshold = self._fw_open_failure_threshold
+            fw_first_open_failure_time = self._fw_first_open_failure_time
             serial_listener = self._serial_listener
 
         if (
@@ -2873,6 +2976,12 @@ class MeshtasticGateway(PluginBase):
                     if t > now_mono - 3600
                 ]),
                 "max_resets_per_hour": fw_max_resets_per_hour,
+                "consecutive_open_failures": fw_consecutive_open_failures,
+                "open_failure_threshold": fw_open_failure_threshold,
+                "open_failure_duration_seconds": (
+                    int(now_mono - fw_first_open_failure_time)
+                    if fw_first_open_failure_time > 0 else None
+                ),
             }
 
         return status
