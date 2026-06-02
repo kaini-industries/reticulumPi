@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from typing import TYPE_CHECKING
 
 import aiohttp.web
@@ -217,7 +218,10 @@ async def _handle_tile_proxy(request: aiohttp.web.Request) -> aiohttp.web.Respon
         z_int = int(request.match_info["z"])
         x_int = int(request.match_info["x"])
         y_int = int(request.match_info["y"])
-        if z_int < 0 or x_int < 0 or y_int < 0:
+        if not (0 <= z_int <= 19):
+            raise ValueError
+        max_coord = (1 << z_int) - 1
+        if not (0 <= x_int <= max_coord) or not (0 <= y_int <= max_coord):
             raise ValueError
     except ValueError:
         raise aiohttp.web.HTTPBadRequest(text="Invalid tile coordinates")
@@ -247,19 +251,21 @@ async def _handle_tile_proxy(request: aiohttp.web.Request) -> aiohttp.web.Respon
     except (aiohttp.ClientError, asyncio.TimeoutError):
         raise aiohttp.web.HTTPGatewayTimeout(text="Upstream tile fetch failed")
 
-    tile_dir = os.path.dirname(tile_path)
-    os.makedirs(tile_dir, exist_ok=True)
-    try:
-        import tempfile
-
-        fd, tmp_path = tempfile.mkstemp(dir=tile_dir, suffix=".tmp")
+    max_bytes = getattr(plugin, "_tile_max_bytes", 0)
+    cur_bytes = getattr(plugin, "_tile_cache_bytes", 0)
+    if max_bytes <= 0 or cur_bytes + len(data) <= max_bytes:
+        tile_dir = os.path.dirname(tile_path)
+        os.makedirs(tile_dir, exist_ok=True)
         try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        os.rename(tmp_path, tile_path)
-    except OSError:
-        pass
+            fd, tmp_path = tempfile.mkstemp(dir=tile_dir, suffix=".tmp")
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.rename(tmp_path, tile_path)
+            plugin._tile_cache_bytes = getattr(plugin, "_tile_cache_bytes", 0) + len(data)
+        except OSError:
+            pass
 
     return aiohttp.web.Response(
         body=data,

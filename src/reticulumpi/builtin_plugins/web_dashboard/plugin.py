@@ -77,6 +77,17 @@ class WebDashboardPlugin(PluginBase):
             timeout = tile_proxy.get("request_timeout", 10)
             if not isinstance(timeout, (int, float)) or timeout < 1:
                 raise ValueError("tile_proxy.request_timeout must be >= 1")
+            bbox = tile_proxy.get("prefetch", {}).get("bbox")
+            if bbox is not None:
+                if not isinstance(bbox, list) or len(bbox) != 4:
+                    raise ValueError("tile_proxy.prefetch.bbox must be [south, west, north, east]")
+                if not all(isinstance(v, (int, float)) for v in bbox):
+                    raise ValueError("tile_proxy.prefetch.bbox values must be numbers")
+                south, west, north, east = bbox
+                if not (-90 <= south < north <= 90):
+                    raise ValueError("tile_proxy.prefetch.bbox: need -90 <= south < north <= 90")
+                if not (-180 <= west < east <= 180):
+                    raise ValueError("tile_proxy.prefetch.bbox: need -180 <= west < east <= 180")
 
         lora_region = self.config.get("lora_region", "US")
         if not isinstance(lora_region, str) or lora_region not in {
@@ -271,10 +282,14 @@ class WebDashboardPlugin(PluginBase):
             self._tile_cache_dir = cache_dir
             ua = tp.get("user_agent", "reticulumpi/0.2 tile-proxy")
             timeout = aiohttp.ClientTimeout(total=tp.get("request_timeout", 10))
-            conn = aiohttp.TCPConnector(limit=2)
             self._tile_session = aiohttp.ClientSession(
-                connector=conn,
+                connector=aiohttp.TCPConnector(limit=6),
                 timeout=timeout,
+                headers={"User-Agent": ua},
+            )
+            self._prefetch_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=2),
+                timeout=aiohttp.ClientTimeout(total=5),
                 headers={"User-Agent": ua},
             )
             self._tile_upstream = tp.get(
@@ -282,7 +297,28 @@ class WebDashboardPlugin(PluginBase):
                 "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
             )
             self._tile_max_bytes = int(tp.get("max_cache_mb", 500)) * 1024 * 1024
-            self.log.info("Tile proxy enabled, cache: %s", cache_dir)
+            self._tile_cache_bytes = 0
+            if os.path.isdir(cache_dir):
+                for e in os.scandir(cache_dir):
+                    if not e.is_dir():
+                        continue
+                    for e2 in os.scandir(e.path):
+                        if not e2.is_dir():
+                            continue
+                        for e3 in os.scandir(e2.path):
+                            if e3.is_file() and e3.name.endswith(".png"):
+                                self._tile_cache_bytes += e3.stat().st_size
+                            elif e3.is_file() and e3.name.endswith(".tmp"):
+                                try:
+                                    os.unlink(e3.path)
+                                except OSError:
+                                    pass
+            self.log.info(
+                "Tile proxy enabled, cache: %s (%d MB / %d MB)",
+                cache_dir,
+                self._tile_cache_bytes // (1024 * 1024),
+                tp.get("max_cache_mb", 500),
+            )
 
         # Start periodic session garbage collection
         self._session_gc_task = asyncio.ensure_future(self._session_gc_loop())
@@ -329,6 +365,9 @@ class WebDashboardPlugin(PluginBase):
                 await self._prefetch_task
             except asyncio.CancelledError:
                 pass
+        if getattr(self, "_prefetch_session", None):
+            await self._prefetch_session.close()
+            self._prefetch_session = None
         if getattr(self, "_tile_session", None):
             await self._tile_session.close()
             self._tile_session = None

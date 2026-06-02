@@ -6,12 +6,15 @@ import asyncio
 import logging
 import math
 import os
+import tempfile
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
 
 log = logging.getLogger(__name__)
+
+MAX_PREFETCH_TILES = 10_000
 
 
 def _lat_lon_to_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
@@ -49,6 +52,23 @@ def _tile_list(lat: float, lon: float, min_zoom: int, max_zoom: int) -> list[tup
     return tiles
 
 
+def _tile_list_bbox(
+    south: float, west: float, north: float, east: float,
+    min_zoom: int, max_zoom: int,
+) -> list[tuple[int, int, int]]:
+    """Return [(z, x, y), ...] covering a bounding box at each zoom level."""
+    tiles = []
+    for z in range(min_zoom, max_zoom + 1):
+        x_min, y_min = _lat_lon_to_tile(north, west, z)
+        x_max, y_max = _lat_lon_to_tile(south, east, z)
+        n = 2**z
+        for x in range(x_min, x_max + 1):
+            for y in range(y_min, y_max + 1):
+                if 0 <= y < n:
+                    tiles.append((z, x % n, y))
+    return tiles
+
+
 async def run_prefetch(plugin: WebDashboardPlugin) -> None:
     """Prefetch tiles around the node's position into the disk cache.
 
@@ -59,33 +79,56 @@ async def run_prefetch(plugin: WebDashboardPlugin) -> None:
     if not pf.get("enabled"):
         return
 
-    lat = pf.get("latitude")
-    lon = pf.get("longitude")
-
-    if lat is None or lon is None:
-        lat, lon = _detect_position(plugin)
-    if lat is None or lon is None:
-        log.info("Tile prefetch: no position available, skipping")
-        return
-
     min_zoom = pf.get("min_zoom", 6)
     max_zoom = pf.get("max_zoom", 15)
     cache_dir = getattr(plugin, "_tile_cache_dir", "")
-    session = getattr(plugin, "_tile_session", None)
+    session = getattr(plugin, "_prefetch_session", None) or getattr(plugin, "_tile_session", None)
     upstream = getattr(plugin, "_tile_upstream", "")
 
     if not cache_dir or not session or not upstream:
         log.warning("Tile prefetch: proxy not initialised, skipping")
         return
 
-    tiles = _tile_list(lat, lon, min_zoom, max_zoom)
+    bbox = pf.get("bbox")
+    if bbox and len(bbox) == 4:
+        south, west, north, east = bbox
+        tiles = _tile_list_bbox(south, west, north, east, min_zoom, max_zoom)
+        log.info(
+            "Tile prefetch: %d tiles for bbox [%.4f,%.4f,%.4f,%.4f] (z%d–z%d)",
+            len(tiles), south, west, north, east, min_zoom, max_zoom,
+        )
+    else:
+        lat = pf.get("latitude")
+        lon = pf.get("longitude")
+        if lat is None or lon is None:
+            lat, lon = _detect_position(plugin)
+        if lat is None or lon is None:
+            log.info("Tile prefetch: no position available, skipping")
+            return
+        tiles = _tile_list(lat, lon, min_zoom, max_zoom)
+        log.info(
+            "Tile prefetch: %d tiles for %.4f, %.4f (z%d–z%d)",
+            len(tiles), lat, lon, min_zoom, max_zoom,
+        )
+
+    if len(tiles) > MAX_PREFETCH_TILES:
+        log.warning(
+            "Tile prefetch: %d tiles exceeds limit of %d, truncating",
+            len(tiles), MAX_PREFETCH_TILES,
+        )
+        tiles = tiles[:MAX_PREFETCH_TILES]
+
     total = len(tiles)
     fetched = 0
     skipped = 0
 
-    log.info("Tile prefetch: %d tiles for %.4f, %.4f (z%d–z%d)", total, lat, lon, min_zoom, max_zoom)
+    max_bytes = getattr(plugin, "_tile_max_bytes", 0)
 
     for z, x, y in tiles:
+        if max_bytes > 0 and getattr(plugin, "_tile_cache_bytes", 0) >= max_bytes:
+            log.info("Tile prefetch: cache budget reached, stopping")
+            break
+
         tile_path = os.path.join(cache_dir, str(z), str(x), f"{y}.png")
         if os.path.isfile(tile_path):
             skipped += 1
@@ -102,10 +145,16 @@ async def run_prefetch(plugin: WebDashboardPlugin) -> None:
 
             tile_dir = os.path.dirname(tile_path)
             os.makedirs(tile_dir, exist_ok=True)
-            with open(tile_path, "wb") as f:
-                f.write(data)
+            fd, tmp_path = tempfile.mkstemp(dir=tile_dir, suffix=".tmp")
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.rename(tmp_path, tile_path)
+            plugin._tile_cache_bytes = getattr(plugin, "_tile_cache_bytes", 0) + len(data)
             fetched += 1
-        except Exception:
+        except Exception as exc:
+            log.debug("Tile prefetch failed for z%d/%d/%d: %s", z, x, y, exc)
             continue
 
         await asyncio.sleep(0.2)

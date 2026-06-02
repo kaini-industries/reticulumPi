@@ -129,6 +129,7 @@ reticulumpi:
     #    request_timeout: 10       # Upstream fetch timeout in seconds.
     #    prefetch:                 # Pre-seed tiles around node position.
     #      enabled: false
+    #      bbox: null              # [south, west, north, east] — overrides lat/lon.
     #      latitude: null          # null = auto-detect from GPS plugin.
     #      longitude: null
     #      min_zoom: 6
