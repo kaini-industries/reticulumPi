@@ -121,6 +121,8 @@ reticulumpi:
       max_sessions: 5
       metrics_interval: 2
       max_websocket_clients: 10
+    hotspot_monitor:
+      enabled: true
     captive_portal:
       enabled: true
       mode: auto
