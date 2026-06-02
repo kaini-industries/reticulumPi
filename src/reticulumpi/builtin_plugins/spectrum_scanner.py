@@ -90,8 +90,20 @@ _BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
 # internally, so we don't strictly need to — but we warn the user if the
 # request is far off a known step for documentation's sake.
 _COMMON_GAIN_STEPS_DB = (
-    -1.0, 1.5, 4.0, 6.5, 9.0, 11.5, 14.0, 16.5,
-    19.0, 21.5, 24.0, 29.0, 34.0, 42.0,
+    -1.0,
+    1.5,
+    4.0,
+    6.5,
+    9.0,
+    11.5,
+    14.0,
+    16.5,
+    19.0,
+    21.5,
+    24.0,
+    29.0,
+    34.0,
+    42.0,
 )
 
 # Elonics E4000 tuner has a local-oscillator dead zone in L-band; sweeps
@@ -123,8 +135,7 @@ class SpectrumScanner(PluginBase):
     ) -> None:
         if freq_stop <= freq_start:
             raise ValueError(
-                f"freq_stop_mhz ({freq_stop}) must be greater than "
-                f"freq_start_mhz ({freq_start})"
+                f"freq_stop_mhz ({freq_stop}) must be greater than freq_start_mhz ({freq_start})"
             )
         if not 1.0 <= bin_khz <= 1000.0:
             raise ValueError(f"bin_khz must be 1-1000, got {bin_khz}")
@@ -152,8 +163,11 @@ class SpectrumScanner(PluginBase):
         self._base_gain_db = self._gain_db
 
         self._validate_freq_params(
-            self._freq_start_mhz, self._freq_stop_mhz,
-            self._bin_khz, self._sweep_seconds, self._gain_db,
+            self._freq_start_mhz,
+            self._freq_stop_mhz,
+            self._bin_khz,
+            self._sweep_seconds,
+            self._gain_db,
         )
 
         self._ppm = int(cfg.get("ppm", 0))
@@ -170,9 +184,7 @@ class SpectrumScanner(PluginBase):
 
         self._peak_threshold_db = float(cfg.get("peak_threshold_db", 10.0))
         if not 1.0 <= self._peak_threshold_db <= 30.0:
-            raise ValueError(
-                f"peak_threshold_db must be 1.0-30.0, got {self._peak_threshold_db}"
-            )
+            raise ValueError(f"peak_threshold_db must be 1.0-30.0, got {self._peak_threshold_db}")
 
         self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
         self._power_command = str(cfg.get("power_command", "rtl_power"))
@@ -219,8 +231,11 @@ class SpectrumScanner(PluginBase):
         else:
             self._gain_db = self._base_gain_db
         self._validate_freq_params(
-            self._freq_start_mhz, self._freq_stop_mhz,
-            self._bin_khz, self._sweep_seconds, self._gain_db,
+            self._freq_start_mhz,
+            self._freq_stop_mhz,
+            self._bin_khz,
+            self._sweep_seconds,
+            self._gain_db,
         )
 
     def _activate_analyzer_for_preset(self, preset: dict[str, Any]) -> None:
@@ -279,18 +294,24 @@ class SpectrumScanner(PluginBase):
             self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
         try:
-            self.event_bus.publish(events.SPECTRUM_PRESET_ACTIVE, {
-                "preset": name,
-                "freq_start_mhz": self._freq_start_mhz,
-                "freq_stop_mhz": self._freq_stop_mhz,
-                "has_analysis": self._analyzer is not None,
-            })
+            self.event_bus.publish(
+                events.SPECTRUM_PRESET_ACTIVE,
+                {
+                    "preset": name,
+                    "freq_start_mhz": self._freq_start_mhz,
+                    "freq_stop_mhz": self._freq_stop_mhz,
+                    "has_analysis": self._analyzer is not None,
+                },
+            )
         except Exception:
             self.log.debug("event_bus publish failed", exc_info=True)
 
         self.log.info(
             "Preset switched to '%s': %.2f-%.2f MHz, %.1f kHz bins",
-            name, self._freq_start_mhz, self._freq_stop_mhz, self._bin_khz,
+            name,
+            self._freq_start_mhz,
+            self._freq_stop_mhz,
+            self._bin_khz,
         )
         return {
             "preset": name,
@@ -320,12 +341,14 @@ class SpectrumScanner(PluginBase):
         """Return available presets with metadata for the dashboard."""
         presets = []
         for name, p in self._presets.items():
-            presets.append({
-                "name": name,
-                "freq_start_mhz": p.get("freq_start_mhz"),
-                "freq_stop_mhz": p.get("freq_stop_mhz"),
-                "has_analysis": bool(p.get("analysis")),
-            })
+            presets.append(
+                {
+                    "name": name,
+                    "freq_start_mhz": p.get("freq_start_mhz"),
+                    "freq_stop_mhz": p.get("freq_stop_mhz"),
+                    "has_analysis": bool(p.get("analysis")),
+                }
+            )
         return {
             "active_preset": self._active_preset,
             "presets": presets,
@@ -372,6 +395,7 @@ class SpectrumScanner(PluginBase):
 
         try:
             from reticulumpi.rtlsdr import resolve_device
+
             self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
         except (RuntimeError, ValueError) as exc:
             self.log.error("RTL-SDR device resolution failed: %s", exc)
@@ -388,7 +412,10 @@ class SpectrumScanner(PluginBase):
                 "Configured span %.2f-%.2f MHz overlaps the E4000 L-band LO "
                 "gap (%.0f-%.0f MHz); expect garbage bins in that range if "
                 "your tuner is an Elonics E4000.",
-                self._freq_start_mhz, self._freq_stop_mhz, gap_lo, gap_hi,
+                self._freq_start_mhz,
+                self._freq_stop_mhz,
+                gap_lo,
+                gap_hi,
             )
 
         # Snap-to-step diagnostic.
@@ -398,7 +425,8 @@ class SpectrumScanner(PluginBase):
                 self.log.info(
                     "Requested gain %.1f dB is far from the nearest typical "
                     "tuner step (%.1f dB); rtl_power will snap it internally.",
-                    self._gain_db, nearest,
+                    self._gain_db,
+                    nearest,
                 )
 
         # Activate LoRa analyzer if the active preset requests it.
@@ -408,7 +436,9 @@ class SpectrumScanner(PluginBase):
         self.log.info(
             "%s started: %.2f-%.2f MHz, %.1f kHz bins, %.1fs sweep%s%s",
             self.plugin_name,
-            self._freq_start_mhz, self._freq_stop_mhz, self._bin_khz,
+            self._freq_start_mhz,
+            self._freq_stop_mhz,
+            self._bin_khz,
             self._sweep_seconds,
             f", gain {self._gain_db:.1f} dB" if self._gain_db is not None else ", auto gain",
             f", preset={self._active_preset}" if self._active_preset else "",
@@ -419,6 +449,7 @@ class SpectrumScanner(PluginBase):
         self._terminate_process()
         try:
             from reticulumpi.rtlsdr import release_device
+
             release_device(self._device_id, caller=self.plugin_name)
         except Exception:
             pass
@@ -462,7 +493,7 @@ class SpectrumScanner(PluginBase):
             if cached is not None and cached[0] == self._sweep_count:
                 return cached[1]
 
-            tail = list(self._waterfall)[-self._SNAPSHOT_TAIL_ROWS:]
+            tail = list(self._waterfall)[-self._SNAPSHOT_TAIL_ROWS :]
             snap: dict[str, Any] = {
                 "status": self._status,
                 "error": self._last_error,
@@ -568,9 +599,7 @@ class SpectrumScanner(PluginBase):
                 "bins_version": self._bins_version,
                 "waterfall_rows": self._waterfall_rows,
                 "rows": rows_out,
-                "row_timestamps": [
-                    round(ts, 3) for ts, _ in wf
-                ],
+                "row_timestamps": [round(ts, 3) for ts, _ in wf],
             }
             if downsample and full_res_start > 0:
                 hist["downsample_factor"] = 2
@@ -603,7 +632,8 @@ class SpectrumScanner(PluginBase):
             )
             self.log.warning(
                 "%s binary not found; %s will stay idle.",
-                self._power_command, self.plugin_name,
+                self._power_command,
+                self.plugin_name,
             )
             return
 
@@ -649,11 +679,13 @@ class SpectrumScanner(PluginBase):
                 )
                 break
 
-            backoff = min(60.0, 2.0 ** self._restart_count)
+            backoff = min(60.0, 2.0**self._restart_count)
             self._set_status("restarting", f"backoff {backoff:.0f}s")
             self.log.info(
                 "Restarting rtl_power in %.0fs (attempt %d/%d)",
-                backoff, self._restart_count, self._max_restarts,
+                backoff,
+                self._restart_count,
+                self._max_restarts,
             )
             self._sleep_while_active(backoff)
 
@@ -681,21 +713,24 @@ class SpectrumScanner(PluginBase):
         self._set_status("running")
         self.log.info(
             "Started rtl_power sweep %.2f-%.2f MHz (PID %d)",
-            self._freq_start_mhz, self._freq_stop_mhz, self._pid,
+            self._freq_start_mhz,
+            self._freq_stop_mhz,
+            self._pid,
         )
 
     def _build_cmd(self) -> list[str]:
         assert self._rtl_power_path is not None
-        freq_arg = (
-            f"{self._freq_start_mhz:.3f}M:{self._freq_stop_mhz:.3f}M:"
-            f"{self._bin_khz:.3f}k"
-        )
+        freq_arg = f"{self._freq_start_mhz:.3f}M:{self._freq_stop_mhz:.3f}M:{self._bin_khz:.3f}k"
         cmd = [
             self._rtl_power_path,
-            "-f", freq_arg,
-            "-i", f"{self._sweep_seconds:g}s",
-            "-d", str(self._resolved_index if self._resolved_index is not None else self._device_id),
-            "-p", str(self._ppm),
+            "-f",
+            freq_arg,
+            "-i",
+            f"{self._sweep_seconds:g}s",
+            "-d",
+            str(self._resolved_index if self._resolved_index is not None else self._device_id),
+            "-p",
+            str(self._ppm),
         ]
         if self._gain_db is not None:
             cmd += ["-g", f"{self._gain_db:.1f}"]
@@ -745,9 +780,11 @@ class SpectrumScanner(PluginBase):
                 raw = proc.stdout.readline()
                 if not raw:
                     break
-                line = raw.strip() if isinstance(raw, str) else raw.decode(
-                    "utf-8", errors="replace"
-                ).strip()
+                line = (
+                    raw.strip()
+                    if isinstance(raw, str)
+                    else raw.decode("utf-8", errors="replace").strip()
+                )
                 if not line or line.startswith("#"):
                     continue
                 self._handle_csv_line(line)
@@ -796,7 +833,10 @@ class SpectrumScanner(PluginBase):
         self._segments[freq_lo] = (bin_step, dbs)
 
     def _detect_peaks(
-        self, freqs: list[int], powers: list[float | None], noise_floor: float,
+        self,
+        freqs: list[int],
+        powers: list[float | None],
+        noise_floor: float,
     ) -> list[dict[str, Any]]:
         """Find local maxima above noise_floor + threshold.  Returns up to 20 peaks."""
         threshold = noise_floor + self._peak_threshold_db
@@ -813,12 +853,14 @@ class SpectrumScanner(PluginBase):
                 continue
             if right is not None and right >= p:
                 continue
-            peaks.append({
-                "freq_hz": freqs[i],
-                "freq_mhz": round(freqs[i] / 1_000_000, 4),
-                "power_db": p,
-                "excess_db": round(p - noise_floor, 1),
-            })
+            peaks.append(
+                {
+                    "freq_hz": freqs[i],
+                    "freq_mhz": round(freqs[i] / 1_000_000, 4),
+                    "power_db": p,
+                    "excess_db": round(p - noise_floor, 1),
+                }
+            )
         # Sort by power descending, cap at 20
         peaks.sort(key=lambda pk: pk["power_db"], reverse=True)
         return peaks[:20]
@@ -875,7 +917,10 @@ class SpectrumScanner(PluginBase):
         # Feed LoRa channel analyzer if active
         if self._analyzer is not None:
             triggers = self._analyzer.on_sweep(
-                freqs, powers, timestamp=now, sweep_seconds=self._sweep_seconds,
+                freqs,
+                powers,
+                timestamp=now,
+                sweep_seconds=self._sweep_seconds,
             )
             for payload in triggers:
                 try:

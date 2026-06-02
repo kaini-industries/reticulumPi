@@ -216,9 +216,7 @@ class TestAddInterface:
 
     def test_add_preserves_existing(self, config_file):
         lines, _ = parse_rns_config(config_file)
-        new_lines = add_interface_section(
-            lines, "New One", "AutoInterface", {}
-        )
+        new_lines = add_interface_section(lines, "New One", "AutoInterface", {})
         with open(config_file, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
         _, new_ifaces = parse_rns_config(config_file)

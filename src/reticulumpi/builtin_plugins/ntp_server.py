@@ -18,22 +18,43 @@ from reticulumpi.plugin_base import PluginBase
 
 # chronyc -c tracking fields (comma-separated)
 _TRACKING_FIELDS = [
-    "ref_id_name", "ref_id_hex", "stratum", "ref_time",
-    "system_time_offset", "last_offset", "rms_offset",
-    "frequency", "residual_freq", "skew", "root_delay",
-    "root_dispersion", "update_interval", "leap_status",
+    "ref_id_name",
+    "ref_id_hex",
+    "stratum",
+    "ref_time",
+    "system_time_offset",
+    "last_offset",
+    "rms_offset",
+    "frequency",
+    "residual_freq",
+    "skew",
+    "root_delay",
+    "root_dispersion",
+    "update_interval",
+    "leap_status",
 ]
 
 # chronyc -c sources fields (comma-separated)
 _SOURCE_FIELDS = [
-    "mode", "state", "name", "stratum", "poll", "reach",
-    "last_rx", "last_sample_offset", "last_sample_error",
+    "mode",
+    "state",
+    "name",
+    "stratum",
+    "poll",
+    "reach",
+    "last_rx",
+    "last_sample_offset",
+    "last_sample_error",
 ]
 
 # Source state codes from chronyc
 _SOURCE_STATES = {
-    "*": "synced", "+": "candidate", "-": "not_combined",
-    "?": "unreachable", "x": "false_ticker", "~": "too_variable",
+    "*": "synced",
+    "+": "candidate",
+    "-": "not_combined",
+    "?": "unreachable",
+    "x": "false_ticker",
+    "~": "too_variable",
 }
 
 
@@ -149,17 +170,21 @@ class NtpServerPlugin(PluginBase):
                     self._last_check = time.time()
                     self._prev_sync_state = self._sync_state
                     self._sync_state = self._determine_sync_state(
-                        parsed_tracking, parsed_sources,
+                        parsed_tracking,
+                        parsed_sources,
                     )
 
                 self._handle_state_transitions()
 
-                self.event_bus.publish(events.NTP_STATUS_UPDATED, {
-                    "sync_state": self._sync_state,
-                    "stratum": parsed_tracking.get("stratum"),
-                    "offset_ms": parsed_tracking.get("system_time_offset_ms"),
-                    "sources_count": len(parsed_sources),
-                })
+                self.event_bus.publish(
+                    events.NTP_STATUS_UPDATED,
+                    {
+                        "sync_state": self._sync_state,
+                        "stratum": parsed_tracking.get("stratum"),
+                        "offset_ms": parsed_tracking.get("system_time_offset_ms"),
+                        "sources_count": len(parsed_sources),
+                    },
+                )
 
             except Exception:
                 self._check_errors += 1
@@ -172,12 +197,14 @@ class NtpServerPlugin(PluginBase):
         if self._use_sudo:
             cmd = ["sudo", "-n"] + cmd
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=10,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             raise RuntimeError(
-                f"chronyc {command} failed (rc={result.returncode}): "
-                f"{result.stderr.strip()[:200]}"
+                f"chronyc {command} failed (rc={result.returncode}): {result.stderr.strip()[:200]}"
             )
         return result.stdout.strip()
 
@@ -199,9 +226,15 @@ class NtpServerPlugin(PluginBase):
                 except ValueError:
                     result[field] = val
             elif field in (
-                "system_time_offset", "last_offset", "rms_offset",
-                "root_delay", "root_dispersion", "frequency",
-                "residual_freq", "skew", "update_interval",
+                "system_time_offset",
+                "last_offset",
+                "rms_offset",
+                "root_delay",
+                "root_dispersion",
+                "frequency",
+                "residual_freq",
+                "skew",
+                "update_interval",
             ):
                 try:
                     result[field] = float(val)
@@ -296,12 +329,16 @@ class NtpServerPlugin(PluginBase):
                     lost_duration = time.time() - self._last_synced_time
                     if lost_duration >= threshold and self.config.get("alert_on_sync_loss", True):
                         self._sync_lost_alerted = True
-                        self.event_bus.publish(events.NTP_SYNC_LOST, {
-                            "last_sync_age_s": round(lost_duration, 1),
-                        })
+                        self.event_bus.publish(
+                            events.NTP_SYNC_LOST,
+                            {
+                                "last_sync_age_s": round(lost_duration, 1),
+                            },
+                        )
                         self.log.warning(
                             "NTP sync lost for %.0fs (threshold: %ds)",
-                            lost_duration, threshold,
+                            lost_duration,
+                            threshold,
                         )
             return
 
@@ -309,11 +346,14 @@ class NtpServerPlugin(PluginBase):
         if curr in ("synced", "gps_disciplined"):
             self._last_synced_time = time.time()
             self._sync_lost_alerted = False
-            self.event_bus.publish(events.NTP_SYNC_ACQUIRED, {
-                "stratum": self._tracking.get("stratum"),
-                "ref_id": self._tracking.get("ref_id_name"),
-                "offset_ms": self._tracking.get("system_time_offset_ms"),
-            })
+            self.event_bus.publish(
+                events.NTP_SYNC_ACQUIRED,
+                {
+                    "stratum": self._tracking.get("stratum"),
+                    "ref_id": self._tracking.get("ref_id_name"),
+                    "offset_ms": self._tracking.get("system_time_offset_ms"),
+                },
+            )
             self.log.info(
                 "NTP sync acquired: stratum %s, ref %s",
                 self._tracking.get("stratum"),
@@ -358,9 +398,7 @@ class NtpServerPlugin(PluginBase):
             f"offset {offset} delay {delay}",
         ]
         if pps_device:
-            lines.append(
-                f"refclock PPS {pps_device} refid PPS precision {pps_precision} lock GPS"
-            )
+            lines.append(f"refclock PPS {pps_device} refid PPS precision {pps_precision} lock GPS")
         content = "\n".join(lines) + "\n"
 
         # Write config snippet
@@ -368,8 +406,11 @@ class NtpServerPlugin(PluginBase):
             if self._use_sudo:
                 subprocess.run(
                     ["sudo", "-n", "tee", self._conf_path],
-                    input=content, capture_output=True, text=True,
-                    timeout=5, check=True,
+                    input=content,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=True,
                 )
             else:
                 os.makedirs(self._conf_dir, exist_ok=True)
@@ -388,8 +429,11 @@ class NtpServerPlugin(PluginBase):
             if self._use_sudo:
                 restart_cmd = ["sudo", "-n"] + restart_cmd
             subprocess.run(
-                restart_cmd, capture_output=True, text=True,
-                timeout=30, check=True,
+                restart_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
             )
         except Exception as exc:
             self.log.warning("Could not restart chrony: %s", exc)
@@ -399,10 +443,13 @@ class NtpServerPlugin(PluginBase):
             self._gps_refclock_configured = True
             self._gps_refclock_active = True
 
-        self.event_bus.publish(events.NTP_GPS_REFCLOCK_ACTIVE, {
-            "shm_segment": shm_segment,
-            "pps_device": pps_device,
-        })
+        self.event_bus.publish(
+            events.NTP_GPS_REFCLOCK_ACTIVE,
+            {
+                "shm_segment": shm_segment,
+                "pps_device": pps_device,
+            },
+        )
         self.log.info(
             "GPS refclock configured (SHM %d%s)",
             shm_segment,
@@ -414,7 +461,9 @@ class NtpServerPlugin(PluginBase):
             if self._use_sudo:
                 subprocess.run(
                     ["sudo", "-n", "rm", "-f", self._conf_path],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
             elif os.path.exists(self._conf_path):
                 os.remove(self._conf_path)
@@ -423,7 +472,10 @@ class NtpServerPlugin(PluginBase):
             if self._use_sudo:
                 restart_cmd = ["sudo", "-n"] + restart_cmd
             subprocess.run(
-                restart_cmd, capture_output=True, text=True, timeout=30,
+                restart_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
         except Exception:
             self.log.debug("Error removing GPS refclock config", exc_info=True)

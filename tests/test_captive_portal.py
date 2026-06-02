@@ -15,16 +15,13 @@ from reticulumpi.builtin_plugins.captive_portal import CaptivePortalPlugin, _SPL
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def _mock_hostapd(tmp_path):
     """Write a temporary hostapd.conf and patch the default path."""
     conf = tmp_path / "hostapd.conf"
-    conf.write_text(
-        "interface=wlan0\nssid=TestNet\nwpa=2\nwpa_key_mgmt=WPA-PSK\n"
-    )
-    with patch(
-        "reticulumpi.builtin_plugins.captive_portal.Path"
-    ) as mock_path_cls:
+    conf.write_text("interface=wlan0\nssid=TestNet\nwpa=2\nwpa_key_mgmt=WPA-PSK\n")
+    with patch("reticulumpi.builtin_plugins.captive_portal.Path") as mock_path_cls:
         real_path = __import__("pathlib").Path
 
         def _side_effect(p):
@@ -80,6 +77,7 @@ def _make_plugin(mock_app, config=None, internet=False):
 # Config validation
 # ---------------------------------------------------------------------------
 
+
 class TestValidateConfig:
     def test_default_config(self, mock_app):
         mock_app.internet_probe = None
@@ -112,6 +110,7 @@ class TestValidateConfig:
 # Splash page template
 # ---------------------------------------------------------------------------
 
+
 class TestSplashPage:
     def test_contains_dashboard_link(self):
         html = _SPLASH_TEMPLATE.format(ssid="MyNet", dashboard_url="http://10.0.0.1:8080")
@@ -127,6 +126,7 @@ class TestSplashPage:
 
     def test_escapes_html_in_ssid(self):
         import html as html_mod
+
         rendered = _SPLASH_TEMPLATE.format(
             ssid=html_mod.escape("<script>alert(1)</script>"),
             dashboard_url="http://x",
@@ -139,6 +139,7 @@ class TestSplashPage:
 # HTTP handler responses
 # ---------------------------------------------------------------------------
 
+
 class TestHTTPHandler:
     """Test the HTTP handler responses using a real HTTPServer on localhost."""
 
@@ -146,7 +147,8 @@ class TestHTTPHandler:
     def _setup_server(self, mock_app):
         self.plugin, _ = _make_plugin(mock_app, {"mode": "off"}, internet=True)
         self.plugin._splash_html = _SPLASH_TEMPLATE.format(
-            ssid="Test", dashboard_url="http://10.0.0.1:8080",
+            ssid="Test",
+            dashboard_url="http://10.0.0.1:8080",
         )
         self.plugin._ap_ip = "127.0.0.1"
         self.plugin._portal_port = 0
@@ -197,6 +199,7 @@ class TestHTTPHandler:
 
     def _get(self, path):
         import urllib.request
+
         url = f"http://127.0.0.1:{self.port}{path}"
         req = urllib.request.Request(url, method="GET")
         try:
@@ -207,6 +210,7 @@ class TestHTTPHandler:
 
     def _get_no_redirect(self, path):
         import http.client
+
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         conn.request("GET", path)
         resp = conn.getresponse()
@@ -252,6 +256,7 @@ class TestHTTPHandler:
 # State machine — activation / deactivation
 # ---------------------------------------------------------------------------
 
+
 class TestActivationLifecycle:
     def test_auto_mode_activates_when_offline(self, mock_app):
         plugin, mock_sp = _make_plugin(mock_app, internet=False)
@@ -290,6 +295,7 @@ class TestActivationLifecycle:
 # Internet event hooks
 # ---------------------------------------------------------------------------
 
+
 class TestInternetEvents:
     def test_on_internet_available_deactivates_auto(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=False)
@@ -323,6 +329,7 @@ class TestInternetEvents:
 # ---------------------------------------------------------------------------
 # Helper script invocations
 # ---------------------------------------------------------------------------
+
 
 class TestHelperCommands:
     def test_activate_calls_helper_with_correct_args(self, mock_app):
@@ -389,6 +396,7 @@ class TestHelperCommands:
 # Status / broadcast
 # ---------------------------------------------------------------------------
 
+
 class TestStatusBroadcast:
     def test_get_status_fields(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
@@ -412,6 +420,7 @@ class TestStatusBroadcast:
 # Resolution helpers
 # ---------------------------------------------------------------------------
 
+
 class TestResolution:
     def test_resolve_ap_interface_from_config(self, mock_app):
         plugin, _ = _make_plugin(mock_app, {"ap_interface": "wlan1"}, internet=True)
@@ -423,7 +432,9 @@ class TestResolution:
 
     def test_resolve_dashboard_url_from_config(self, mock_app):
         plugin, _ = _make_plugin(
-            mock_app, {"dashboard_url": "http://custom:9090"}, internet=True,
+            mock_app,
+            {"dashboard_url": "http://custom:9090"},
+            internet=True,
         )
         assert plugin._dashboard_url == "http://custom:9090"
 
@@ -449,7 +460,9 @@ class TestResolution:
             "reticulumpi.builtin_plugins.captive_portal.Path",
         ) as mock_path_cls:
             real_path = __import__("pathlib").Path
-            mock_path_cls.side_effect = lambda p: conf if p == "/etc/hostapd/hostapd.conf" else real_path(p)
+            mock_path_cls.side_effect = lambda p: (
+                conf if p == "/etc/hostapd/hostapd.conf" else real_path(p)
+            )
             assert plugin._parse_hostapd_interface() == "wlan1"
 
     def test_parse_hostapd_interface_missing(self, mock_app):
@@ -490,6 +503,7 @@ class TestResolution:
 # Helper failure / error paths
 # ---------------------------------------------------------------------------
 
+
 class TestHelperErrors:
     def test_run_helper_failure_raises(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
@@ -502,6 +516,7 @@ class TestHelperErrors:
         plugin, _ = _make_plugin(mock_app, internet=True)
         with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
             import subprocess as sp_mod
+
             mock_sp.run.side_effect = sp_mod.TimeoutExpired(cmd="helper", timeout=15)
             with pytest.raises(sp_mod.TimeoutExpired):
                 plugin._run_helper("activate", "wlan0", "9999", "10.0.0.1")
@@ -518,6 +533,7 @@ class TestHelperErrors:
 # ---------------------------------------------------------------------------
 # Idempotency guards
 # ---------------------------------------------------------------------------
+
 
 class TestIdempotency:
     def test_double_activate_is_noop(self, mock_app):

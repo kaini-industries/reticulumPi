@@ -12,7 +12,6 @@ from reticulumpi.plugin_base import PluginBase
 
 
 class HotspotMonitorPlugin(PluginBase):
-
     plugin_name = "hotspot_monitor"
     plugin_version = "1.0.0"
     plugin_description = "Monitors Wi-Fi hotspot (hostapd) status and clients"
@@ -25,7 +24,8 @@ class HotspotMonitorPlugin(PluginBase):
         self._snapshot: dict[str, Any] | None = None
 
         conf_path = self.config.get(
-            "hostapd_conf", "/etc/hostapd/hostapd.conf",
+            "hostapd_conf",
+            "/etc/hostapd/hostapd.conf",
         )
         self._static = _parse_hostapd_conf(conf_path)
         self._iface = self._static.get("interface", "wlan0")
@@ -45,7 +45,11 @@ class HotspotMonitorPlugin(PluginBase):
         with self._lock:
             snap = self._snapshot
         if snap:
-            return {"active": True, "ap_active": snap.get("active", False), "client_count": snap.get("client_count", 0)}
+            return {
+                "active": True,
+                "ap_active": snap.get("active", False),
+                "client_count": snap.get("client_count", 0),
+            }
         return {"active": self._active}
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
@@ -147,7 +151,9 @@ def _parse_iw_info(iface: str) -> dict[str, Any]:
     try:
         out = subprocess.run(
             ["iw", "dev", iface, "info"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         text = out.stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -175,7 +181,9 @@ def _parse_iw_station_dump(iface: str) -> list[dict[str, Any]]:
     try:
         out = subprocess.run(
             ["iw", "dev", iface, "station", "dump"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         text = out.stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -234,7 +242,9 @@ def _get_interface_ip(iface: str) -> str | None:
     try:
         out = subprocess.run(
             ["ip", "-4", "addr", "show", iface],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         m = _IP_ADDR_RE.search(out.stdout)
         return m.group(1) if m else None

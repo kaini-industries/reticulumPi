@@ -61,9 +61,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
     plugin_name = "lora_diagnostics"
     plugin_version = "1.0.0"
-    plugin_description = (
-        "LoRa traffic monitoring, announce beaconing, and peer tracking"
-    )
+    plugin_description = "LoRa traffic monitoring, announce beaconing, and peer tracking"
     broadcast_tier = 2
     broadcast_keys = "lora_diagnostics"
 
@@ -74,28 +72,20 @@ class LoRaDiagnosticsPlugin(PluginBase):
     def validate_config(self) -> None:
         monitor = self.config.get("monitor_interval", _DEFAULT_MONITOR_INTERVAL)
         if not isinstance(monitor, (int, float)) or monitor < _MIN_MONITOR_INTERVAL:
-            raise ValueError(
-                f"monitor_interval must be >= {_MIN_MONITOR_INTERVAL} seconds"
-            )
+            raise ValueError(f"monitor_interval must be >= {_MIN_MONITOR_INTERVAL} seconds")
         beacon = self.config.get("beacon_interval", _DEFAULT_BEACON_INTERVAL)
         if not isinstance(beacon, (int, float)) or beacon < _MIN_BEACON_INTERVAL:
-            raise ValueError(
-                f"beacon_interval must be >= {_MIN_BEACON_INTERVAL} seconds"
-            )
+            raise ValueError(f"beacon_interval must be >= {_MIN_BEACON_INTERVAL} seconds")
         dests = self.config.get("monitored_destinations", [])
         if not isinstance(dests, list):
             raise ValueError("monitored_destinations must be a list")
         for entry in dests:
             if not isinstance(entry, dict) or "hash" not in entry:
-                raise ValueError(
-                    "Each monitored_destinations entry must have a 'hash' key"
-                )
+                raise ValueError("Each monitored_destinations entry must have a 'hash' key")
             try:
                 bytes.fromhex(entry["hash"])
             except (ValueError, TypeError):
-                raise ValueError(
-                    f"Invalid hex hash in monitored_destinations: {entry.get('hash')}"
-                )
+                raise ValueError(f"Invalid hex hash in monitored_destinations: {entry.get('hash')}")
 
     def start(self) -> None:
         self._active = True
@@ -139,7 +129,8 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
         # Subscribe to announces for monitored destinations
         self._announce_sub = self.announce_dispatcher.subscribe(
-            "lxmf.delivery", self.on_announce_received,
+            "lxmf.delivery",
+            self.on_announce_received,
         )
 
         # Start background threads
@@ -207,16 +198,14 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 "beacon": {
                     "last_beacon_time": self._last_beacon_time,
                     "beacons_sent": self._beacons_sent,
-                    "interval": self.config.get(
-                        "beacon_interval", _DEFAULT_BEACON_INTERVAL
-                    ),
+                    "interval": self.config.get("beacon_interval", _DEFAULT_BEACON_INTERVAL),
                 },
                 "announce_mode": {
                     "current": current_mode,
                     "available": list(ANNOUNCE_MODES.keys()),
-                    "description": ANNOUNCE_MODES.get(
-                        current_mode, {}
-                    ).get("description", "unknown"),
+                    "description": ANNOUNCE_MODES.get(current_mode, {}).get(
+                        "description", "unknown"
+                    ),
                 },
                 "airtime_history": airtime_hist,
             }
@@ -237,9 +226,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
         )
 
         if mode not in ANNOUNCE_MODES:
-            raise ValueError(
-                f"Invalid mode '{mode}'. Must be one of: {', '.join(ANNOUNCE_MODES)}"
-            )
+            raise ValueError(f"Invalid mode '{mode}'. Must be one of: {', '.join(ANNOUNCE_MODES)}")
 
         preset = ANNOUNCE_MODES[mode]
         rns_config_path = self._get_rns_config_path()
@@ -253,38 +240,31 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 break
 
         if not rnode:
-            raise RuntimeError(
-                f"RNode interface '{iface_name}' not found in {rns_config_path}"
-            )
+            raise RuntimeError(f"RNode interface '{iface_name}' not found in {rns_config_path}")
 
         # Apply announce_cap
         if preset["announce_cap"] is not None:
-            lines = set_interface_property(
-                lines, rnode, "announce_cap", preset["announce_cap"]
-            )
+            lines = set_interface_property(lines, rnode, "announce_cap", preset["announce_cap"])
             # Re-parse to get updated line positions after insertion
             lines, interfaces = parse_rns_config_from_lines(lines)
-            rnode = next(
-                (i for i in interfaces if iface_name in i.name), rnode
-            )
+            rnode = next((i for i in interfaces if iface_name in i.name), rnode)
 
         # Apply interface_mode
         if preset["interface_mode"] is not None:
-            lines = set_interface_property(
-                lines, rnode, "interface_mode", preset["interface_mode"]
-            )
+            lines = set_interface_property(lines, rnode, "interface_mode", preset["interface_mode"])
         else:
             # Remove interface_mode line if present (defaults to full)
             lines = remove_interface_property(lines, rnode, "interface_mode")
 
         write_rns_config(rns_config_path, lines)
-        self.log.info(
-            "LoRa announce mode set to '%s' — restarting rnsd", mode
-        )
+        self.log.info("LoRa announce mode set to '%s' — restarting rnsd", mode)
 
-        self.event_bus.publish(events.RNSD_RESTARTING, {
-            "reason": f"announce_mode_change:{mode}",
-        })
+        self.event_bus.publish(
+            events.RNSD_RESTARTING,
+            {
+                "reason": f"announce_mode_change:{mode}",
+            },
+        )
 
         try:
             subprocess.run(
@@ -300,9 +280,12 @@ class LoRaDiagnosticsPlugin(PluginBase):
             raise RuntimeError(f"rnsd restart failed: {exc.stderr.decode()}")
 
         self._wait_for_rnsd(timeout=10)
-        self.event_bus.publish(events.RNSD_RECOVERED, {
-            "reason": f"announce_mode_change:{mode}",
-        })
+        self.event_bus.publish(
+            events.RNSD_RECOVERED,
+            {
+                "reason": f"announce_mode_change:{mode}",
+            },
+        )
 
         return {
             "mode": mode,
@@ -332,9 +315,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
             rns_config_path = self._get_rns_config_path()
             _, interfaces = parse_rns_config(rns_config_path)
-            iface_name = self.config.get(
-                "lora_interface_name", "RNode LoRa Interface"
-            )
+            iface_name = self.config.get("lora_interface_name", "RNode LoRa Interface")
             for iface in interfaces:
                 if iface_name in iface.name:
                     imode = iface.properties.get("interface_mode", "").lower()
@@ -415,31 +396,23 @@ class LoRaDiagnosticsPlugin(PluginBase):
             self._lora_stats["txb"] = txb
             self._lora_stats["rxb_delta"] = rxb - self._prev_rxb
             self._lora_stats["txb_delta"] = txb - self._prev_txb
-            self._lora_stats["airtime_short"] = lora_iface.get(
-                "airtime_short", 0.0
-            )
-            self._lora_stats["airtime_long"] = lora_iface.get(
-                "airtime_long", 0.0
-            )
-            self._lora_stats["announce_queue"] = lora_iface.get(
-                "announce_queue", 0
-            )
-            self._lora_stats["channel_load_short"] = lora_iface.get(
-                "channel_load_short", 0.0
-            )
-            self._lora_stats["channel_load_long"] = lora_iface.get(
-                "channel_load_long", 0.0
-            )
+            self._lora_stats["airtime_short"] = lora_iface.get("airtime_short", 0.0)
+            self._lora_stats["airtime_long"] = lora_iface.get("airtime_long", 0.0)
+            self._lora_stats["announce_queue"] = lora_iface.get("announce_queue", 0)
+            self._lora_stats["channel_load_short"] = lora_iface.get("channel_load_short", 0.0)
+            self._lora_stats["channel_load_long"] = lora_iface.get("channel_load_long", 0.0)
             rxb_delta = rxb - self._prev_rxb
             txb_delta = txb - self._prev_txb
             self._prev_rxb = rxb
             self._prev_txb = txb
             # Record airtime trending
-            self._airtime_history.append((
-                time.time(),
-                self._lora_stats["airtime_short"],
-                self._lora_stats["airtime_long"],
-            ))
+            self._airtime_history.append(
+                (
+                    time.time(),
+                    self._lora_stats["airtime_short"],
+                    self._lora_stats["airtime_long"],
+                )
+            )
 
         self.event_bus.publish(
             events.LORA_STATS_UPDATED,
@@ -577,5 +550,3 @@ class LoRaDiagnosticsPlugin(PluginBase):
             events.LORA_PEER_ANNOUNCE_RECEIVED,
             {"hash": hex_hash, "name": info["name"]},
         )
-
-

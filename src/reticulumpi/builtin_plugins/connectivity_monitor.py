@@ -279,9 +279,7 @@ class ConnectivityMonitorPlugin(PluginBase):
 
     def _setup_log_file(self) -> logging.Logger:
         """Create a dedicated logger that writes to the connectivity log file."""
-        log_path = os.path.expanduser(
-            self.config.get("log_path", _DEFAULT_LOG_PATH)
-        )
+        log_path = os.path.expanduser(self.config.get("log_path", _DEFAULT_LOG_PATH))
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
         logger = logging.getLogger("reticulumpi.connectivity")
@@ -294,12 +292,8 @@ class ConnectivityMonitorPlugin(PluginBase):
                 pass
             logger.removeHandler(h)
 
-        handler = RotatingFileHandler(
-            log_path, maxBytes=5 * 1024 * 1024, backupCount=3
-        )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)-8s] %(message)s")
-        )
+        handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=3)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)-8s] %(message)s"))
         logger.addHandler(handler)
         return logger
 
@@ -327,13 +321,10 @@ class ConnectivityMonitorPlugin(PluginBase):
             if self._rnsd_down_since is None:
                 self._rnsd_down_since = now
                 self._conn_log.critical(
-                    "rnsd shared instance UNREACHABLE — "
-                    "ALL link establishment will fail"
+                    "rnsd shared instance UNREACHABLE — ALL link establishment will fail"
                 )
             downtime = now - self._rnsd_down_since
-            issues.append(
-                f"rnsd unreachable for {downtime:.0f}s — all links will fail"
-            )
+            issues.append(f"rnsd unreachable for {downtime:.0f}s — all links will fail")
         else:
             if self._rnsd_down_since is not None:
                 downtime = now - self._rnsd_down_since
@@ -373,8 +364,7 @@ class ConnectivityMonitorPlugin(PluginBase):
             )
         else:
             self._conn_log.info(
-                "Diagnostics OK — rnsd=%s, interfaces=%d/%d online, "
-                "paths=%d, i2p=%s (%d peers)",
+                "Diagnostics OK — rnsd=%s, interfaces=%d/%d online, paths=%d, i2p=%s (%d peers)",
                 "up" if rnsd_ok else "DOWN",
                 self._health["interfaces_online"],
                 self._health["interfaces_total"],
@@ -448,9 +438,7 @@ class ConnectivityMonitorPlugin(PluginBase):
                     online_count += 1
                 else:
                     issues.append(f"Interface '{name}' ({itype}) is OFFLINE")
-                    self._conn_log.warning(
-                        "Interface OFFLINE: %s (%s)", name, itype
-                    )
+                    self._conn_log.warning("Interface OFFLINE: %s (%s)", name, itype)
 
                 # Track I2P-specific stats
                 if itype == "I2PInterface":
@@ -520,8 +508,7 @@ class ConnectivityMonitorPlugin(PluginBase):
 
         if not sam_ok:
             issues.append(
-                f"i2pd SAM API unreachable on port {self._sam_port} — "
-                "I2P interface cannot function"
+                f"i2pd SAM API unreachable on port {self._sam_port} — I2P interface cannot function"
             )
             self._conn_log.warning(
                 "i2pd SAM API UNREACHABLE on port %d",
@@ -534,13 +521,9 @@ class ConnectivityMonitorPlugin(PluginBase):
         # 2. Query i2pd web console for actual network state
         i2pd_info = self._query_i2pd_console()
         with self._lock:
-            self._health["i2pd_network_status"] = i2pd_info.get(
-                "network_status", "unknown"
-            )
+            self._health["i2pd_network_status"] = i2pd_info.get("network_status", "unknown")
             self._health["i2pd_known_routers"] = i2pd_info.get("routers", 0)
-            self._health["i2pd_client_tunnels"] = i2pd_info.get(
-                "client_tunnels", 0
-            )
+            self._health["i2pd_client_tunnels"] = i2pd_info.get("client_tunnels", 0)
 
         net_status = i2pd_info.get("network_status", "unknown").lower()
         routers = i2pd_info.get("routers", 0)
@@ -590,12 +573,10 @@ class ConnectivityMonitorPlugin(PluginBase):
         # Only flag as an issue if i2pd itself is failing
         if routers == 0 and elapsed > _I2P_BOOTSTRAP_GRACE:
             issues.append(
-                "i2pd knows 0 routers after "
-                f"{elapsed / 60:.0f} min — I2P network unreachable"
+                f"i2pd knows 0 routers after {elapsed / 60:.0f} min — I2P network unreachable"
             )
             self._conn_log.warning(
-                "i2pd has 0 known routers — may need restart: "
-                "sudo systemctl restart i2pd"
+                "i2pd has 0 known routers — may need restart: sudo systemctl restart i2pd"
             )
 
         return issues
@@ -611,9 +592,7 @@ class ConnectivityMonitorPlugin(PluginBase):
 
         info: dict[str, Any] = {}
         try:
-            with urllib.request.urlopen(
-                "http://127.0.0.1:7070/", timeout=3
-            ) as resp:
+            with urllib.request.urlopen("http://127.0.0.1:7070/", timeout=3) as resp:
                 import re
 
                 html = resp.read().decode("utf-8", errors="replace")
@@ -770,17 +749,17 @@ class ConnectivityMonitorPlugin(PluginBase):
             # 7. Process rate table entries
             rate_entries: list[dict[str, Any]] = []
             for entry in rate_table_raw:
-                rate_entries.append({
-                    "hash": _hex_hash(entry.get("hash", "")),
-                    "last": entry.get("last", 0),
-                    "rate_violations": entry.get("rate_violations", 0),
-                    "blocked_until": entry.get("blocked_until", 0),
-                    "timestamps": entry.get("timestamps", []),
-                })
+                rate_entries.append(
+                    {
+                        "hash": _hex_hash(entry.get("hash", "")),
+                        "last": entry.get("last", 0),
+                        "rate_violations": entry.get("rate_violations", 0),
+                        "blocked_until": entry.get("blocked_until", 0),
+                        "timestamps": entry.get("timestamps", []),
+                    }
+                )
 
-            actively_blocked = sum(
-                1 for re in rate_entries if re.get("blocked_until", 0) > now
-            )
+            actively_blocked = sum(1 for re in rate_entries if re.get("blocked_until", 0) > now)
             rate_tracked_count = len(rate_entries)
 
             # 8. Process blackholed identities
@@ -837,8 +816,7 @@ class ConnectivityMonitorPlugin(PluginBase):
                 sole_iface = next(iter(iface_dist))
                 if "LocalInterface" not in sole_iface:
                     routing_diags.append(
-                        f"All {path_count} paths route via '{sole_iface}' — "
-                        "single point of failure"
+                        f"All {path_count} paths route via '{sole_iface}' — single point of failure"
                     )
                     self._publish_event(events.SINGLE_INTERFACE_SPOF)
 
@@ -849,9 +827,7 @@ class ConnectivityMonitorPlugin(PluginBase):
                 )
 
             if len(blackholed_clean) > 0:
-                routing_diags.append(
-                    f"{len(blackholed_clean)} identity(ies) are blackholed"
-                )
+                routing_diags.append(f"{len(blackholed_clean)} identity(ies) are blackholed")
 
             # Note: "paths expiring soon" is normal Reticulum lifecycle
             # behaviour — it's already visible in the freshness stats

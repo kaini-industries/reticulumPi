@@ -51,9 +51,7 @@ class TransportHealthPlugin(PluginBase):
         self._transport_nodes: dict[str, dict[str, Any]] = {}
 
         # Set up SQLite
-        db_path = os.path.expanduser(
-            self.config.get("db_path", _DEFAULT_DB_PATH)
-        )
+        db_path = os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH))
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._db_path = db_path
         self._init_db()
@@ -68,8 +66,7 @@ class TransportHealthPlugin(PluginBase):
         self._start_thread(self._monitor_loop, "transport-health")
 
         self.log.info(
-            "Transport health active (interval=%ds, db=%s, "
-            "down_threshold=%d, critical_paths=%d)",
+            "Transport health active (interval=%ds, db=%s, down_threshold=%d, critical_paths=%d)",
             self.config.get("check_interval", _DEFAULT_CHECK_INTERVAL),
             db_path,
             self.config.get("down_threshold_checks", _DEFAULT_DOWN_THRESHOLD),
@@ -144,15 +141,9 @@ class TransportHealthPlugin(PluginBase):
 
     def _run_check(self) -> None:
         """Execute one health check cycle."""
-        down_threshold = self.config.get(
-            "down_threshold_checks", _DEFAULT_DOWN_THRESHOLD
-        )
-        degraded_pct = self.config.get(
-            "degraded_threshold_pct", _DEFAULT_DEGRADED_PCT
-        )
-        critical_paths = self.config.get(
-            "critical_path_count", _DEFAULT_CRITICAL_PATHS
-        )
+        down_threshold = self.config.get("down_threshold_checks", _DEFAULT_DOWN_THRESHOLD)
+        degraded_pct = self.config.get("degraded_threshold_pct", _DEFAULT_DEGRADED_PCT)
+        critical_paths = self.config.get("critical_path_count", _DEFAULT_CRITICAL_PATHS)
         now = time.time()
 
         # Get current path table from connectivity_monitor
@@ -176,9 +167,7 @@ class TransportHealthPlugin(PluginBase):
                     )
                     record["total_appearances"] += 1
                     record["consecutive_absent"] = 0
-                    record["consecutive_present"] = record.get(
-                        "consecutive_present", 0
-                    ) + 1
+                    record["consecutive_present"] = record.get("consecutive_present", 0) + 1
                     record["longest_present_streak"] = max(
                         record.get("longest_present_streak", 0),
                         record["consecutive_present"],
@@ -187,9 +176,7 @@ class TransportHealthPlugin(PluginBase):
                     # Node is absent
                     record["paths_via"] = 0
                     record["consecutive_present"] = 0
-                    record["consecutive_absent"] = record.get(
-                        "consecutive_absent", 0
-                    ) + 1
+                    record["consecutive_absent"] = record.get("consecutive_absent", 0) + 1
                     record["longest_absent_streak"] = max(
                         record.get("longest_absent_streak", 0),
                         record["consecutive_absent"],
@@ -204,13 +191,13 @@ class TransportHealthPlugin(PluginBase):
 
                 # Determine status
                 old_status = record["status"]
-                record["status"] = self._classify_status(
-                    record, down_threshold, degraded_pct
-                )
+                record["status"] = self._classify_status(record, down_threshold, degraded_pct)
 
                 # Detect transitions
                 self._handle_transition(
-                    hex_hash, old_status, record["status"],
+                    hex_hash,
+                    old_status,
+                    record["status"],
                     record.get("paths_via", 0),
                     record.get("max_paths_via", 0),
                     critical_paths,
@@ -304,10 +291,7 @@ class TransportHealthPlugin(PluginBase):
             }
             self.event_bus.publish(events.TRANSPORT_NODE_DOWN, event_data)
 
-            if (
-                self.config.get("alert_on_critical_down", True)
-                and max_paths >= critical_threshold
-            ):
+            if self.config.get("alert_on_critical_down", True) and max_paths >= critical_threshold:
                 self.log.warning(
                     "CRITICAL: Transport node %s was carrying %d paths",
                     hex_hash[:16],
@@ -326,9 +310,7 @@ class TransportHealthPlugin(PluginBase):
             )
 
         elif new_status == "degraded" and old_status == "healthy":
-            self.log.info(
-                "Transport node DEGRADED: %s", hex_hash[:16]
-            )
+            self.log.info("Transport node DEGRADED: %s", hex_hash[:16])
             self.event_bus.publish(
                 events.TRANSPORT_NODE_DEGRADED,
                 {"hash": hex_hash},
@@ -406,8 +388,7 @@ class TransportHealthPlugin(PluginBase):
                 )
             """)
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_history_ts "
-                "ON transport_node_history(timestamp)"
+                "CREATE INDEX IF NOT EXISTS idx_history_ts ON transport_node_history(timestamp)"
             )
 
     def _load_from_db(self) -> None:
@@ -445,25 +426,28 @@ class TransportHealthPlugin(PluginBase):
                 snapshot = list(self._transport_nodes.values())
             with sqlite3.connect(self._db_path) as conn:
                 for record in snapshot:
-                    conn.execute("""
+                    conn.execute(
+                        """
                         INSERT OR REPLACE INTO transport_nodes
                         (hash, first_seen, last_seen, paths_via, max_paths_via,
                          total_appearances, total_checks, availability_pct,
                          interface, status, node_name)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        record["hash"],
-                        record["first_seen"],
-                        record["last_seen"],
-                        record["paths_via"],
-                        record["max_paths_via"],
-                        record["total_appearances"],
-                        record["total_checks"],
-                        record["availability_pct"],
-                        record.get("interface", ""),
-                        record["status"],
-                        record.get("node_name", ""),
-                    ))
+                    """,
+                        (
+                            record["hash"],
+                            record["first_seen"],
+                            record["last_seen"],
+                            record["paths_via"],
+                            record["max_paths_via"],
+                            record["total_appearances"],
+                            record["total_checks"],
+                            record["availability_pct"],
+                            record.get("interface", ""),
+                            record["status"],
+                            record.get("node_name", ""),
+                        ),
+                    )
         except Exception:
             self.log.debug("Error persisting transport nodes", exc_info=True)
 
@@ -474,23 +458,24 @@ class TransportHealthPlugin(PluginBase):
             with sqlite3.connect(self._db_path) as conn:
                 for record in snapshot:
                     if record.get("paths_via", 0) > 0 or record["status"] != "new":
-                        conn.execute("""
+                        conn.execute(
+                            """
                             INSERT OR REPLACE INTO transport_node_history
                             (hash, timestamp, paths_via, status)
                             VALUES (?, ?, ?, ?)
-                        """, (
-                            record["hash"],
-                            now,
-                            record.get("paths_via", 0),
-                            record["status"],
-                        ))
+                        """,
+                            (
+                                record["hash"],
+                                now,
+                                record.get("paths_via", 0),
+                                record["status"],
+                            ),
+                        )
         except Exception:
             self.log.debug("Error recording history", exc_info=True)
 
     def _prune_history(self) -> None:
-        retention = self.config.get(
-            "history_retention_hours", _DEFAULT_HISTORY_HOURS
-        )
+        retention = self.config.get("history_retention_hours", _DEFAULT_HISTORY_HOURS)
         cutoff = time.time() - (retention * 3600)
         max_rows = self.config.get("max_history_rows", 500_000)
         try:
@@ -499,9 +484,7 @@ class TransportHealthPlugin(PluginBase):
                     "DELETE FROM transport_node_history WHERE timestamp < ?",
                     (cutoff,),
                 )
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM transport_node_history"
-                ).fetchone()[0]
+                count = conn.execute("SELECT COUNT(*) FROM transport_node_history").fetchone()[0]
                 if count > max_rows:
                     excess = count - max_rows
                     conn.execute(
@@ -512,7 +495,9 @@ class TransportHealthPlugin(PluginBase):
                         (excess,),
                     )
                     self.log.info(
-                        "Pruned %d excess history rows (cap: %d)", excess, max_rows,
+                        "Pruned %d excess history rows (cap: %d)",
+                        excess,
+                        max_rows,
                     )
                 # Remove nodes not seen in retention period
                 conn.execute(
@@ -521,11 +506,7 @@ class TransportHealthPlugin(PluginBase):
                 )
             # Also prune from memory
             with self._lock:
-                expired = [
-                    h
-                    for h, r in self._transport_nodes.items()
-                    if r["last_seen"] < cutoff
-                ]
+                expired = [h for h, r in self._transport_nodes.items() if r["last_seen"] < cutoff]
                 for h in expired:
                     del self._transport_nodes[h]
         except Exception:

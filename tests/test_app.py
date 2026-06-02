@@ -12,10 +12,9 @@ def app_with_config(tmp_path):
     """Create an app instance with a minimal config (no plugins enabled)."""
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "reticulumpi:\n"
-        "  log_level: 4\n"
-        "  identity_path: {identity}\n"
-        "  plugins: {{}}\n".format(identity=str(tmp_path / "identity"))
+        "reticulumpi:\n  log_level: 4\n  identity_path: {identity}\n  plugins: {{}}\n".format(
+            identity=str(tmp_path / "identity")
+        )
     )
     return ReticulumPiApp(config_path=str(config_file))
 
@@ -30,18 +29,14 @@ def test_constructor_defaults():
 
 def test_constructor_log_level_override(tmp_path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text(
-        "reticulumpi:\n  log_level: 4\n"
-    )
+    config_file.write_text("reticulumpi:\n  log_level: 4\n")
     app = ReticulumPiApp(config_path=str(config_file), log_level_override=7)
     assert app._log_level == 7
 
 
 def test_constructor_uses_config_log_level(tmp_path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text(
-        "reticulumpi:\n  log_level: 2\n"
-    )
+    config_file.write_text("reticulumpi:\n  log_level: 2\n")
     app = ReticulumPiApp(config_path=str(config_file))
     assert app._log_level == 2
 
@@ -107,10 +102,9 @@ def test_shutdown_continues_on_plugin_error():
 def test_start_initializes_reticulum(mock_identity, mock_rns, tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "reticulumpi:\n"
-        "  log_level: 4\n"
-        "  identity_path: {identity}\n"
-        "  plugins: {{}}\n".format(identity=str(tmp_path / "identity"))
+        "reticulumpi:\n  log_level: 4\n  identity_path: {identity}\n  plugins: {{}}\n".format(
+            identity=str(tmp_path / "identity")
+        )
     )
     mock_id = MagicMock()
     mock_id.hash = b"\x00" * 16
@@ -158,6 +152,7 @@ def test_start_loads_and_starts_plugins(mock_identity, mock_rns, tmp_path, plugi
 
 def test_get_version():
     from reticulumpi import __version__
+
     app = ReticulumPiApp()
     assert app._get_version() == __version__
 
@@ -165,11 +160,7 @@ def test_get_version():
 def test_failed_plugin_tracked_when_not_found(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "reticulumpi:\n"
-        "  log_level: 4\n"
-        "  plugins:\n"
-        "    nonexistent:\n"
-        "      enabled: true\n"
+        "reticulumpi:\n  log_level: 4\n  plugins:\n    nonexistent:\n      enabled: true\n"
     )
     app = ReticulumPiApp(config_path=str(config_file))
     app._load_plugins()
@@ -232,10 +223,9 @@ def test_get_status_includes_failed_plugins():
 def test_startup_report_logs_version(mock_identity, mock_transport, mock_rns, tmp_path, caplog):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "reticulumpi:\n"
-        "  log_level: 4\n"
-        "  identity_path: {identity}\n"
-        "  plugins: {{}}\n".format(identity=str(tmp_path / "identity"))
+        "reticulumpi:\n  log_level: 4\n  identity_path: {identity}\n  plugins: {{}}\n".format(
+            identity=str(tmp_path / "identity")
+        )
     )
     mock_id = MagicMock()
     mock_id.hash = b"\x00" * 16
@@ -245,6 +235,7 @@ def test_startup_report_logs_version(mock_identity, mock_transport, mock_rns, tm
     app = ReticulumPiApp(config_path=str(config_file))
     app._shutdown_event.set()
     import logging
+
     with caplog.at_level(logging.INFO):
         app.start()
     assert any("ReticulumPi v" in msg for msg in caplog.messages)
@@ -253,7 +244,9 @@ def test_startup_report_logs_version(mock_identity, mock_transport, mock_rns, tm
 @patch("RNS.Reticulum")
 @patch("RNS.Transport")
 @patch("reticulumpi.identity_manager.load_or_create")
-def test_startup_report_logs_plugins(mock_identity, mock_transport, mock_rns, tmp_path, caplog, plugin_dir):
+def test_startup_report_logs_plugins(
+    mock_identity, mock_transport, mock_rns, tmp_path, caplog, plugin_dir
+):
     config_file = tmp_path / "cfg.yaml"
     config_file.write_text(
         "reticulumpi:\n"
@@ -276,6 +269,7 @@ def test_startup_report_logs_plugins(mock_identity, mock_transport, mock_rns, tm
     app = ReticulumPiApp(config_path=str(config_file))
     app._shutdown_event.set()
     import logging
+
     with caplog.at_level(logging.INFO):
         app.start()
     assert any("sample" in msg and "Plugin" in msg for msg in caplog.messages)
@@ -287,6 +281,7 @@ def test_startup_report_warns_on_failed_plugins(caplog):
     app.identity = MagicMock()
     app.identity.hash = b"\x00" * 16
     import logging
+
     with caplog.at_level(logging.ERROR), patch("RNS.Transport") as mock_transport:
         mock_transport.interfaces = []
         app._print_startup_report()
@@ -303,11 +298,7 @@ def test_check_returns_true_valid(tmp_path):
 def test_check_returns_false_missing_plugin(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "reticulumpi:\n"
-        "  log_level: 4\n"
-        "  plugins:\n"
-        "    nonexistent:\n"
-        "      enabled: true\n"
+        "reticulumpi:\n  log_level: 4\n  plugins:\n    nonexistent:\n      enabled: true\n"
     )
     app = ReticulumPiApp(config_path=str(config_file))
     assert app.check() is False
@@ -316,11 +307,9 @@ def test_check_returns_false_missing_plugin(tmp_path):
 def test_list_plugins_prints_discovered(tmp_path, plugin_dir, capsys):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "reticulumpi:\n"
-        "  log_level: 4\n"
-        "  plugin_paths:\n"
-        "    - {pdir}\n"
-        "  plugins: {{}}\n".format(pdir=plugin_dir)
+        "reticulumpi:\n  log_level: 4\n  plugin_paths:\n    - {pdir}\n  plugins: {{}}\n".format(
+            pdir=plugin_dir
+        )
     )
     app = ReticulumPiApp(config_path=str(config_file))
     app.list_plugins()
@@ -368,23 +357,17 @@ class TestHotReload:
 
         app = _make_hot_reload_app(tmp_path, plugin_dir)
         received: list[dict] = []
-        app.event_bus.subscribe(
-            events.PLUGIN_STARTED, lambda _evt, data: received.append(data)
-        )
+        app.event_bus.subscribe(events.PLUGIN_STARTED, lambda _evt, data: received.append(data))
         app.enable_plugin("sample")
         assert received == [{"name": "sample"}]
 
-    def test_enable_plugin_raises_runtime_error_if_already_running(
-        self, tmp_path, plugin_dir
-    ):
+    def test_enable_plugin_raises_runtime_error_if_already_running(self, tmp_path, plugin_dir):
         app = _make_hot_reload_app(tmp_path, plugin_dir)
         app.enable_plugin("sample")
         with pytest.raises(RuntimeError, match="already running"):
             app.enable_plugin("sample")
 
-    def test_enable_plugin_raises_key_error_if_not_discoverable(
-        self, tmp_path, plugin_dir
-    ):
+    def test_enable_plugin_raises_key_error_if_not_discoverable(self, tmp_path, plugin_dir):
         app = _make_hot_reload_app(tmp_path, plugin_dir)
         with pytest.raises(KeyError, match="not found"):
             app.enable_plugin("no_such_plugin")
@@ -427,9 +410,7 @@ class TestHotReload:
         app = _make_hot_reload_app(tmp_path, plugin_dir)
         app.enable_plugin("sample")
         received: list[dict] = []
-        app.event_bus.subscribe(
-            events.PLUGIN_STOPPED, lambda _evt, data: received.append(data)
-        )
+        app.event_bus.subscribe(events.PLUGIN_STOPPED, lambda _evt, data: received.append(data))
         app.disable_plugin("sample")
         assert received == [{"name": "sample"}]
 
@@ -454,9 +435,7 @@ class TestHotReload:
         app = _make_hot_reload_app(tmp_path, str(tmp_path))
         app.enable_plugin("angry_hr")
         received: list[dict] = []
-        app.event_bus.subscribe(
-            events.PLUGIN_STOPPED, lambda _evt, data: received.append(data)
-        )
+        app.event_bus.subscribe(events.PLUGIN_STOPPED, lambda _evt, data: received.append(data))
         app.disable_plugin("angry_hr")  # Must not raise
         assert "angry_hr" not in app.plugins
         assert received == [{"name": "angry_hr"}]
@@ -499,7 +478,9 @@ class TestHotReload:
         assert not errors, f"Unexpected errors under concurrency: {errors}"
 
     def test_disable_plugin_publishes_plugin_stopping_before_pop(
-        self, tmp_path, plugin_dir,
+        self,
+        tmp_path,
+        plugin_dir,
     ):
         from reticulumpi import events
 
@@ -516,7 +497,9 @@ class TestHotReload:
         assert still_in_registry == [True]
 
     def test_disable_plugin_warns_about_dependents(
-        self, tmp_path, caplog,
+        self,
+        tmp_path,
+        caplog,
     ):
         dep_plugin = tmp_path / "dep_plugin.py"
         dep_plugin.write_text(

@@ -76,16 +76,18 @@ class TestValidateConfig:
         assert p._device_id == "0"
 
     def test_custom_config_overrides_defaults(self):
-        p = _make_plugin({
-            "freq_start_mhz": 144.0,
-            "freq_stop_mhz": 148.0,
-            "bin_khz": 10.0,
-            "sweep_seconds": 5,
-            "gain_db": 29.0,
-            "ppm": -3,
-            "waterfall_rows": 256,
-            "device_index": 1,
-        })
+        p = _make_plugin(
+            {
+                "freq_start_mhz": 144.0,
+                "freq_stop_mhz": 148.0,
+                "bin_khz": 10.0,
+                "sweep_seconds": 5,
+                "gain_db": 29.0,
+                "ppm": -3,
+                "waterfall_rows": 256,
+                "device_index": 1,
+            }
+        )
         assert p._freq_start_mhz == 144.0
         assert p._freq_stop_mhz == 148.0
         assert p._bin_khz == 10.0
@@ -179,12 +181,10 @@ class TestCsvParser:
         p = _make_plugin({"freq_start_mhz": 88.0, "freq_stop_mhz": 90.0})
         # One CSV segment; timestamp changes to flush.
         p._handle_csv_line(
-            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, "
-            "-55.0, -54.0, -53.0, -52.0"
+            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, -55.0, -54.0, -53.0, -52.0"
         )
         p._handle_csv_line(
-            "2025-01-01, 12:00:02, 88000000, 90000000, 500000, 1, "
-            "-45.0, -44.0, -43.0, -42.0"
+            "2025-01-01, 12:00:02, 88000000, 90000000, 500000, 1, -45.0, -44.0, -43.0, -42.0"
         )
 
         # First sweep got flushed when ts changed.
@@ -213,9 +213,7 @@ class TestCsvParser:
             "2025-01-01, 12:00:00, 90000000, 92000000, 500000, 1, -60.0, -59.0, -58.0, -57.0"
         )
         # New timestamp → flush the accumulated 3-segment sweep.
-        p._handle_csv_line(
-            "2025-01-01, 12:00:02, 88000000, 90000000, 500000, 1, 0, 0, 0, 0"
-        )
+        p._handle_csv_line("2025-01-01, 12:00:02, 88000000, 90000000, 500000, 1, 0, 0, 0, 0")
 
         assert p._sweep_count == 1
         # Bins should be contiguous from 88 to 94 MHz at 500 kHz spacing.
@@ -225,9 +223,18 @@ class TestCsvParser:
         # Power values should follow the sorted-by-freq order:
         # first segment 88-90, then 90-92, then 92-94.
         assert p._latest_powers_db == [
-            -55.0, -54.0, -53.0, -52.0,   # 88-90 MHz
-            -60.0, -59.0, -58.0, -57.0,   # 90-92 MHz
-            -70.0, -69.0, -68.0, -67.0,   # 92-94 MHz
+            -55.0,
+            -54.0,
+            -53.0,
+            -52.0,  # 88-90 MHz
+            -60.0,
+            -59.0,
+            -58.0,
+            -57.0,  # 90-92 MHz
+            -70.0,
+            -69.0,
+            -68.0,
+            -67.0,  # 92-94 MHz
         ]
 
     def test_ignores_comments_and_blank_lines(self):
@@ -243,9 +250,7 @@ class TestCsvParser:
         # Too few columns
         p._handle_csv_line("2025-01-01, 12:00:00, 88000000")
         # Non-numeric dB values
-        p._handle_csv_line(
-            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, hello, world"
-        )
+        p._handle_csv_line("2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, hello, world")
         assert p._sweep_count == 0
         # Non-parseable dBs → no segment stored
         assert not p._segments
@@ -258,8 +263,7 @@ class TestCsvParser:
         non-finite floats."""
         p = _make_plugin({"freq_start_mhz": 88.0, "freq_stop_mhz": 90.0})
         p._handle_csv_line(
-            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, "
-            "-55.0, nan, -inf, -52.0"
+            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, -55.0, nan, -inf, -52.0"
         )
         p._flush_current_sweep()
         assert p._sweep_count == 1
@@ -294,10 +298,20 @@ class TestSnapshot:
         p = _make_plugin()
         snap = p.get_snapshot()
         for key in (
-            "status", "error", "freq_start_hz", "freq_stop_hz",
-            "bin_hz_requested", "sweep_seconds", "gain_db", "ppm",
-            "sweep_count", "last_sweep_at", "waterfall_rows",
-            "bins_hz", "latest_powers_db", "waterfall_tail",
+            "status",
+            "error",
+            "freq_start_hz",
+            "freq_stop_hz",
+            "bin_hz_requested",
+            "sweep_seconds",
+            "gain_db",
+            "ppm",
+            "sweep_count",
+            "last_sweep_at",
+            "waterfall_rows",
+            "bins_hz",
+            "latest_powers_db",
+            "waterfall_tail",
             "waterfall_tail_times",
         ):
             assert key in snap, f"missing key {key!r}"
@@ -309,11 +323,11 @@ class TestSnapshot:
 
     def test_snapshot_after_sweep(self):
         import time as _t
+
         before = _t.time()
         p = _make_plugin()
         p._handle_csv_line(
-            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, "
-            "-55.5, -54.4, -53.3, -52.2"
+            "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, -55.5, -54.4, -53.3, -52.2"
         )
         p._flush_current_sweep()
 
@@ -363,8 +377,11 @@ class TestHistory:
         p = _make_plugin()
         h = p.get_history()
         for key in (
-            "available", "sweep_count", "waterfall_rows",
-            "rows", "row_timestamps",
+            "available",
+            "sweep_count",
+            "waterfall_rows",
+            "rows",
+            "row_timestamps",
         ):
             assert key in h
         assert h["available"] is True
@@ -501,14 +518,18 @@ class TestPresets:
         assert p._freq_start_mhz == 144.0
 
     def test_user_preset_merges_with_builtins(self):
-        p = _make_plugin({"presets": {"my_band": {"freq_start_mhz": 200.0, "freq_stop_mhz": 210.0}}})
+        p = _make_plugin(
+            {"presets": {"my_band": {"freq_start_mhz": 200.0, "freq_stop_mhz": 210.0}}}
+        )
         info = p.get_presets()
         names = [pr["name"] for pr in info["presets"]]
         assert "my_band" in names
         assert "fm_broadcast" in names
 
     def test_user_preset_overrides_builtin(self):
-        p = _make_plugin({"presets": {"fm_broadcast": {"freq_start_mhz": 87.5, "freq_stop_mhz": 108.0}}})
+        p = _make_plugin(
+            {"presets": {"fm_broadcast": {"freq_start_mhz": 87.5, "freq_stop_mhz": 108.0}}}
+        )
         preset = p._presets["fm_broadcast"]
         assert preset["freq_start_mhz"] == 87.5
 
@@ -650,31 +671,49 @@ class TestSwitchPreset:
 class TestPresetValidation:
     def test_preset_rejects_invalid_freq_range(self):
         with pytest.raises(ValueError, match="freq_stop_mhz"):
-            _make_plugin({
-                "default_preset": "bad",
-                "presets": {"bad": {"freq_start_mhz": 200.0, "freq_stop_mhz": 100.0}},
-            })
+            _make_plugin(
+                {
+                    "default_preset": "bad",
+                    "presets": {"bad": {"freq_start_mhz": 200.0, "freq_stop_mhz": 100.0}},
+                }
+            )
 
     def test_preset_rejects_bin_khz_out_of_range(self):
         with pytest.raises(ValueError, match="bin_khz"):
-            _make_plugin({
-                "default_preset": "bad",
-                "presets": {"bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "bin_khz": 0.5}},
-            })
+            _make_plugin(
+                {
+                    "default_preset": "bad",
+                    "presets": {
+                        "bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "bin_khz": 0.5}
+                    },
+                }
+            )
 
     def test_preset_rejects_sweep_out_of_range(self):
         with pytest.raises(ValueError, match="sweep_seconds"):
-            _make_plugin({
-                "default_preset": "bad",
-                "presets": {"bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "sweep_seconds": 120}},
-            })
+            _make_plugin(
+                {
+                    "default_preset": "bad",
+                    "presets": {
+                        "bad": {
+                            "freq_start_mhz": 88.0,
+                            "freq_stop_mhz": 108.0,
+                            "sweep_seconds": 120,
+                        }
+                    },
+                }
+            )
 
     def test_preset_rejects_gain_out_of_range(self):
         with pytest.raises(ValueError, match="gain_db"):
-            _make_plugin({
-                "default_preset": "bad",
-                "presets": {"bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "gain_db": 200.0}},
-            })
+            _make_plugin(
+                {
+                    "default_preset": "bad",
+                    "presets": {
+                        "bad": {"freq_start_mhz": 88.0, "freq_stop_mhz": 108.0, "gain_db": 200.0}
+                    },
+                }
+            )
 
     def test_switch_preset_validates_values(self):
         p = _make_plugin()
@@ -703,8 +742,14 @@ class TestPresetAnalyzerIntegration:
     def _make_csv_line(self, freq_lo_hz, freq_hi_hz, bin_step_hz, powers_db):
         """Construct an rtl_power CSV line."""
         n_bins = len(powers_db)
-        parts = ["2026-01-01", "00:00:00", str(freq_lo_hz), str(freq_hi_hz),
-                 str(bin_step_hz), str(n_bins)]
+        parts = [
+            "2026-01-01",
+            "00:00:00",
+            str(freq_lo_hz),
+            str(freq_hi_hz),
+            str(bin_step_hz),
+            str(n_bins),
+        ]
         parts += [f"{p:.1f}" for p in powers_db]
         return ", ".join(parts)
 
@@ -760,8 +805,7 @@ class TestPresetAnalyzerIntegration:
             p._flush_current_sweep()
 
         publish_calls = p.app.event_bus.publish.call_args_list
-        trigger_calls = [c for c in publish_calls
-                         if c[0][0] == "lora.capture_trigger"]
+        trigger_calls = [c for c in publish_calls if c[0][0] == "lora.capture_trigger"]
         assert len(trigger_calls) >= 1
         payload = trigger_calls[0][0][1]
         assert payload["channel_idx"] == 0
@@ -780,18 +824,26 @@ class TestPresetAnalyzerIntegration:
         snap = p.get_snapshot()
         assert "channel_analysis" not in snap
 
+
 class TestSpectrumSweepEvent:
     """Verify that SPECTRUM_SWEEP events carry frequency and power data."""
 
     def _make_csv_line(self, freq_lo_hz, freq_hi_hz, bin_step_hz, powers_db):
         n_bins = len(powers_db)
-        parts = ["2026-01-01", "00:00:00", str(freq_lo_hz), str(freq_hi_hz),
-                 str(bin_step_hz), str(n_bins)]
+        parts = [
+            "2026-01-01",
+            "00:00:00",
+            str(freq_lo_hz),
+            str(freq_hi_hz),
+            str(bin_step_hz),
+            str(n_bins),
+        ]
         parts += [f"{p:.1f}" for p in powers_db]
         return ", ".join(parts)
 
     def test_sweep_event_includes_bins_and_powers(self):
         from reticulumpi import events
+
         p = _make_plugin()
         p._event_sweep_topic = events.SPECTRUM_SWEEP
         freq_lo = 88_000_000
@@ -805,8 +857,7 @@ class TestSpectrumSweepEvent:
         p._flush_current_sweep()
 
         publish_calls = p.app.event_bus.publish.call_args_list
-        sweep_calls = [c for c in publish_calls
-                       if c[0][0] == "spectrum.sweep"]
+        sweep_calls = [c for c in publish_calls if c[0][0] == "spectrum.sweep"]
         assert len(sweep_calls) >= 1
         payload = sweep_calls[0][0][1]
         assert "bins_hz" in payload

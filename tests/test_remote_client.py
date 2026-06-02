@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock
 
 
-
 def test_format_response():
     from reticulumpi.remote_client import _format_response
 

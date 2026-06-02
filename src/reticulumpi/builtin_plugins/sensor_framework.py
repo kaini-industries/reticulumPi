@@ -77,6 +77,7 @@ class BME280Driver(SensorDriver):
         try:
             if self._bus is None:
                 import smbus2
+
                 self._bus = smbus2.SMBus(self._bus_num)
 
             # Read raw compensation data and measurements
@@ -84,7 +85,9 @@ class BME280Driver(SensorDriver):
             # For production use, consider the bme280 pip package
             calib = self._bus.read_i2c_block_data(self._address, 0x88, 26)
             self._bus.write_byte_data(self._address, 0xF2, 0x01)  # humidity oversampling x1
-            self._bus.write_byte_data(self._address, 0xF4, 0x27)  # temp+pressure oversampling, normal mode
+            self._bus.write_byte_data(
+                self._address, 0xF4, 0x27
+            )  # temp+pressure oversampling, normal mode
             self._bus.write_byte_data(self._address, 0xF5, 0xA0)  # config
             time.sleep(0.05)
             data = self._bus.read_i2c_block_data(self._address, 0xF7, 8)
@@ -108,8 +111,10 @@ class BME280Driver(SensorDriver):
             v2 = v1 * v1 * dig_p2 / 32768.0
             v2 = v2 + v1 * (self._to_signed(calib[10] | (calib[11] << 8))) * 2.0
             v2 = (v2 / 4.0) + (self._to_signed(calib[12] | (calib[13] << 8)) * 65536.0)
-            v1 = ((self._to_signed(calib[14] | (calib[15] << 8))) * v1 * v1 / 524288.0
-                   + (self._to_signed(calib[16] | (calib[17] << 8))) * v1) / 524288.0
+            v1 = (
+                (self._to_signed(calib[14] | (calib[15] << 8))) * v1 * v1 / 524288.0
+                + (self._to_signed(calib[16] | (calib[17] << 8))) * v1
+            ) / 524288.0
             v1 = (1.0 + v1 / 32768.0) * dig_p1
             pressure = 0.0
             if v1 != 0:
@@ -126,8 +131,15 @@ class BME280Driver(SensorDriver):
             h = t_fine - 76800.0
             if h != 0:
                 h = (raw_hum - (dig_h4 * 64.0 + (dig_h5 / 16384.0) * h)) * (
-                    dig_h2 / 65536.0 * (1.0 + (self._to_signed(calib_h[6]) / 67108864.0) * h * (
-                        1.0 + (self._to_signed((calib_h[3] << 4) | 0) / 67108864.0) * h)))
+                    dig_h2
+                    / 65536.0
+                    * (
+                        1.0
+                        + (self._to_signed(calib_h[6]) / 67108864.0)
+                        * h
+                        * (1.0 + (self._to_signed((calib_h[3] << 4) | 0) / 67108864.0) * h)
+                    )
+                )
             humidity = max(0.0, min(100.0, round(h, 2))) if h else 0.0
 
             return {
@@ -174,8 +186,7 @@ class ADCDriver(SensorDriver):
         self._path = os.path.realpath(raw_path) if raw_path else ""
         if self._path and not any(self._path.startswith(p) for p in self._ALLOWED_PREFIXES):
             raise ValueError(
-                f"ADC sysfs_path must be under {self._ALLOWED_PREFIXES}, "
-                f"got: {self._path}"
+                f"ADC sysfs_path must be under {self._ALLOWED_PREFIXES}, got: {self._path}"
             )
 
     def read(self) -> dict[str, Any]:
@@ -208,6 +219,7 @@ class CommandDriver(SensorDriver):
         self._name = sensor_config.get("reading_name", "value")
         if sensor_config.get("shell"):
             import logging
+
             logging.getLogger(__name__).warning(
                 "Sensor '%s': 'shell: true' is no longer supported and will "
                 "be ignored. Use the default argv mode instead.",
@@ -216,6 +228,7 @@ class CommandDriver(SensorDriver):
         self._command_argv: list[str] = []
         if self._command_str:
             import shlex
+
             self._command_argv = shlex.split(self._command_str)
 
     def read(self) -> dict[str, Any]:
@@ -223,9 +236,12 @@ class CommandDriver(SensorDriver):
             return {"error": "no command configured"}
         try:
             import subprocess
+
             result = subprocess.run(
                 self._command_argv,
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode != 0:
                 return {"error": f"command failed: {result.stderr.strip()[:100]}"}
@@ -394,9 +410,7 @@ class SensorFrameworkPlugin(PluginBase):
         with self._db_lock:
             return dict(self._last_readings)
 
-    def get_sensor_history(
-        self, sensor_name: str, limit: int = 100
-    ) -> list[dict[str, Any]]:
+    def get_sensor_history(self, sensor_name: str, limit: int = 100) -> list[dict[str, Any]]:
         """Return recent readings for a sensor from SQLite."""
         if not self._db:
             return []
@@ -441,15 +455,21 @@ class SensorFrameworkPlugin(PluginBase):
                             self._readings_count += 1
 
                     # Publish event
-                    self.event_bus.publish(events.SENSOR_READING, {
-                        "sensor": sensor_name,
-                        "driver": sensor_cfg["driver"],
-                        "reading": reading,
-                    })
+                    self.event_bus.publish(
+                        events.SENSOR_READING,
+                        {
+                            "sensor": sensor_name,
+                            "driver": sensor_cfg["driver"],
+                            "reading": reading,
+                        },
+                    )
                 except Exception:
                     self.log.exception("Error reading sensor '%s'", sensor_name)
                     with self._db_lock:
-                        self._last_readings[sensor_name] = {"error": "read failed", "timestamp": now}
+                        self._last_readings[sensor_name] = {
+                            "error": "read failed",
+                            "timestamp": now,
+                        }
 
             # Broadcast if interval elapsed
             if (
@@ -463,9 +483,7 @@ class SensorFrameworkPlugin(PluginBase):
 
             self._sleep_while_active(interval)
 
-    def _store_reading(
-        self, sensor_name: str, reading: dict[str, Any], timestamp: float
-    ) -> None:
+    def _store_reading(self, sensor_name: str, reading: dict[str, Any], timestamp: float) -> None:
         storage_type = self.config.get("storage", {}).get("type", "sqlite")
 
         if storage_type == "sqlite" and self._db:
@@ -489,6 +507,7 @@ class SensorFrameworkPlugin(PluginBase):
         elif storage_type == "csv" and hasattr(self, "_csv_path"):
             try:
                 import csv
+
                 with self._db_lock:
                     file_exists = os.path.isfile(self._csv_path)
                     with open(self._csv_path, "a", newline="") as f:
@@ -513,7 +532,8 @@ class SensorFrameworkPlugin(PluginBase):
             for sensor_name, reading in readings.items():
                 if "error" not in reading:
                     clean = {
-                        k: v for k, v in reading.items()
+                        k: v
+                        for k, v in reading.items()
                         if k != "timestamp" and isinstance(v, (int, float))
                     }
                     if clean:
@@ -535,9 +555,7 @@ class SensorFrameworkPlugin(PluginBase):
             try:
                 cutoff = time.time() - (retention_days * 86400)
                 with self._db_lock:
-                    self._db.execute(
-                        "DELETE FROM sensor_readings WHERE timestamp < ?", (cutoff,)
-                    )
+                    self._db.execute("DELETE FROM sensor_readings WHERE timestamp < ?", (cutoff,))
                     self._db.commit()
                 self.log.debug("Pruned sensor readings older than %d days", retention_days)
             except Exception:

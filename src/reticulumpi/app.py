@@ -35,7 +35,9 @@ class ReticulumPiApp:
     ):
         self.config = AppConfig(config_path)
         self._reticulum_config_dir = reticulum_config_dir or self.config.reticulum_config_dir
-        self._log_level = log_level_override if log_level_override is not None else self.config.log_level
+        self._log_level = (
+            log_level_override if log_level_override is not None else self.config.log_level
+        )
         self.node_name: str = self.config.node_name
         self.reticulum: RNS.Reticulum | None = None
         self.identity: RNS.Identity | None = None
@@ -71,9 +73,7 @@ class ReticulumPiApp:
 
         self.internet_probe = InternetProbe(self.event_bus, self.config.internet)
         self.internet_probe.start()
-        log.info(
-            "Internet: %s", "online" if self.internet_probe.is_online else "offline"
-        )
+        log.info("Internet: %s", "online" if self.internet_probe.is_online else "offline")
 
         PluginBase.set_thread_budget(self.config.thread_budget)
 
@@ -178,9 +178,7 @@ class ReticulumPiApp:
         elapsed = self.SHUTDOWN_TIMEOUT - (deadline - time.monotonic())
         log.info("ReticulumPi stopped in %.1fs.", elapsed)
 
-    def _start_plugin_with_timeout(
-        self, name: str, plugin: PluginBase, timeout: float
-    ) -> None:
+    def _start_plugin_with_timeout(self, name: str, plugin: PluginBase, timeout: float) -> None:
         """Start a single plugin, enforcing a wall-clock timeout.
 
         Runs ``start()`` in a worker thread so that a hung plugin doesn't
@@ -196,9 +194,7 @@ class ReticulumPiApp:
                 future = pool.submit(plugin.start)
                 future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
-            raise TimeoutError(
-                f"Plugin '{name}' did not start within {timeout:.0f}s"
-            ) from None
+            raise TimeoutError(f"Plugin '{name}' did not start within {timeout:.0f}s") from None
         except Exception as exc:
             if "signal only works in main thread" in str(exc):
                 # Plugin uses signal handlers (e.g. LXMF router) — must
@@ -211,9 +207,7 @@ class ReticulumPiApp:
             else:
                 raise
 
-    def _stop_plugin_with_timeout(
-        self, name: str, plugin: PluginBase, timeout: float
-    ) -> None:
+    def _stop_plugin_with_timeout(self, name: str, plugin: PluginBase, timeout: float) -> None:
         """Stop a single plugin, enforcing a wall-clock timeout."""
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(plugin.stop)
@@ -222,9 +216,7 @@ class ReticulumPiApp:
                 log.info("Stopped plugin: %s", name)
                 self.event_bus.publish(events.PLUGIN_STOPPED, {"name": name})
             except concurrent.futures.TimeoutError:
-                log.warning(
-                    "Plugin '%s' did not stop within %.1fs — moving on", name, timeout
-                )
+                log.warning("Plugin '%s' did not stop within %.1fs — moving on", name, timeout)
             except Exception:
                 log.exception("Error stopping plugin: %s", name)
 
@@ -267,8 +259,7 @@ class ReticulumPiApp:
             "version": self._get_version(),
             "plugins": {},
             "failed_plugins": [
-                {"name": name, "error": reason}
-                for name, reason in self._failed_plugins
+                {"name": name, "error": reason} for name, reason in self._failed_plugins
             ],
         }
         for name, plugin in list(self.plugins.items()):
@@ -320,7 +311,8 @@ class ReticulumPiApp:
                 if name in getattr(other_plugin, "plugin_dependencies", []):
                     log.warning(
                         "Disabling '%s' which is a dependency of running plugin '%s'",
-                        name, other_name,
+                        name,
+                        other_name,
                     )
             plugin = self.plugins.pop(name, None)
             if plugin is None:
@@ -374,7 +366,8 @@ class ReticulumPiApp:
                 if dep not in self.plugins:
                     log.warning(
                         "Plugin '%s' depends on '%s' which is not enabled",
-                        name, dep,
+                        name,
+                        dep,
                     )
 
     def _topo_sort_plugins(self) -> list[str]:
@@ -436,9 +429,7 @@ class ReticulumPiApp:
 
         # Report failed plugins prominently
         if self._failed_plugins:
-            log.error(
-                "  %d plugin(s) FAILED to load:", len(self._failed_plugins)
-            )
+            log.error("  %d plugin(s) FAILED to load:", len(self._failed_plugins))
             for name, reason in self._failed_plugins:
                 log.error("    - %s: %s", name, reason)
 
@@ -466,9 +457,7 @@ class ReticulumPiApp:
         print()
 
         enabled = {
-            name: cfg
-            for name, cfg in self.config.plugins.items()
-            if cfg.get("enabled", False)
+            name: cfg for name, cfg in self.config.plugins.items() if cfg.get("enabled", False)
         }
         if enabled:
             print("Enabled plugin check:")
@@ -507,4 +496,5 @@ class ReticulumPiApp:
     @staticmethod
     def _get_version() -> str:
         from reticulumpi import __version__
+
         return __version__

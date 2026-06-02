@@ -84,7 +84,8 @@ class SdrScheduler:
         self._thread: threading.Thread | None = None
         self._running = False
         self._weather_override_lock = self._config.get(
-            "weather_alerts_override_lock", True,
+            "weather_alerts_override_lock",
+            True,
         )
         self._init_dongles()
 
@@ -117,7 +118,8 @@ class SdrScheduler:
         )
         self._thread.start()
         log.info(
-            "SDR scheduler started, managing %d dongle(s)", len(self._dongles),
+            "SDR scheduler started, managing %d dongle(s)",
+            len(self._dongles),
         )
 
     def stop(self) -> None:
@@ -172,7 +174,9 @@ class SdrScheduler:
 
             log.info(
                 "Registered %s on dongle %s (P%d, %s)",
-                caller, serial, priority,
+                caller,
+                serial,
+                priority,
                 "continuous" if continuous else f"{len(slot.windows)} windows",
             )
             self._condition.notify_all()
@@ -214,19 +218,27 @@ class SdrScheduler:
             slot = dongle.slots.get(caller)
             if slot is None:
                 return
-            slot.windows.append(TimeWindow(
-                start_ts=start_ts, end_ts=end_ts, caller=caller, label=label,
-            ))
+            slot.windows.append(
+                TimeWindow(
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    caller=caller,
+                    label=label,
+                )
+            )
             slot.windows.sort(key=lambda w: w.start_ts)
             window_count = len(slot.windows)
             self._condition.notify_all()
 
         try:
-            self._event_bus.publish(events.SDR_SCHEDULE_UPDATED, {
-                "serial": serial,
-                "caller": caller,
-                "window_count": window_count,
-            })
+            self._event_bus.publish(
+                events.SDR_SCHEDULE_UPDATED,
+                {
+                    "serial": serial,
+                    "caller": caller,
+                    "window_count": window_count,
+                },
+            )
         except Exception:
             pass
 
@@ -250,7 +262,8 @@ class SdrScheduler:
             if dongle.current_holder != caller:
                 log.warning(
                     "lock() rejected: %s is not current holder of %s",
-                    caller, serial,
+                    caller,
+                    serial,
                 )
                 return False
             dongle.locked_by = caller
@@ -278,7 +291,8 @@ class SdrScheduler:
                         self._evaluate(serial)
                     except Exception:
                         log.exception(
-                            "Error evaluating dongle %s", serial,
+                            "Error evaluating dongle %s",
+                            serial,
                         )
                 self._condition.wait(timeout=1.0)
 
@@ -365,7 +379,10 @@ class SdrScheduler:
         return None
 
     def _can_preempt(
-        self, dongle: DongleState, current: str, winner: str,
+        self,
+        dongle: DongleState,
+        current: str,
+        winner: str,
     ) -> bool:
         if dongle.locked_by == current:
             winner_slot = dongle.slots.get(winner)
@@ -373,13 +390,16 @@ class SdrScheduler:
             if winner_priority == PRIORITY_CRITICAL and self._weather_override_lock:
                 log.info(
                     "P0 signal %s overrides lock held by %s",
-                    winner, current,
+                    winner,
+                    current,
                 )
                 return True
             log.debug(
                 "Dongle %s locked by %s — skipping P%d signal %s",
-                dongle.serial, current,
-                winner_priority, winner,
+                dongle.serial,
+                current,
+                winner_priority,
+                winner,
             )
             return False
 
@@ -387,12 +407,18 @@ class SdrScheduler:
         winner_slot = dongle.slots.get(winner)
         if current_slot is None or winner_slot is None:
             return True
-        if winner_slot.priority == PRIORITY_BACKGROUND and current_slot.priority == PRIORITY_BACKGROUND:
+        if (
+            winner_slot.priority == PRIORITY_BACKGROUND
+            and current_slot.priority == PRIORITY_BACKGROUND
+        ):
             return True
         return winner_slot.priority < current_slot.priority
 
     def _window_end(
-        self, dongle: DongleState, caller: str, now: float,
+        self,
+        dongle: DongleState,
+        caller: str,
+        now: float,
     ) -> float | None:
         slot = dongle.slots.get(caller)
         if slot is None:
@@ -423,7 +449,9 @@ class SdrScheduler:
 
         log.info(
             "Yielding dongle %s from %s (preempted by %s)",
-            dongle.serial, caller, preempted_by or "none",
+            dongle.serial,
+            caller,
+            preempted_by or "none",
         )
 
         slot.is_active = False
@@ -448,17 +476,21 @@ class SdrScheduler:
                 log.exception("yield_cb failed for %s", caller)
 
             from reticulumpi.rtlsdr import release_device
+
             try:
                 release_device(serial, caller=caller)
             except Exception:
                 pass
 
             try:
-                self._event_bus.publish(events.SDR_DONGLE_YIELDED, {
-                    "serial": serial,
-                    "caller": caller,
-                    "preempted_by": preempted_by,
-                })
+                self._event_bus.publish(
+                    events.SDR_DONGLE_YIELDED,
+                    {
+                        "serial": serial,
+                        "caller": caller,
+                        "preempted_by": preempted_by,
+                    },
+                )
             except Exception:
                 pass
         finally:
@@ -481,12 +513,15 @@ class SdrScheduler:
             time.sleep(_USB_SETTLE_DELAY)
 
             from reticulumpi.rtlsdr import resolve_device
+
             try:
                 idx = resolve_device(serial, caller=caller)
             except RuntimeError as exc:
                 log.error(
                     "Failed to claim dongle %s for %s: %s",
-                    serial, caller, exc,
+                    serial,
+                    caller,
+                    exc,
                 )
                 return
 
@@ -498,6 +533,7 @@ class SdrScheduler:
             except Exception:
                 log.exception("acquire_cb failed for %s", caller)
                 from reticulumpi.rtlsdr import release_device
+
                 try:
                     release_device(serial, caller=caller)
                 except Exception:
@@ -512,6 +548,7 @@ class SdrScheduler:
             self._condition.release()
             try:
                 from reticulumpi.rtlsdr import release_device
+
                 try:
                     release_device(serial, caller=caller)
                 except Exception:
@@ -527,6 +564,7 @@ class SdrScheduler:
             self._condition.release()
             try:
                 from reticulumpi.rtlsdr import release_device
+
                 try:
                     release_device(serial, caller=caller)
                 except Exception:
@@ -550,11 +588,14 @@ class SdrScheduler:
             dongle.relock_after = None
 
         try:
-            self._event_bus.publish(events.SDR_DONGLE_GRANTED, {
-                "serial": serial,
-                "caller": caller,
-                "priority": priority,
-            })
+            self._event_bus.publish(
+                events.SDR_DONGLE_GRANTED,
+                {
+                    "serial": serial,
+                    "caller": caller,
+                    "priority": priority,
+                },
+            )
         except Exception:
             pass
 
@@ -600,13 +641,15 @@ class SdrScheduler:
             windows: list[dict[str, Any]] = []
             for caller, slot in dongle.slots.items():
                 for w in slot.windows:
-                    windows.append({
-                        "caller": caller,
-                        "label": w.label or slot.label,
-                        "start_ts": w.start_ts,
-                        "end_ts": w.end_ts,
-                        "priority": slot.priority,
-                    })
+                    windows.append(
+                        {
+                            "caller": caller,
+                            "label": w.label or slot.label,
+                            "start_ts": w.start_ts,
+                            "end_ts": w.end_ts,
+                            "priority": slot.priority,
+                        }
+                    )
             windows.sort(key=lambda w: w["start_ts"])
             return windows
 

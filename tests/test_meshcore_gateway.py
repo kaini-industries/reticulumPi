@@ -17,6 +17,7 @@ import pytest
 # Mock the meshcore package before any plugin imports
 # ---------------------------------------------------------------------------
 
+
 # Build a realistic mock of the meshcore event types
 class _MockEventType(Enum):
     CONTACTS = "contacts"
@@ -60,10 +61,13 @@ _mock_meshcore_events.Event = _MockEvent
 @pytest.fixture(autouse=True)
 def _patch_meshcore():
     """Ensure meshcore is always available as a mock."""
-    with patch.dict(sys.modules, {
-        "meshcore": _mock_meshcore,
-        "meshcore.events": _mock_meshcore_events,
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "meshcore": _mock_meshcore,
+            "meshcore.events": _mock_meshcore_events,
+        },
+    ):
         # Also patch the EventType import inside the module
         _mock_meshcore.MeshCore = MagicMock()
         _mock_meshcore_events.EventType = _MockEventType
@@ -120,24 +124,32 @@ def _make_mock_meshcore_device():
     # Async methods
     mc.commands = MagicMock()
     mc.commands.set_time = AsyncMock()
-    mc.commands.send_device_query = AsyncMock(return_value=_MockEvent(
-        _MockEventType.DEVICE_INFO,
-        {
-            "fw ver": 10,
-            "max_contacts": 350,
-            "max_channels": 40,
-            "ver": "v1.14.1",
-            "model": "RAK 4631",
-            "fw_build": "20-Mar-2026",
-        },
-    ))
+    mc.commands.send_device_query = AsyncMock(
+        return_value=_MockEvent(
+            _MockEventType.DEVICE_INFO,
+            {
+                "fw ver": 10,
+                "max_contacts": 350,
+                "max_channels": 40,
+                "ver": "v1.14.1",
+                "model": "RAK 4631",
+                "fw_build": "20-Mar-2026",
+            },
+        )
+    )
     mc.commands.get_contacts = AsyncMock()
-    mc.commands.send_msg = AsyncMock(return_value=_MockEvent(
-        _MockEventType.MSG_SENT, {"expected_ack": b"\x01\x02", "suggested_timeout": 5000},
-    ))
-    mc.commands.send_chan_msg = AsyncMock(return_value=_MockEvent(
-        _MockEventType.OK, {},
-    ))
+    mc.commands.send_msg = AsyncMock(
+        return_value=_MockEvent(
+            _MockEventType.MSG_SENT,
+            {"expected_ack": b"\x01\x02", "suggested_timeout": 5000},
+        )
+    )
+    mc.commands.send_chan_msg = AsyncMock(
+        return_value=_MockEvent(
+            _MockEventType.OK,
+            {},
+        )
+    )
 
     mc.subscribe = MagicMock(return_value=_MockSubscription())
     mc.unsubscribe = MagicMock()
@@ -476,6 +488,7 @@ class TestSendMessage:
 
         # Run the loop in another thread briefly
         import threading
+
         t = threading.Thread(target=plugin._loop.run_forever, daemon=True)
         t.start()
 
@@ -501,6 +514,7 @@ class TestSendMessage:
         plugin._loop_ready.set()
 
         import threading
+
         t = threading.Thread(target=plugin._loop.run_forever, daemon=True)
         t.start()
 

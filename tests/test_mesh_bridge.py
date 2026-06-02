@@ -110,7 +110,10 @@ def test_mesh_broadcast_relays_to_core(bridge_app, hub_mock, bridge_config):
     plugin.start()
     _publish_mesh(
         bridge_app.event_bus,
-        from_name="Alice", text="hello world", channel=0, is_broadcast=True,
+        from_name="Alice",
+        text="hello world",
+        channel=0,
+        is_broadcast=True,
     )
     hub_mock.send_message.assert_called_once()
     args, kwargs = hub_mock.send_message.call_args
@@ -127,7 +130,10 @@ def test_core_broadcast_relays_to_mesh(bridge_app, hub_mock, bridge_config):
     plugin.start()
     _publish_core(
         bridge_app.event_bus,
-        from_name="Bob", text="hey mesh", channel=0, msg_type="broadcast",
+        from_name="Bob",
+        text="hey mesh",
+        channel=0,
+        msg_type="broadcast",
     )
     hub_mock.send_message.assert_called_once()
     args, kwargs = hub_mock.send_message.call_args
@@ -159,6 +165,7 @@ def test_dedup_blocks_immediate_repeat(bridge_app, hub_mock, bridge_config):
 
 def test_dedup_entry_expires_after_ttl(bridge_app, hub_mock, bridge_config, monkeypatch):
     import reticulumpi.builtin_plugins.mesh_bridge as mb
+
     fake_now = [1000.0]
     monkeypatch.setattr(mb.time, "monotonic", lambda: fake_now[0])
     plugin = _make(bridge_app, {**bridge_config, "dedup_ttl_seconds": 60})
@@ -170,20 +177,26 @@ def test_dedup_entry_expires_after_ttl(bridge_app, hub_mock, bridge_config, monk
 
 
 def test_opposite_side_prestocked_blocks_return_trip(
-    bridge_app, hub_mock, bridge_config,
+    bridge_app,
+    hub_mock,
+    bridge_config,
 ):
     plugin = _make(bridge_app, bridge_config)
     plugin.start()
     # Mesh→Core relay happens
     _publish_mesh(
         bridge_app.event_bus,
-        from_name="Alice", from_id="!abcd1234", text="greetings",
+        from_name="Alice",
+        from_id="!abcd1234",
+        text="greetings",
     )
     assert hub_mock.send_message.call_count == 1
     # Now simulate the same (sender, text) bouncing back as a Core event
     _publish_core(
         bridge_app.event_bus,
-        from_name="Alice", from_key="!abcd1234", text="greetings",
+        from_name="Alice",
+        from_key="!abcd1234",
+        text="greetings",
     )
     # Second call would be a Core→Mesh relay — must be blocked
     assert hub_mock.send_message.call_count == 1
@@ -254,7 +267,9 @@ def test_dm_bridging_off_by_default(bridge_app, hub_mock, bridge_config):
     plugin.start()
     _publish_mesh(
         bridge_app.event_bus,
-        is_broadcast=False, to_id="!deadbeef", channel=None,
+        is_broadcast=False,
+        to_id="!deadbeef",
+        channel=None,
     )
     assert hub_mock.send_message.call_count == 0
     assert plugin.get_status()["stats"]["msgs_dropped_no_pair"] == 1
@@ -269,8 +284,11 @@ def test_dm_bridging_with_mapping(bridge_app, hub_mock, bridge_config):
     plugin.start()
     _publish_mesh(
         bridge_app.event_bus,
-        from_id="!ffffffff", from_name="Alice",
-        is_broadcast=False, to_id="!abcd1234", channel=None,
+        from_id="!ffffffff",
+        from_name="Alice",
+        is_broadcast=False,
+        to_id="!abcd1234",
+        channel=None,
         text="hi bob",
     )
     hub_mock.send_message.assert_called_once()
@@ -286,14 +304,18 @@ def test_unmapped_dm_dropped(bridge_app, hub_mock, bridge_config):
     plugin.start()
     _publish_mesh(
         bridge_app.event_bus,
-        is_broadcast=False, to_id="!deadbeef", channel=None,
+        is_broadcast=False,
+        to_id="!deadbeef",
+        channel=None,
     )
     assert hub_mock.send_message.call_count == 0
     assert plugin.get_status()["stats"]["msgs_dropped_no_pair"] == 1
 
 
 def test_core_dm_always_drops_due_to_missing_to_key(
-    bridge_app, hub_mock, bridge_config,
+    bridge_app,
+    hub_mock,
+    bridge_config,
 ):
     """MeshCore gateway events don't include a to_key field, so even with
     bridge_dms=true and a dm_pair, core-origin DMs cannot be routed to a
@@ -306,8 +328,10 @@ def test_core_dm_always_drops_due_to_missing_to_key(
     plugin.start()
     _publish_core(
         bridge_app.event_bus,
-        from_key="3c5a1f8e9012", from_name="Bob",
-        msg_type="direct", text="private",
+        from_key="3c5a1f8e9012",
+        from_name="Bob",
+        msg_type="direct",
+        text="private",
     )
     assert hub_mock.send_message.call_count == 0
     assert plugin.get_status()["stats"]["msgs_dropped_no_pair"] == 1
@@ -317,7 +341,8 @@ def test_core_dm_always_drops_due_to_missing_to_key(
 
 
 def test_hub_unavailable_falls_back_to_direct_gateway(
-    bridge_app, bridge_config,
+    bridge_app,
+    bridge_config,
 ):
     gw = MagicMock()
     gw.send_message.return_value = {"sent": True}
@@ -352,20 +377,29 @@ def test_rate_limited_handled(bridge_app, hub_mock, bridge_config):
 def test_invalid_config_raises_on_init(bridge_app, tmp_path):
     state_path = str(tmp_path / "state.json")
     with pytest.raises(ValueError, match="channel_pair.meshtastic"):
-        MeshBridge(bridge_app, {
-            "channel_pairs": [{"meshtastic": 99, "meshcore": 0}],
-            "state_path": state_path,
-        })
+        MeshBridge(
+            bridge_app,
+            {
+                "channel_pairs": [{"meshtastic": 99, "meshcore": 0}],
+                "state_path": state_path,
+            },
+        )
     with pytest.raises(ValueError, match="loop_detect_regex"):
-        MeshBridge(bridge_app, {
-            "loop_detect_regex": "[",
-            "state_path": state_path,
-        })
+        MeshBridge(
+            bridge_app,
+            {
+                "loop_detect_regex": "[",
+                "state_path": state_path,
+            },
+        )
     with pytest.raises(ValueError, match="dm_pair.meshtastic"):
-        MeshBridge(bridge_app, {
-            "dm_pairs": [{"meshtastic": "notavalidid", "meshcore": "3c5a1f8e9012"}],
-            "state_path": state_path,
-        })
+        MeshBridge(
+            bridge_app,
+            {
+                "dm_pairs": [{"meshtastic": "notavalidid", "meshcore": "3c5a1f8e9012"}],
+                "state_path": state_path,
+            },
+        )
 
 
 # ── Pause / resume / persistence ───────────────────────────────
@@ -413,7 +447,9 @@ def test_circuit_breaker_trips_on_rate_spike(bridge_app, hub_mock, bridge_config
 
 
 def test_manual_resume_clears_auto_paused_reason(
-    bridge_app, hub_mock, bridge_config,
+    bridge_app,
+    hub_mock,
+    bridge_config,
 ):
     bridge_config["auto_pause_threshold"] = 2
     plugin = _make(bridge_app, bridge_config)
@@ -427,10 +463,7 @@ def test_manual_resume_clears_auto_paused_reason(
     assert status["auto_paused_reason"] is None
     # Next relay goes through (new text to avoid dedup)
     _publish_mesh(bridge_app.event_bus, text="resumed!")
-    assert any(
-        "resumed!" in str(call.args[1])
-        for call in hub_mock.send_message.call_args_list
-    )
+    assert any("resumed!" in str(call.args[1]) for call in hub_mock.send_message.call_args_list)
 
 
 def test_manual_resume_clears_rate_window(bridge_app, hub_mock, bridge_config):
@@ -452,7 +485,9 @@ def test_manual_resume_clears_rate_window(bridge_app, hub_mock, bridge_config):
 
 
 def test_empty_text_increments_dropped_empty_stat(
-    bridge_app, hub_mock, bridge_config,
+    bridge_app,
+    hub_mock,
+    bridge_config,
 ):
     plugin = _make(bridge_app, bridge_config)
     plugin.start()
@@ -465,12 +500,16 @@ def test_empty_text_increments_dropped_empty_stat(
 
 
 def test_startup_grace_drops_messages_during_window(
-    bridge_app, hub_mock, bridge_config, monkeypatch,
+    bridge_app,
+    hub_mock,
+    bridge_config,
+    monkeypatch,
 ):
     """Messages arriving in the first N seconds after start are dropped —
     prevents re-broadcasting queue-drained messages from MeshCore/MQTT
     after a service restart."""
     import reticulumpi.builtin_plugins.mesh_bridge as mb
+
     fake_now = [1000.0]
     monkeypatch.setattr(mb.time, "monotonic", lambda: fake_now[0])
     bridge_config["startup_grace_seconds"] = 30
@@ -486,7 +525,9 @@ def test_startup_grace_drops_messages_during_window(
 
 
 def test_startup_grace_zero_disables_feature(
-    bridge_app, hub_mock, bridge_config,
+    bridge_app,
+    hub_mock,
+    bridge_config,
 ):
     bridge_config["startup_grace_seconds"] = 0
     plugin = _make(bridge_app, bridge_config)
@@ -511,7 +552,9 @@ def test_position_share_blocked_by_default(bridge_app, hub_mock, bridge_config):
 
 
 def test_position_share_location_variant_blocked(
-    bridge_app, hub_mock, bridge_config,
+    bridge_app,
+    hub_mock,
+    bridge_config,
 ):
     plugin = _make(bridge_app, bridge_config)
     plugin.start()
@@ -531,12 +574,23 @@ def test_position_filter_can_be_disabled(bridge_app, hub_mock, bridge_config):
     assert hub_mock.send_message.call_count == 1
 
 
-@pytest.mark.parametrize("tapback_text", [
-    "👍", "❤️", "😂", "👎", "🔥", "!!",
-    "  👍  ",  # whitespace-wrapped emoji
-])
+@pytest.mark.parametrize(
+    "tapback_text",
+    [
+        "👍",
+        "❤️",
+        "😂",
+        "👎",
+        "🔥",
+        "!!",
+        "  👍  ",  # whitespace-wrapped emoji
+    ],
+)
 def test_tapback_blocked_by_default(
-    bridge_app, hub_mock, bridge_config, tapback_text,
+    bridge_app,
+    hub_mock,
+    bridge_config,
+    tapback_text,
 ):
     plugin = _make(bridge_app, bridge_config)
     plugin.start()
@@ -545,11 +599,23 @@ def test_tapback_blocked_by_default(
     assert plugin.get_status()["stats"]["msgs_dropped_tapback"] == 1
 
 
-@pytest.mark.parametrize("short_text", [
-    "ok", "yes", "hi", "LOL", "42", "OMG", "LOL!!",
-])
+@pytest.mark.parametrize(
+    "short_text",
+    [
+        "ok",
+        "yes",
+        "hi",
+        "LOL",
+        "42",
+        "OMG",
+        "LOL!!",
+    ],
+)
 def test_short_alphanumeric_text_is_not_tapback(
-    bridge_app, hub_mock, bridge_config, short_text,
+    bridge_app,
+    hub_mock,
+    bridge_config,
+    short_text,
 ):
     plugin = _make(bridge_app, bridge_config)
     plugin.start()
@@ -582,6 +648,7 @@ def test_state_file_roundtrip_with_auto_pause(bridge_app, hub_mock, bridge_confi
 
 def test_dedup_eviction_at_max(bridge_app, hub_mock, bridge_config, monkeypatch):
     import reticulumpi.builtin_plugins.mesh_bridge as mb
+
     fake_now = [1000.0]
     monkeypatch.setattr(mb.time, "monotonic", lambda: fake_now[0])
     bridge_config["dedup_max_entries"] = 4
@@ -597,6 +664,7 @@ def test_dedup_eviction_at_max(bridge_app, hub_mock, bridge_config, monkeypatch)
 def test_dedup_eviction_same_timestamp(bridge_app, hub_mock, bridge_config, monkeypatch):
     """Even when all entries share the same timestamp, eviction reduces size."""
     import reticulumpi.builtin_plugins.mesh_bridge as mb
+
     fake_now = [1000.0]
     monkeypatch.setattr(mb.time, "monotonic", lambda: fake_now[0])
     bridge_config["dedup_max_entries"] = 4
@@ -608,10 +676,14 @@ def test_dedup_eviction_same_timestamp(bridge_app, hub_mock, bridge_config, monk
 
 
 def test_dedup_eviction_preserves_valid_ttl_entries(
-    bridge_app, hub_mock, bridge_config, monkeypatch,
+    bridge_app,
+    hub_mock,
+    bridge_config,
+    monkeypatch,
 ):
     """Expired entries are pruned first; TTL-valid entries survive eviction."""
     import reticulumpi.builtin_plugins.mesh_bridge as mb
+
     fake_now = [1000.0]
     monkeypatch.setattr(mb.time, "monotonic", lambda: fake_now[0])
     # Each relay records 2 dedup entries (inbound + outbound side), so
@@ -640,10 +712,14 @@ def test_dedup_eviction_preserves_valid_ttl_entries(
 
 
 def test_dedup_eviction_fifo_when_all_valid(
-    bridge_app, hub_mock, bridge_config, monkeypatch,
+    bridge_app,
+    hub_mock,
+    bridge_config,
+    monkeypatch,
 ):
     """When all entries are within TTL, oldest-by-insertion are evicted first."""
     import reticulumpi.builtin_plugins.mesh_bridge as mb
+
     fake_now = [1000.0]
     monkeypatch.setattr(mb.time, "monotonic", lambda: fake_now[0])
     # Each relay records 2 entries; set max=6 so 4 relays (8 entries) triggers FIFO
@@ -676,6 +752,7 @@ def test_corrupt_state_file_falls_back_to_default(bridge_app, hub_mock, bridge_c
 
 def test_select_sender_label_none_inputs():
     from reticulumpi.builtin_plugins.mesh_bridge import _select_sender_label
+
     assert _select_sender_label(None, None) == "?"
     assert _select_sender_label("", None) == "?"
     assert _select_sender_label(None, "") == "?"
@@ -711,7 +788,7 @@ def test_multiple_channel_pairs_directions(bridge_app, hub_mock, bridge_config):
 def test_mtu_truncation_utf8_multibyte(bridge_app, hub_mock, bridge_config):
     plugin = _make(bridge_app, bridge_config)
     plugin.start()
-    body = "\U0001F600" * 200
+    body = "\U0001f600" * 200
     _publish_mesh(bridge_app.event_bus, text=body, from_name="A")
     args, _ = hub_mock.send_message.call_args
     sent = args[1]

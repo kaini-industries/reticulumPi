@@ -126,9 +126,7 @@ def _cached_response(
     return resp
 
 
-def _set_cache_headers(
-    resp: aiohttp.web.Response, ttl: float, stale: float
-) -> None:
+def _set_cache_headers(resp: aiohttp.web.Response, ttl: float, stale: float) -> None:
     parts = [f"max-age={int(ttl)}"]
     if stale:
         parts.append(f"stale-while-revalidate={int(stale)}")

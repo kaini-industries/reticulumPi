@@ -18,6 +18,7 @@ from typing import Any, NamedTuple
 # Channel plan definitions (LoRaWAN Regional Parameters v1.0.3)
 # ---------------------------------------------------------------------------
 
+
 class Channel(NamedTuple):
     idx: int
     center_hz: int
@@ -65,6 +66,7 @@ def bisect_left_hz(bins: list[int], target_hz: int) -> int:
 # ---------------------------------------------------------------------------
 # LoRa channel analyzer
 # ---------------------------------------------------------------------------
+
 
 class LoraChannelAnalyzer:
     """Stateful per-sweep LoRa channel analysis.
@@ -259,7 +261,9 @@ class LoraChannelAnalyzer:
             if ch_power is not None:
                 prev = stats["avg_db"]
                 a = 0.1
-                stats["avg_db"] = round(ch_power if prev is None else a * ch_power + (1 - a) * prev, 1)
+                stats["avg_db"] = round(
+                    ch_power if prev is None else a * ch_power + (1 - a) * prev, 1
+                )
 
             if ch_power is not None:
                 prev_peak = stats["peak_db"]
@@ -296,16 +300,18 @@ class LoraChannelAnalyzer:
             self._capture_consec_counts[ci] = 0
 
             power = self._channel_powers[ci]
-            triggers.append({
-                "channel_idx": ch.idx,
-                "center_hz": ch.center_hz,
-                "bw_hz": ch.bw_hz,
-                "direction": ch.direction,
-                "power_db": round(power, 1) if power is not None else None,
-                "noise_floor_db": round(nf, 1),
-                "excess_db": round(power - nf, 1) if power is not None else None,
-                "timestamp": round(now, 3),
-            })
+            triggers.append(
+                {
+                    "channel_idx": ch.idx,
+                    "center_hz": ch.center_hz,
+                    "bw_hz": ch.bw_hz,
+                    "direction": ch.direction,
+                    "power_db": round(power, 1) if power is not None else None,
+                    "noise_floor_db": round(nf, 1),
+                    "excess_db": round(power - nf, 1) if power is not None else None,
+                    "timestamp": round(now, 3),
+                }
+            )
 
         return triggers
 
@@ -328,15 +334,23 @@ class LoraChannelAnalyzer:
                     j += 1
                 if j - i <= 3:
                     center_idx = (i + j) // 2
-                    freq_mhz = freq_bins[center_idx] / 1_000_000 if center_idx < len(freq_bins) else 0
-                    power = self._bin_max_hold[center_idx] if center_idx < len(self._bin_max_hold) else None
+                    freq_mhz = (
+                        freq_bins[center_idx] / 1_000_000 if center_idx < len(freq_bins) else 0
+                    )
+                    power = (
+                        self._bin_max_hold[center_idx]
+                        if center_idx < len(self._bin_max_hold)
+                        else None
+                    )
                     duration_s = consec[center_idx] * self._sweep_seconds
-                    flags.append({
-                        "type": "cw",
-                        "freq_mhz": round(freq_mhz, 4),
-                        "power_db": round(power, 1) if power is not None else None,
-                        "duration_s": round(duration_s, 1),
-                    })
+                    flags.append(
+                        {
+                            "type": "cw",
+                            "freq_mhz": round(freq_mhz, 4),
+                            "power_db": round(power, 1) if power is not None else None,
+                            "duration_s": round(duration_s, 1),
+                        }
+                    )
                 i = j
             else:
                 i += 1
@@ -344,12 +358,14 @@ class LoraChannelAnalyzer:
         if nf is not None and self._noise_baseline_db is not None:
             delta = nf - self._noise_baseline_db
             if delta > 3.0:
-                flags.append({
-                    "type": "noise_elevated",
-                    "current_db": round(nf, 1),
-                    "baseline_db": round(self._noise_baseline_db, 1),
-                    "delta_db": round(delta, 1),
-                })
+                flags.append(
+                    {
+                        "type": "noise_elevated",
+                        "current_db": round(nf, 1),
+                        "baseline_db": round(self._noise_baseline_db, 1),
+                        "delta_db": round(delta, 1),
+                    }
+                )
 
         return flags
 
@@ -392,15 +408,17 @@ class LoraChannelAnalyzer:
                 interference_penalty += 10.0
 
             score = max(0.0, 100.0 - duty_pct - interference_penalty)
-            scored.append({
-                "idx": ch.idx,
-                "center_mhz": round(ch.center_hz / 1_000_000, 4),
-                "bw_khz": ch.bw_hz // 1000,
-                "dir": ch.direction,
-                "score": round(score, 1),
-                "duty_pct": duty_pct,
-                "interference_penalty": round(interference_penalty, 1),
-            })
+            scored.append(
+                {
+                    "idx": ch.idx,
+                    "center_mhz": round(ch.center_hz / 1_000_000, 4),
+                    "bw_khz": ch.bw_hz // 1000,
+                    "dir": ch.direction,
+                    "score": round(score, 1),
+                    "duty_pct": duty_pct,
+                    "interference_penalty": round(interference_penalty, 1),
+                }
+            )
 
         scored.sort(key=lambda c: c["score"], reverse=True)
         return scored[:10]
@@ -420,19 +438,21 @@ class LoraChannelAnalyzer:
                 active = power_per_bin > nf + self._threshold_db
             if active:
                 active_count += 1
-            channels_out.append({
-                "idx": ch.idx,
-                "center_mhz": round(ch.center_hz / 1_000_000, 4),
-                "bw_khz": ch.bw_hz // 1000,
-                "dir": ch.direction,
-                "power_db": round(power, 1) if power is not None else None,
-                "avg_db": stats["avg_db"],
-                "peak_db": stats["peak_db"],
-                "duty_pct": stats["duty_pct"],
-                "active": active,
-                "det_count": stats["det_count"],
-                "last_active_at": stats["last_active_at"],
-            })
+            channels_out.append(
+                {
+                    "idx": ch.idx,
+                    "center_mhz": round(ch.center_hz / 1_000_000, 4),
+                    "bw_khz": ch.bw_hz // 1000,
+                    "dir": ch.direction,
+                    "power_db": round(power, 1) if power is not None else None,
+                    "avg_db": stats["avg_db"],
+                    "peak_db": stats["peak_db"],
+                    "duty_pct": stats["duty_pct"],
+                    "active": active,
+                    "det_count": stats["det_count"],
+                    "last_active_at": stats["last_active_at"],
+                }
+            )
 
         nf_trend = [
             {"t": round(t, 3), "db": round(db, 1)}
@@ -443,15 +463,16 @@ class LoraChannelAnalyzer:
 
         # Hourly noise floor — last 24 entries
         hourly = [
-            {"t": round(t, 0), "db": round(db, 1)}
-            for t, db in list(self._noise_floor_hourly)[-24:]
+            {"t": round(t, 0), "db": round(db, 1)} for t, db in list(self._noise_floor_hourly)[-24:]
         ]
 
         return {
             "channels": channels_out,
             "noise_floor_db": round(nf, 1) if nf is not None else None,
             "noise_floor_trend": nf_trend,
-            "noise_baseline_db": round(self._noise_baseline_db, 1) if self._noise_baseline_db is not None else None,
+            "noise_baseline_db": round(self._noise_baseline_db, 1)
+            if self._noise_baseline_db is not None
+            else None,
             "active_count": active_count,
             "threshold_db": self._threshold_db,
             "interference_flags": interference,
@@ -466,7 +487,6 @@ class LoraChannelAnalyzer:
             entries = list(self._channel_power_history[ci])
             if entries:
                 ch_hist[ci] = [
-                    [round(t, 3), round(p, 1) if p is not None else None]
-                    for t, p in entries
+                    [round(t, 3), round(p, 1) if p is not None else None] for t, p in entries
                 ]
         return ch_hist

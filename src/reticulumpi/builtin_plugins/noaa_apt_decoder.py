@@ -87,12 +87,14 @@ class NOAAAPTDecoder(SignalPluginBase):
         self._load_existing_images()
 
         self.event_bus.subscribe(
-            events.SPACE_PASS_UPCOMING, self._on_pass_prediction,
+            events.SPACE_PASS_UPCOMING,
+            self._on_pass_prediction,
         )
 
     def _on_stop(self) -> None:
         self.event_bus.unsubscribe(
-            events.SPACE_PASS_UPCOMING, self._on_pass_prediction,
+            events.SPACE_PASS_UPCOMING,
+            self._on_pass_prediction,
         )
 
     def _load_existing_images(self) -> None:
@@ -106,13 +108,15 @@ class NOAAAPTDecoder(SignalPluginBase):
                 stat = f.stat()
                 parts = f.stem.split("_")
                 sat_name = parts[0].replace("-", " ") if parts else "Unknown"
-                self._recent_images.append({
-                    "satellite": sat_name,
-                    "filename": f.name,
-                    "file_size_bytes": stat.st_size,
-                    "captured_at": stat.st_mtime,
-                    "quality": "unknown",
-                })
+                self._recent_images.append(
+                    {
+                        "satellite": sat_name,
+                        "filename": f.name,
+                        "file_size_bytes": stat.st_size,
+                        "captured_at": stat.st_mtime,
+                        "quality": "unknown",
+                    }
+                )
         except Exception:
             self.log.debug("Could not load existing images", exc_info=True)
 
@@ -125,14 +129,16 @@ class NOAAAPTDecoder(SignalPluginBase):
                 continue
             if p.get("max_el", 0) < self._min_elevation:
                 continue
-            noaa_passes.append({
-                "satellite": name,
-                "freq_mhz": self._satellites[name],
-                "aos_ts": p["aos_ts"],
-                "los_ts": p["los_ts"],
-                "max_el": p.get("max_el", 0),
-                "duration_s": p.get("duration_s", 0),
-            })
+            noaa_passes.append(
+                {
+                    "satellite": name,
+                    "freq_mhz": self._satellites[name],
+                    "aos_ts": p["aos_ts"],
+                    "los_ts": p["los_ts"],
+                    "max_el": p.get("max_el", 0),
+                    "duration_s": p.get("duration_s", 0),
+                }
+            )
 
         new_passes = sorted(noaa_passes, key=lambda x: x["aos_ts"])[:6]
         with self._passes_lock:
@@ -198,12 +204,18 @@ class NOAAAPTDecoder(SignalPluginBase):
 
         rtl_cmd = [
             rtl_fm,
-            "-d", str(device_index),
-            "-f", str(freq_hz),
-            "-s", "48000",
-            "-p", str(self._ppm),
-            "-E", "dc",
-            "-F", "9",
+            "-d",
+            str(device_index),
+            "-f",
+            str(freq_hz),
+            "-s",
+            "48000",
+            "-p",
+            str(self._ppm),
+            "-E",
+            "dc",
+            "-F",
+            "9",
         ]
         if self._gain is not None:
             rtl_cmd.extend(["-g", str(self._gain)])
@@ -211,11 +223,24 @@ class NOAAAPTDecoder(SignalPluginBase):
 
         if sox:
             sox_cmd = [
-                sox, "-t", "raw", "-r", "48000", "-e", "signed",
-                "-b", "16", "-c", "1", "-", wav_path,
+                sox,
+                "-t",
+                "raw",
+                "-r",
+                "48000",
+                "-e",
+                "signed",
+                "-b",
+                "16",
+                "-c",
+                "1",
+                "-",
+                wav_path,
             ]
             self.log.debug(
-                "Launching: %s | %s", " ".join(rtl_cmd), " ".join(sox_cmd),
+                "Launching: %s | %s",
+                " ".join(rtl_cmd),
+                " ".join(sox_cmd),
             )
             rtl_proc = subprocess.Popen(
                 rtl_cmd,
@@ -243,17 +268,23 @@ class NOAAAPTDecoder(SignalPluginBase):
         self._start_thread(self._monitor_pass, name="noaa-monitor")
 
         try:
-            self.event_bus.publish(events.NOAA_APT_CAPTURE_START, {
-                "satellite": current["satellite"],
-                "freq_mhz": current["freq_mhz"],
-                "max_el": current["max_el"],
-            })
+            self.event_bus.publish(
+                events.NOAA_APT_CAPTURE_START,
+                {
+                    "satellite": current["satellite"],
+                    "freq_mhz": current["freq_mhz"],
+                    "max_el": current["max_el"],
+                },
+            )
         except Exception:
             pass
 
         self.log.info(
             "Recording %s at %.3f MHz (PID %d, file %s)",
-            current["satellite"], current["freq_mhz"], self._pid, wav_name,
+            current["satellite"],
+            current["freq_mhz"],
+            self._pid,
+            wav_name,
         )
 
     def _kill_subprocess(self) -> None:
@@ -308,10 +339,13 @@ class NOAAAPTDecoder(SignalPluginBase):
         self._update_snapshot_cache()
 
         try:
-            self.event_bus.publish(events.NOAA_APT_CAPTURE_DONE, {
-                "satellite": cp.get("satellite"),
-                "recording_file": cp.get("recording_file"),
-            })
+            self.event_bus.publish(
+                events.NOAA_APT_CAPTURE_DONE,
+                {
+                    "satellite": cp.get("satellite"),
+                    "recording_file": cp.get("recording_file"),
+                },
+            )
         except Exception:
             pass
 
@@ -336,7 +370,8 @@ class NOAAAPTDecoder(SignalPluginBase):
 
         sat_safe = pass_info["satellite"].replace(" ", "-")
         ts_str = time.strftime(
-            "%Y%m%d_%H%M", time.gmtime(pass_info.get("started_at", time.time())),
+            "%Y%m%d_%H%M",
+            time.gmtime(pass_info.get("started_at", time.time())),
         )
         png_name = f"{sat_safe}_{ts_str}.png"
         png_path = os.path.join(self._image_dir, png_name)
@@ -346,10 +381,15 @@ class NOAAAPTDecoder(SignalPluginBase):
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             if result.returncode != 0:
-                self.log.warning("Decode failed (rc=%d): %s", result.returncode, result.stderr[:200])
+                self.log.warning(
+                    "Decode failed (rc=%d): %s", result.returncode, result.stderr[:200]
+                )
                 self._stats["failed_decodes"] += 1
             elif os.path.exists(png_path) and os.path.getsize(png_path) > 0:
                 max_el = pass_info.get("max_el", 0)
@@ -371,9 +411,13 @@ class NOAAAPTDecoder(SignalPluginBase):
                     quality_score += 0.1
                 quality_score = round(min(1.0, quality_score), 2)
                 quality = (
-                    "excellent" if quality_score >= 0.8 else
-                    "good" if quality_score >= 0.6 else
-                    "fair" if quality_score >= 0.4 else "poor"
+                    "excellent"
+                    if quality_score >= 0.8
+                    else "good"
+                    if quality_score >= 0.6
+                    else "fair"
+                    if quality_score >= 0.4
+                    else "poor"
                 )
                 image_meta = {
                     "satellite": pass_info["satellite"],
@@ -399,10 +443,13 @@ class NOAAAPTDecoder(SignalPluginBase):
 
                 total = self._stats["successful_decodes"] + self._stats["failed_decodes"]
                 self._stats["success_rate_pct"] = round(
-                    self._stats["successful_decodes"] / max(1, total) * 100, 1,
+                    self._stats["successful_decodes"] / max(1, total) * 100,
+                    1,
                 )
 
-                self.log.info("Decoded image: %s (%s quality, score %.2f)", png_name, quality, quality_score)
+                self.log.info(
+                    "Decoded image: %s (%s quality, score %.2f)", png_name, quality, quality_score
+                )
                 try:
                     self.event_bus.publish(events.NOAA_APT_DECODE_COMPLETE, image_meta)
                 except Exception:

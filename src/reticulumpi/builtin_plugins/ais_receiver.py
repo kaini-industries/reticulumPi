@@ -20,19 +20,39 @@ from reticulumpi.sdr_scheduler import PRIORITY_BACKGROUND
 
 _SHIP_TYPES: dict[int, str] = {
     0: "Not available",
-    20: "Wing in ground", 30: "Fishing", 31: "Towing", 32: "Towing (large)",
-    33: "Dredging", 34: "Diving ops", 35: "Military ops",
-    36: "Sailing", 37: "Pleasure craft",
-    40: "High speed craft", 50: "Pilot vessel", 51: "SAR vessel",
-    52: "Tug", 53: "Port tender", 55: "Law enforcement",
-    60: "Passenger", 70: "Cargo", 80: "Tanker", 90: "Other",
+    20: "Wing in ground",
+    30: "Fishing",
+    31: "Towing",
+    32: "Towing (large)",
+    33: "Dredging",
+    34: "Diving ops",
+    35: "Military ops",
+    36: "Sailing",
+    37: "Pleasure craft",
+    40: "High speed craft",
+    50: "Pilot vessel",
+    51: "SAR vessel",
+    52: "Tug",
+    53: "Port tender",
+    55: "Law enforcement",
+    60: "Passenger",
+    70: "Cargo",
+    80: "Tanker",
+    90: "Other",
 }
 
 _NAV_STATUSES = {
-    0: "Under way using engine", 1: "At anchor", 2: "Not under command",
-    3: "Restricted manoeuvrability", 4: "Constrained by draught",
-    5: "Moored", 6: "Aground", 7: "Engaged in fishing",
-    8: "Under way sailing", 14: "AIS-SART", 15: "Not defined",
+    0: "Under way using engine",
+    1: "At anchor",
+    2: "Not under command",
+    3: "Restricted manoeuvrability",
+    4: "Constrained by draught",
+    5: "Moored",
+    6: "Aground",
+    7: "Engaged in fishing",
+    8: "Under way sailing",
+    14: "AIS-SART",
+    15: "Not defined",
 }
 
 
@@ -176,7 +196,6 @@ class AISReceiver(SignalPluginBase):
                 except Exception:
                     pass
 
-
             vessel["last_seen"] = now
             vessel["message_count"] += 1
 
@@ -194,7 +213,8 @@ class AISReceiver(SignalPluginBase):
                 status_code = msg.get("status")
                 if status_code is not None:
                     vessel["nav_status"] = _NAV_STATUSES.get(
-                        status_code, f"Status {status_code}",
+                        status_code,
+                        f"Status {status_code}",
                     )
 
                 if vessel["lat"] is not None and vessel["lon"] is not None:
@@ -203,11 +223,18 @@ class AISReceiver(SignalPluginBase):
                     )
                     if self._receiver_lat is not None and self._receiver_lon is not None:
                         from reticulumpi.geo import haversine_nm, bearing_deg
+
                         vessel["distance_nm"] = round(
-                            haversine_nm(self._receiver_lat, self._receiver_lon, vessel["lat"], vessel["lon"]), 1,
+                            haversine_nm(
+                                self._receiver_lat, self._receiver_lon, vessel["lat"], vessel["lon"]
+                            ),
+                            1,
                         )
                         vessel["bearing_deg"] = round(
-                            bearing_deg(self._receiver_lat, self._receiver_lon, vessel["lat"], vessel["lon"]), 0,
+                            bearing_deg(
+                                self._receiver_lat, self._receiver_lon, vessel["lat"], vessel["lon"]
+                            ),
+                            0,
                         )
 
             elif msg_type == 5:

@@ -14,41 +14,58 @@ from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _
 _INTERFACE_SCHEMAS: dict[str, dict] = {
     "TCPClientInterface": {
         "required": {"target_host": str, "target_port": int},
-        "optional": {"kiss_framing": bool, "connect_timeout": int,
-                      "max_reconnect_tries": int},
+        "optional": {"kiss_framing": bool, "connect_timeout": int, "max_reconnect_tries": int},
     },
     "TCPServerInterface": {
         "required": {},
-        "optional": {"listen_ip": str, "listen_port": int,
-                      "kiss_framing": bool},
+        "optional": {"listen_ip": str, "listen_port": int, "kiss_framing": bool},
     },
     "RNodeInterface": {
-        "required": {"port": str, "frequency": int, "bandwidth": int,
-                      "txpower": int, "spreadingfactor": int, "codingrate": int},
-        "optional": {"id_callsign": str, "id_interval": int,
-                      "announce_cap": float, "airtime_limit_short": float,
-                      "airtime_limit_long": float},
+        "required": {
+            "port": str,
+            "frequency": int,
+            "bandwidth": int,
+            "txpower": int,
+            "spreadingfactor": int,
+            "codingrate": int,
+        },
+        "optional": {
+            "id_callsign": str,
+            "id_interval": int,
+            "announce_cap": float,
+            "airtime_limit_short": float,
+            "airtime_limit_long": float,
+        },
     },
     "UDPInterface": {
         "required": {},
-        "optional": {"listen_ip": str, "listen_port": int,
-                      "forward_ip": str, "forward_port": int},
+        "optional": {"listen_ip": str, "listen_port": int, "forward_ip": str, "forward_port": int},
     },
     "SerialInterface": {
         "required": {"port": str},
-        "optional": {"speed": int, "databits": int, "parity": str,
-                      "stopbits": int},
+        "optional": {"speed": int, "databits": int, "parity": str, "stopbits": int},
     },
     "KISSInterface": {
         "required": {"port": str},
-        "optional": {"speed": int, "databits": int, "parity": str,
-                      "stopbits": int, "preamble": int, "txtail": int,
-                      "persistence": int, "slottime": int},
+        "optional": {
+            "speed": int,
+            "databits": int,
+            "parity": str,
+            "stopbits": int,
+            "preamble": int,
+            "txtail": int,
+            "persistence": int,
+            "slottime": int,
+        },
     },
     "AutoInterface": {
         "required": {},
-        "optional": {"group_id": str, "discovery_scope": str,
-                      "discovery_port": int, "data_port": int},
+        "optional": {
+            "group_id": str,
+            "discovery_scope": str,
+            "discovery_port": int,
+            "data_port": int,
+        },
     },
     "I2PInterface": {
         "required": {},
@@ -59,7 +76,7 @@ _INTERFACE_SCHEMAS: dict[str, dict] = {
 # RNode-specific value ranges
 _RNODE_RANGES = {
     "frequency": (100_000_000, 1_000_000_000),  # 100 MHz – 1 GHz
-    "bandwidth": (7800, 500_000),                 # 7.8 kHz – 500 kHz
+    "bandwidth": (7800, 500_000),  # 7.8 kHz – 500 kHz
     "txpower": (0, 22),
     "spreadingfactor": (7, 12),
     "codingrate": (5, 8),
@@ -154,7 +171,9 @@ async def handle_interfaces(request: aiohttp.web.Request) -> aiohttp.web.Respons
     try:
         loop = asyncio.get_running_loop()
         interfaces = await loop.run_in_executor(
-            None, _collect_interfaces, rns_instance,
+            None,
+            _collect_interfaces,
+            rns_instance,
         )
     except Exception as exc:
         return _ok({"interfaces": [], "error": f"Partial collection: {exc}"})
@@ -177,21 +196,24 @@ async def handle_interfaces_config(
     except Exception as exc:
         return _error(f"Failed to parse config: {exc}", 500)
 
-    return _ok({
-        "interfaces": [
-            {
-                "name": e.name,
-                "type": e.iface_type,
-                "enabled": e.enabled,
-                "properties": {
-                    k: v for k, v in e.properties.items()
-                    if k not in ("type", "enabled", "password")
-                },
-            }
-            for e in interfaces
-        ],
-        "config_path": path,
-    })
+    return _ok(
+        {
+            "interfaces": [
+                {
+                    "name": e.name,
+                    "type": e.iface_type,
+                    "enabled": e.enabled,
+                    "properties": {
+                        k: v
+                        for k, v in e.properties.items()
+                        if k not in ("type", "enabled", "password")
+                    },
+                }
+                for e in interfaces
+            ],
+            "config_path": path,
+        }
+    )
 
 
 async def handle_interface_toggle(
@@ -224,11 +246,13 @@ async def handle_interface_toggle(
     except Exception as exc:
         return _error(f"Failed to write config: {exc}", 500)
 
-    return _ok({
-        "name": name,
-        "enabled": new_enabled,
-        "restart_required": True,
-    })
+    return _ok(
+        {
+            "name": name,
+            "enabled": new_enabled,
+            "restart_required": True,
+        }
+    )
 
 
 async def handle_interface_add(
@@ -263,10 +287,11 @@ async def handle_interface_add(
     if len(iface_name) > 100:
         return _error("name too long", 400)
     import re
-    if not re.match(r'^[A-Za-z0-9 _-]{1,100}$', iface_name):
+
+    if not re.match(r"^[A-Za-z0-9 _-]{1,100}$", iface_name):
         return _error("Interface name contains invalid characters", 400)
     for k, v in properties.items():
-        if '\n' in str(k) or '\n' in str(v) or '\r' in str(k) or '\r' in str(v):
+        if "\n" in str(k) or "\n" in str(v) or "\r" in str(k) or "\r" in str(v):
             return _error("Properties must not contain newlines", 400)
 
     # Validate interface type and properties before writing
@@ -288,11 +313,13 @@ async def handle_interface_add(
     except Exception as exc:
         return _error(f"Failed to write config: {exc}", 500)
 
-    return _ok({
-        "name": iface_name,
-        "type": iface_type,
-        "restart_required": True,
-    })
+    return _ok(
+        {
+            "name": iface_name,
+            "type": iface_type,
+            "restart_required": True,
+        }
+    )
 
 
 def setup_interface_routes(app: aiohttp.web.Application) -> None:

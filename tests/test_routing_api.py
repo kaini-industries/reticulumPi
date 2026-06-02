@@ -68,7 +68,10 @@ class TestRoutingEndpoint:
             "blackholed": {},
         }
 
-        request = _make_request("page=2&per_page=50&sort=timestamp&order=desc&interface=TCP&min_hops=2&max_hops=4&search=aa", conn_mon)
+        request = _make_request(
+            "page=2&per_page=50&sort=timestamp&order=desc&interface=TCP&min_hops=2&max_hops=4&search=aa",
+            conn_mon,
+        )
         resp = asyncio.run(handle_routing(request))
 
         # Verify get_routing_data was called with parsed params

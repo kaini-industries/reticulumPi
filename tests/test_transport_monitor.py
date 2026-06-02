@@ -58,6 +58,7 @@ def test_validate_config_valid(mock_app, base_config):
 
 def test_validate_config_bad_interval(mock_app, base_config):
     from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
     base_config["check_interval"] = 2
     with pytest.raises(ValueError, match="check_interval"):
         with patch("RNS.Transport") as mt:
@@ -67,6 +68,7 @@ def test_validate_config_bad_interval(mock_app, base_config):
 
 def test_validate_config_bad_threshold(mock_app, base_config):
     from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
     base_config["down_threshold"] = 5
     with pytest.raises(ValueError, match="down_threshold"):
         with patch("RNS.Transport") as mt:
@@ -76,6 +78,7 @@ def test_validate_config_bad_threshold(mock_app, base_config):
 
 def test_validate_config_missing_hub_host(mock_app, base_config):
     from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
     base_config["primary_hubs"] = [{"target_port": 4242}]
     with pytest.raises(ValueError, match="target_host"):
         with patch("RNS.Transport") as mt:
@@ -85,6 +88,7 @@ def test_validate_config_missing_hub_host(mock_app, base_config):
 
 def test_validate_config_missing_hub_port(mock_app, base_config):
     from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
     base_config["fallback_hubs"] = [{"target_host": "x.com"}]
     with pytest.raises(ValueError, match="target_port"):
         with patch("RNS.Transport") as mt:
@@ -94,6 +98,7 @@ def test_validate_config_missing_hub_port(mock_app, base_config):
 
 def test_validate_config_hubs_not_list(mock_app, base_config):
     from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
     base_config["primary_hubs"] = "not-a-list"
     with pytest.raises(ValueError, match="primary_hubs must be a list"):
         with patch("RNS.Transport") as mt:
@@ -189,10 +194,11 @@ def test_failover_after_threshold(mock_app, base_config):
         plugin._all_down_since = time.monotonic() - 15
 
     mock_fallback = MagicMock()
-    with patch.object(plugin, "_probe_tcp", return_value=False), \
-         patch("RNS.Interfaces.TCPInterface.TCPClientInterface",
-               return_value=mock_fallback), \
-         patch("RNS.Transport") as mt:
+    with (
+        patch.object(plugin, "_probe_tcp", return_value=False),
+        patch("RNS.Interfaces.TCPInterface.TCPClientInterface", return_value=mock_fallback),
+        patch("RNS.Transport") as mt,
+    ):
         mt.interfaces = []
         plugin._check_health()
 
@@ -213,8 +219,7 @@ def test_fallback_teardown_on_recovery(mock_app, base_config):
     received = []
     mock_app.event_bus.subscribe(events.FALLBACK_DEACTIVATED, lambda t, d: received.append(d))
 
-    with patch.object(plugin, "_probe_tcp", return_value=True), \
-         patch("RNS.Transport") as mt:
+    with patch.object(plugin, "_probe_tcp", return_value=True), patch("RNS.Transport") as mt:
         mt.interfaces = [mock_fallback]
         plugin._check_health()
 
@@ -363,6 +368,7 @@ class TestAutoDiscoveryConfig:
 
     def test_bad_target_connections(self, mock_app, base_config):
         from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
         base_config["auto_discovery"] = {"enabled": True, "target_connections": 0}
         with pytest.raises(ValueError, match="target_connections"):
             with patch("RNS.Transport") as mt:
@@ -371,6 +377,7 @@ class TestAutoDiscoveryConfig:
 
     def test_bad_probe_interval(self, mock_app, base_config):
         from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
         base_config["auto_discovery"] = {"enabled": True, "probe_interval": 5}
         with pytest.raises(ValueError, match="probe_interval"):
             with patch("RNS.Transport") as mt:
@@ -379,6 +386,7 @@ class TestAutoDiscoveryConfig:
 
     def test_bad_cooldown_seconds(self, mock_app, base_config):
         from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
         base_config["auto_discovery"] = {"enabled": True, "cooldown_seconds": 10}
         with pytest.raises(ValueError, match="cooldown_seconds"):
             with patch("RNS.Transport") as mt:
@@ -387,6 +395,7 @@ class TestAutoDiscoveryConfig:
 
     def test_max_cooldown_less_than_cooldown(self, mock_app, base_config):
         from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
         base_config["auto_discovery"] = {
             "enabled": True,
             "cooldown_seconds": 300,
@@ -399,6 +408,7 @@ class TestAutoDiscoveryConfig:
 
     def test_bad_extra_hubs_missing_host(self, mock_app, base_config):
         from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
         base_config["auto_discovery"] = {
             "enabled": True,
             "extra_hubs": [{"target_port": 4242}],
@@ -434,10 +444,7 @@ class TestLoadHubPool:
     def test_custom_hub_list_path(self, mock_app, auto_config, tmp_path):
         hub_file = tmp_path / "custom_hubs.yaml"
         hub_file.write_text(
-            "hubs:\n"
-            "  - name: Custom\n"
-            "    target_host: custom.example.com\n"
-            "    target_port: 9999\n"
+            "hubs:\n  - name: Custom\n    target_host: custom.example.com\n    target_port: 9999\n"
         )
         auto_config["auto_discovery"]["hub_list_path"] = str(hub_file)
         plugin = _start_plugin(mock_app, auto_config)
@@ -531,18 +538,25 @@ class TestConnectDisconnect:
     def test_connect_auto_hub_success(self, mock_app, auto_config):
         plugin = _start_plugin(mock_app, auto_config)
 
-        hub = {"name": "TestHub", "target_host": "test.com", "target_port": 4242, "region": "na-east"}
+        hub = {
+            "name": "TestHub",
+            "target_host": "test.com",
+            "target_port": 4242,
+            "region": "na-east",
+        }
         mock_iface = MagicMock()
 
         received = []
         mock_app.event_bus.subscribe(events.HUB_POOL_CONNECTED, lambda t, d: received.append(d))
 
-        with patch.object(plugin, "_probe_tcp", return_value=True), \
-             patch(
-                 "RNS.Interfaces.TCPInterface.TCPClientInterface",
-                 return_value=mock_iface,
-             ), \
-             patch("RNS.Transport") as mt:
+        with (
+            patch.object(plugin, "_probe_tcp", return_value=True),
+            patch(
+                "RNS.Interfaces.TCPInterface.TCPClientInterface",
+                return_value=mock_iface,
+            ),
+            patch("RNS.Transport") as mt,
+        ):
             mt.interfaces = []
             result = plugin._connect_auto_hub(hub)
 
@@ -632,12 +646,14 @@ class TestCooldownBackoff:
         hub = {"name": "Test", "target_host": "test.com", "target_port": 4242, "region": "na-east"}
         mock_iface = MagicMock()
 
-        with patch.object(plugin, "_probe_tcp", return_value=True), \
-             patch(
-                 "RNS.Interfaces.TCPInterface.TCPClientInterface",
-                 return_value=mock_iface,
-             ), \
-             patch("RNS.Transport") as mt:
+        with (
+            patch.object(plugin, "_probe_tcp", return_value=True),
+            patch(
+                "RNS.Interfaces.TCPInterface.TCPClientInterface",
+                return_value=mock_iface,
+            ),
+            patch("RNS.Transport") as mt,
+        ):
             mt.interfaces = []
             plugin._connect_auto_hub(hub)
 
@@ -678,12 +694,14 @@ class TestAutoDiscoveryTick:
 
         mock_new_iface = MagicMock()
 
-        with patch.object(plugin, "_probe_tcp", side_effect=probe_side_effect), \
-             patch(
-                 "RNS.Interfaces.TCPInterface.TCPClientInterface",
-                 return_value=mock_new_iface,
-             ), \
-             patch("RNS.Transport") as mt:
+        with (
+            patch.object(plugin, "_probe_tcp", side_effect=probe_side_effect),
+            patch(
+                "RNS.Interfaces.TCPInterface.TCPClientInterface",
+                return_value=mock_new_iface,
+            ),
+            patch("RNS.Transport") as mt,
+        ):
             mt.interfaces = [mock_dead]
             plugin._auto_discovery_tick()
 
@@ -770,11 +788,11 @@ class TestHubExchange:
     def test_exchange_setup_creates_destination(self, mock_app, auto_config):
         mock_dest = MagicMock()
         mock_dest.hash = b"\xdd" * 16
-        with patch("RNS.Destination", return_value=mock_dest), \
-             patch("RNS.Transport") as mt:
+        with patch("RNS.Destination", return_value=mock_dest), patch("RNS.Transport") as mt:
             mt.interfaces = []
             mt.register_announce_handler = MagicMock()
             from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
             plugin = TransportMonitorPlugin(mock_app, auto_config)
             plugin.start()
         assert plugin._exchange_destination is not None
@@ -785,6 +803,7 @@ class TestHubExchange:
 
     def test_handle_hub_request_returns_pool(self, mock_app, auto_config):
         import RNS.vendor.umsgpack as umsgpack
+
         plugin = _start_plugin(mock_app, auto_config)
         plugin._hub_pool = [
             {"target_host": "a.com", "target_port": 4242, "name": "HubA", "region": "na-east"},
@@ -802,6 +821,7 @@ class TestHubExchange:
 
     def test_handle_hub_request_excludes_cooldown(self, mock_app, auto_config):
         import RNS.vendor.umsgpack as umsgpack
+
         plugin = _start_plugin(mock_app, auto_config)
         plugin._hub_pool = [
             {"target_host": "a.com", "target_port": 4242, "name": "HubA", "region": "na-east"},
@@ -889,6 +909,7 @@ class TestHubExchange:
         plugin = _start_plugin(mock_app, auto_config)
         # Fill up to MAX_EXCHANGE_PEERS
         from reticulumpi.builtin_plugins.transport_monitor import _MAX_EXCHANGE_PEERS
+
         for i in range(_MAX_EXCHANGE_PEERS):
             h = bytes([i]) * 16
             plugin._exchange_peers[h] = float(i)
@@ -905,6 +926,7 @@ class TestHubExchange:
 
     def test_exchange_config_validation(self, mock_app, base_config):
         from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
         base_config["auto_discovery"] = {
             "enabled": True,
             "exchange_interval": 30,  # too low, must be >= 60
@@ -1037,7 +1059,11 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_disable_on_stabilization_expired(
-        self, mock_subprocess, mock_app, tam_config, tmp_path,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
 
@@ -1080,9 +1106,11 @@ class TestTcpAutoManage:
         assert content.count("enabled = no") == 2
 
         import json
+
         state = json.loads((tmp_path / "state.json").read_text())
         assert set(state["disabled_interfaces"]) == {
-            "Primary Hub", "Secondary Hub",
+            "Primary Hub",
+            "Secondary Hub",
         }
 
         mock_subprocess.run.assert_called()
@@ -1090,7 +1118,11 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_enable_on_internet_restored(
-        self, mock_subprocess, mock_app, tam_config, tmp_path,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
 
@@ -1099,6 +1131,7 @@ class TestTcpAutoManage:
         plugin._internet_available = True
 
         import json
+
         (tmp_path / "state.json").write_text(
             json.dumps({"disabled_interfaces": ["Primary Hub"]}),
         )
@@ -1133,11 +1166,16 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_startup_recovery_online(
-        self, mock_subprocess, mock_app, tam_config, tmp_path,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
 
         import json
+
         state_path = tmp_path / "state.json"
         state_path.write_text(
             json.dumps({"disabled_interfaces": ["Primary Hub"]}),
@@ -1169,6 +1207,7 @@ class TestTcpAutoManage:
 
     def test_startup_recovery_offline(self, mock_app, tam_config, tmp_path):
         import json
+
         state_path = tmp_path / "state.json"
         state_path.write_text(
             json.dumps({"disabled_interfaces": ["Primary Hub"]}),
@@ -1185,7 +1224,11 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_no_action_when_no_tcp_interfaces(
-        self, mock_subprocess, mock_app, tam_config, tmp_path,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
     ):
         plugin = _start_plugin(mock_app, tam_config)
         plugin._tam_state_path = str(tmp_path / "state.json")
@@ -1193,10 +1236,7 @@ class TestTcpAutoManage:
 
         config_file = tmp_path / "config"
         config_file.write_text(
-            "[interfaces]\n"
-            "  [[Auto Discovery]]\n"
-            "    type = AutoInterface\n"
-            "    enabled = true\n"
+            "[interfaces]\n  [[Auto Discovery]]\n    type = AutoInterface\n    enabled = true\n"
         )
         plugin.app._reticulum_config_dir = str(tmp_path)
 
@@ -1208,11 +1248,16 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_user_disabled_not_re_enabled(
-        self, mock_subprocess, mock_app, tam_config, tmp_path,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
 
         import json
+
         state_path = tmp_path / "state.json"
         state_path.write_text(
             json.dumps({"disabled_interfaces": ["Primary Hub"]}),
@@ -1241,18 +1286,10 @@ class TestTcpAutoManage:
 
         content = config_file.read_text()
         lines = content.split("\n")
-        primary_idx = next(
-            i for i, line in enumerate(lines) if "Primary Hub" in line
-        )
-        user_idx = next(
-            i for i, line in enumerate(lines) if "User Disabled Hub" in line
-        )
-        primary_enabled = next(
-            line for line in lines[primary_idx:user_idx] if "enabled" in line
-        )
-        user_enabled = next(
-            line for line in lines[user_idx:] if "enabled" in line
-        )
+        primary_idx = next(i for i, line in enumerate(lines) if "Primary Hub" in line)
+        user_idx = next(i for i, line in enumerate(lines) if "User Disabled Hub" in line)
+        primary_enabled = next(line for line in lines[primary_idx:user_idx] if "enabled" in line)
+        user_enabled = next(line for line in lines[user_idx:] if "enabled" in line)
         assert "yes" in primary_enabled
         assert "false" in user_enabled or "no" in user_enabled
         plugin.stop()
@@ -1278,7 +1315,9 @@ class TestTcpAutoManage:
         plugin.stop()
 
     def test_get_hub_health_includes_tcp_auto_manage(
-        self, mock_app, tam_config,
+        self,
+        mock_app,
+        tam_config,
     ):
         plugin = _start_plugin(mock_app, tam_config)
         health = plugin.get_hub_health()
@@ -1294,17 +1333,20 @@ class TestTcpAutoManage:
         mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired
         mock_subprocess.CalledProcessError = subprocess.CalledProcessError
         mock_subprocess.run.side_effect = subprocess.TimeoutExpired(
-            cmd=["sudo", "systemctl", "restart", "rnsd"], timeout=15,
+            cmd=["sudo", "systemctl", "restart", "rnsd"],
+            timeout=15,
         )
         plugin = _start_plugin(mock_app, tam_config)
 
         restarting = []
         recovered = []
         mock_app.event_bus.subscribe(
-            events.RNSD_RESTARTING, lambda e, d: restarting.append(d),
+            events.RNSD_RESTARTING,
+            lambda e, d: restarting.append(d),
         )
         mock_app.event_bus.subscribe(
-            events.RNSD_RECOVERED, lambda e, d: recovered.append(d),
+            events.RNSD_RECOVERED,
+            lambda e, d: recovered.append(d),
         )
 
         plugin._restart_rnsd("test_timeout")
@@ -1317,7 +1359,8 @@ class TestTcpAutoManage:
         mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired
         mock_subprocess.CalledProcessError = subprocess.CalledProcessError
         mock_subprocess.run.side_effect = subprocess.CalledProcessError(
-            returncode=1, cmd=["sudo", "systemctl", "restart", "rnsd"],
+            returncode=1,
+            cmd=["sudo", "systemctl", "restart", "rnsd"],
             stderr=b"unit not found",
         )
         plugin = _start_plugin(mock_app, tam_config)
@@ -1325,10 +1368,12 @@ class TestTcpAutoManage:
         restarting = []
         recovered = []
         mock_app.event_bus.subscribe(
-            events.RNSD_RESTARTING, lambda e, d: restarting.append(d),
+            events.RNSD_RESTARTING,
+            lambda e, d: restarting.append(d),
         )
         mock_app.event_bus.subscribe(
-            events.RNSD_RECOVERED, lambda e, d: recovered.append(d),
+            events.RNSD_RECOVERED,
+            lambda e, d: recovered.append(d),
         )
 
         plugin._restart_rnsd("test_failed")
@@ -1338,7 +1383,10 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_restart_rnsd_success_events(
-        self, mock_subprocess, mock_app, tam_config,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
         plugin = _start_plugin(mock_app, tam_config)
@@ -1346,10 +1394,12 @@ class TestTcpAutoManage:
         restarting = []
         recovered = []
         mock_app.event_bus.subscribe(
-            events.RNSD_RESTARTING, lambda e, d: restarting.append(d),
+            events.RNSD_RESTARTING,
+            lambda e, d: restarting.append(d),
         )
         mock_app.event_bus.subscribe(
-            events.RNSD_RECOVERED, lambda e, d: recovered.append(d),
+            events.RNSD_RECOVERED,
+            lambda e, d: recovered.append(d),
         )
 
         plugin._restart_rnsd("test_success")
@@ -1361,7 +1411,10 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_restart_rnsd_cooldown(
-        self, mock_subprocess, mock_app, tam_config,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
         plugin = _start_plugin(mock_app, tam_config)
@@ -1376,7 +1429,11 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_disable_reverts_config_on_blocked_restart(
-        self, mock_subprocess, mock_app, tam_config, tmp_path,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
         plugin = _start_plugin(mock_app, tam_config)
@@ -1411,7 +1468,11 @@ class TestTcpAutoManage:
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
     def test_enable_reverts_config_on_blocked_restart(
-        self, mock_subprocess, mock_app, tam_config, tmp_path,
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
     ):
         mock_subprocess.run.return_value = MagicMock(returncode=0)
         plugin = _start_plugin(mock_app, tam_config)
@@ -1419,6 +1480,7 @@ class TestTcpAutoManage:
         plugin._internet_available = True
 
         import json
+
         state_path = tmp_path / "state.json"
         state_path.write_text(
             json.dumps({"disabled_interfaces": ["Primary Hub"]}),

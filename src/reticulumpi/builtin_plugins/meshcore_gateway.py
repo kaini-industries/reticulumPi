@@ -114,16 +114,19 @@ class MeshCoreGateway(PluginBase):
         # (from_key_prefix, msg_type, text) and drop duplicates within a
         # small window.
         self._dedup_ttl_seconds: float = max(
-            10.0, float(self.config.get("dedup_ttl_seconds", 60.0)),
+            10.0,
+            float(self.config.get("dedup_ttl_seconds", 60.0)),
         )
         self._dedup_max_entries: int = max(
-            32, int(self.config.get("dedup_max_entries", 256)),
+            32,
+            int(self.config.get("dedup_max_entries", 256)),
         )
         self._seen_msg_keys: dict[tuple[str, str, int], float] = {}
         # Cleanup is amortized: we only scan for stale/over-cap entries
         # every N inserts, not per-packet, to keep dedup O(1) amortized.
         self._seen_msg_cleanup_interval: int = max(
-            16, self._dedup_max_entries // 8,
+            16,
+            self._dedup_max_entries // 8,
         )
         self._seen_msg_inserts_since_cleanup: int = 0
 
@@ -158,7 +161,8 @@ class MeshCoreGateway(PluginBase):
         if self._loop and self._mc:
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    self._async_disconnect(), self._loop,
+                    self._async_disconnect(),
+                    self._loop,
                 )
                 future.result(timeout=5)
             except Exception:
@@ -183,9 +187,7 @@ class MeshCoreGateway(PluginBase):
             for task in pending:
                 task.cancel()
             if pending:
-                self._loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True)
-                )
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             self._loop.close()
 
     def _run_async(self, coro: Any, timeout: float = 15) -> Any:
@@ -206,9 +208,7 @@ class MeshCoreGateway(PluginBase):
         # the connection.  A single transient ``is_connected`` hiccup used
         # to trigger a full reconnect (~15-30s of lost messages); require
         # repeated failures so only a genuine outage escalates.
-        health_failure_threshold = max(
-            1, int(self.config.get("health_failure_threshold", 3))
-        )
+        health_failure_threshold = max(1, int(self.config.get("health_failure_threshold", 3)))
 
         consecutive_health_failures = 0
 
@@ -225,10 +225,13 @@ class MeshCoreGateway(PluginBase):
                         self._reconnect_failures,
                         exc,
                     )
-                    self.event_bus.publish(events.MESHCORE_CONNECT_FAILED, {
-                        "error": str(exc),
-                        "attempt": self._reconnect_failures,
-                    })
+                    self.event_bus.publish(
+                        events.MESHCORE_CONNECT_FAILED,
+                        {
+                            "error": str(exc),
+                            "attempt": self._reconnect_failures,
+                        },
+                    )
                     if max_attempts > 0 and self._reconnect_failures >= max_attempts:
                         self.log.error(
                             "Max reconnect attempts (%d) reached, giving up",
@@ -269,9 +272,12 @@ class MeshCoreGateway(PluginBase):
                     )
                     consecutive_health_failures = 0
                     self._disconnect_device()
-                    self.event_bus.publish(events.MESHCORE_DISCONNECTED, {
-                        "reason": "health_check_failed",
-                    })
+                    self.event_bus.publish(
+                        events.MESHCORE_DISCONNECTED,
+                        {
+                            "reason": "health_check_failed",
+                        },
+                    )
                     continue
 
             # Periodic advertisement
@@ -337,9 +343,12 @@ class MeshCoreGateway(PluginBase):
             self.log.warning("MeshCore device disconnected")
             with self._lock:
                 self._connected = False
-            self.event_bus.publish(events.MESHCORE_DISCONNECTED, {
-                "reason": "device_disconnected",
-            })
+            self.event_bus.publish(
+                events.MESHCORE_DISCONNECTED,
+                {
+                    "reason": "device_disconnected",
+                },
+            )
 
         async def _on_ack(event):
             self._handle_ack_event(event)
@@ -374,11 +383,14 @@ class MeshCoreGateway(PluginBase):
         fw = self._device_info.get("ver", "unknown")
         model = self._device_info.get("model", "unknown")
         self.log.info("MeshCore connected: %s %s", model, fw)
-        self.event_bus.publish(events.MESHCORE_CONNECTED, {
-            "firmware": fw,
-            "model": model,
-            "serial_port": serial_port,
-        })
+        self.event_bus.publish(
+            events.MESHCORE_CONNECTED,
+            {
+                "firmware": fw,
+                "model": model,
+                "serial_port": serial_port,
+            },
+        )
 
     def _disconnect_device(self) -> None:
         """Tear down the MeshCore connection."""
@@ -398,7 +410,8 @@ class MeshCoreGateway(PluginBase):
                 mc.unsubscribe(sub)
             except Exception:
                 self.log.debug(
-                    "Error unsubscribing MeshCore event handler", exc_info=True,
+                    "Error unsubscribing MeshCore event handler",
+                    exc_info=True,
                 )
 
         # Disconnect — only schedule the coroutine if the async loop is
@@ -411,9 +424,7 @@ class MeshCoreGateway(PluginBase):
             except Exception:
                 self.log.debug("Error disconnecting MeshCore", exc_info=True)
         else:
-            self.log.debug(
-                "MeshCore async loop not running; skipping device disconnect"
-            )
+            self.log.debug("MeshCore async loop not running; skipping device disconnect")
 
         self._save_contact_cache()
 
@@ -425,7 +436,8 @@ class MeshCoreGateway(PluginBase):
                 await mc.stop_auto_message_fetching()
             except Exception:
                 self.log.debug(
-                    "Error stopping MeshCore auto-fetch", exc_info=True,
+                    "Error stopping MeshCore auto-fetch",
+                    exc_info=True,
                 )
             try:
                 await mc.disconnect()
@@ -438,7 +450,8 @@ class MeshCoreGateway(PluginBase):
             await mc.stop_auto_message_fetching()
         except Exception:
             self.log.debug(
-                "Error stopping MeshCore auto-fetch (mc)", exc_info=True,
+                "Error stopping MeshCore auto-fetch (mc)",
+                exc_info=True,
             )
         try:
             await mc.disconnect()
@@ -547,15 +560,19 @@ class MeshCoreGateway(PluginBase):
         # Reject prefixes that span lines or look like URL-ish content
         if "\n" in prefix or "/" in prefix:
             return "", text
-        return prefix, text[idx + 2:]
+        return prefix, text[idx + 2 :]
 
     def _handle_incoming_message(
-        self, event: Any, msg_type: str = "direct",
+        self,
+        event: Any,
+        msg_type: str = "direct",
     ) -> None:
         """Process an incoming MeshCore message event."""
         try:
             payload = event.payload if isinstance(event.payload, dict) else {}
-            text = payload.get("text", str(event.payload) if not isinstance(event.payload, dict) else "")
+            text = payload.get(
+                "text", str(event.payload) if not isinstance(event.payload, dict) else ""
+            )
             channel = payload.get("channel_idx")
 
             # Direct messages carry a pubkey_prefix; channel messages don't —
@@ -594,7 +611,8 @@ class MeshCoreGateway(PluginBase):
                 if prior is not None and prior > cutoff:
                     self.log.debug(
                         "Dropping duplicate MeshCore %s from %s",
-                        msg_type, from_key[:12] or "anon",
+                        msg_type,
+                        from_key[:12] or "anon",
                     )
                     return
                 self._seen_msg_keys[dedup_key] = now
@@ -602,14 +620,12 @@ class MeshCoreGateway(PluginBase):
                 # Amortized cleanup: drop TTL-expired entries, then trim
                 # oldest if still over the absolute cap.
                 if (
-                    self._seen_msg_inserts_since_cleanup
-                    >= self._seen_msg_cleanup_interval
+                    self._seen_msg_inserts_since_cleanup >= self._seen_msg_cleanup_interval
                     or len(self._seen_msg_keys) > self._dedup_max_entries
                 ):
                     self._seen_msg_inserts_since_cleanup = 0
                     self._seen_msg_keys = {
-                        k: v for k, v in self._seen_msg_keys.items()
-                        if v > cutoff
+                        k: v for k, v in self._seen_msg_keys.items() if v > cutoff
                     }
                     if len(self._seen_msg_keys) > self._dedup_max_entries:
                         # Hard cap — keep newest N by timestamp
@@ -618,21 +634,24 @@ class MeshCoreGateway(PluginBase):
                             key=lambda kv: kv[1],
                             reverse=True,
                         )
-                        self._seen_msg_keys = dict(
-                            sorted_items[: self._dedup_max_entries]
-                        )
+                        self._seen_msg_keys = dict(sorted_items[: self._dedup_max_entries])
 
-            from_label = f"{from_name} ({from_key[:12]})" if from_name else (from_key[:12] or "unknown")
+            from_label = (
+                f"{from_name} ({from_key[:12]})" if from_name else (from_key[:12] or "unknown")
+            )
 
             if msg_type == "broadcast":
                 self.log.info(
                     "MeshCore channel msg (ch%s) from %s: %s",
-                    channel, from_label, text[:80],
+                    channel,
+                    from_label,
+                    text[:80],
                 )
             else:
                 self.log.info(
                     "MeshCore direct msg from %s: %s",
-                    from_label, text[:80],
+                    from_label,
+                    text[:80],
                 )
 
             with self._lock:
@@ -648,14 +667,17 @@ class MeshCoreGateway(PluginBase):
                     if opl is not None and opl >= 0:
                         path_len = opl
 
-            self.event_bus.publish(events.MESHCORE_MESSAGE_RECEIVED, {
-                "from_key": from_key,
-                "from_name": from_name,
-                "text": text[:500],
-                "msg_type": msg_type,
-                "channel": channel,
-                "path_len": path_len,
-            })
+            self.event_bus.publish(
+                events.MESHCORE_MESSAGE_RECEIVED,
+                {
+                    "from_key": from_key,
+                    "from_name": from_name,
+                    "text": text[:500],
+                    "msg_type": msg_type,
+                    "channel": channel,
+                    "path_len": path_len,
+                },
+            )
 
         except Exception:
             self.log.exception("Error handling incoming MeshCore message")
@@ -675,9 +697,12 @@ class MeshCoreGateway(PluginBase):
                 ack_code = str(ack_code)
             if ack_code:
                 self.log.debug("MeshCore ACK received: %s", ack_code)
-                self.event_bus.publish(events.MESHCORE_MESSAGE_ACKED, {
-                    "ack_code": ack_code,
-                })
+                self.event_bus.publish(
+                    events.MESHCORE_MESSAGE_ACKED,
+                    {
+                        "ack_code": ack_code,
+                    },
+                )
         except Exception:
             self.log.exception("Error handling MeshCore ACK event")
 
@@ -784,8 +809,13 @@ class MeshCoreGateway(PluginBase):
             return {"sent": False, "reason": str(exc)}
 
         from meshcore.events import EventType
+
         if result and result.type == EventType.ERROR:
-            reason = result.payload.get("reason", "unknown error") if isinstance(result.payload, dict) else str(result.payload)
+            reason = (
+                result.payload.get("reason", "unknown error")
+                if isinstance(result.payload, dict)
+                else str(result.payload)
+            )
             return {"sent": False, "reason": reason}
 
         with self._lock:
@@ -803,11 +833,14 @@ class MeshCoreGateway(PluginBase):
                 expected_ack = raw_ack.hex() if isinstance(raw_ack, bytes) else str(raw_ack)
             suggested_timeout = result.payload.get("suggested_timeout")
 
-        self.event_bus.publish(events.MESHCORE_MESSAGE_SENT, {
-            "text": text[:100],
-            "destination": dest_label,
-            "expected_ack": expected_ack,
-        })
+        self.event_bus.publish(
+            events.MESHCORE_MESSAGE_SENT,
+            {
+                "text": text[:100],
+                "destination": dest_label,
+                "expected_ack": expected_ack,
+            },
+        )
         return {
             "sent": True,
             "expected_ack": expected_ack,
@@ -922,16 +955,18 @@ class MeshCoreGateway(PluginBase):
                 last_advert = 0
             if cutoff and last_advert and last_advert < cutoff:
                 continue
-            result.append({
-                "public_key": key,
-                "name": contact.get("adv_name", ""),
-                "type": contact.get("type", 0),
-                "last_advert": last_advert,
-                "latitude": contact.get("adv_lat", 0),
-                "longitude": contact.get("adv_lon", 0),
-                "flags": contact.get("flags", 0),
-                "out_path_len": contact.get("out_path_len", -1),
-            })
+            result.append(
+                {
+                    "public_key": key,
+                    "name": contact.get("adv_name", ""),
+                    "type": contact.get("type", 0),
+                    "last_advert": last_advert,
+                    "latitude": contact.get("adv_lat", 0),
+                    "longitude": contact.get("adv_lon", 0),
+                    "flags": contact.get("flags", 0),
+                    "out_path_len": contact.get("out_path_len", -1),
+                }
+            )
         return result
 
     def get_meshcore_nodes(self) -> list[dict[str, Any]]:

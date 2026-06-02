@@ -45,6 +45,7 @@ class RemoteClient:
         # Load or create client identity
         if identity_path:
             import os
+
             if os.path.isfile(identity_path):
                 self.identity = RNS.Identity.from_file(identity_path)
             else:
@@ -117,7 +118,9 @@ class RemoteClient:
         print(f"Connected to {RNS.prettyhexrep(dest_hash)}")
         return True
 
-    def request(self, path: str, data: Any = None, timeout: float | None = None) -> dict[str, Any] | None:
+    def request(
+        self, path: str, data: Any = None, timeout: float | None = None
+    ) -> dict[str, Any] | None:
         """Send a request over the Link and return the parsed response."""
         if not self._link or self._link_closed.is_set():
             return None
@@ -276,7 +279,8 @@ def run_interactive(client: RemoteClient) -> None:
 
 
 def _print_help() -> None:
-    print("""
+    print(
+        """
 Available commands:
   ping          — Check connectivity and round-trip time
   status        — Get node status (version, plugins, identity)
@@ -290,7 +294,8 @@ Available commands:
   disable NAME  — Stop and unload a plugin
   help          — Show this help
   quit          — Disconnect and exit
-""".strip())
+""".strip()
+    )
 
 
 def run_single_command(client: RemoteClient, command: str, args: str = "") -> int:

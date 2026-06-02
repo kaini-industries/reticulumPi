@@ -163,9 +163,7 @@ class TestEnsurePath:
         plugin.start()
 
         events_received = []
-        mock_app.event_bus.subscribe(
-            "path.warmed", lambda e, d: events_received.append(d)
-        )
+        mock_app.event_bus.subscribe("path.warmed", lambda e, d: events_received.append(d))
 
         result = plugin.ensure_path(b"\xaa" * 16, timeout=2)
         assert result is True
@@ -182,9 +180,7 @@ class TestEnsurePath:
         plugin.start()
 
         events_received = []
-        mock_app.event_bus.subscribe(
-            "path.warm_failed", lambda e, d: events_received.append(d)
-        )
+        mock_app.event_bus.subscribe("path.warm_failed", lambda e, d: events_received.append(d))
 
         result = plugin.ensure_path(b"\xaa" * 16, timeout=1)
         assert result is False
@@ -282,9 +278,7 @@ class TestEventPublishing:
         plugin.start()
 
         events_received = []
-        mock_app.event_bus.subscribe(
-            "path.warming_cycle", lambda e, d: events_received.append(d)
-        )
+        mock_app.event_bus.subscribe("path.warming_cycle", lambda e, d: events_received.append(d))
 
         mock_app.get_plugin.return_value = None
         plugin._run_warm_cycle()

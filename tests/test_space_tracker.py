@@ -199,7 +199,7 @@ class TestTleParser:
     def test_partial_trailing_triplet_dropped(self):
         text = _SAMPLE_TLE + "\nORPHAN SAT\n1 99999U 00000A"
         sats = _parse_tle_block(text)
-        assert len(sats) == 2   # trailing partial not included
+        assert len(sats) == 2  # trailing partial not included
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +210,7 @@ class TestPropagationMath:
 
     def test_gmst_at_j2000(self):
         import math
+
         # Known: GMST at J2000 (2451545.0) ≈ 280.46 degrees
         g = math.degrees(_gmst_rad(2451545.0))
         assert 280.0 < g < 281.0
@@ -270,6 +271,7 @@ def _sine_el_fn(period_s=600.0, amplitude=30.0, az=90.0, t_offset=0.0):
     def fn(t):
         phase = 2.0 * math.pi * (t - t_offset) / period_s
         return (amplitude * math.sin(phase), az)
+
     return fn
 
 
@@ -328,7 +330,11 @@ class TestFindPasses:
     def test_max_passes_cap_respected(self):
         fn = _sine_el_fn(period_s=600.0, amplitude=45.0)
         passes = _find_passes(
-            fn, t_start=0.0, t_end=100000.0, min_el_deg=0.0, max_passes=5,
+            fn,
+            t_start=0.0,
+            t_end=100000.0,
+            min_el_deg=0.0,
+            max_passes=5,
         )
         assert len(passes) <= 5
 
@@ -366,6 +372,7 @@ class TestFindPasses:
     def test_empty_when_never_rises(self):
         def always_below(t):
             return (-5.0, 0.0)
+
         passes = _find_passes(always_below, 0.0, 3600.0, min_el_deg=0.0)
         assert passes == []
 
@@ -402,11 +409,13 @@ class TestSgp4IntegratedPasses:
 
     def _epoch_start(self):
         import datetime as _dt
+
         # 2024-01-01 12:00 UTC
         return _dt.datetime(2024, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc).timestamp()
 
     def test_iss_produces_passes_over_24h(self):
         from sgp4.api import jday
+
         satrec = self._iss_satrec()
         observer = {"lat": 40.0, "lon": 0.0, "elev_m": 0.0}
 
@@ -425,6 +434,7 @@ class TestSgp4IntegratedPasses:
 
     def test_iss_min_elevation_filter(self):
         from sgp4.api import jday
+
         satrec = self._iss_satrec()
         observer = {"lat": 40.0, "lon": 0.0, "elev_m": 0.0}
         t_start = self._epoch_start()
@@ -439,6 +449,7 @@ class TestSgp4IntegratedPasses:
 
     def test_sat_el_az_at_returns_numeric(self):
         from sgp4.api import jday
+
         satrec = self._iss_satrec()
         observer = {"lat": 40.0, "lon": 0.0, "elev_m": 0.0}
         result = _sat_el_az_at(satrec, jday, observer, self._epoch_start())
@@ -458,6 +469,7 @@ def mock_app(tmp_path):
     app.identity = MagicMock()
     app.identity.hash = b"\x02" * 16
     from reticulumpi.event_bus import EventBus
+
     app.event_bus = EventBus()
     app.plugins = {}
     app.node_name = "TestNode"
@@ -467,11 +479,13 @@ def mock_app(tmp_path):
 class TestValidateConfig:
     def test_rejects_tle_refresh_too_low(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         with pytest.raises(ValueError, match="tle_refresh_hours"):
             SpaceTrackerPlugin(mock_app, {"tle_refresh_hours": 1})
 
     def test_rejects_launch_interval_too_low(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         with pytest.raises(ValueError, match="launches.poll_interval_minutes"):
             SpaceTrackerPlugin(
                 mock_app,
@@ -480,6 +494,7 @@ class TestValidateConfig:
 
     def test_rejects_weather_interval_too_low(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         with pytest.raises(ValueError, match="space_weather.poll_interval_minutes"):
             SpaceTrackerPlugin(
                 mock_app,
@@ -488,6 +503,7 @@ class TestValidateConfig:
 
     def test_accepts_valid_config(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         plugin = SpaceTrackerPlugin(
             mock_app,
             {
@@ -500,11 +516,13 @@ class TestValidateConfig:
 
     def test_rejects_non_list_groups(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         with pytest.raises(ValueError, match="celestrak_groups"):
             SpaceTrackerPlugin(mock_app, {"celestrak_groups": "stations"})
 
     def test_rejects_pass_min_elevation_out_of_range(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         with pytest.raises(ValueError, match="min_elevation_deg"):
             SpaceTrackerPlugin(
                 mock_app,
@@ -518,6 +536,7 @@ class TestValidateConfig:
 
     def test_rejects_pass_lookahead_out_of_range(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         with pytest.raises(ValueError, match="lookahead_hours"):
             SpaceTrackerPlugin(
                 mock_app,
@@ -531,6 +550,7 @@ class TestValidateConfig:
 
     def test_rejects_non_list_watchlist(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         with pytest.raises(ValueError, match="watchlist"):
             SpaceTrackerPlugin(
                 mock_app,
@@ -539,6 +559,7 @@ class TestValidateConfig:
 
     def test_accepts_valid_passes_config(self, mock_app):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         plugin = SpaceTrackerPlugin(
             mock_app,
             {
@@ -555,6 +576,7 @@ class TestValidateConfig:
     def test_passes_disabled_skips_validation(self, mock_app):
         """When passes.enabled is false, out-of-range values don't error."""
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         plugin = SpaceTrackerPlugin(
             mock_app,
             {"passes": {"enabled": False, "min_elevation_deg": 999}},
@@ -569,6 +591,7 @@ class TestValidateConfig:
 class TestPluginLifecycle:
     def test_start_stop_clean(self, mock_app, tmp_path):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},
@@ -583,6 +606,7 @@ class TestPluginLifecycle:
 
     def test_state_persisted_on_stop(self, mock_app, tmp_path):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},
@@ -602,15 +626,20 @@ class TestPluginLifecycle:
 
     def test_state_loaded_on_start(self, mock_app, tmp_path):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         # Pre-seed a state file that marks celestrak as blocked
         state_file = tmp_path / "rate_state.json"
-        state_file.write_text(json.dumps({
-            "celestrak": {
-                "last_request_ts": time.time(),
-                "failures": 0,
-                "recent": [],
-            }
-        }))
+        state_file.write_text(
+            json.dumps(
+                {
+                    "celestrak": {
+                        "last_request_ts": time.time(),
+                        "failures": 0,
+                        "recent": [],
+                    }
+                }
+            )
+        )
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},
@@ -626,6 +655,7 @@ class TestPluginLifecycle:
 
     def test_get_status_reports_limiters(self, mock_app, tmp_path):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},
@@ -645,6 +675,7 @@ class TestPluginLifecycle:
     def test_http_not_called_when_limiter_blocks(self, mock_app, tmp_path):
         """When a limiter is cool-down locked, _fetch_group must not call http.get."""
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},
@@ -665,6 +696,7 @@ class TestPluginLifecycle:
     def test_passes_loop_stays_idle_without_watchlist(self, mock_app, tmp_path):
         """Empty watchlist → no passes thread starts (nothing to predict for)."""
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},
@@ -686,6 +718,7 @@ class TestPluginLifecycle:
 
     def test_get_status_reports_upcoming_passes(self, mock_app, tmp_path):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},
@@ -707,6 +740,7 @@ class TestPluginLifecycle:
             pytest.skip("sgp4 not installed")
         from sgp4.api import Satrec, jday
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
         cfg = {
             "cache_dir": str(tmp_path),
             "launches": {"enabled": False},

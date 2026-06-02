@@ -160,10 +160,13 @@ class EmergencyBroadcastPlugin(PluginBase):
             ttl,
         )
 
-        self.event_bus.publish(events.EMERGENCY_RECEIVED, {
-            "message": msg,
-            "source": "local",
-        })
+        self.event_bus.publish(
+            events.EMERGENCY_RECEIVED,
+            {
+                "message": msg,
+                "source": "local",
+            },
+        )
 
         return msg_id
 
@@ -217,10 +220,13 @@ class EmergencyBroadcastPlugin(PluginBase):
             self._store_message(msg)
 
         # Publish event
-        self.event_bus.publish(events.EMERGENCY_RECEIVED, {
-            "message": msg,
-            "source": "mesh",
-        })
+        self.event_bus.publish(
+            events.EMERGENCY_RECEIVED,
+            {
+                "message": msg,
+                "source": "mesh",
+            },
+        )
 
         # Re-broadcast with decremented TTL
         ttl = msg.get("ttl", 0)
@@ -297,5 +303,3 @@ class EmergencyBroadcastPlugin(PluginBase):
         origin = origin_hash.hex() if origin_hash else "local"
         raw = f"{origin}:{message}:{timestamp}".encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:32]
-
-

@@ -81,9 +81,7 @@ class YggdrasilTransportPlugin(PluginBase):
 
     plugin_name = "yggdrasil_transport"
     plugin_version = "1.0.0"
-    plugin_description = (
-        "Yggdrasil encrypted IPv6 overlay — global mesh connectivity"
-    )
+    plugin_description = "Yggdrasil encrypted IPv6 overlay — global mesh connectivity"
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -99,13 +97,9 @@ class YggdrasilTransportPlugin(PluginBase):
     def start(self) -> None:
         self._active = True
         self._lock = threading.Lock()
-        self._check_interval = self.config.get(
-            "check_interval", _DEFAULT_CHECK_INTERVAL
-        )
+        self._check_interval = self.config.get("check_interval", _DEFAULT_CHECK_INTERVAL)
         self._auto_configure_rns = self.config.get("auto_configure_rns", False)
-        self._rns_listen_port = self.config.get(
-            "rns_listen_port", _DEFAULT_RNS_PORT
-        )
+        self._rns_listen_port = self.config.get("rns_listen_port", _DEFAULT_RNS_PORT)
         self._admin_socket = self.config.get("admin_socket")  # None = auto
 
         # Resolved socket path (discovered on first check)
@@ -137,8 +131,7 @@ class YggdrasilTransportPlugin(PluginBase):
 
         self._start_thread(self._monitor_loop, "yggdrasil-monitor")
         self.log.info(
-            "Yggdrasil transport monitor started "
-            "(interval=%ds, auto_configure_rns=%s)",
+            "Yggdrasil transport monitor started (interval=%ds, auto_configure_rns=%s)",
             self._check_interval,
             self._auto_configure_rns,
         )
@@ -157,9 +150,7 @@ class YggdrasilTransportPlugin(PluginBase):
                 "running": self._health["running"],
                 "address": self._health["address"],
                 "peer_count": self._health["peer_count"],
-                "rns_interface_configured": self._health[
-                    "rns_interface_configured"
-                ],
+                "rns_interface_configured": self._health["rns_interface_configured"],
                 "issues": len(self._health["issues"]),
             }
 
@@ -201,9 +192,7 @@ class YggdrasilTransportPlugin(PluginBase):
             try:
                 self._run_check()
             except Exception:
-                self.log.debug(
-                    "Error in Yggdrasil monitor loop", exc_info=True
-                )
+                self.log.debug("Error in Yggdrasil monitor loop", exc_info=True)
             self._sleep_while_active(self._check_interval)
 
     def _run_check(self) -> None:
@@ -216,10 +205,7 @@ class YggdrasilTransportPlugin(PluginBase):
             self._health["installed"] = installed
 
         if not installed:
-            issues.append(
-                "Yggdrasil not installed — "
-                "install with: sudo apt-get install yggdrasil"
-            )
+            issues.append("Yggdrasil not installed — install with: sudo apt-get install yggdrasil")
             self._update_offline_state(issues)
             return
 
@@ -262,24 +248,16 @@ class YggdrasilTransportPlugin(PluginBase):
             elapsed = time.monotonic() - self._start_time
             if elapsed > _BOOTSTRAP_GRACE:
                 if not self.internet_available:
-                    issues.append(
-                        "Yggdrasil has 0 peers — "
-                        "internet is currently unavailable"
-                    )
+                    issues.append("Yggdrasil has 0 peers — internet is currently unavailable")
                 else:
-                    issues.append(
-                        "Yggdrasil has 0 peers — "
-                        "add public peers in /etc/yggdrasil.conf"
-                    )
+                    issues.append("Yggdrasil has 0 peers — add public peers in /etc/yggdrasil.conf")
 
         # 4. State transition events
         if not self._was_online:
             self._was_online = True
             addr = self._health.get("address", "?")
             self.log.info("Yggdrasil ONLINE — address %s", addr)
-            self._publish_event(
-                events.YGGDRASIL_ONLINE, {"address": addr}
-            )
+            self._publish_event(events.YGGDRASIL_ONLINE, {"address": addr})
 
         # Peer count change event
         if len(peers) != self._last_peer_count and self._last_peer_count >= 0:
@@ -459,21 +437,16 @@ class YggdrasilTransportPlugin(PluginBase):
 
             config_path = self._get_rns_config_path()
             if not config_path:
-                self.log.debug(
-                    "Cannot auto-configure: Reticulum config not found"
-                )
+                self.log.debug("Cannot auto-configure: Reticulum config not found")
                 return
 
             lines, interfaces = parse_rns_config(config_path)
 
             # Check if already configured
             for iface in interfaces:
-                name_match = (
-                    _RNS_INTERFACE_NAME.lower() in iface.name.lower()
-                )
+                name_match = _RNS_INTERFACE_NAME.lower() in iface.name.lower()
                 addr_match = address in (
-                    iface.properties.get("listen_ip", "")
-                    or iface.properties.get("listen_host", "")
+                    iface.properties.get("listen_ip", "") or iface.properties.get("listen_host", "")
                 )
                 if name_match or addr_match:
                     self._rns_configured = True
@@ -517,9 +490,7 @@ class YggdrasilTransportPlugin(PluginBase):
             )
 
         except Exception:
-            self.log.warning(
-                "Failed to auto-configure RNS interface", exc_info=True
-            )
+            self.log.warning("Failed to auto-configure RNS interface", exc_info=True)
 
     def _check_rns_interface_exists(self) -> None:
         """Check whether a Yggdrasil-bound RNS interface exists in the config."""
@@ -539,8 +510,7 @@ class YggdrasilTransportPlugin(PluginBase):
                     found = True
                     break
                 if address and address in (
-                    iface.properties.get("listen_ip", "")
-                    or iface.properties.get("listen_host", "")
+                    iface.properties.get("listen_ip", "") or iface.properties.get("listen_host", "")
                 ):
                     found = True
                     break
@@ -554,9 +524,7 @@ class YggdrasilTransportPlugin(PluginBase):
 
     # ── Helpers ───────────────────────────────────────────────────────
 
-    def _publish_event(
-        self, event_type: str, data: dict[str, Any] | None = None
-    ) -> None:
+    def _publish_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
         """Publish an event, swallowing errors."""
         try:
             if hasattr(self, "event_bus") and self.event_bus:

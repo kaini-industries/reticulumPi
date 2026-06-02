@@ -41,7 +41,8 @@ _STATE_FILENAME = "mesh_bridge_state.json"
 # Meshtastic/MeshCore auto-generated position-share alerts have a consistent
 # English phrase in the text body.  Matched case-insensitively.
 _POSITION_SHARE_RE = re.compile(
-    r"has shared their (position|location)", re.IGNORECASE,
+    r"has shared their (position|location)",
+    re.IGNORECASE,
 )
 
 # Tapback heuristic: text is short (≤6 chars after stripping) AND contains
@@ -95,9 +96,7 @@ class MeshBridge(PluginBase):
 
     plugin_name = "mesh_bridge"
     plugin_version = "1.0.0"
-    plugin_description = (
-        "Relays broadcasts (and optionally DMs) between Meshtastic and MeshCore."
-    )
+    plugin_description = "Relays broadcasts (and optionally DMs) between Meshtastic and MeshCore."
     broadcast_tier = 1
     broadcast_keys = "mesh_bridge"
     plugin_dependencies = ("meshtastic_gateway", "meshcore_gateway", "messaging_hub")
@@ -112,13 +111,9 @@ class MeshBridge(PluginBase):
             m_ch = pair.get("meshtastic")
             c_ch = pair.get("meshcore")
             if not isinstance(m_ch, int) or not (0 <= m_ch <= 7):
-                raise ValueError(
-                    f"channel_pair.meshtastic must be int 0-7, got {m_ch!r}"
-                )
+                raise ValueError(f"channel_pair.meshtastic must be int 0-7, got {m_ch!r}")
             if not isinstance(c_ch, int) or c_ch < 0:
-                raise ValueError(
-                    f"channel_pair.meshcore must be non-negative int, got {c_ch!r}"
-                )
+                raise ValueError(f"channel_pair.meshcore must be non-negative int, got {c_ch!r}")
             direction = pair.get("direction", "both")
             if direction not in ("both", "mesh_to_core", "core_to_mesh"):
                 raise ValueError(f"invalid direction: {direction!r}")
@@ -139,13 +134,9 @@ class MeshBridge(PluginBase):
             m_id = dm.get("meshtastic", "")
             c_id = dm.get("meshcore", "")
             if not (isinstance(m_id, str) and re.match(r"^![0-9a-fA-F]{8}$", m_id)):
-                raise ValueError(
-                    f"dm_pair.meshtastic must be '!XXXXXXXX', got {m_id!r}"
-                )
+                raise ValueError(f"dm_pair.meshtastic must be '!XXXXXXXX', got {m_id!r}")
             if not (isinstance(c_id, str) and re.match(r"^[0-9a-fA-F]{12,}$", c_id)):
-                raise ValueError(
-                    f"dm_pair.meshcore must be hex prefix >=12 chars, got {c_id!r}"
-                )
+                raise ValueError(f"dm_pair.meshcore must be hex prefix >=12 chars, got {c_id!r}")
 
         loop_regex = self.config.get("loop_detect_regex", _DEFAULT_LOOP_REGEX)
         try:
@@ -161,21 +152,13 @@ class MeshBridge(PluginBase):
         self._tag_core = self.config.get("tag_core", "[via Core]")
 
         # MTUs
-        self._mesh_mtu = int(
-            self.config.get("meshtastic_mtu", MESHTASTIC_MTU)
-        )
+        self._mesh_mtu = int(self.config.get("meshtastic_mtu", MESHTASTIC_MTU))
         self._core_mtu = int(self.config.get("meshcore_mtu", MESHCORE_MTU))
 
         # Loop detection + dedup
-        self._loop_re = re.compile(
-            self.config.get("loop_detect_regex", _DEFAULT_LOOP_REGEX)
-        )
-        self._dedup_ttl = float(
-            self.config.get("dedup_ttl_seconds", _DEFAULT_DEDUP_TTL)
-        )
-        self._dedup_max = int(
-            self.config.get("dedup_max_entries", _DEFAULT_DEDUP_MAX)
-        )
+        self._loop_re = re.compile(self.config.get("loop_detect_regex", _DEFAULT_LOOP_REGEX))
+        self._dedup_ttl = float(self.config.get("dedup_ttl_seconds", _DEFAULT_DEDUP_TTL))
+        self._dedup_max = int(self.config.get("dedup_max_entries", _DEFAULT_DEDUP_MAX))
         self._dedup_cache: dict[tuple[str, str, int], float] = {}
 
         # DM config.  Note: only mesh→core DMs can be routed to a specific
@@ -207,10 +190,8 @@ class MeshBridge(PluginBase):
                 "meshtastic": pair["meshtastic"],
                 "meshcore": pair["meshcore"],
                 "direction": direction,
-                "allow_regex": re.compile(pair["allow_regex"])
-                if pair.get("allow_regex") else None,
-                "deny_regex": re.compile(pair["deny_regex"])
-                if pair.get("deny_regex") else None,
+                "allow_regex": re.compile(pair["allow_regex"]) if pair.get("allow_regex") else None,
+                "deny_regex": re.compile(pair["deny_regex"]) if pair.get("deny_regex") else None,
             }
             if direction in ("both", "mesh_to_core"):
                 self._mesh_to_core[pair["meshtastic"]] = compiled
@@ -219,9 +200,7 @@ class MeshBridge(PluginBase):
 
         # Content filters — block auto-generated chatter that adds noise
         # when relayed across networks.
-        self._filter_position_shares = bool(
-            self.config.get("filter_position_shares", True)
-        )
+        self._filter_position_shares = bool(self.config.get("filter_position_shares", True))
         self._filter_tapbacks = bool(self.config.get("filter_tapbacks", True))
 
         # Circuit breaker
@@ -268,18 +247,19 @@ class MeshBridge(PluginBase):
 
         # Subscribe (offloaded to avoid blocking gateway callback threads)
         self.event_bus.subscribe_offloaded(
-            events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message,
+            events.MESHTASTIC_MESSAGE_RECEIVED,
+            self._on_mesh_message,
         )
         self.event_bus.subscribe_offloaded(
-            events.MESHCORE_MESSAGE_RECEIVED, self._on_core_message,
+            events.MESHCORE_MESSAGE_RECEIVED,
+            self._on_core_message,
         )
 
         self.log.info(
-            "mesh_bridge: %d broadcast pair(s), %d DM pair(s) active, "
-            "running=%s, grace=%.0fs",
-            len(self._mesh_to_core) + len(self._core_to_mesh) -
-            sum(1 for p in self._mesh_to_core.values()
-                if p.get("direction") == "both"),
+            "mesh_bridge: %d broadcast pair(s), %d DM pair(s) active, running=%s, grace=%.0fs",
+            len(self._mesh_to_core)
+            + len(self._core_to_mesh)
+            - sum(1 for p in self._mesh_to_core.values() if p.get("direction") == "both"),
             len(self._dm_mesh_to_core) + len(self._dm_core_to_mesh),
             self._running,
             self._startup_grace,
@@ -289,10 +269,12 @@ class MeshBridge(PluginBase):
         self._active = False
         try:
             self.event_bus.unsubscribe(
-                events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message,
+                events.MESHTASTIC_MESSAGE_RECEIVED,
+                self._on_mesh_message,
             )
             self.event_bus.unsubscribe(
-                events.MESHCORE_MESSAGE_RECEIVED, self._on_core_message,
+                events.MESHCORE_MESSAGE_RECEIVED,
+                self._on_core_message,
             )
         except Exception:
             self.log.debug("Error unsubscribing from event bus", exc_info=True)
@@ -315,7 +297,9 @@ class MeshBridge(PluginBase):
         return self.get_status()
 
     def set_running(
-        self, running: bool, reason: str | None = None,
+        self,
+        running: bool,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Toggle runtime state; persists to disk.
 
@@ -367,9 +351,7 @@ class MeshBridge(PluginBase):
         # arrive in the first N seconds after start.  MeshCore's auto
         # message fetcher empties the device buffer on connect, and MQTT
         # can deliver recent broadcasts from before the restart.
-        if self._startup_grace > 0 and (
-            time.monotonic() - self._started_at < self._startup_grace
-        ):
+        if self._startup_grace > 0 and (time.monotonic() - self._started_at < self._startup_grace):
             self._inc_stat("msgs_dropped_startup_grace")
             return
 
@@ -417,7 +399,8 @@ class MeshBridge(PluginBase):
             if self._log_dropped:
                 self.log.debug(
                     "mesh_bridge: dropped tapback from %s: %r",
-                    msg.get("from_id"), text,
+                    msg.get("from_id"),
+                    text,
                 )
             return
 
@@ -465,8 +448,12 @@ class MeshBridge(PluginBase):
             "msg_type": msg_type,
         }
         result = self._dispatch(
-            target_transport, attributed, target, msg.get("channel"),
-            msg_type, bridge_origin,
+            target_transport,
+            attributed,
+            target,
+            msg.get("channel"),
+            msg_type,
+            bridge_origin,
         )
 
         if not result.get("sent"):
@@ -475,12 +462,16 @@ class MeshBridge(PluginBase):
             if reason in {"not_connected", "not connected", "rate_limited"}:
                 self.log.warning(
                     "mesh_bridge: %s→%s send dropped (%s)",
-                    origin, target_transport, reason,
+                    origin,
+                    target_transport,
+                    reason,
                 )
             else:
                 self.log.info(
                     "mesh_bridge: %s→%s send failed: %s",
-                    origin, target_transport, reason,
+                    origin,
+                    target_transport,
+                    reason,
                 )
             return
 
@@ -488,14 +479,14 @@ class MeshBridge(PluginBase):
         self._dedup_record(key, now)
         opposite = "core" if origin == "mesh" else "mesh"
         self._dedup_record((opposite, from_id_norm, text_hash), now)
-        stat_key = (
-            "msgs_relayed_mesh_to_core" if origin == "mesh"
-            else "msgs_relayed_core_to_mesh"
-        )
+        stat_key = "msgs_relayed_mesh_to_core" if origin == "mesh" else "msgs_relayed_core_to_mesh"
         self._inc_stat(stat_key)
         self.log.info(
             'mesh_bridge: relayed %s→%s from %s: "%s"',
-            origin, target_transport, sender, body[:60],
+            origin,
+            target_transport,
+            sender,
+            body[:60],
         )
 
         # 9. Circuit breaker
@@ -504,7 +495,9 @@ class MeshBridge(PluginBase):
     # ── Target resolution ────────────────────────────────────────
 
     def _resolve_broadcast_target(
-        self, origin: str, channel: Any,
+        self,
+        origin: str,
+        channel: Any,
     ) -> tuple[str | None, dict | None]:
         """Look up the opposite-network channel for a broadcast relay."""
         if not isinstance(channel, int):
@@ -520,7 +513,9 @@ class MeshBridge(PluginBase):
         return "broadcast", pair
 
     def _resolve_dm_target(
-        self, origin: str, to_id: str,
+        self,
+        origin: str,
+        to_id: str,
     ) -> tuple[str | None, dict | None]:
         """Look up the opposite-network identity for a DM relay."""
         if not to_id:
@@ -583,7 +578,9 @@ class MeshBridge(PluginBase):
     # ── Dedup cache ──────────────────────────────────────────────
 
     def _dedup_hit(
-        self, key: tuple[str, str, int], now: float,
+        self,
+        key: tuple[str, str, int],
+        now: float,
     ) -> bool:
         with self._lock:
             ts = self._dedup_cache.get(key)
@@ -599,9 +596,7 @@ class MeshBridge(PluginBase):
             self._dedup_cache[key] = now
             if len(self._dedup_cache) > self._dedup_max:
                 cutoff = now - self._dedup_ttl
-                self._dedup_cache = {
-                    k: v for k, v in self._dedup_cache.items() if v > cutoff
-                }
+                self._dedup_cache = {k: v for k, v in self._dedup_cache.items() if v > cutoff}
                 if len(self._dedup_cache) > self._dedup_max:
                     excess = len(self._dedup_cache) - self._dedup_max
                     for k in list(self._dedup_cache)[:excess]:
@@ -622,7 +617,8 @@ class MeshBridge(PluginBase):
         if tripped:
             self.log.warning(
                 "mesh_bridge: auto-pausing (rate limit: %d relays in %ds)",
-                self._auto_pause_threshold + 1, int(_CIRCUIT_BREAKER_WINDOW),
+                self._auto_pause_threshold + 1,
+                int(_CIRCUIT_BREAKER_WINDOW),
             )
             self.set_running(False, reason="rate_limit")
 
@@ -665,7 +661,8 @@ class MeshBridge(PluginBase):
         except Exception:
             self.log.warning(
                 "mesh_bridge: failed to persist state to %s",
-                self._state_path, exc_info=True,
+                self._state_path,
+                exc_info=True,
             )
             try:
                 os.unlink(tmp)

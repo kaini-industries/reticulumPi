@@ -42,7 +42,10 @@ def _get_rate_state(plugin) -> tuple[threading.Lock, dict[str, deque]]:
 
 
 def _check_send_rate_limit(
-    plugin, key: str, max_per_window: int, window_seconds: float,
+    plugin,
+    key: str,
+    max_per_window: int,
+    window_seconds: float,
 ) -> tuple[bool, float]:
     """Return ``(allowed, retry_after)``. Uses a per-key sliding window."""
     now = time.monotonic()
@@ -58,9 +61,7 @@ def _check_send_rate_limit(
         bucket.append(now)
         # Bound memory: drop buckets that have no recent activity.
         if len(buckets) > 256:
-            stale = [
-                k for k, b in buckets.items() if not b or b[-1] < cutoff
-            ]
+            stale = [k for k, b in buckets.items() if not b or b[-1] < cutoff]
             for k in stale:
                 buckets.pop(k, None)
     return True, 0.0
@@ -164,7 +165,9 @@ async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Res
         limit = 60
 
     history = await _run_sync(
-        sf.get_sensor_history, sensor_name, limit=limit,
+        sf.get_sensor_history,
+        sensor_name,
+        limit=limit,
     )
     return _ok({"sensor": sensor_name, "history": history})
 
@@ -190,10 +193,12 @@ async def handle_nomadnet_auth(request: aiohttp.web.Request) -> aiohttp.web.Resp
     if not nn or not hasattr(nn, "get_allowed_identities"):
         return _ok({"message": "nomadnet_server plugin not available"})
     protected = nn._get_protected_pages() if hasattr(nn, "_get_protected_pages") else []
-    return _ok({
-        "allowed_identities": nn.get_allowed_identities(),
-        "protected_pages": protected,
-    })
+    return _ok(
+        {
+            "allowed_identities": nn.get_allowed_identities(),
+            "protected_pages": protected,
+        }
+    )
 
 
 async def handle_nomadnet_auth_add(
@@ -314,13 +319,13 @@ async def handle_meshtastic_channels(
     if not gw or not hasattr(gw, "get_channels"):
         return _ok({"channels": [], "message": "meshtastic_gateway plugin not enabled"})
     channels = await _run_sync(gw.get_channels)
-    return _ok({
-        "channels": channels,
-        "live": getattr(gw, "channels_live", None),
-        "cache_age_seconds": getattr(
-            gw, "channels_cache_age_seconds", None
-        ),
-    })
+    return _ok(
+        {
+            "channels": channels,
+            "live": getattr(gw, "channels_live", None),
+            "cache_age_seconds": getattr(gw, "channels_cache_age_seconds", None),
+        }
+    )
 
 
 async def handle_meshtastic_channel_join(
@@ -367,7 +372,10 @@ async def handle_meshtastic_channel_join(
     if not hasattr(gw, "join_channel"):
         return _error("Channel join not supported", 501)
     result = await _run_sync(
-        gw.join_channel, name, psk, index=index,
+        gw.join_channel,
+        name,
+        psk,
+        index=index,
     )
     if result.get("ok"):
         return _ok(result)
@@ -476,7 +484,8 @@ async def handle_mesh_bridge_running(
     if not isinstance(running, bool):
         return _error("'running' field must be a boolean", 400)
     result = await _run_sync(
-        bridge.set_running, running,
+        bridge.set_running,
+        running,
         reason="manual" if not running else None,
     )
     return _ok(result)
@@ -517,8 +526,12 @@ async def handle_messages(
         None,
         functools.partial(
             hub.get_messages,
-            limit=limit, offset=offset, transport=transport,
-            direction=direction, since=since, sub_transport=sub_transport,
+            limit=limit,
+            offset=offset,
+            transport=transport,
+            direction=direction,
+            since=since,
+            sub_transport=sub_transport,
         ),
     )
     return _ok({"messages": messages})
@@ -575,8 +588,11 @@ async def handle_send_message(
         ua_tag = hashlib.sha1(ua.encode("utf-8", "replace")).hexdigest()[:8] if ua else "none"
         rate_key = f"local:{request.remote or 'unknown'}:{ua_tag}"
     ok, retry_after = await _run_sync(
-        _check_send_rate_limit, plugin, rate_key,
-        max_sends, window_s,
+        _check_send_rate_limit,
+        plugin,
+        rate_key,
+        max_sends,
+        window_s,
     )
     if not ok:
         resp = _error(
@@ -656,7 +672,8 @@ async def handle_contacts(
     sub_transport = request.query.get("sub_transport")
     loop = asyncio.get_running_loop()
     contacts = await loop.run_in_executor(
-        None, functools.partial(hub.get_contacts, transport, query=query),
+        None,
+        functools.partial(hub.get_contacts, transport, query=query),
     )
     # Adapters don't tag their contacts with sub_transport today, so we
     # derive it from stored DM history: include a contact on a given
@@ -671,7 +688,8 @@ async def handle_contacts(
         if transport and hasattr(hub, "get_peer_sub_transports"):
             try:
                 peer_subs = await loop.run_in_executor(
-                    None, functools.partial(hub.get_peer_sub_transports, transport),
+                    None,
+                    functools.partial(hub.get_peer_sub_transports, transport),
                 )
             except Exception:
                 peer_subs = {}
@@ -719,7 +737,8 @@ async def handle_conversations(
         None,
         functools.partial(
             hub.get_conversations,
-            transport=transport, sub_transport=sub_transport,
+            transport=transport,
+            sub_transport=sub_transport,
         ),
     )
     return _ok({"conversations": conversations})
@@ -748,7 +767,9 @@ async def handle_conversation_messages(
         None,
         functools.partial(
             hub.get_conversation_messages,
-            contact_id, limit=limit, before=before,
+            contact_id,
+            limit=limit,
+            before=before,
         ),
     )
     return _ok({"messages": msgs})
@@ -776,7 +797,10 @@ async def handle_message_search(
         None,
         functools.partial(
             hub.search_messages,
-            query, limit=limit, transport=transport, sub_transport=sub_transport,
+            query,
+            limit=limit,
+            transport=transport,
+            sub_transport=sub_transport,
         ),
     )
     return _ok({"messages": results})
@@ -795,7 +819,8 @@ async def handle_delete_conversation(
         return _error("contact_id required", 400)
     loop = asyncio.get_running_loop()
     deleted = await loop.run_in_executor(
-        None, functools.partial(hub.delete_conversation, contact_id),
+        None,
+        functools.partial(hub.delete_conversation, contact_id),
     )
     return _ok({"deleted": deleted})
 
@@ -817,7 +842,8 @@ async def handle_mark_read(
         return _error("contact_id required", 400)
     loop = asyncio.get_running_loop()
     updated = await loop.run_in_executor(
-        None, functools.partial(hub.mark_read, contact_id),
+        None,
+        functools.partial(hub.mark_read, contact_id),
     )
     return _ok({"updated": updated})
 
@@ -837,7 +863,8 @@ async def handle_unread_counts(
         None,
         functools.partial(
             hub.get_unread_counts,
-            transport=transport, sub_transport=sub_transport,
+            transport=transport,
+            sub_transport=sub_transport,
         ),
     )
     return _ok({"unread": unread})
@@ -1094,6 +1121,7 @@ async def handle_noaa_image(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.StreamResponse:
     import os
+
     plugin = _get_plugin(request)
     noaa = plugin.app.get_plugin("noaa_apt_decoder")
     if not noaa:
@@ -1173,10 +1201,12 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/messages/stats", handle_message_stats)
     app.router.add_get("/api/messages/conversations", handle_conversations)
     app.router.add_get(
-        "/api/messages/conversation/{contact_id}", handle_conversation_messages,
+        "/api/messages/conversation/{contact_id}",
+        handle_conversation_messages,
     )
     app.router.add_delete(
-        "/api/messages/conversation/{contact_id}", handle_delete_conversation,
+        "/api/messages/conversation/{contact_id}",
+        handle_delete_conversation,
     )
     app.router.add_get("/api/messages/search", handle_message_search)
     app.router.add_post("/api/messages/read", handle_mark_read)

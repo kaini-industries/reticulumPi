@@ -177,10 +177,13 @@ class TestGetInterfaceIp:
 
 class TestHotspotMonitorPlugin:
     def test_start_no_config(self, mock_app, tmp_path):
-        plugin = HotspotMonitorPlugin(mock_app, {
-            "enabled": True,
-            "hostapd_conf": str(tmp_path / "missing.conf"),
-        })
+        plugin = HotspotMonitorPlugin(
+            mock_app,
+            {
+                "enabled": True,
+                "hostapd_conf": str(tmp_path / "missing.conf"),
+            },
+        )
         plugin.start()
         assert plugin._snapshot is None
         assert plugin._threads == []
@@ -189,29 +192,38 @@ class TestHotspotMonitorPlugin:
     def test_start_with_config(self, mock_app, tmp_path):
         conf = tmp_path / "hostapd.conf"
         conf.write_text(SAMPLE_HOSTAPD_CONF)
-        plugin = HotspotMonitorPlugin(mock_app, {
-            "enabled": True,
-            "hostapd_conf": str(conf),
-        })
+        plugin = HotspotMonitorPlugin(
+            mock_app,
+            {
+                "enabled": True,
+                "hostapd_conf": str(conf),
+            },
+        )
         plugin.start()
         assert plugin._iface == "wlan0"
         assert len(plugin._threads) == 1
         plugin.stop()
 
     def test_broadcast_snapshot_returns_none_before_collect(self, mock_app, tmp_path):
-        plugin = HotspotMonitorPlugin(mock_app, {
-            "enabled": True,
-            "hostapd_conf": str(tmp_path / "missing.conf"),
-        })
+        plugin = HotspotMonitorPlugin(
+            mock_app,
+            {
+                "enabled": True,
+                "hostapd_conf": str(tmp_path / "missing.conf"),
+            },
+        )
         plugin.start()
         assert plugin.broadcast_snapshot() is None
         plugin.stop()
 
     def test_get_status_before_collect(self, mock_app, tmp_path):
-        plugin = HotspotMonitorPlugin(mock_app, {
-            "enabled": True,
-            "hostapd_conf": str(tmp_path / "missing.conf"),
-        })
+        plugin = HotspotMonitorPlugin(
+            mock_app,
+            {
+                "enabled": True,
+                "hostapd_conf": str(tmp_path / "missing.conf"),
+            },
+        )
         plugin.start()
         status = plugin.get_status()
         assert "active" in status
@@ -221,18 +233,39 @@ class TestHotspotMonitorPlugin:
     @patch("reticulumpi.builtin_plugins.hotspot_monitor._parse_dnsmasq_leases")
     @patch("reticulumpi.builtin_plugins.hotspot_monitor._parse_iw_station_dump")
     @patch("reticulumpi.builtin_plugins.hotspot_monitor._parse_iw_info")
-    def test_collect_active_ap(self, mock_info, mock_stations, mock_leases, mock_ip, mock_app, tmp_path):
+    def test_collect_active_ap(
+        self, mock_info, mock_stations, mock_leases, mock_ip, mock_app, tmp_path
+    ):
         conf = tmp_path / "hostapd.conf"
         conf.write_text(SAMPLE_HOSTAPD_CONF)
-        plugin = HotspotMonitorPlugin(mock_app, {
-            "enabled": True,
-            "hostapd_conf": str(conf),
-        })
+        plugin = HotspotMonitorPlugin(
+            mock_app,
+            {
+                "enabled": True,
+                "hostapd_conf": str(conf),
+            },
+        )
         plugin.start()
 
-        mock_info.return_value = {"type": "AP", "ssid": "Reticulum Pi", "channel": 1, "frequency": 2412}
-        mock_stations.return_value = [{"mac": "5c:e9:1e:b2:58:78", "hostname": None, "ip": None, "rx_bytes": 100, "tx_bytes": 200, "connected_time": 60}]
-        mock_leases.return_value = {"5c:e9:1e:b2:58:78": {"ip": "10.0.0.32", "hostname": "Test-Mac"}}
+        mock_info.return_value = {
+            "type": "AP",
+            "ssid": "Reticulum Pi",
+            "channel": 1,
+            "frequency": 2412,
+        }
+        mock_stations.return_value = [
+            {
+                "mac": "5c:e9:1e:b2:58:78",
+                "hostname": None,
+                "ip": None,
+                "rx_bytes": 100,
+                "tx_bytes": 200,
+                "connected_time": 60,
+            }
+        ]
+        mock_leases.return_value = {
+            "5c:e9:1e:b2:58:78": {"ip": "10.0.0.32", "hostname": "Test-Mac"}
+        }
 
         result = plugin._collect()
         assert result["active"] is True
@@ -247,10 +280,13 @@ class TestHotspotMonitorPlugin:
     def test_collect_inactive_ap(self, mock_info, mock_ip, mock_app, tmp_path):
         conf = tmp_path / "hostapd.conf"
         conf.write_text(SAMPLE_HOSTAPD_CONF)
-        plugin = HotspotMonitorPlugin(mock_app, {
-            "enabled": True,
-            "hostapd_conf": str(conf),
-        })
+        plugin = HotspotMonitorPlugin(
+            mock_app,
+            {
+                "enabled": True,
+                "hostapd_conf": str(conf),
+            },
+        )
         plugin.start()
 
         mock_info.return_value = {"type": "managed"}

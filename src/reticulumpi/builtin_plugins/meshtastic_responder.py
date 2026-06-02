@@ -140,27 +140,73 @@ def _safe_eval(node: ast.AST) -> int | float:
 
 # ── Known built-in command names (for config validation) ─────────────
 
-_ALL_COMMANDS = frozenset({
-    "help", "ping", "time", "uptime", "nodes",
-    "weather", "fortune", "dice", "flip", "calc",
-})
+_ALL_COMMANDS = frozenset(
+    {
+        "help",
+        "ping",
+        "time",
+        "uptime",
+        "nodes",
+        "weather",
+        "fortune",
+        "dice",
+        "flip",
+        "calc",
+    }
+)
 
 # US state abbreviation → full name, for disambiguating "City, TX" style queries.
 _US_STATE_ABBREV = {
-    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
-    "ca": "california", "co": "colorado", "ct": "connecticut", "de": "delaware",
-    "fl": "florida", "ga": "georgia", "hi": "hawaii", "id": "idaho",
-    "il": "illinois", "in": "indiana", "ia": "iowa", "ks": "kansas",
-    "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
-    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota",
-    "ms": "mississippi", "mo": "missouri", "mt": "montana", "ne": "nebraska",
-    "nv": "nevada", "nh": "new hampshire", "nj": "new jersey",
-    "nm": "new mexico", "ny": "new york", "nc": "north carolina",
-    "nd": "north dakota", "oh": "ohio", "ok": "oklahoma", "or": "oregon",
-    "pa": "pennsylvania", "ri": "rhode island", "sc": "south carolina",
-    "sd": "south dakota", "tn": "tennessee", "tx": "texas", "ut": "utah",
-    "vt": "vermont", "va": "virginia", "wa": "washington",
-    "wv": "west virginia", "wi": "wisconsin", "wy": "wyoming",
+    "al": "alabama",
+    "ak": "alaska",
+    "az": "arizona",
+    "ar": "arkansas",
+    "ca": "california",
+    "co": "colorado",
+    "ct": "connecticut",
+    "de": "delaware",
+    "fl": "florida",
+    "ga": "georgia",
+    "hi": "hawaii",
+    "id": "idaho",
+    "il": "illinois",
+    "in": "indiana",
+    "ia": "iowa",
+    "ks": "kansas",
+    "ky": "kentucky",
+    "la": "louisiana",
+    "me": "maine",
+    "md": "maryland",
+    "ma": "massachusetts",
+    "mi": "michigan",
+    "mn": "minnesota",
+    "ms": "mississippi",
+    "mo": "missouri",
+    "mt": "montana",
+    "ne": "nebraska",
+    "nv": "nevada",
+    "nh": "new hampshire",
+    "nj": "new jersey",
+    "nm": "new mexico",
+    "ny": "new york",
+    "nc": "north carolina",
+    "nd": "north dakota",
+    "oh": "ohio",
+    "ok": "oklahoma",
+    "or": "oregon",
+    "pa": "pennsylvania",
+    "ri": "rhode island",
+    "sc": "south carolina",
+    "sd": "south dakota",
+    "tn": "tennessee",
+    "tx": "texas",
+    "ut": "utah",
+    "vt": "vermont",
+    "va": "virginia",
+    "wa": "washington",
+    "wv": "west virginia",
+    "wi": "wisconsin",
+    "wy": "wyoming",
     "dc": "district of columbia",
 }
 
@@ -192,15 +238,11 @@ class MeshtasticResponder(PluginBase):
         if commands:
             unknown = set(commands) - _ALL_COMMANDS
             if unknown:
-                raise ValueError(
-                    f"meshtastic_responder: unknown commands: {sorted(unknown)}"
-                )
+                raise ValueError(f"meshtastic_responder: unknown commands: {sorted(unknown)}")
 
         custom = self.config.get("custom_responses", {})
         if not isinstance(custom, dict):
-            raise ValueError(
-                "meshtastic_responder: 'custom_responses' must be a mapping"
-            )
+            raise ValueError("meshtastic_responder: 'custom_responses' must be a mapping")
 
     def start(self) -> None:
         # Initialise state that stop()/get_status() touch BEFORE any work
@@ -217,19 +259,13 @@ class MeshtasticResponder(PluginBase):
         self._custom_responses: dict[str, str] = {}
 
         self._prefix: str = self.config.get("prefix", "!")
-        self._respond_to_broadcast: bool = self.config.get(
-            "respond_to_broadcast", False
-        )
-        self._cooldown_seconds: float = float(
-            self.config.get("cooldown_seconds", 30)
-        )
+        self._respond_to_broadcast: bool = self.config.get("respond_to_broadcast", False)
+        self._cooldown_seconds: float = float(self.config.get("cooldown_seconds", 30))
         self._reply_via: str = self.config.get("reply_via", "")
 
         # Custom responses — lowercased keys for case-insensitive matching
         raw_custom = self.config.get("custom_responses", {})
-        self._custom_responses = {
-            k.lower(): v for k, v in raw_custom.items()
-        }
+        self._custom_responses = {k.lower(): v for k, v in raw_custom.items()}
 
         # Build command registry from enabled commands list
         enabled = self.config.get("commands", [])
@@ -251,12 +287,8 @@ class MeshtasticResponder(PluginBase):
     def stop(self) -> None:
         self._active = False
         try:
-            self.event_bus.unsubscribe(
-                events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message
-            )
-            self.event_bus.unsubscribe(
-                events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_message
-            )
+            self.event_bus.unsubscribe(events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_message)
+            self.event_bus.unsubscribe(events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_message)
         except Exception:
             self.log.debug("unsubscribe during stop() failed", exc_info=True)
         lock = getattr(self, "_lock", None)
@@ -278,11 +310,11 @@ class MeshtasticResponder(PluginBase):
             "active": getattr(self, "_active", False),
             "msgs_handled": getattr(self, "_msgs_handled", 0),
             "msgs_cooldown_skipped": getattr(
-                self, "_msgs_cooldown_skipped", 0,
+                self,
+                "_msgs_cooldown_skipped",
+                0,
             ),
-            "enabled_commands": sorted(
-                getattr(self, "_commands", {}).keys()
-            ),
+            "enabled_commands": sorted(getattr(self, "_commands", {}).keys()),
             "custom_responses": len(getattr(self, "_custom_responses", {})),
         }
 
@@ -396,9 +428,7 @@ class MeshtasticResponder(PluginBase):
             if len(self._node_cooldowns) > _COOLDOWN_PRUNE_THRESHOLD:
                 cutoff = now - self._cooldown_seconds
                 self._node_cooldowns = {
-                    nid: ts
-                    for nid, ts in self._node_cooldowns.items()
-                    if ts > cutoff
+                    nid: ts for nid, ts in self._node_cooldowns.items() if ts > cutoff
                 }
         return True
 
@@ -411,7 +441,7 @@ class MeshtasticResponder(PluginBase):
         if text.lower().strip() in self._custom_responses:
             return True
         if text.startswith(self._prefix):
-            without_prefix = text[len(self._prefix):]
+            without_prefix = text[len(self._prefix) :]
             parts = without_prefix.split(None, 1)
             # Empty prefix-only (e.g. "!") → help response
             if not parts:
@@ -435,7 +465,7 @@ class MeshtasticResponder(PluginBase):
 
     def _route_command(self, text: str) -> str:
         """Parse the prefix command and dispatch to the handler."""
-        without_prefix = text[len(self._prefix):]
+        without_prefix = text[len(self._prefix) :]
         parts = without_prefix.split(None, 1)
         if not parts:
             return self._cmd_help()
@@ -509,13 +539,9 @@ class MeshtasticResponder(PluginBase):
         try:
             gw = self.app.get_plugin("meshtastic_gateway")
             if not gw or not hasattr(gw, "send_message"):
-                self.log.warning(
-                    "Cannot send reply — meshtastic_gateway plugin not available"
-                )
+                self.log.warning("Cannot send reply — meshtastic_gateway plugin not available")
                 return
-            result = gw.send_message(
-                text, destination_id=destination_id, via=self._reply_via
-            )
+            result = gw.send_message(text, destination_id=destination_id, via=self._reply_via)
             if result.get("sent"):
                 self.log.debug("Reply sent to %s (%d bytes)", destination_id, len(text))
             else:
@@ -532,9 +558,7 @@ class MeshtasticResponder(PluginBase):
         try:
             gw = self.app.get_plugin("meshcore_gateway")
             if not gw or not hasattr(gw, "send_message"):
-                self.log.warning(
-                    "Cannot send reply — meshcore_gateway plugin not available"
-                )
+                self.log.warning("Cannot send reply — meshcore_gateway plugin not available")
                 return
             result = gw.send_message(text, destination=destination)
             label = destination or "channel"
@@ -572,14 +596,23 @@ class MeshtasticResponder(PluginBase):
             return f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
 
         tz_aliases = {
-            "EST": "US/Eastern", "EDT": "US/Eastern",
-            "CST": "US/Central", "CDT": "US/Central",
-            "MST": "US/Mountain", "MDT": "US/Mountain",
-            "PST": "US/Pacific", "PDT": "US/Pacific",
-            "GMT": "GMT", "CET": "CET", "EET": "EET",
-            "JST": "Asia/Tokyo", "IST": "Asia/Kolkata",
-            "AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",
-            "NZST": "Pacific/Auckland", "NZDT": "Pacific/Auckland",
+            "EST": "US/Eastern",
+            "EDT": "US/Eastern",
+            "CST": "US/Central",
+            "CDT": "US/Central",
+            "MST": "US/Mountain",
+            "MDT": "US/Mountain",
+            "PST": "US/Pacific",
+            "PDT": "US/Pacific",
+            "GMT": "GMT",
+            "CET": "CET",
+            "EET": "EET",
+            "JST": "Asia/Tokyo",
+            "IST": "Asia/Kolkata",
+            "AEST": "Australia/Sydney",
+            "AEDT": "Australia/Sydney",
+            "NZST": "Pacific/Auckland",
+            "NZDT": "Pacific/Auckland",
         }
         resolved = tz_aliases.get(tz_name.upper(), tz_name)
 
@@ -625,10 +658,7 @@ class MeshtasticResponder(PluginBase):
             # Prefer short_name (<=4 chars) to stay within one LoRa packet
             recent = []
             for n in with_heard[:3]:
-                recent.append(
-                    n.get("short_name")
-                    or (n.get("long_name") or "?")[:12]
-                )
+                recent.append(n.get("short_name") or (n.get("long_name") or "?")[:12])
             return f"{total} nodes. Recent: " + ", ".join(recent)
         except Exception as exc:
             return f"Error: {str(exc)[:80]}"
@@ -646,9 +676,8 @@ class MeshtasticResponder(PluginBase):
             city_name = parts[0]
             filter_terms = [p.lower() for p in parts[1:] if p]
 
-            geo_url = (
-                "https://geocoding-api.open-meteo.com/v1/search?"
-                + urllib.parse.urlencode({"name": city_name, "count": 10})
+            geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
+                {"name": city_name, "count": 10}
             )
             geo_data = _fetch_json(geo_url)
 
@@ -660,16 +689,16 @@ class MeshtasticResponder(PluginBase):
             if filter_terms:
                 # Expand US state abbreviations ("tx" → "texas") so short
                 # forms substring-match the admin1 field.
-                expanded = [
-                    _US_STATE_ABBREV.get(t, t) for t in filter_terms
-                ]
+                expanded = [_US_STATE_ABBREV.get(t, t) for t in filter_terms]
                 for r in results:
-                    searchable = " ".join([
-                        r.get("admin1", ""),
-                        r.get("admin2", ""),
-                        r.get("country", ""),
-                        r.get("country_code", ""),
-                    ]).lower()
+                    searchable = " ".join(
+                        [
+                            r.get("admin1", ""),
+                            r.get("admin2", ""),
+                            r.get("country", ""),
+                            r.get("country_code", ""),
+                        ]
+                    ).lower()
                     if all(term in searchable for term in expanded):
                         place = r
                         break
@@ -679,10 +708,7 @@ class MeshtasticResponder(PluginBase):
                     alts = []
                     for r in results[:3]:
                         name = r.get("name", "?")
-                        region = (
-                            r.get("country_code")
-                            or r.get("admin1", "")
-                        )
+                        region = r.get("country_code") or r.get("admin1", "")
                         alts.append(f"{name},{region}" if region else name)
                     return "No match. Try: " + " / ".join(alts)
             if place is None:
@@ -694,18 +720,14 @@ class MeshtasticResponder(PluginBase):
             country = place.get("country", "")
             admin1 = place.get("admin1", "")
 
-            weather_url = (
-                "https://api.open-meteo.com/v1/forecast?"
-                + urllib.parse.urlencode({
+            weather_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(
+                {
                     "latitude": lat,
                     "longitude": lon,
-                    "current": (
-                        "temperature_2m,relative_humidity_2m,"
-                        "wind_speed_10m,weather_code"
-                    ),
+                    "current": ("temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code"),
                     "temperature_unit": "fahrenheit",
                     "wind_speed_unit": "mph",
-                })
+                }
             )
             weather_data = _fetch_json(weather_url)
             current = weather_data.get("current", {})
@@ -714,9 +736,7 @@ class MeshtasticResponder(PluginBase):
             humidity = current.get("relative_humidity_2m")
             wind_mph = current.get("wind_speed_10m")
             weather_code = current.get("weather_code", -1)
-            temp_c = (
-                round((temp_f - 32) * 5 / 9, 1) if temp_f is not None else None
-            )
+            temp_c = round((temp_f - 32) * 5 / 9, 1) if temp_f is not None else None
             conditions = _WMO_CODES.get(weather_code, "Unknown")
 
             # Keep it compact for LoRa — one tight location label + one data line
@@ -784,8 +804,7 @@ class MeshtasticResponder(PluginBase):
                 if result == int(result) and abs(result) < 1e15:
                     result = int(result)
             return f"{expr} = {result}"
-        except (ValueError, TypeError, SyntaxError,
-                ZeroDivisionError, OverflowError) as exc:
+        except (ValueError, TypeError, SyntaxError, ZeroDivisionError, OverflowError) as exc:
             return f"Error: {exc}"
 
 
@@ -824,8 +843,6 @@ def _truncate_response(text: str, max_bytes: int = _MESHTASTIC_MTU) -> str:
 
 def _fetch_json(url: str) -> dict:
     """Fetch a URL and parse the JSON response."""
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "ReticulumPi-MeshResponder/1.0"}
-    )
+    req = urllib.request.Request(url, headers={"User-Agent": "ReticulumPi-MeshResponder/1.0"})
     with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))

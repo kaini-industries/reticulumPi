@@ -18,10 +18,18 @@ import aiohttp.web
 if TYPE_CHECKING:
     pass
 
-SENSITIVE_KEYS = frozenset({
-    "password", "password_hash", "token", "secret", "api_key",
-    "private_key", "credentials", "auth_token",
-})
+SENSITIVE_KEYS = frozenset(
+    {
+        "password",
+        "password_hash",
+        "token",
+        "secret",
+        "api_key",
+        "private_key",
+        "credentials",
+        "auth_token",
+    }
+)
 
 # API version — bump when making breaking changes to response schemas.
 # Included in all API responses via the Api-Version header so clients
@@ -77,13 +85,15 @@ def _collect_local_services(app) -> list[dict]:
         except Exception:
             pass
 
-        services.append({
-            "destination_hash": dest_hash,
-            "plugin_name": getattr(p, "plugin_name", name),
-            "app_name": app_name,
-            "aspects": aspects,
-            "is_local": True,
-        })
+        services.append(
+            {
+                "destination_hash": dest_hash,
+                "plugin_name": getattr(p, "plugin_name", name),
+                "app_name": app_name,
+                "aspects": aspects,
+                "is_local": True,
+            }
+        )
     return services
 
 
@@ -131,9 +141,7 @@ def _error(message: str, status: int = 400) -> aiohttp.web.Response:
     import json
 
     body = json.dumps({"ok": False, "error": message, "code": status})
-    return aiohttp.web.Response(
-        text=body, status=status, content_type="application/json"
-    )
+    return aiohttp.web.Response(text=body, status=status, content_type="application/json")
 
 
 def _get_plugin(request: aiohttp.web.Request):
@@ -144,9 +152,7 @@ def _get_plugin(request: aiohttp.web.Request):
 async def _run_sync(fn, *args, **kwargs):
     """Run a blocking function in the default executor."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, functools.partial(fn, *args, **kwargs)
-    )
+    return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
 
 
 # ── Route registration hub ───────────────────────────────────────────
@@ -197,10 +203,12 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
 async def handle_version(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/version — API version and compatibility info."""
     plugin = _get_plugin(request)
-    return _ok({
-        "api_version": API_VERSION,
-        "app_version": plugin.app._get_version(),
-    })
+    return _ok(
+        {
+            "api_version": API_VERSION,
+            "app_version": plugin.app._get_version(),
+        }
+    )
 
 
 # ── Auth endpoints ───────────────────────────────────────────────────
@@ -376,9 +384,7 @@ async def handle_plugins(request: aiohttp.web.Request) -> aiohttp.web.Response:
     loop = asyncio.get_running_loop()
     plugins_data = await loop.run_in_executor(None, _collect_plugin_statuses, app)
 
-    failed = [
-        {"name": name, "error": reason} for name, reason in app._failed_plugins
-    ]
+    failed = [{"name": name, "error": reason} for name, reason in app._failed_plugins]
 
     return _ok({"plugins": plugins_data, "failed_plugins": failed})
 
@@ -397,13 +403,15 @@ async def handle_plugin_detail(request: aiohttp.web.Request) -> aiohttp.web.Resp
     except Exception:
         status = {"error": "status collection failed"}
 
-    return _ok({
-        "name": name,
-        "version": p.plugin_version,
-        "description": p.plugin_description,
-        "status": status,
-        "address": _get_plugin_address(p),
-    })
+    return _ok(
+        {
+            "name": name,
+            "version": p.plugin_version,
+            "description": p.plugin_description,
+            "status": status,
+            "address": _get_plugin_address(p),
+        }
+    )
 
 
 _last_restart_time: float = 0.0
@@ -429,12 +437,18 @@ async def handle_services_restart(
     async def _do_restart() -> None:
         await asyncio.sleep(2)  # let HTTP response flush
         proc = await asyncio.create_subprocess_exec(
-            "sudo", "systemctl", "restart", "rnsd",
+            "sudo",
+            "systemctl",
+            "restart",
+            "rnsd",
         )
         await proc.wait()
         await asyncio.sleep(3)  # rnsd startup time
         await asyncio.create_subprocess_exec(
-            "sudo", "systemctl", "restart", "reticulumpi",
+            "sudo",
+            "systemctl",
+            "restart",
+            "reticulumpi",
         )
 
     asyncio.create_task(_do_restart())
@@ -469,8 +483,10 @@ async def handle_spectrum_switch_preset(
     remote_ip = request.remote or "unknown"
     ok, retry_after = await _run_sync(
         _check_send_rate_limit,
-        plugin, f"preset:{remote_ip}",
-        max_per_window=3, window_seconds=30.0,
+        plugin,
+        f"preset:{remote_ip}",
+        max_per_window=3,
+        window_seconds=30.0,
     )
     if not ok:
         resp = _error("Too many preset switches — try again shortly", 429)
@@ -501,9 +517,7 @@ async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:
     # Build sanitized plugin config
     plugins_config = {}
     for name, cfg in config.plugins.items():
-        plugins_config[name] = {
-            k: v for k, v in cfg.items() if k not in SENSITIVE_KEYS
-        }
+        plugins_config[name] = {k: v for k, v in cfg.items() if k not in SENSITIVE_KEYS}
 
     data = {
         "node_name": config.node_name,

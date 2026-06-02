@@ -41,10 +41,7 @@ class WebDashboardPlugin(PluginBase):
             raise ValueError("max_sessions must be a positive integer")
 
         session_gc_interval = self.config.get("session_gc_interval", 300)
-        if (
-            not isinstance(session_gc_interval, (int, float))
-            or session_gc_interval < 30
-        ):
+        if not isinstance(session_gc_interval, (int, float)) or session_gc_interval < 30:
             raise ValueError("session_gc_interval must be a number >= 30")
 
         metrics_interval = self.config.get("metrics_interval", 5)
@@ -91,11 +88,14 @@ class WebDashboardPlugin(PluginBase):
 
         lora_region = self.config.get("lora_region", "US")
         if not isinstance(lora_region, str) or lora_region not in {
-            "US", "EU_868", "EU_433", "CN", "JP", "ANZ",
+            "US",
+            "EU_868",
+            "EU_433",
+            "CN",
+            "JP",
+            "ANZ",
         }:
-            raise ValueError(
-                "lora_region must be one of: US, EU_868, EU_433, CN, JP, ANZ"
-            )
+            raise ValueError("lora_region must be one of: US, EU_868, EU_433, CN, JP, ANZ")
 
     def start(self) -> None:
         self._active = True
@@ -113,26 +113,24 @@ class WebDashboardPlugin(PluginBase):
         import os
 
         # Resolve password: env var > config password_hash > config password > auto-generate
-        password_hash = (
-            os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD_HASH")
-            or self.config.get("password_hash")
+        password_hash = os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD_HASH") or self.config.get(
+            "password_hash"
         )
-        plaintext_password = (
-            os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD")
-            or self.config.get("password")
+        plaintext_password = os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD") or self.config.get(
+            "password"
         )
         generated_password = None
 
         if password_hash:
-            source = "environment" if os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD_HASH") else "config"
+            source = (
+                "environment" if os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD_HASH") else "config"
+            )
             self.log.info("Using dashboard password hash from %s", source)
         elif plaintext_password:
             pass  # handled below
 
         if not password_hash and not plaintext_password:
-            secret_dir = self.config.get(
-                "secret_dir", "~/.config/reticulumpi"
-            )
+            secret_dir = self.config.get("secret_dir", "~/.config/reticulumpi")
             password_hash, generated_password = load_or_create_password_hash(secret_dir)
             if generated_password:
                 banner = (
@@ -178,9 +176,7 @@ class WebDashboardPlugin(PluginBase):
         self._start_thread(self._run_server, "web-dashboard")
 
         scheme = "https" if ssl_ctx else "http"
-        self.log.info(
-            "Web dashboard starting on %s://%s:%d", scheme, self._host, self._port
-        )
+        self.log.info("Web dashboard starting on %s://%s:%d", scheme, self._host, self._port)
 
         if self._host != "127.0.0.1" and not ssl_ctx:
             self.log.warning(
@@ -202,9 +198,12 @@ class WebDashboardPlugin(PluginBase):
                     stderr=subprocess.DEVNULL,
                 )
                 import socket
+
                 self.log.info(
                     "mDNS: dashboard advertised at %s://%s.local:%d",
-                    scheme, socket.gethostname(), self._port,
+                    scheme,
+                    socket.gethostname(),
+                    self._port,
                 )
             except OSError:
                 self.log.warning("Failed to start mDNS advertisement")
@@ -237,7 +236,9 @@ class WebDashboardPlugin(PluginBase):
             "host": host,
             "port": port,
             "web_url": f"{scheme}://{host}:{port}",
-            "uptime": time.time() - getattr(self, "_start_time", time.time()) if self._active else 0,
+            "uptime": time.time() - getattr(self, "_start_time", time.time())
+            if self._active
+            else 0,
             "active_sessions": len(self._auth.sessions) if hasattr(self, "_auth") else 0,
         }
 
@@ -263,9 +264,7 @@ class WebDashboardPlugin(PluginBase):
 
         self._runner = aiohttp.web.AppRunner(self._aiohttp_app)
         await self._runner.setup()
-        site = aiohttp.web.TCPSite(
-            self._runner, self._host, self._port, ssl_context=self._ssl_ctx
-        )
+        site = aiohttp.web.TCPSite(self._runner, self._host, self._port, ssl_context=self._ssl_ctx)
         await site.start()
         self.log.info("Web dashboard listening on %s:%d", self._host, self._port)
 
@@ -325,15 +324,18 @@ class WebDashboardPlugin(PluginBase):
 
         # Tile prefetch (delayed to let GPS settle)
         if tp.get("enabled") and tp.get("prefetch", {}).get("enabled"):
+
             async def _delayed_prefetch():
                 try:
                     await asyncio.sleep(30)
                     from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
+
                     await run_prefetch(self)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     self.log.exception("Tile prefetch failed")
+
             self._prefetch_task = asyncio.ensure_future(_delayed_prefetch())
 
     async def _session_gc_loop(self) -> None:
@@ -377,8 +379,7 @@ class WebDashboardPlugin(PluginBase):
         # offloaded to the executor) so asyncio doesn't log
         # "Task was destroyed but it is pending" when the loop stops.
         pending = [
-            t for t in asyncio.all_tasks()
-            if t is not asyncio.current_task() and not t.done()
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()
         ]
         if pending:
             for t in pending:
@@ -402,9 +403,7 @@ class WebDashboardPlugin(PluginBase):
                 generate_self_signed_cert,
             )
 
-            cert_dir = ssl_config.get(
-                "cert_dir", "~/.config/reticulumpi/web_certs"
-            )
+            cert_dir = ssl_config.get("cert_dir", "~/.config/reticulumpi/web_certs")
             cert_file, key_file = generate_self_signed_cert(
                 cert_dir, self.app.config.node_name, self.log
             )

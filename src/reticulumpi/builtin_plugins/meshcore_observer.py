@@ -52,7 +52,10 @@ def _patch_paho_websocket() -> None:
 
     def ping(self):
         frame = _orig_create_frame(
-            self, _WebsocketWrapper.OPCODE_PING, bytearray(), do_masking=1,
+            self,
+            _WebsocketWrapper.OPCODE_PING,
+            bytearray(),
+            do_masking=1,
         )
         self._socket.send(frame)
 
@@ -81,17 +84,13 @@ class MeshCoreObserver(PluginBase):
             import meshcore  # noqa: F401
         except ImportError:
             raise ValueError(
-                "meshcore package not found. "
-                "Install with: pip install reticulumpi[meshcore]"
+                "meshcore package not found. Install with: pip install reticulumpi[meshcore]"
             )
 
         try:
             import paho.mqtt.client  # noqa: F401
         except ImportError:
-            raise ValueError(
-                "paho-mqtt package not found. "
-                "Install with: pip install paho-mqtt"
-            )
+            raise ValueError("paho-mqtt package not found. Install with: pip install paho-mqtt")
 
         shared = self.config.get("use_gateway_device", False)
         if not shared:
@@ -202,13 +201,15 @@ class MeshCoreObserver(PluginBase):
                 self.event_bus.unsubscribe_all(self._on_plugin_stopping)
             except Exception:
                 self.log.debug(
-                    "Error unsubscribing gateway handlers", exc_info=True,
+                    "Error unsubscribing gateway handlers",
+                    exc_info=True,
                 )
 
         if not self._shared_mode and self._loop and self._mc:
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    self._async_disconnect(), self._loop,
+                    self._async_disconnect(),
+                    self._loop,
                 )
                 future.result(timeout=5)
             except Exception:
@@ -232,9 +233,7 @@ class MeshCoreObserver(PluginBase):
                 "mqtt_connected": self._connected_mqtt,
                 "public_key": self._public_key,
                 "iata": self.config.get("iata", "XXX"),
-                "mqtt_broker": self.config.get(
-                    "mqtt_broker", "mqtt-us-v1.letsmesh.net"
-                ),
+                "mqtt_broker": self.config.get("mqtt_broker", "mqtt-us-v1.letsmesh.net"),
                 "packets_captured": self._packets_captured,
                 "packets_published": self._packets_published,
                 "packets_failed": self._packets_failed,
@@ -247,8 +246,7 @@ class MeshCoreObserver(PluginBase):
                 "model": self._device_info.get("model"),
                 "queue_depth": self._packet_queue.qsize(),
                 "ws_ping_active": (
-                    self._ws_ping_thread is not None
-                    and self._ws_ping_thread.is_alive()
+                    self._ws_ping_thread is not None and self._ws_ping_thread.is_alive()
                 ),
             }
 
@@ -269,9 +267,7 @@ class MeshCoreObserver(PluginBase):
             for task in pending:
                 task.cancel()
             if pending:
-                self._loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True)
-                )
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             self._loop.close()
 
     def _run_async(self, coro: Any, timeout: float = 15) -> Any:
@@ -292,9 +288,7 @@ class MeshCoreObserver(PluginBase):
         reconnect_delay = self.config.get("reconnect_delay", 10)
         health_check_interval = self.config.get("health_check_interval", 30)
         max_attempts = self.config.get("max_reconnect_attempts", 10)
-        health_failure_threshold = max(
-            1, int(self.config.get("health_failure_threshold", 3))
-        )
+        health_failure_threshold = max(1, int(self.config.get("health_failure_threshold", 3)))
         consecutive_health_failures = 0
 
         while self._active:
@@ -307,12 +301,16 @@ class MeshCoreObserver(PluginBase):
                     self._reconnect_failures += 1
                     self.log.warning(
                         "MeshCore observer connect failed (%d): %s",
-                        self._reconnect_failures, exc,
+                        self._reconnect_failures,
+                        exc,
                     )
-                    self.event_bus.publish(events.MESHCORE_OBSERVER_CONNECT_FAILED, {
-                        "error": str(exc),
-                        "attempt": self._reconnect_failures,
-                    })
+                    self.event_bus.publish(
+                        events.MESHCORE_OBSERVER_CONNECT_FAILED,
+                        {
+                            "error": str(exc),
+                            "attempt": self._reconnect_failures,
+                        },
+                    )
                     if max_attempts > 0 and self._reconnect_failures >= max_attempts:
                         self.log.error(
                             "Max reconnect attempts (%d) reached, giving up",
@@ -341,7 +339,8 @@ class MeshCoreObserver(PluginBase):
                     if consecutive_health_failures < health_failure_threshold:
                         self.log.info(
                             "Observer health check failed (%d/%d) — will retry",
-                            consecutive_health_failures, health_failure_threshold,
+                            consecutive_health_failures,
+                            health_failure_threshold,
                         )
                         continue
                     self.log.warning(
@@ -364,12 +363,15 @@ class MeshCoreObserver(PluginBase):
             serial_port = self.config.get("serial_port", "/dev/ttyUSB0")
             baudrate = self.config.get("serial_baud", 115200)
             self.log.info(
-                "Connecting observer to MeshCore device (port=%s)...", serial_port,
+                "Connecting observer to MeshCore device (port=%s)...",
+                serial_port,
             )
             mc = self._run_async(
                 MeshCore.create_serial(
-                    serial_port, baudrate,
-                    auto_reconnect=True, max_reconnect_attempts=3,
+                    serial_port,
+                    baudrate,
+                    auto_reconnect=True,
+                    max_reconnect_attempts=3,
                 ),
                 timeout=30,
             )
@@ -377,12 +379,16 @@ class MeshCoreObserver(PluginBase):
             host = self.config.get("tcp_host")
             port = self.config.get("tcp_port", 5000)
             self.log.info(
-                "Connecting observer to MeshCore device (tcp=%s:%d)...", host, port,
+                "Connecting observer to MeshCore device (tcp=%s:%d)...",
+                host,
+                port,
             )
             mc = self._run_async(
                 MeshCore.create_tcp(
-                    host, port,
-                    auto_reconnect=True, max_reconnect_attempts=3,
+                    host,
+                    port,
+                    auto_reconnect=True,
+                    max_reconnect_attempts=3,
                 ),
                 timeout=30,
             )
@@ -432,10 +438,15 @@ class MeshCoreObserver(PluginBase):
         fw = self._device_info.get("ver", "unknown")
         model = self._device_info.get("model", "unknown")
         self.log.info("MeshCore observer connected: %s %s (key=%s…)", model, fw, public_key[:12])
-        self.event_bus.publish(events.MESHCORE_OBSERVER_DEVICE_CONNECTED, {
-            "firmware": fw, "model": model,
-            "public_key": public_key, "mode": "standalone",
-        })
+        self.event_bus.publish(
+            events.MESHCORE_OBSERVER_DEVICE_CONNECTED,
+            {
+                "firmware": fw,
+                "model": model,
+                "public_key": public_key,
+                "mode": "standalone",
+            },
+        )
 
     def _disconnect_device(self) -> None:
         with self._lock:
@@ -482,13 +493,16 @@ class MeshCoreObserver(PluginBase):
 
     def _gateway_watcher_loop(self) -> None:
         self.event_bus.subscribe(
-            events.MESHCORE_CONNECTED, self._on_gateway_connected,
+            events.MESHCORE_CONNECTED,
+            self._on_gateway_connected,
         )
         self.event_bus.subscribe(
-            events.MESHCORE_DISCONNECTED, self._on_gateway_disconnected,
+            events.MESHCORE_DISCONNECTED,
+            self._on_gateway_disconnected,
         )
         self.event_bus.subscribe(
-            events.PLUGIN_STOPPING, self._on_plugin_stopping,
+            events.PLUGIN_STOPPING,
+            self._on_plugin_stopping,
         )
 
         while self._active:
@@ -546,14 +560,18 @@ class MeshCoreObserver(PluginBase):
             raise
 
         self.log.info(
-            "Observer attached to gateway device (key=%s…)", public_key[:12],
+            "Observer attached to gateway device (key=%s…)",
+            public_key[:12],
         )
-        self.event_bus.publish(events.MESHCORE_OBSERVER_DEVICE_CONNECTED, {
-            "firmware": gw_status.get("firmware"),
-            "model": gw_status.get("model"),
-            "public_key": public_key,
-            "mode": "shared",
-        })
+        self.event_bus.publish(
+            events.MESHCORE_OBSERVER_DEVICE_CONNECTED,
+            {
+                "firmware": gw_status.get("firmware"),
+                "model": gw_status.get("model"),
+                "public_key": public_key,
+                "mode": "shared",
+            },
+        )
 
     def _detach_from_gateway(self) -> None:
         with self._lock:
@@ -701,10 +719,7 @@ class MeshCoreObserver(PluginBase):
 
                 # paho's username_pw_set only takes effect on the next connect,
                 # so refresh the JWT by cleanly reconnecting before it expires.
-                if (
-                    self._jwt_expires
-                    and time.time() >= self._jwt_expires - _JWT_REFRESH_BUFFER
-                ):
+                if self._jwt_expires and time.time() >= self._jwt_expires - _JWT_REFRESH_BUFFER:
                     self.log.info("JWT approaching expiry — reconnecting MQTT")
                     self._disconnect_mqtt()
                     self.event_bus.publish(
@@ -749,7 +764,8 @@ class MeshCoreObserver(PluginBase):
         client.will_set(
             status_topic,
             json.dumps({"online": False}),
-            qos=0, retain=True,
+            qos=0,
+            retain=True,
         )
 
         def on_connect(client, userdata, flags, rc, properties=None):
@@ -780,8 +796,13 @@ class MeshCoreObserver(PluginBase):
             raise ConnectionError(f"MQTT connection to {broker}:{port} timed out")
 
     def _handle_mqtt_connect(
-        self, client: Any, rc: Any,
-        broker: str, port: int, iata: str, status_topic: str,
+        self,
+        client: Any,
+        rc: Any,
+        broker: str,
+        port: int,
+        iata: str,
+        status_topic: str,
     ) -> None:
         """Handle a paho CONNACK. Extracted from the on_connect closure for testing.
 
@@ -798,16 +819,21 @@ class MeshCoreObserver(PluginBase):
         info = client.publish(
             status_topic,
             json.dumps({"online": True}),
-            qos=0, retain=True,
+            qos=0,
+            retain=True,
         )
         if getattr(info, "rc", 0) != mqtt.MQTT_ERR_SUCCESS:
             self.log.warning("LWT online publish rc=%s", info.rc)
         with self._lock:
             self._connected_mqtt = True
 
-        self.event_bus.publish(events.MESHCORE_OBSERVER_MQTT_CONNECTED, {
-            "broker": broker, "iata": iata,
-        })
+        self.event_bus.publish(
+            events.MESHCORE_OBSERVER_MQTT_CONNECTED,
+            {
+                "broker": broker,
+                "iata": iata,
+            },
+        )
 
         transport = self.config.get("mqtt_transport", "websockets")
         if transport == "websockets":
@@ -816,7 +842,8 @@ class MeshCoreObserver(PluginBase):
                 self._ws_ping_thread.join(timeout=2)
             self._ws_ping_stop.clear()
             self._ws_ping_thread = self._start_thread(
-                self._ws_ping_loop, "observer-ws-ping",
+                self._ws_ping_loop,
+                "observer-ws-ping",
             )
 
     def _ws_ping_loop(self) -> None:
@@ -859,7 +886,9 @@ class MeshCoreObserver(PluginBase):
         topic = f"meshcore/{iata}/{self._public_key}/packets"
         try:
             result = self._mqtt_client.publish(
-                topic, json.dumps(packet_json), qos=0,
+                topic,
+                json.dumps(packet_json),
+                qos=0,
             )
             if result.rc == 0:
                 with self._lock:
@@ -899,6 +928,7 @@ class MeshCoreObserver(PluginBase):
             test_data = b"test"
             result = self._run_async(mc.commands.sign(test_data), timeout=15)
             from meshcore.events import EventType
+
             if result and result.type == EventType.SIGNATURE:
                 sig = result.payload.get("signature", b"")
                 if sig and len(sig) == 64:
@@ -912,6 +942,7 @@ class MeshCoreObserver(PluginBase):
         # Fallback: try pynacl
         try:
             import nacl.signing  # noqa: F401
+
             self._signing_mode = "local"
             self.log.info("Observer using local PyNaCl signing (fallback)")
         except ImportError:
@@ -964,8 +995,13 @@ class MeshCoreObserver(PluginBase):
 
         result = self._run_async(mc.commands.sign(data), timeout=20)
         from meshcore.events import EventType
+
         if result.type == EventType.ERROR:
-            reason = result.payload.get("reason", "unknown") if isinstance(result.payload, dict) else str(result.payload)
+            reason = (
+                result.payload.get("reason", "unknown")
+                if isinstance(result.payload, dict)
+                else str(result.payload)
+            )
             raise RuntimeError(f"Device signing failed: {reason}")
         sig = result.payload.get("signature", b"")
         if isinstance(sig, bytes):
@@ -982,6 +1018,7 @@ class MeshCoreObserver(PluginBase):
 
         result = self._run_async(mc.commands.export_private_key())
         from meshcore.events import EventType
+
         if result.type in (EventType.ERROR, EventType.DISABLED):
             raise RuntimeError("Cannot export private key from device")
 

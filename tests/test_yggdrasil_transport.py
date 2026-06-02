@@ -55,9 +55,7 @@ class TestValidateConfig:
 
     def test_valid_custom(self, mock_app):
         """Custom valid config passes."""
-        p = YggdrasilTransportPlugin(
-            mock_app, {"check_interval": 60, "rns_listen_port": 5555}
-        )
+        p = YggdrasilTransportPlugin(mock_app, {"check_interval": 60, "rns_listen_port": 5555})
         p.validate_config()
 
     def test_interval_too_low(self, mock_app):
@@ -130,9 +128,7 @@ class TestAdminAPI:
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasilctl"):
             with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout=json.dumps(fake_response)
-                )
+                mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(fake_response))
                 result = plugin._query_ctl("getself")
 
         assert result == fake_response
@@ -146,9 +142,7 @@ class TestAdminAPI:
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasilctl"):
             with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout=json.dumps(envelope)
-                )
+                mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope))
                 result = plugin._query_ctl("getself")
 
         assert result == {"address": "200:1234::1", "key": "def456"}
@@ -172,9 +166,7 @@ class TestAdminAPI:
         """Returns None on invalid JSON output."""
         with patch("shutil.which", return_value="/usr/bin/yggdrasilctl"):
             with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout="not json"
-                )
+                mock_run.return_value = MagicMock(returncode=0, stdout="not json")
                 result = plugin._query_ctl("getself")
         assert result is None
 
@@ -206,10 +198,7 @@ class TestAdminAPI:
             return path == "/var/run/yggdrasil/yggdrasil.sock"
 
         with patch("os.path.exists", side_effect=exists_side_effect):
-            assert (
-                plugin._find_admin_socket()
-                == "/var/run/yggdrasil/yggdrasil.sock"
-            )
+            assert plugin._find_admin_socket() == "/var/run/yggdrasil/yggdrasil.sock"
 
     def test_find_admin_socket_alt_path(self, plugin):
         """Falls back to alternative socket paths."""
@@ -219,10 +208,7 @@ class TestAdminAPI:
             return path == "/run/yggdrasil/yggdrasil.sock"
 
         with patch("os.path.exists", side_effect=exists_side_effect):
-            assert (
-                plugin._find_admin_socket()
-                == "/run/yggdrasil/yggdrasil.sock"
-            )
+            assert plugin._find_admin_socket() == "/run/yggdrasil/yggdrasil.sock"
 
     def test_extract_response_success(self):
         """Extracts response from success envelope."""
@@ -248,9 +234,7 @@ class TestAdminAPI:
     def test_admin_request_tries_socket_then_ctl(self, plugin):
         """_admin_request tries socket first, falls back to ctl."""
         with patch.object(plugin, "_query_socket", return_value=None):
-            with patch.object(
-                plugin, "_query_ctl", return_value={"address": "200::1"}
-            ) as mock_ctl:
+            with patch.object(plugin, "_query_ctl", return_value={"address": "200::1"}) as mock_ctl:
                 result = plugin._admin_request("getself")
 
         assert result == {"address": "200::1"}
@@ -258,9 +242,7 @@ class TestAdminAPI:
 
     def test_admin_request_socket_success_skips_ctl(self, plugin):
         """Doesn't call ctl when socket succeeds."""
-        with patch.object(
-            plugin, "_query_socket", return_value={"address": "200::2"}
-        ):
+        with patch.object(plugin, "_query_socket", return_value={"address": "200::2"}):
             with patch.object(plugin, "_query_ctl") as mock_ctl:
                 result = plugin._admin_request("getself")
 
@@ -347,9 +329,7 @@ class TestRunCheck:
             return None
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasil"):
-            with patch.object(
-                plugin, "_admin_request", side_effect=admin_side_effect
-            ):
+            with patch.object(plugin, "_admin_request", side_effect=admin_side_effect):
                 with patch.object(plugin, "_check_rns_interface_exists"):
                     plugin._run_check()
 
@@ -381,9 +361,7 @@ class TestRunCheck:
             return None
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasil"):
-            with patch.object(
-                plugin, "_admin_request", side_effect=admin_side_effect
-            ):
+            with patch.object(plugin, "_admin_request", side_effect=admin_side_effect):
                 with patch.object(plugin, "_check_rns_interface_exists"):
                     plugin._run_check()
 
@@ -406,9 +384,7 @@ class TestRunCheck:
             return None
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasil"):
-            with patch.object(
-                plugin, "_admin_request", side_effect=admin_side_effect
-            ):
+            with patch.object(plugin, "_admin_request", side_effect=admin_side_effect):
                 with patch.object(plugin, "_check_rns_interface_exists"):
                     plugin._run_check()
 
@@ -430,15 +406,11 @@ class TestEvents:
             return self_info if req == "getself" else []
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasil"):
-            with patch.object(
-                plugin, "_admin_request", side_effect=admin_side_effect
-            ):
+            with patch.object(plugin, "_admin_request", side_effect=admin_side_effect):
                 with patch.object(plugin, "_check_rns_interface_exists"):
                     plugin._run_check()
 
-        plugin.app.event_bus.publish.assert_any_call(
-            events.YGGDRASIL_ONLINE, {"address": "200::1"}
-        )
+        plugin.app.event_bus.publish.assert_any_call(events.YGGDRASIL_ONLINE, {"address": "200::1"})
         plugin.stop()
 
     def test_offline_event(self, plugin):
@@ -450,9 +422,7 @@ class TestEvents:
             with patch.object(plugin, "_admin_request", return_value=None):
                 plugin._run_check()
 
-        plugin.app.event_bus.publish.assert_any_call(
-            events.YGGDRASIL_OFFLINE, {}
-        )
+        plugin.app.event_bus.publish.assert_any_call(events.YGGDRASIL_OFFLINE, {})
         plugin.stop()
 
     def test_no_offline_event_when_already_offline(self, plugin):
@@ -485,9 +455,7 @@ class TestEvents:
             return None
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasil"):
-            with patch.object(
-                plugin, "_admin_request", side_effect=admin_side_effect
-            ):
+            with patch.object(plugin, "_admin_request", side_effect=admin_side_effect):
                 with patch.object(plugin, "_check_rns_interface_exists"):
                     plugin._run_check()
 
@@ -513,9 +481,7 @@ class TestEvents:
             return None
 
         with patch("shutil.which", return_value="/usr/bin/yggdrasil"):
-            with patch.object(
-                plugin, "_admin_request", side_effect=admin_side_effect
-            ):
+            with patch.object(plugin, "_admin_request", side_effect=admin_side_effect):
                 with patch.object(plugin, "_check_rns_interface_exists"):
                     plugin._run_check()
 
@@ -584,9 +550,7 @@ class TestPublicAPI:
 
     def test_get_peering_uri_custom_port(self, mock_app):
         """Peering URI uses configured port."""
-        plugin = YggdrasilTransportPlugin(
-            mock_app, {"rns_listen_port": 5555}
-        )
+        plugin = YggdrasilTransportPlugin(mock_app, {"rns_listen_port": 5555})
         plugin.start()
         with plugin._lock:
             plugin._health["address"] = "200::1"
@@ -607,9 +571,7 @@ class TestRNSConfig:
 
     def test_auto_configure_adds_interface(self, plugin):
         """Auto-configure adds TCPServerInterface to Reticulum config."""
-        config_path = os.path.join(
-            plugin.app.reticulum.configdir, "config"
-        )
+        config_path = os.path.join(plugin.app.reticulum.configdir, "config")
         self._write_rns_config(
             config_path,
             "[reticulum]\n  enable_transport = True\n\n[interfaces]\n\n"
@@ -647,9 +609,7 @@ class TestRNSConfig:
 
     def test_auto_configure_skips_existing(self, plugin):
         """Doesn't duplicate interface if it already exists."""
-        config_path = os.path.join(
-            plugin.app.reticulum.configdir, "config"
-        )
+        config_path = os.path.join(plugin.app.reticulum.configdir, "config")
         self._write_rns_config(
             config_path,
             "[reticulum]\n  enable_transport = True\n\n[interfaces]\n\n"
@@ -674,9 +634,7 @@ class TestRNSConfig:
 
     def test_auto_configure_detects_address_match(self, plugin):
         """Detects interface bound to our address even with different name."""
-        config_path = os.path.join(
-            plugin.app.reticulum.configdir, "config"
-        )
+        config_path = os.path.join(plugin.app.reticulum.configdir, "config")
         self._write_rns_config(
             config_path,
             "[reticulum]\n  enable_transport = True\n\n[interfaces]\n\n"
@@ -698,9 +656,7 @@ class TestRNSConfig:
 
     def test_check_rns_interface_exists_true(self, plugin):
         """_check_rns_interface_exists detects configured interface."""
-        config_path = os.path.join(
-            plugin.app.reticulum.configdir, "config"
-        )
+        config_path = os.path.join(plugin.app.reticulum.configdir, "config")
         self._write_rns_config(
             config_path,
             "[reticulum]\n\n[interfaces]\n\n"
@@ -717,9 +673,7 @@ class TestRNSConfig:
 
     def test_check_rns_interface_exists_false(self, plugin):
         """_check_rns_interface_exists reports missing interface."""
-        config_path = os.path.join(
-            plugin.app.reticulum.configdir, "config"
-        )
+        config_path = os.path.join(plugin.app.reticulum.configdir, "config")
         self._write_rns_config(
             config_path,
             "[reticulum]\n\n[interfaces]\n\n"

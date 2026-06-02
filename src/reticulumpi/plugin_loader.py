@@ -37,7 +37,8 @@ class PluginLoader:
                     log.exception("Failed to load plugin module: %s", filepath)
                     continue
                 candidates = [
-                    getattr(module, n) for n in dir(module)
+                    getattr(module, n)
+                    for n in dir(module)
                     if isinstance(getattr(module, n), type)
                     and issubclass(getattr(module, n), PluginBase)
                     and getattr(module, n) is not PluginBase
@@ -57,14 +58,15 @@ class PluginLoader:
         return found
 
     def _load_module_from_path(self, filepath: str) -> Any:
-        dir_part = re.sub(r'[^a-zA-Z0-9_]', '_', os.path.basename(os.path.dirname(filepath)))
-        file_part = re.sub(r'[^a-zA-Z0-9_]', '_', os.path.basename(filepath).replace('.py', ''))
+        dir_part = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.basename(os.path.dirname(filepath)))
+        file_part = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.basename(filepath).replace(".py", ""))
         module_name = f"reticulumpi_plugin_{dir_part}_{file_part}"
         spec = importlib.util.spec_from_file_location(module_name, filepath)
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot create module spec for {filepath}")
         module = importlib.util.module_from_spec(spec)
         import sys
+
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         return module

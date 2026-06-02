@@ -25,17 +25,21 @@ _mock_portnums.PortNum.TEXT_MESSAGE_APP = 1
 
 @pytest.fixture(autouse=True)
 def _patch_meshtastic():
-    with patch.dict(sys.modules, {
-        "meshtastic": _mock_meshtastic,
-        "meshtastic.serial_interface": _mock_meshtastic_serial,
-        "meshtastic.portnums_pb2": _mock_portnums,
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "meshtastic": _mock_meshtastic,
+            "meshtastic.serial_interface": _mock_meshtastic_serial,
+            "meshtastic.portnums_pb2": _mock_portnums,
+        },
+    ):
         yield
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_app() -> MagicMock:
     app = MagicMock()
@@ -56,6 +60,7 @@ def _make_config(**overrides: Any) -> dict[str, Any]:
 
 def _make_plugin(config: dict[str, Any] | None = None) -> Any:
     from reticulumpi.builtin_plugins.lora_link_tester import LoraLinkTester
+
     return LoraLinkTester(_make_app(), config or _make_config())
 
 
@@ -94,22 +99,25 @@ def _make_started_plugin(config: dict[str, Any] | None = None) -> Any:
 # TestValidateConfig
 # ===========================================================================
 
+
 class TestValidateConfig:
     def test_valid_minimal_config(self):
         _make_plugin()  # should not raise
 
     def test_valid_full_config(self):
-        _make_plugin(_make_config(
-            target_node_id="!abcd1234",
-            channel_index=3,
-            probe_interval=15,
-            probe_count=50,
-            probe_timeout=20,
-            max_history=100,
-            hop_limit=4,
-            reconnect_delay=5,
-            max_reconnect_attempts=3,
-        ))
+        _make_plugin(
+            _make_config(
+                target_node_id="!abcd1234",
+                channel_index=3,
+                probe_interval=15,
+                probe_count=50,
+                probe_timeout=20,
+                max_history=100,
+                hop_limit=4,
+                reconnect_delay=5,
+                max_reconnect_attempts=3,
+            )
+        )
 
     def test_missing_serial_port(self):
         with pytest.raises(ValueError, match="serial_port"):
@@ -178,6 +186,7 @@ class TestValidateConfig:
 # TestStartTest
 # ===========================================================================
 
+
 class TestStartTest:
     def test_start_returns_ok(self):
         plugin = _make_started_plugin(_make_config(target_node_id="!abcd1234"))
@@ -228,6 +237,7 @@ class TestStartTest:
 # TestStopTest
 # ===========================================================================
 
+
 class TestStopTest:
     def test_stop_when_not_running(self):
         plugin = _make_started_plugin()
@@ -252,6 +262,7 @@ class TestStopTest:
 # ===========================================================================
 # TestProbeCallback
 # ===========================================================================
+
 
 class TestProbeCallback:
     def test_ack_records_result(self):
@@ -293,6 +304,7 @@ class TestProbeCallback:
 # TestTimeoutSweep
 # ===========================================================================
 
+
 class TestTimeoutSweep:
     def test_timeout_marks_lost(self):
         plugin = _make_started_plugin()
@@ -324,6 +336,7 @@ class TestTimeoutSweep:
 # TestStatistics
 # ===========================================================================
 
+
 class TestStatistics:
     def test_empty_stats(self):
         plugin = _make_started_plugin()
@@ -338,11 +351,27 @@ class TestStatistics:
         plugin._probes_sent = 3
         plugin._probes_acked = 2
         plugin._probes_lost = 1
-        plugin._history.extend([
-            {"seq": 0, "time": 1.0, "rtt_ms": 1000.0, "rssi": -90, "snr": 8.0, "status": "ack"},
-            {"seq": 1, "time": 2.0, "rtt_ms": 2000.0, "rssi": -100, "snr": 4.0, "status": "ack"},
-            {"seq": 2, "time": 3.0, "rtt_ms": None, "rssi": None, "snr": None, "status": "lost"},
-        ])
+        plugin._history.extend(
+            [
+                {"seq": 0, "time": 1.0, "rtt_ms": 1000.0, "rssi": -90, "snr": 8.0, "status": "ack"},
+                {
+                    "seq": 1,
+                    "time": 2.0,
+                    "rtt_ms": 2000.0,
+                    "rssi": -100,
+                    "snr": 4.0,
+                    "status": "ack",
+                },
+                {
+                    "seq": 2,
+                    "time": 3.0,
+                    "rtt_ms": None,
+                    "rssi": None,
+                    "snr": None,
+                    "status": "lost",
+                },
+            ]
+        )
 
         stats = plugin._compute_stats()
         assert stats["sent"] == 3
@@ -360,6 +389,7 @@ class TestStatistics:
 # TestSnapshot
 # ===========================================================================
 
+
 class TestSnapshot:
     def test_snapshot_structure(self):
         plugin = _make_started_plugin()
@@ -375,7 +405,16 @@ class TestSnapshot:
     def test_snapshot_tails_history(self):
         plugin = _make_started_plugin()
         for i in range(20):
-            plugin._history.append({"seq": i, "time": float(i), "rtt_ms": 100.0, "rssi": -80, "snr": 5.0, "status": "ack"})
+            plugin._history.append(
+                {
+                    "seq": i,
+                    "time": float(i),
+                    "rtt_ms": 100.0,
+                    "rssi": -80,
+                    "snr": 5.0,
+                    "status": "ack",
+                }
+            )
 
         snap = plugin.get_snapshot()
         assert len(snap["results"]) == 10
@@ -384,7 +423,16 @@ class TestSnapshot:
     def test_history_returns_full_buffer(self):
         plugin = _make_started_plugin()
         for i in range(20):
-            plugin._history.append({"seq": i, "time": float(i), "rtt_ms": 100.0, "rssi": -80, "snr": 5.0, "status": "ack"})
+            plugin._history.append(
+                {
+                    "seq": i,
+                    "time": float(i),
+                    "rtt_ms": 100.0,
+                    "rssi": -80,
+                    "snr": 5.0,
+                    "status": "ack",
+                }
+            )
 
         hist = plugin.get_history()
         assert len(hist["results"]) == 20
@@ -393,6 +441,7 @@ class TestSnapshot:
 # ===========================================================================
 # TestClearHistory
 # ===========================================================================
+
 
 class TestClearHistory:
     def test_clear_empties_buffer(self):
@@ -413,6 +462,7 @@ class TestClearHistory:
 # ===========================================================================
 # TestGetStatus
 # ===========================================================================
+
 
 class TestGetStatus:
     def test_status_fields(self):

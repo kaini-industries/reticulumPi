@@ -105,6 +105,7 @@ class MeshTelemetryPlugin(PluginBase):
 
         try:
             import RNS.vendor.umsgpack as umsgpack
+
             metrics = umsgpack.unpackb(app_data)
         except Exception:
             # Fall back to UTF-8 string (heartbeat-style announces)
@@ -128,10 +129,13 @@ class MeshTelemetryPlugin(PluginBase):
         with self._peers_lock:
             self._peer_metrics[destination_hash] = metrics
 
-        self.event_bus.publish(events.NODE_METRICS_RECEIVED, {
-            "destination_hash": destination_hash,
-            "metrics": metrics,
-        })
+        self.event_bus.publish(
+            events.NODE_METRICS_RECEIVED,
+            {
+                "destination_hash": destination_hash,
+                "metrics": metrics,
+            },
+        )
 
         self.log.debug(
             "Received telemetry from %s: %s",
@@ -204,5 +208,3 @@ _SHORT_KEYS = {
     "memory_percent": "mem",
     "disk_percent": "disk",
 }
-
-

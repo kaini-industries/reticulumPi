@@ -53,11 +53,13 @@ def _make_request(body=None, query_string="", plugin_mock=None, match_info=None)
 
     # json() coroutine
     if body is not None:
+
         async def _json():
             return body
 
         request.json = _json
     else:
+
         async def _json():
             raise ValueError("no body")
 
@@ -217,7 +219,12 @@ class TestValidateInterfaceConfig:
 
     def test_type_and_enabled_keys_skipped_in_optional_check(self):
         """Properties named 'type', 'enabled', 'mode' are not type-checked."""
-        props = {"target_host": "localhost", "target_port": 4242, "type": "anything", "enabled": "whatever"}
+        props = {
+            "target_host": "localhost",
+            "target_port": 4242,
+            "type": "anything",
+            "enabled": "whatever",
+        }
         assert _validate_interface_config("TCPClientInterface", props) is None
 
 
@@ -231,7 +238,9 @@ class TestHandleInterfaceToggle:
     @patch("reticulumpi.rns_config.set_interface_enabled")
     @patch("reticulumpi.rns_config.parse_rns_config")
     def test_toggle_success(self, mock_parse, mock_set, mock_write):
-        entry = InterfaceEntry(name="TCP Client", iface_type="TCPClientInterface", enabled=True, start_line=5)
+        entry = InterfaceEntry(
+            name="TCP Client", iface_type="TCPClientInterface", enabled=True, start_line=5
+        )
         mock_parse.return_value = (["line1\n", "line2\n"], [entry])
         mock_set.return_value = ["line1\n", "line2_modified\n"]
 
@@ -252,7 +261,9 @@ class TestHandleInterfaceToggle:
     @patch("reticulumpi.rns_config.set_interface_enabled")
     @patch("reticulumpi.rns_config.parse_rns_config")
     def test_toggle_disabled_to_enabled(self, mock_parse, mock_set, mock_write):
-        entry = InterfaceEntry(name="My RNode", iface_type="RNodeInterface", enabled=False, start_line=10)
+        entry = InterfaceEntry(
+            name="My RNode", iface_type="RNodeInterface", enabled=False, start_line=10
+        )
         mock_parse.return_value = (["line\n"], [entry])
         mock_set.return_value = ["line_modified\n"]
 
@@ -301,7 +312,9 @@ class TestHandleInterfaceToggle:
     @patch("reticulumpi.rns_config.set_interface_enabled")
     @patch("reticulumpi.rns_config.parse_rns_config")
     def test_toggle_write_error(self, mock_parse, mock_set, mock_write):
-        entry = InterfaceEntry(name="TCP Client", iface_type="TCPClientInterface", enabled=True, start_line=5)
+        entry = InterfaceEntry(
+            name="TCP Client", iface_type="TCPClientInterface", enabled=True, start_line=5
+        )
         mock_parse.return_value = (["line\n"], [entry])
         mock_set.return_value = ["modified\n"]
         mock_write.side_effect = PermissionError("read-only filesystem")
@@ -365,7 +378,11 @@ class TestHandleInterfaceAdd:
     def test_add_empty_name(self):
         plugin = MagicMock()
         plugin.app._reticulum_config_dir = "/tmp/test_rns"
-        body = {"name": "   ", "type": "TCPClientInterface", "properties": {"target_host": "x", "target_port": 1}}
+        body = {
+            "name": "   ",
+            "type": "TCPClientInterface",
+            "properties": {"target_host": "x", "target_port": 1},
+        }
         request = _make_request(body=body, plugin_mock=plugin)
 
         resp = asyncio.run(handle_interface_add(request))

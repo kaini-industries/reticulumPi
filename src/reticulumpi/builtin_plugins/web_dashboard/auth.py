@@ -30,6 +30,7 @@ def _normalize_ip(ip: str) -> str:
     except ValueError:
         return ip
 
+
 SECRET_FILENAME = "dashboard_secret"
 
 
@@ -204,10 +205,7 @@ class SqliteSessionStore:
         os.chmod(db_path, 0o600)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS sessions ("
-            "  token TEXT PRIMARY KEY,"
-            "  data TEXT NOT NULL"
-            ")"
+            "CREATE TABLE IF NOT EXISTS sessions (  token TEXT PRIMARY KEY,  data TEXT NOT NULL)"
         )
         self._conn.commit()
 
@@ -230,18 +228,14 @@ class SqliteSessionStore:
 
     def __delitem__(self, token: str) -> None:
         with self._lock:
-            cursor = self._conn.execute(
-                "DELETE FROM sessions WHERE token = ?", (token,)
-            )
+            cursor = self._conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             self._conn.commit()
         if cursor.rowcount == 0:
             raise KeyError(token)
 
     def __contains__(self, token: object) -> bool:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM sessions WHERE token = ?", (token,)
-            ).fetchone()
+            row = self._conn.execute("SELECT 1 FROM sessions WHERE token = ?", (token,)).fetchone()
         return row is not None
 
     def close(self) -> None:
@@ -276,9 +270,7 @@ class SqliteSessionStore:
                 if args:
                     return args[0]
                 raise KeyError(token)
-            self._conn.execute(
-                "DELETE FROM sessions WHERE token = ?", (token,)
-            )
+            self._conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             self._conn.commit()
         return json.loads(row[0])
 
@@ -309,8 +301,8 @@ class AuthManager:
         self.session_timeout = session_timeout
         self.max_sessions = max_sessions
         if session_db_path:
-            self.sessions: dict[str, dict[str, Any]] | SqliteSessionStore = (
-                SqliteSessionStore(session_db_path)
+            self.sessions: dict[str, dict[str, Any]] | SqliteSessionStore = SqliteSessionStore(
+                session_db_path
             )
             log.info("Using persistent session store: %s", session_db_path)
         else:
@@ -336,9 +328,7 @@ class AuthManager:
 
         # Evict oldest sessions if over limit
         while len(self.sessions) > self.max_sessions:
-            oldest_token = min(
-                self.sessions, key=lambda t: self.sessions[t]["last_seen"]
-            )
+            oldest_token = min(self.sessions, key=lambda t: self.sessions[t]["last_seen"])
             del self.sessions[oldest_token]
 
         return token

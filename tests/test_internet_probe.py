@@ -18,6 +18,7 @@ def _mock_ip_detection():
     ):
         yield
 
+
 _DEFAULT_CONFIG = {
     "force_offline": False,
     "probe_interval": 30,
@@ -262,6 +263,7 @@ class TestSetForceOffline:
         try:
             probe.set_force_offline(False)
             import time
+
             deadline = time.monotonic() + 2.0
             while not published and time.monotonic() < deadline:
                 time.sleep(0.05)

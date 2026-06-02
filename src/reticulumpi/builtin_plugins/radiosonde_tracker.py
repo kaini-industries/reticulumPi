@@ -39,7 +39,8 @@ class RadiosondeTracker(SignalPluginBase):
         )
         self._scan_freqs = self.config.get("scan_freqs_mhz", [404.8])
         self._launch_windows_utc = self.config.get(
-            "launch_windows_utc", ["11:15", "23:15"],
+            "launch_windows_utc",
+            ["11:15", "23:15"],
         )
         self._window_duration_min = int(
             self.config.get("launch_window_duration_min", 120),
@@ -132,11 +133,16 @@ class RadiosondeTracker(SignalPluginBase):
         freq_hz = self._default_freq_hz
         rtl_cmd = [
             rtl_fm,
-            "-d", str(device_index),
-            "-f", str(freq_hz),
-            "-s", "48000",
-            "-M", "fm",
-            "-p", str(self._ppm),
+            "-d",
+            str(device_index),
+            "-f",
+            str(freq_hz),
+            "-s",
+            "48000",
+            "-M",
+            "fm",
+            "-p",
+            str(self._ppm),
         ]
         if self._gain is not None:
             rtl_cmd += ["-g", str(self._gain)]
@@ -145,7 +151,9 @@ class RadiosondeTracker(SignalPluginBase):
         decoder_cmd = [decoder, "--ptu", "--json", "--ecc2"]
 
         self.log.debug(
-            "Launching: %s | %s", " ".join(rtl_cmd), " ".join(decoder_cmd),
+            "Launching: %s | %s",
+            " ".join(rtl_cmd),
+            " ".join(decoder_cmd),
         )
 
         rtl_proc = subprocess.Popen(
@@ -172,7 +180,8 @@ class RadiosondeTracker(SignalPluginBase):
 
         self.log.info(
             "Radiosonde scanner started at %.3f MHz (PID %d)",
-            freq_hz / 1_000_000, self._pid,
+            freq_hz / 1_000_000,
+            self._pid,
         )
 
     def _kill_subprocess(self) -> None:
@@ -258,9 +267,13 @@ class RadiosondeTracker(SignalPluginBase):
 
             self.log.info("New sonde detected: %s (%s)", sonde_id, sonde_type)
             try:
-                self.event_bus.publish(events.RADIOSONDE_DETECTED, {
-                    "id": sonde_id, "type": sonde_type,
-                })
+                self.event_bus.publish(
+                    events.RADIOSONDE_DETECTED,
+                    {
+                        "id": sonde_id,
+                        "type": sonde_type,
+                    },
+                )
             except Exception:
                 pass
 
@@ -288,34 +301,49 @@ class RadiosondeTracker(SignalPluginBase):
                 sonde["burst_alt_m"] = alt
                 self.log.info("Sonde %s burst at %.0f m", sonde_id, alt)
                 try:
-                    self.event_bus.publish(events.RADIOSONDE_BURST, {
-                        "id": sonde_id, "alt_m": alt,
-                    })
+                    self.event_bus.publish(
+                        events.RADIOSONDE_BURST,
+                        {
+                            "id": sonde_id,
+                            "alt_m": alt,
+                        },
+                    )
                 except Exception:
                     pass
         elif sonde.get("phase") == "burst" and vel_v < 0:
             sonde["phase"] = "descent"
 
         if alt is not None:
-            self._altitude_profile.append({
-                "ts": now, "alt_m": alt,
-                "temp_c": temp, "vel_v": vel_v,
-            })
+            self._altitude_profile.append(
+                {
+                    "ts": now,
+                    "alt_m": alt,
+                    "temp_c": temp,
+                    "vel_v": vel_v,
+                }
+            )
 
         if lat is not None and lon is not None:
             if len(self._position_track) == 0 or self._frame_count % 4 == 0:
-                self._position_track.append({
-                    "ts": now, "lat": lat, "lon": lon,
-                    "alt_m": alt,
-                })
+                self._position_track.append(
+                    {
+                        "ts": now,
+                        "lat": lat,
+                        "lon": lon,
+                        "alt_m": alt,
+                    }
+                )
 
             if self._receiver_lat is not None and self._receiver_lon is not None:
                 from reticulumpi.geo import haversine_km, bearing_deg
+
                 sonde["distance_km"] = round(
-                    haversine_km(self._receiver_lat, self._receiver_lon, lat, lon), 1,
+                    haversine_km(self._receiver_lat, self._receiver_lon, lat, lon),
+                    1,
                 )
                 sonde["bearing_deg"] = round(
-                    bearing_deg(self._receiver_lat, self._receiver_lon, lat, lon), 0,
+                    bearing_deg(self._receiver_lat, self._receiver_lon, lat, lon),
+                    0,
                 )
 
             wind = self._derive_wind(lat, lon, alt, now)
@@ -328,7 +356,11 @@ class RadiosondeTracker(SignalPluginBase):
         self._snapshot_dirty = True
 
     def _derive_wind(
-        self, lat: float, lon: float, alt: float | None, now: float,
+        self,
+        lat: float,
+        lon: float,
+        alt: float | None,
+        now: float,
     ) -> dict[str, Any] | None:
         prev = self._prev_wind_point
         self._prev_wind_point = {"lat": lat, "lon": lon, "alt": alt, "ts": now}
@@ -338,6 +370,7 @@ class RadiosondeTracker(SignalPluginBase):
         if dt < 2.0:
             return None
         from reticulumpi.geo import haversine_km, bearing_deg
+
         dist_km = haversine_km(prev["lat"], prev["lon"], lat, lon)
         speed_ms = dist_km * 1000.0 / dt
         direction = bearing_deg(prev["lat"], prev["lon"], lat, lon)
@@ -380,7 +413,9 @@ class RadiosondeTracker(SignalPluginBase):
             "landed_lon": sonde.get("lon"),
         }
         self._recent_sondes.appendleft(summary)
-        self.log.info("Sonde %s finalized (%d frames)", sonde.get("id"), sonde.get("frame_count", 0))
+        self.log.info(
+            "Sonde %s finalized (%d frames)", sonde.get("id"), sonde.get("frame_count", 0)
+        )
 
     def _next_launch_window(self) -> dict[str, Any] | None:
         now = time.time()

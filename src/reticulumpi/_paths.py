@@ -24,11 +24,7 @@ def find_repo_asset(*parts: str) -> str | None:
             candidates.append(os.path.dirname(entry))
     # Editable install where __file__ itself is in the repo tree
     # (`<repo>/src/reticulumpi/_paths.py` → <repo>)
-    candidates.append(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    )
+    candidates.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     # Standard system install
     candidates.append("/opt/reticulumpi")
     for root in candidates:

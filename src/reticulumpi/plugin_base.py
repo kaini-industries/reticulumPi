@@ -139,7 +139,8 @@ class PluginBase(ABC):
         self.event_bus.unsubscribe_all(self._on_internet_event)
         with PluginBase._global_thread_lock:
             PluginBase._global_thread_count = max(
-                0, PluginBase._global_thread_count - thread_count,
+                0,
+                PluginBase._global_thread_count - thread_count,
             )
 
     def _sleep_while_active(self, seconds: float) -> None:
@@ -154,6 +155,7 @@ class PluginBase(ABC):
         Applies +/- *jitter_pct* (default 10 %) uniform random offset.
         """
         import random
+
         offset = seconds * jitter_pct * (2 * random.random() - 1)
         self._stop_event.wait(timeout=max(0.0, float(seconds + offset)))
 
@@ -183,8 +185,10 @@ class PluginBase(ABC):
 
     def _start_stderr_reader(self, process: Any, prefix: str = "") -> threading.Thread:
         """Start a log reader that drains the process's stderr pipe."""
+
         class _StderrProxy:
             stdout = process.stderr
+
         return self._start_log_reader(_StderrProxy(), prefix=prefix)
 
     @classmethod
@@ -210,7 +214,8 @@ class PluginBase(ABC):
             return
         with PluginBase._global_thread_lock:
             PluginBase._global_thread_count = max(
-                0, PluginBase._global_thread_count - 1,
+                0,
+                PluginBase._global_thread_count - 1,
             )
 
     def _start_thread(self, target: Any, name: str | None = None) -> threading.Thread:
@@ -229,6 +234,8 @@ class PluginBase(ABC):
         if count > budget:
             self.log.warning(
                 "Plugin thread budget exceeded: %d/%d active (started '%s')",
-                count, budget, thread.name,
+                count,
+                budget,
+                thread.name,
             )
         return thread

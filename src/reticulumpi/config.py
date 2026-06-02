@@ -179,9 +179,9 @@ class AppConfig:
             return
         raw.setdefault("reticulumpi", {})
         raw["reticulumpi"].setdefault("internet", {})
-        raw["reticulumpi"]["internet"]["force_offline"] = self._data.get(
-            "internet", {}
-        ).get("force_offline", False)
+        raw["reticulumpi"]["internet"]["force_offline"] = self._data.get("internet", {}).get(
+            "force_offline", False
+        )
         dir_name = os.path.dirname(path) or "."
         fd, tmp = tempfile.mkstemp(dir=dir_name, prefix=".config_", suffix=".tmp")
         try:

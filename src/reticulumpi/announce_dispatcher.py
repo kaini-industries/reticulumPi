@@ -146,7 +146,9 @@ class AnnounceDispatcher:
                         af = sub.aspect_filter
                         if af not in matched_aspects:
                             matched_aspects[af] = self._aspect_matches(
-                                af, destination_hash, announced_identity,
+                                af,
+                                destination_hash,
+                                announced_identity,
                             )
                         should_call = matched_aspects[af]
 
@@ -192,7 +194,8 @@ class AnnounceDispatcher:
             return False
         try:
             expected = RNS.Destination.hash_from_name_and_identity(
-                aspect_filter, announced_identity,
+                aspect_filter,
+                announced_identity,
             )
             return destination_hash == expected
         except Exception:

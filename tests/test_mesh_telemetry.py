@@ -138,7 +138,9 @@ def test_get_status(mock_dest, mock_transport, mock_app, plugin_config):
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
-def test_broadcast_cache_returns_cached_within_ttl(mock_dest, mock_transport, mock_app, plugin_config):
+def test_broadcast_cache_returns_cached_within_ttl(
+    mock_dest, mock_transport, mock_app, plugin_config
+):
     from reticulumpi.builtin_plugins.mesh_telemetry import MeshTelemetryPlugin
 
     plugin = MeshTelemetryPlugin(mock_app, plugin_config)

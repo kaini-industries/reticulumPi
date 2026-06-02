@@ -13,13 +13,15 @@ if TYPE_CHECKING:
     from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
 
 # Paths that do not require authentication
-PUBLIC_PATHS = frozenset({
-    "/login.html",
-    "/api/auth/login",
-    "/auth/login",
-    "/api/version",
-    "/sw.js",
-})
+PUBLIC_PATHS = frozenset(
+    {
+        "/login.html",
+        "/api/auth/login",
+        "/auth/login",
+        "/api/version",
+        "/sw.js",
+    }
+)
 
 # Static file prefixes that are public
 PUBLIC_PREFIXES = ("/static/", "/tiles/")
@@ -64,14 +66,16 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
     return app
 
 
-_COMPRESSIBLE = frozenset({
-    "text/html",
-    "text/css",
-    "application/javascript",
-    "application/json",
-    "text/plain",
-    "image/svg+xml",
-})
+_COMPRESSIBLE = frozenset(
+    {
+        "text/html",
+        "text/css",
+        "application/javascript",
+        "application/json",
+        "text/plain",
+        "image/svg+xml",
+    }
+)
 
 
 _ZLIB_EXECUTOR_THRESHOLD = 32768
@@ -133,9 +137,9 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
                 return await handler(request)
 
         # Allow localhost requests for internal services (NomadNet pages, scripts)
-        if (
-            plugin.config.get("allow_localhost_api", False)
-            and request.remote in ("127.0.0.1", "::1")
+        if plugin.config.get("allow_localhost_api", False) and request.remote in (
+            "127.0.0.1",
+            "::1",
         ):
             if request.method in ("POST", "PUT", "DELETE"):
                 if not request.headers.get("X-Requested-With"):

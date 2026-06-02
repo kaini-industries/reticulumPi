@@ -157,6 +157,7 @@ def test_subscribe_offloaded_logs_exceptions(caplog):
         done.wait(timeout=5)
         # Give the executor a moment to flush the log
         import time
+
         time.sleep(0.1)
     assert "boom" in caplog.text
 
@@ -168,6 +169,7 @@ def test_unsubscribe_offloaded_callback():
     bus.unsubscribe("test.event", cb)
     bus.publish("test.event", {})
     import time
+
     time.sleep(0.2)
     cb.assert_not_called()
 
@@ -182,5 +184,6 @@ def test_unsubscribe_all_offloaded_callback():
     bus.publish("evt.a", {})
     bus.publish("evt.b", {})
     import time
+
     time.sleep(0.2)
     cb.assert_not_called()

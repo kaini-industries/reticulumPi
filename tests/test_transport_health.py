@@ -175,11 +175,13 @@ class TestNodeDetection:
         plugin.start()
 
         via_hash = "dd" * 16
-        mock_conn = _mock_routing_data([
-            (via_hash, "TCPInterface"),
-            (via_hash, "TCPInterface"),
-            (via_hash, "TCPInterface"),
-        ])
+        mock_conn = _mock_routing_data(
+            [
+                (via_hash, "TCPInterface"),
+                (via_hash, "TCPInterface"),
+                (via_hash, "TCPInterface"),
+            ]
+        )
         mock_app.get_plugin.return_value = mock_conn
 
         plugin._run_check()
@@ -232,9 +234,7 @@ class TestStatusTransitions:
         mock_app.get_plugin.return_value = mock_conn_empty
 
         events_received = []
-        mock_app.event_bus.subscribe(
-            "transport_node.down", lambda e, d: events_received.append(d)
-        )
+        mock_app.event_bus.subscribe("transport_node.down", lambda e, d: events_received.append(d))
 
         # Run enough checks to trigger "down"
         for _ in range(2):

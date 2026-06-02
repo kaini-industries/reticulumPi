@@ -61,17 +61,58 @@ _ORG_NAMES = {
 }
 
 _FIPS_STATES: dict[str, str] = {
-    "00": "US", "01": "AL", "02": "AK", "04": "AZ", "05": "AR",
-    "06": "CA", "08": "CO", "09": "CT", "10": "DE", "11": "DC",
-    "12": "FL", "13": "GA", "15": "HI", "16": "ID", "17": "IL",
-    "18": "IN", "19": "IA", "20": "KS", "21": "KY", "22": "LA",
-    "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN",
-    "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV",
-    "33": "NH", "34": "NJ", "35": "NM", "36": "NY", "37": "NC",
-    "38": "ND", "39": "OH", "40": "OK", "41": "OR", "42": "PA",
-    "44": "RI", "45": "SC", "46": "SD", "47": "TN", "48": "TX",
-    "49": "UT", "50": "VT", "51": "VA", "53": "WA", "54": "WV",
-    "55": "WI", "56": "WY",
+    "00": "US",
+    "01": "AL",
+    "02": "AK",
+    "04": "AZ",
+    "05": "AR",
+    "06": "CA",
+    "08": "CO",
+    "09": "CT",
+    "10": "DE",
+    "11": "DC",
+    "12": "FL",
+    "13": "GA",
+    "15": "HI",
+    "16": "ID",
+    "17": "IL",
+    "18": "IN",
+    "19": "IA",
+    "20": "KS",
+    "21": "KY",
+    "22": "LA",
+    "23": "ME",
+    "24": "MD",
+    "25": "MA",
+    "26": "MI",
+    "27": "MN",
+    "28": "MS",
+    "29": "MO",
+    "30": "MT",
+    "31": "NE",
+    "32": "NV",
+    "33": "NH",
+    "34": "NJ",
+    "35": "NM",
+    "36": "NY",
+    "37": "NC",
+    "38": "ND",
+    "39": "OH",
+    "40": "OK",
+    "41": "OR",
+    "42": "PA",
+    "44": "RI",
+    "45": "SC",
+    "46": "SD",
+    "47": "TN",
+    "48": "TX",
+    "49": "UT",
+    "50": "VT",
+    "51": "VA",
+    "53": "WA",
+    "54": "WV",
+    "55": "WI",
+    "56": "WY",
 }
 
 
@@ -100,6 +141,7 @@ def _parse_issued_ts(issued: str) -> float | None:
         now = time.gmtime(now_ts)
         year = now.tm_year
         import calendar
+
         jan1 = calendar.timegm((year, 1, 1, 0, 0, 0, 0, 1, -1))
         ts = jan1 + (jday - 1) * 86400 + hour * 3600 + minute * 60
         if ts > now_ts + 86400:
@@ -191,13 +233,20 @@ class WeatherAlert(SignalPluginBase):
 
         rtl_cmd = [
             rtl_fm,
-            "-d", str(device_index),
-            "-f", str(self._freq_hz),
-            "-s", "22050",
-            "-M", "fm",
-            "-E", "dc",
-            "-A", "fast",
-            "-p", str(self._ppm),
+            "-d",
+            str(device_index),
+            "-f",
+            str(self._freq_hz),
+            "-s",
+            "22050",
+            "-M",
+            "fm",
+            "-E",
+            "dc",
+            "-A",
+            "fast",
+            "-p",
+            str(self._ppm),
         ]
         if self._gain_db is not None:
             rtl_cmd += ["-g", str(self._gain_db)]
@@ -229,7 +278,8 @@ class WeatherAlert(SignalPluginBase):
 
         self.log.info(
             "Monitoring %.3f MHz for SAME headers (PID %d)",
-            self._freq_hz / 1_000_000, self._pid,
+            self._freq_hz / 1_000_000,
+            self._pid,
         )
 
     def _kill_subprocess(self) -> None:
@@ -290,7 +340,8 @@ class WeatherAlert(SignalPluginBase):
                 return
 
         event_desc, severity = _EVENT_CODES.get(
-            event_code, (f"Unknown ({event_code})", "info"),
+            event_code,
+            (f"Unknown ({event_code})", "info"),
         )
         issued_ts = _parse_issued_ts(issued)
         purge_ts = _compute_purge_ts(issued_ts, purge)
@@ -337,9 +388,11 @@ class WeatherAlert(SignalPluginBase):
         counts[event_code] = counts.get(event_code, 0) + 1
 
         if self._active_alert is None or _SEVERITY_RANK.get(
-            severity, 99,
+            severity,
+            99,
         ) <= _SEVERITY_RANK.get(
-            self._active_alert.get("severity", "info"), 99,
+            self._active_alert.get("severity", "info"),
+            99,
         ):
             self._active_alert = alert
 
@@ -347,7 +400,10 @@ class WeatherAlert(SignalPluginBase):
 
         self.log.info(
             "SAME: %s — %s (%s) from %s",
-            event_code, event_desc, severity, callsign,
+            event_code,
+            event_desc,
+            severity,
+            callsign,
         )
 
         try:
@@ -362,30 +418,31 @@ class WeatherAlert(SignalPluginBase):
                 pass
             if self._forward_to_alert_system:
                 try:
-                    self.event_bus.publish(events.ALERT_TRIGGERED, {
-                        "source": "weather_alert",
-                        "title": event_desc,
-                        "message": f"{event_desc} for {', '.join(alert['counties'])}",
-                        "severity": severity,
-                    })
+                    self.event_bus.publish(
+                        events.ALERT_TRIGGERED,
+                        {
+                            "source": "weather_alert",
+                            "title": event_desc,
+                            "message": f"{event_desc} for {', '.join(alert['counties'])}",
+                            "severity": severity,
+                        },
+                    )
                 except Exception:
                     pass
-
 
     def _check_expired(self) -> None:
         now = time.time()
         if self._seen_headers:
             cutoff = now - 300
-            self._seen_headers = {
-                k: v for k, v in self._seen_headers.items() if v > cutoff
-            }
+            self._seen_headers = {k: v for k, v in self._seen_headers.items() if v > cutoff}
         if self._active_alert:
             purge = self._active_alert.get("purge_ts")
             if purge and now > purge:
                 self._active_alert["expired"] = True
                 try:
                     self.event_bus.publish(
-                        events.WEATHER_ALERT_EXPIRED, self._active_alert,
+                        events.WEATHER_ALERT_EXPIRED,
+                        self._active_alert,
                     )
                 except Exception:
                     pass
@@ -414,7 +471,8 @@ class WeatherAlert(SignalPluginBase):
         with self._cache_lock:
             total = self._stats["headers_decoded_total"] + self._partial_headers
             error_rate = round(
-                self._partial_headers / max(1, total) * 100, 1,
+                self._partial_headers / max(1, total) * 100,
+                1,
             )
             self._snapshot_cache = {
                 "status": self._status,

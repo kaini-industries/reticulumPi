@@ -424,8 +424,8 @@ class TestAspectMatching:
         assert done.wait(5.0), "Both callbacks not called"
 
         calls = [
-            c for c in _rns_mock.Destination.hash_from_name_and_identity.call_args_list
+            c
+            for c in _rns_mock.Destination.hash_from_name_and_identity.call_args_list
             if c[0][0] == "shared.aspect"
         ]
         assert len(calls) == 1
-

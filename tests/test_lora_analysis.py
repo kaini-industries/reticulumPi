@@ -15,6 +15,7 @@ from reticulumpi.builtin_plugins.lora_analysis import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _us915_bins(bin_khz: float = 12.5) -> list[int]:
     """Generate a bin frequency array matching a 902–928 MHz sweep at given resolution."""
     start_hz = 902_000_000
@@ -46,6 +47,7 @@ def _powers_with_active_channel(
 # ---------------------------------------------------------------------------
 # Channel plan
 # ---------------------------------------------------------------------------
+
 
 class TestChannelPlan:
     def test_us915_has_72_channels(self):
@@ -85,6 +87,7 @@ class TestChannelPlan:
 # bisect_left_hz
 # ---------------------------------------------------------------------------
 
+
 class TestBisectLeftHz:
     def test_exact_match(self):
         bins = [100, 200, 300, 400]
@@ -109,6 +112,7 @@ class TestBisectLeftHz:
 # ---------------------------------------------------------------------------
 # Construction / reset
 # ---------------------------------------------------------------------------
+
 
 class TestConstruction:
     def test_default_region(self):
@@ -149,6 +153,7 @@ class TestReset:
 # Noise floor estimation
 # ---------------------------------------------------------------------------
 
+
 class TestNoiseFloor:
     def test_noise_floor_from_uniform_sweep(self):
         a = LoraChannelAnalyzer()
@@ -160,7 +165,9 @@ class TestNoiseFloor:
     def test_noise_floor_ignores_none_bins(self):
         a = LoraChannelAnalyzer()
         bins = _us915_bins()
-        powers: list[float | None] = [None] * (len(bins) // 2) + [-80.0] * (len(bins) - len(bins) // 2)
+        powers: list[float | None] = [None] * (len(bins) // 2) + [-80.0] * (
+            len(bins) - len(bins) // 2
+        )
         a.on_sweep(bins, powers, timestamp=1.0)
         assert a.noise_floor_db is not None
         assert abs(a.noise_floor_db - (-80.0)) < 0.1
@@ -183,6 +190,7 @@ class TestNoiseFloor:
 # ---------------------------------------------------------------------------
 # Per-channel analysis
 # ---------------------------------------------------------------------------
+
 
 class TestChannelAnalysis:
     def test_channel_power_computed_for_active_channel(self):
@@ -271,8 +279,15 @@ class TestChannelAnalysis:
         result = a.get_channel_analysis()
         ch0 = result["channels"][0]
         assert ch0["power_db"] is not None
-        n_bins = len([b for b in bins if a._channels[0].center_hz - a._channels[0].bw_hz // 2
-                      <= b < a._channels[0].center_hz + a._channels[0].bw_hz // 2])
+        n_bins = len(
+            [
+                b
+                for b in bins
+                if a._channels[0].center_hz - a._channels[0].bw_hz // 2
+                <= b
+                < a._channels[0].center_hz + a._channels[0].bw_hz // 2
+            ]
+        )
         expected_integrated = -90.0 + 10.0 * math.log10(n_bins)
         assert abs(ch0["power_db"] - expected_integrated) < 0.5
 
@@ -280,6 +295,7 @@ class TestChannelAnalysis:
 # ---------------------------------------------------------------------------
 # Capture triggers (per-bin mean)
 # ---------------------------------------------------------------------------
+
 
 class TestCaptureTriggerPerBinMean:
     def test_capture_trigger_uses_per_bin_mean(self):
@@ -298,6 +314,7 @@ class TestCaptureTriggerPerBinMean:
 # ---------------------------------------------------------------------------
 # Capture triggers
 # ---------------------------------------------------------------------------
+
 
 class TestCaptureTriggers:
     def test_trigger_fires_after_consecutive_sweeps(self):
@@ -350,6 +367,7 @@ class TestCaptureTriggers:
 # Interference flags
 # ---------------------------------------------------------------------------
 
+
 class TestInterferenceFlags:
     def test_noise_elevated_flag(self):
         a = LoraChannelAnalyzer()
@@ -389,6 +407,7 @@ class TestInterferenceFlags:
 # ---------------------------------------------------------------------------
 # get_channel_analysis / get_channel_power_history
 # ---------------------------------------------------------------------------
+
 
 class TestOutputFormats:
     def test_channel_analysis_shape(self):

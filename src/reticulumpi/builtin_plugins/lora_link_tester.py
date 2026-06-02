@@ -41,8 +41,7 @@ class LoraLinkTester(PluginBase):
             import meshtastic  # noqa: F401
         except ImportError:
             raise ValueError(
-                "meshtastic package not found. "
-                "Install with: pip install reticulumpi[meshtastic]"
+                "meshtastic package not found. Install with: pip install reticulumpi[meshtastic]"
             )
 
         sp = self.config.get("serial_port")
@@ -133,7 +132,9 @@ class LoraLinkTester(PluginBase):
     # ── Public API ─────────────────────────────────────────────────
 
     def start_test(
-        self, target: str | None = None, count: int | None = None,
+        self,
+        target: str | None = None,
+        count: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._test_running:
@@ -162,10 +163,16 @@ class LoraLinkTester(PluginBase):
             lambda: self._probe_loop(effective_target, effective_count),
             "linktester-probe",
         )
-        self.event_bus.publish(events.LINK_TEST_STARTED, {
-            "target": effective_target, "count": effective_count,
-        })
-        self.log.info("Test started → %s (%s probes)", effective_target, effective_count or "unlimited")
+        self.event_bus.publish(
+            events.LINK_TEST_STARTED,
+            {
+                "target": effective_target,
+                "count": effective_count,
+            },
+        )
+        self.log.info(
+            "Test started → %s (%s probes)", effective_target, effective_count or "unlimited"
+        )
         return {"ok": True, "target": effective_target, "count": effective_count}
 
     def stop_test(self) -> dict[str, Any]:
@@ -176,7 +183,12 @@ class LoraLinkTester(PluginBase):
             self._test_running = False
         stats = self._compute_stats()
         self.event_bus.publish(events.LINK_TEST_STOPPED, stats)
-        self.log.info("Test stopped (%d sent, %d acked, %d lost)", stats["sent"], stats["acked"], stats["lost"])
+        self.log.info(
+            "Test stopped (%d sent, %d acked, %d lost)",
+            stats["sent"],
+            stats["acked"],
+            stats["lost"],
+        )
         return {"ok": True, "stats": stats}
 
     def clear_history(self) -> dict[str, Any]:
@@ -247,9 +259,13 @@ class LoraLinkTester(PluginBase):
                 failures += 1
                 self._status = "error"
                 self.log.warning("Connection failed (%d): %s", failures, exc)
-                self.event_bus.publish(events.LINK_TEST_CONNECTION_CHANGED, {
-                    "connected": False, "error": str(exc),
-                })
+                self.event_bus.publish(
+                    events.LINK_TEST_CONNECTION_CHANGED,
+                    {
+                        "connected": False,
+                        "error": str(exc),
+                    },
+                )
                 if max_attempts and failures >= max_attempts:
                     self.log.error("Max reconnect attempts reached, giving up")
                     break
@@ -350,7 +366,9 @@ class LoraLinkTester(PluginBase):
 
         packet = iface.sendData(**send_kwargs)
 
-        packet_id = packet.id if hasattr(packet, "id") else getattr(packet, "get", lambda k, d: d)("id", 0)
+        packet_id = (
+            packet.id if hasattr(packet, "id") else getattr(packet, "get", lambda k, d: d)("id", 0)
+        )
 
         with self._lock:
             self._pending_probes[packet_id] = (send_mono, send_wall, seq)
@@ -413,10 +431,17 @@ class LoraLinkTester(PluginBase):
                 self._history.append(result)
 
         for _, send_wall, seq in timed_out:
-            self.event_bus.publish(events.LINK_TEST_PROBE_RESULT, {
-                "seq": seq, "time": send_wall,
-                "rtt_ms": None, "rssi": None, "snr": None, "status": "lost",
-            })
+            self.event_bus.publish(
+                events.LINK_TEST_PROBE_RESULT,
+                {
+                    "seq": seq,
+                    "time": send_wall,
+                    "rtt_ms": None,
+                    "rssi": None,
+                    "snr": None,
+                    "status": "lost",
+                },
+            )
 
     # ── Statistics ─────────────────────────────────────────────────
 

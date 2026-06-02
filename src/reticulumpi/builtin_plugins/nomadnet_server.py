@@ -65,9 +65,7 @@ class NomadNetServer(PluginBase):
             if os.path.isfile(venv_bin) and os.access(venv_bin, os.X_OK):
                 nomadnet_bin = venv_bin
             else:
-                raise ValueError(
-                    "NomadNet binary not found. Install it with: pip install nomadnet"
-                )
+                raise ValueError("NomadNet binary not found. Install it with: pip install nomadnet")
         self._nomadnet_bin = nomadnet_bin
 
         interval = self.config.get("health_check_interval", 10)
@@ -82,9 +80,7 @@ class NomadNetServer(PluginBase):
         if auth:
             pp = auth.get("protected_pages")
             if pp is not None and pp != "all" and not isinstance(pp, list):
-                raise ValueError(
-                    "auth.protected_pages must be a list of filenames or 'all'"
-                )
+                raise ValueError("auth.protected_pages must be a list of filenames or 'all'")
             pub = auth.get("public_pages")
             if pub is not None and not isinstance(pub, list):
                 raise ValueError("auth.public_pages must be a list of filenames")
@@ -95,9 +91,7 @@ class NomadNetServer(PluginBase):
         self._pid: int | None = None
         self._restart_count = 0
 
-        self._config_dir = os.path.expanduser(
-            self.config.get("config_dir", "~/.nomadnet")
-        )
+        self._config_dir = os.path.expanduser(self.config.get("config_dir", "~/.nomadnet"))
         self._pages_dir = os.path.join(self._config_dir, "storage", "pages")
         self._files_dir = os.path.join(self._config_dir, "storage", "files")
 
@@ -106,15 +100,15 @@ class NomadNetServer(PluginBase):
         self._install_example_pages()
         self._sync_allowed_files()
 
-        rns_config_dir = self.app._reticulum_config_dir or os.path.expanduser(
-            "~/.reticulum"
-        )
+        rns_config_dir = self.app._reticulum_config_dir or os.path.expanduser("~/.reticulum")
 
         cmd = [
             self._nomadnet_bin,
             "--daemon",
-            "--config", self._config_dir,
-            "--rnsconfig", rns_config_dir,
+            "--config",
+            self._config_dir,
+            "--rnsconfig",
+            rns_config_dir,
         ]
         self._launch_process(cmd)
         self._cmd = cmd
@@ -191,9 +185,7 @@ class NomadNetServer(PluginBase):
 
             if self._process is not None and self._process.poll() is not None:
                 exit_code = self._process.returncode
-                self.log.warning(
-                    "NomadNet process exited unexpectedly (code: %s)", exit_code
-                )
+                self.log.warning("NomadNet process exited unexpectedly (code: %s)", exit_code)
 
                 if auto_restart and self._restart_count < max_restarts:
                     self._restart_count += 1
@@ -209,18 +201,14 @@ class NomadNetServer(PluginBase):
                         self.log.exception("Failed to restart NomadNet")
                         self._active = False
                 else:
-                    self.log.error(
-                        "NomadNet exceeded max restarts (%d), giving up", max_restarts
-                    )
+                    self.log.error("NomadNet exceeded max restarts (%d), giving up", max_restarts)
                     self._active = False
 
     # --- Page authentication ---
 
     def _get_allow_list_path(self) -> str:
         auth = self.config.get("auth", {})
-        return os.path.expanduser(
-            auth.get("allow_list_path", _DEFAULT_ALLOW_LIST_PATH)
-        )
+        return os.path.expanduser(auth.get("allow_list_path", _DEFAULT_ALLOW_LIST_PATH))
 
     def get_allowed_identities(self) -> list[str]:
         """Return the current list of authorized identity hashes."""
@@ -234,18 +222,14 @@ class NomadNetServer(PluginBase):
         """
         hex_hash = hex_hash.strip().lower()
         if not _HASH_RE.match(hex_hash):
-            raise ValueError(
-                f"Invalid identity hash (need 32 lowercase hex chars): {hex_hash!r}"
-            )
+            raise ValueError(f"Invalid identity hash (need 32 lowercase hex chars): {hex_hash!r}")
         identities = self._load_allowed_identities()
         if hex_hash in identities:
             return False
         identities.append(hex_hash)
         self._save_allowed_identities(identities)
         self.log.info("Added allowed identity: %s", hex_hash[:16])
-        self.event_bus.publish(
-            events.NOMADNET_AUTH_IDENTITY_ADDED, {"identity": hex_hash}
-        )
+        self.event_bus.publish(events.NOMADNET_AUTH_IDENTITY_ADDED, {"identity": hex_hash})
         return True
 
     def remove_allowed_identity(self, hex_hash: str) -> bool:
@@ -260,9 +244,7 @@ class NomadNetServer(PluginBase):
         identities.remove(hex_hash)
         self._save_allowed_identities(identities)
         self.log.info("Removed allowed identity: %s", hex_hash[:16])
-        self.event_bus.publish(
-            events.NOMADNET_AUTH_IDENTITY_REMOVED, {"identity": hex_hash}
-        )
+        self.event_bus.publish(events.NOMADNET_AUTH_IDENTITY_REMOVED, {"identity": hex_hash})
         return True
 
     def _load_allowed_identities(self) -> list[str]:
@@ -299,11 +281,7 @@ class NomadNetServer(PluginBase):
             pages_dir = getattr(self, "_pages_dir", "")
             if not pages_dir or not os.path.isdir(pages_dir):
                 return []
-            return [
-                f
-                for f in os.listdir(pages_dir)
-                if f.endswith(".mu") and f not in public
-            ]
+            return [f for f in os.listdir(pages_dir) if f.endswith(".mu") and f not in public]
         return list(pp) if isinstance(pp, list) else []
 
     def _sync_allowed_files(self) -> None:

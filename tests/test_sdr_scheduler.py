@@ -50,8 +50,7 @@ def sched():
 class TestRegistration:
     def test_register_creates_slot(self, sched):
         acq, yld = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq, yld,
-                       label="AIS", continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq, yld, label="AIS", continuous=True)
         slot = sched.get_status()[SERIAL]["slots"]["ais"]
         assert slot["priority"] == PRIORITY_BACKGROUND
         assert slot["label"] == "AIS"
@@ -80,10 +79,8 @@ class TestPriorityPreemption:
     def test_p0_preempts_p2(self, sched):
         acq_bg, yld_bg = _cb_pair()
         acq_p0, _ = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, yld_bg,
-                       continuous=True)
-        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, acq_p0, _cb_pair()[1],
-                       continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, yld_bg, continuous=True)
+        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, acq_p0, _cb_pair()[1], continuous=True)
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -96,10 +93,15 @@ class TestPriorityPreemption:
         acq_bg, yld_bg = _cb_pair()
         acq_p1, _ = _cb_pair()
         now = time.time()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, yld_bg,
-                       continuous=True)
-        sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, acq_p1, _cb_pair()[1],
-                       windows=[TimeWindow(now - 10, now + 300, "sat")])
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, yld_bg, continuous=True)
+        sched.register(
+            SERIAL,
+            "sat",
+            PRIORITY_SCHEDULED,
+            acq_p1,
+            _cb_pair()[1],
+            windows=[TimeWindow(now - 10, now + 300, "sat")],
+        )
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -112,10 +114,15 @@ class TestPriorityPreemption:
         _, yld_p1 = _cb_pair()
         acq_bg, _ = _cb_pair()
         now = time.time()
-        sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, _cb_pair()[0], yld_p1,
-                       windows=[TimeWindow(now - 10, now + 300, "sat")])
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, _cb_pair()[1],
-                       continuous=True)
+        sched.register(
+            SERIAL,
+            "sat",
+            PRIORITY_SCHEDULED,
+            _cb_pair()[0],
+            yld_p1,
+            windows=[TimeWindow(now - 10, now + 300, "sat")],
+        )
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, _cb_pair()[1], continuous=True)
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "sat"
         dongle.slots["sat"].is_active = True
@@ -129,10 +136,14 @@ class TestLocking:
     def test_lock_prevents_p1_preemption(self, sched):
         _, yld_bg = _cb_pair()
         now = time.time()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg,
-                       continuous=True)
-        sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, *_cb_pair(),
-                       windows=[TimeWindow(now - 10, now + 300, "sat")])
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg, continuous=True)
+        sched.register(
+            SERIAL,
+            "sat",
+            PRIORITY_SCHEDULED,
+            *_cb_pair(),
+            windows=[TimeWindow(now - 10, now + 300, "sat")],
+        )
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -144,10 +155,8 @@ class TestLocking:
     def test_p0_overrides_lock_when_enabled(self, sched):
         _, yld_bg = _cb_pair()
         acq_p0, _ = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg,
-                       continuous=True)
-        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, acq_p0, _cb_pair()[1],
-                       continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg, continuous=True)
+        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, acq_p0, _cb_pair()[1], continuous=True)
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -161,8 +170,7 @@ class TestLocking:
         with _patch_hw(), patch("reticulumpi.sdr_scheduler._USB_SETTLE_DELAY", 0):
             s = _make_scheduler(weather_alerts_override_lock=False)
             _, yld_bg = _cb_pair()
-            s.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg,
-                       continuous=True)
+            s.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg, continuous=True)
             s.register(SERIAL, "wx", PRIORITY_CRITICAL, *_cb_pair(), continuous=True)
             d = s._dongles[SERIAL]
             d.current_holder = "ais"
@@ -186,10 +194,8 @@ class TestLocking:
     def test_relock_after_p0_preemption(self, sched):
         acq_bg, yld_bg = _cb_pair()
         acq_p0, yld_p0 = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, yld_bg,
-                       continuous=True)
-        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, acq_p0, yld_p0,
-                       continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq_bg, yld_bg, continuous=True)
+        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, acq_p0, yld_p0, continuous=True)
         dongle = sched._dongles[SERIAL]
 
         # Give ais the dongle and lock it
@@ -225,18 +231,27 @@ class TestTimeWindows:
 
     def test_expired_windows_pruned(self, sched):
         past = time.time() - 100
-        sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, *_cb_pair(),
-                       windows=[TimeWindow(past - 200, past, "sat")])
+        sched.register(
+            SERIAL,
+            "sat",
+            PRIORITY_SCHEDULED,
+            *_cb_pair(),
+            windows=[TimeWindow(past - 200, past, "sat")],
+        )
         sched._expire_windows(sched._dongles[SERIAL], time.time())
         assert len(sched._dongles[SERIAL].slots["sat"].windows) == 0
 
     def test_p1_ignored_outside_window(self, sched):
         _, yld_bg = _cb_pair()
         future = time.time() + 3600
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg,
-                       continuous=True)
-        sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, *_cb_pair(),
-                       windows=[TimeWindow(future, future + 300, "sat")])
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg, continuous=True)
+        sched.register(
+            SERIAL,
+            "sat",
+            PRIORITY_SCHEDULED,
+            *_cb_pair(),
+            windows=[TimeWindow(future, future + 300, "sat")],
+        )
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -248,18 +263,15 @@ class TestTimeWindows:
 class TestBackgroundRoundRobin:
     def test_single_bg_acquires(self, sched):
         acq, _ = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq, _cb_pair()[1],
-                       continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, acq, _cb_pair()[1], continuous=True)
         with sched._condition:
             sched._evaluate(SERIAL)
         acq.assert_called_once_with(SERIAL, 0)
 
     def test_rotation_after_slice_expires(self, sched):
         _, yld1 = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld1,
-                       continuous=True)
-        sched.register(SERIAL, "acars", PRIORITY_BACKGROUND, *_cb_pair(),
-                       continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld1, continuous=True)
+        sched.register(SERIAL, "acars", PRIORITY_BACKGROUND, *_cb_pair(), continuous=True)
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -272,10 +284,8 @@ class TestBackgroundRoundRobin:
     def test_bg_stays_within_slice(self, sched):
         _, yld1 = _cb_pair()
         acq2, _ = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld1,
-                       continuous=True)
-        sched.register(SERIAL, "acars", PRIORITY_BACKGROUND, acq2, _cb_pair()[1],
-                       continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld1, continuous=True)
+        sched.register(SERIAL, "acars", PRIORITY_BACKGROUND, acq2, _cb_pair()[1], continuous=True)
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -289,10 +299,10 @@ class TestBackgroundRoundRobin:
 class TestHandoffProtocol:
     def test_yield_cb_receives_preemptor_info(self, sched):
         _, yld_bg = _cb_pair()
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg,
-                       continuous=True)
-        sched.register(SERIAL, "wx", PRIORITY_CRITICAL, *_cb_pair(),
-                       label="SAME Alert", continuous=True)
+        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, _cb_pair()[0], yld_bg, continuous=True)
+        sched.register(
+            SERIAL, "wx", PRIORITY_CRITICAL, *_cb_pair(), label="SAME Alert", continuous=True
+        )
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
@@ -305,8 +315,9 @@ class TestHandoffProtocol:
 
 class TestIntrospection:
     def test_get_status_structure(self, sched):
-        sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, *_cb_pair(),
-                       label="AIS Decoder", continuous=True)
+        sched.register(
+            SERIAL, "ais", PRIORITY_BACKGROUND, *_cb_pair(), label="AIS Decoder", continuous=True
+        )
         info = sched.get_status()[SERIAL]
         assert info["current_holder"] is None
         assert info["locked_by"] is None
@@ -316,8 +327,10 @@ class TestIntrospection:
 
     def test_get_schedule_sorted_and_unknown_empty(self, sched):
         now = time.time()
-        windows = [TimeWindow(now + 200, now + 300, "sat", "B"),
-                   TimeWindow(now + 100, now + 150, "sat", "A")]
+        windows = [
+            TimeWindow(now + 200, now + 300, "sat", "B"),
+            TimeWindow(now + 100, now + 150, "sat", "A"),
+        ]
         sched.register(SERIAL, "sat", PRIORITY_SCHEDULED, *_cb_pair(), windows=windows)
         assert [w["label"] for w in sched.get_schedule(SERIAL)] == ["A", "B"]
         assert sched.get_schedule("NOSUCH") == []

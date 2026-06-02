@@ -138,6 +138,7 @@ class TestParseRnodeConfig:
             ):
                 # Clear cache
                 import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
                 wsh._rnode_config_cache = None
                 wsh._rnode_config_mtime = 0
 
@@ -164,6 +165,7 @@ class TestParseRnodeConfig:
                 [cfg],
             ):
                 import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
                 wsh._rnode_config_cache = None
                 wsh._rnode_config_mtime = 0
 
@@ -189,6 +191,7 @@ class TestParseRnodeConfig:
                 [cfg],
             ):
                 import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
                 wsh._rnode_config_cache = None
                 wsh._rnode_config_mtime = 0
 
@@ -201,10 +204,7 @@ class TestParseRnodeConfig:
 
     def test_caching(self):
         cfg = self._write_config(
-            "[interfaces]\n"
-            "  [[RNode LoRa]]\n"
-            "    type = RNodeInterface\n"
-            "    frequency = 867200000\n"
+            "[interfaces]\n  [[RNode LoRa]]\n    type = RNodeInterface\n    frequency = 867200000\n"
         )
         try:
             with patch(
@@ -212,6 +212,7 @@ class TestParseRnodeConfig:
                 [cfg],
             ):
                 import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
                 wsh._rnode_config_cache = None
                 wsh._rnode_config_mtime = 0
 
@@ -228,6 +229,7 @@ class TestParseRnodeConfig:
             ["/nonexistent/path"],
         ):
             import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
             wsh._rnode_config_cache = None
             wsh._rnode_config_mtime = 0
 
@@ -241,6 +243,7 @@ class TestParseRnodeConfig:
             ["/nonexistent/path"],
         ):
             import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
             cached = {"RNode LoRa": {"frequency": 867200000}}
             wsh._rnode_config_cache = cached
             wsh._rnode_config_mtime = 0
@@ -488,7 +491,9 @@ class TestEnrichTransportTraffic:
 # ── WebSocket auth & connection tests ──────────────────────────────
 
 
-def _make_ws_request(token=None, cookie_token=None, bearer_token=None, max_clients=10, auth_valid=True):
+def _make_ws_request(
+    token=None, cookie_token=None, bearer_token=None, max_clients=10, auth_valid=True
+):
     """Create a mock aiohttp request for WebSocket tests."""
     request = MagicMock()
     request.query = {}
@@ -857,8 +862,10 @@ class TestBroadcastDataCollection:
                     raise asyncio.CancelledError()
                 await original_sleep(0)
 
-            with patch("asyncio.sleep", counted_sleep), \
-                 patch.object(wsh, "_heartbeat_interval", return_value=None):
+            with (
+                patch("asyncio.sleep", counted_sleep),
+                patch.object(wsh, "_heartbeat_interval", return_value=None),
+            ):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
@@ -881,7 +888,9 @@ class TestBroadcastDataCollection:
             ],
         }
         network_map = self._broadcast_plugin(
-            mesh_snapshot, tier=1, keys="mesh",
+            mesh_snapshot,
+            tier=1,
+            keys="mesh",
         )
 
         plugin = self._make_plugin({"network_map": network_map})
@@ -926,7 +935,9 @@ class TestBroadcastDataCollection:
             "temperature": {"value": 22.5, "unit": "C"},
         }
         sensor_fw = self._broadcast_plugin(
-            sensor_snapshot, tier=2, keys="sensors",
+            sensor_snapshot,
+            tier=2,
+            keys="sensors",
         )
 
         plugin = self._make_plugin({"sensor_framework": sensor_fw})
@@ -970,7 +981,9 @@ class TestBroadcastDataCollection:
             "auto_discovery": {"connected": []},
         }
         transport_mon = self._broadcast_plugin(
-            transport_snapshot, tier=0, keys="transport",
+            transport_snapshot,
+            tier=0,
+            keys="transport",
         )
 
         plugin = self._make_plugin({"transport_monitor": transport_mon})
@@ -1029,7 +1042,9 @@ class TestBroadcastDataCollection:
             "unread": {"lxmf": {"abc": 2}},
         }
         msg_hub = self._broadcast_plugin(
-            messaging_snapshot, tier=1, keys="messaging",
+            messaging_snapshot,
+            tier=1,
+            keys="messaging",
         )
 
         plugin = self._make_plugin({"messaging_hub": msg_hub})
@@ -1293,7 +1308,9 @@ class TestOnStatusEvent:
         loop = MagicMock()
         _ws_clients.add(MagicMock())
         data = {
-            "id": 5, "status": "delivered", "timestamp": 1234.5,
+            "id": 5,
+            "status": "delivered",
+            "timestamp": 1234.5,
             "transport": "meshtastic",
         }
         with patch.object(wsh, "_ws_loop", loop):
@@ -1462,9 +1479,13 @@ class TestEnrichAndPush:
         _ws_clients.add(ws)
 
         async def run():
-            with patch.object(wsh, "_lookup_message_row", return_value=row), \
-                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
-                await wsh._enrich_and_push("message", "message_received", {"id": 9, "transport": "lxmf"})
+            with (
+                patch.object(wsh, "_lookup_message_row", return_value=row),
+                patch.object(wsh, "_push_sem", asyncio.Semaphore(8)),
+            ):
+                await wsh._enrich_and_push(
+                    "message", "message_received", {"id": 9, "transport": "lxmf"}
+                )
 
         asyncio.run(run())
         sent = json.loads(ws.send_str.call_args.args[0])
@@ -1479,9 +1500,13 @@ class TestEnrichAndPush:
         _ws_clients.add(ws)
 
         async def run():
-            with patch.object(wsh, "_lookup_message_row", return_value=None), \
-                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
-                await wsh._enrich_and_push("message", "message_sent", {"id": 9, "transport": "lxmf"})
+            with (
+                patch.object(wsh, "_lookup_message_row", return_value=None),
+                patch.object(wsh, "_push_sem", asyncio.Semaphore(8)),
+            ):
+                await wsh._enrich_and_push(
+                    "message", "message_sent", {"id": 9, "transport": "lxmf"}
+                )
 
         asyncio.run(run())
         sent = json.loads(ws.send_str.call_args.args[0])
@@ -1497,11 +1522,19 @@ class TestEnrichAndPush:
         _ws_clients.add(ws)
 
         async def run():
-            with patch.object(wsh, "_lookup_message_row", return_value=row), \
-                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+            with (
+                patch.object(wsh, "_lookup_message_row", return_value=row),
+                patch.object(wsh, "_push_sem", asyncio.Semaphore(8)),
+            ):
                 await wsh._enrich_and_push(
-                    "message_status", "message_status_changed",
-                    {"id": 5, "status": "delivered", "timestamp": 1234.5, "transport": "meshtastic"},
+                    "message_status",
+                    "message_status_changed",
+                    {
+                        "id": 5,
+                        "status": "delivered",
+                        "timestamp": 1234.5,
+                        "transport": "meshtastic",
+                    },
                 )
 
         asyncio.run(run())
@@ -1517,10 +1550,13 @@ class TestEnrichAndPush:
         _ws_clients.add(ws)
 
         async def run():
-            with patch.object(wsh, "_lookup_message_row", return_value=None), \
-                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+            with (
+                patch.object(wsh, "_lookup_message_row", return_value=None),
+                patch.object(wsh, "_push_sem", asyncio.Semaphore(8)),
+            ):
                 await wsh._enrich_and_push(
-                    "message_status", "message_status_changed",
+                    "message_status",
+                    "message_status_changed",
                     {"id": 3, "status": "failed", "contact_id": "peer-2", "sub_transport": "irc"},
                 )
 
@@ -1537,8 +1573,10 @@ class TestEnrichAndPush:
         _ws_clients.add(ws)
 
         async def run():
-            with patch.object(wsh, "_lookup_message_row", side_effect=RuntimeError("db locked")), \
-                 patch.object(wsh, "_push_sem", asyncio.Semaphore(8)):
+            with (
+                patch.object(wsh, "_lookup_message_row", side_effect=RuntimeError("db locked")),
+                patch.object(wsh, "_push_sem", asyncio.Semaphore(8)),
+            ):
                 await wsh._enrich_and_push("message", "message_received", {"id": 1})
 
         asyncio.run(run())
@@ -1632,7 +1670,8 @@ class TestCollectBroadcastDataDirect:
 
     def test_mesh_version_bump_on_new_announces(self):
         network_map = self._mock_broadcast_plugin(
-            1, "mesh",
+            1,
+            "mesh",
             {"node_count": 10, "recent_announces": [{"last_seen": 100.0}]},
         )
         plugin = self._make_mock_plugin({"network_map": network_map})
@@ -1643,7 +1682,8 @@ class TestCollectBroadcastDataDirect:
 
     def test_mesh_version_stable_on_stale_announces(self):
         network_map = self._mock_broadcast_plugin(
-            1, "mesh",
+            1,
+            "mesh",
             {"node_count": 5, "recent_announces": [{"last_seen": 50.0}]},
         )
         plugin = self._make_mock_plugin({"network_map": network_map})
@@ -1654,9 +1694,12 @@ class TestCollectBroadcastDataDirect:
     def test_mesh_peers_merged(self):
         network_map = self._mock_broadcast_plugin(1, "mesh", {"node_count": 2})
         mesh_tel = self._mock_broadcast_plugin(1, "mesh_peers", [{"dest": "aa"}])
-        plugin = self._make_mock_plugin({
-            "network_map": network_map, "mesh_telemetry": mesh_tel,
-        })
+        plugin = self._make_mock_plugin(
+            {
+                "network_map": network_map,
+                "mesh_telemetry": mesh_tel,
+            }
+        )
         data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0)
         assert data["mesh"]["peers"] == [{"dest": "aa"}]
         assert data["mesh"]["peer_count"] == 1
@@ -1664,7 +1707,9 @@ class TestCollectBroadcastDataDirect:
 
     def test_alerts_merged_into_mesh(self):
         alert_sys = self._mock_broadcast_plugin(
-            1, "alerts", {"alerts_sent": 3, "last_alert": "fire"},
+            1,
+            "alerts",
+            {"alerts_sent": 3, "last_alert": "fire"},
         )
         plugin = self._make_mock_plugin({"alert_system": alert_sys})
         data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0)
@@ -1680,6 +1725,7 @@ class TestCollectBroadcastBudget:
 
     def setup_method(self):
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
         wsh._broadcast_registry = None
 
     @staticmethod
@@ -1721,11 +1767,15 @@ class TestCollectBroadcastBudget:
 
     def test_collects_all_plugins_within_budget(self):
         """With a generous budget, all plugins are collected."""
-        space = self._mock_broadcast_plugin(2, "space", {
-            "tle_groups": {"amateur": 5},
-            "positions": {"objects": [{"name": "ISS", "el": 45}]},
-            "observer": {"lat": 30, "lon": -85},
-        })
+        space = self._mock_broadcast_plugin(
+            2,
+            "space",
+            {
+                "tle_groups": {"amateur": 5},
+                "positions": {"objects": [{"name": "ISS", "el": 45}]},
+                "observer": {"lat": 30, "lon": -85},
+            },
+        )
 
         plugin = self._make_mock_plugin(
             {"space_tracker": space},
@@ -1980,8 +2030,7 @@ class TestNoBareWsSendStr:
                 continue
             violations.append(f"  line {i}: {line.strip()}")
         assert not violations, (
-            "Bare ws.send_str() found — use _send_with_timeout() instead:\n"
-            + "\n".join(violations)
+            "Bare ws.send_str() found — use _send_with_timeout() instead:\n" + "\n".join(violations)
         )
 
 
@@ -2053,8 +2102,10 @@ class TestWarmCacheHeartbeat:
                     raise asyncio.CancelledError()
                 await original_sleep(0)
 
-            with patch("asyncio.sleep", counted_sleep), \
-                 patch.object(wsh, "_heartbeat_interval", return_value=0.0):
+            with (
+                patch("asyncio.sleep", counted_sleep),
+                patch.object(wsh, "_heartbeat_interval", return_value=0.0),
+            ):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
@@ -2093,9 +2144,11 @@ class TestWarmCacheHeartbeat:
             def boom(*a, **kw):
                 raise RuntimeError("boom")
 
-            with patch("asyncio.sleep", counted_sleep), \
-                 patch.object(wsh, "_heartbeat_interval", return_value=0.0), \
-                 patch.object(wsh, "_collect_broadcast_data", side_effect=boom):
+            with (
+                patch("asyncio.sleep", counted_sleep),
+                patch.object(wsh, "_heartbeat_interval", return_value=0.0),
+                patch.object(wsh, "_collect_broadcast_data", side_effect=boom),
+            ):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
@@ -2129,8 +2182,10 @@ class TestWarmCacheHeartbeat:
                     raise asyncio.CancelledError()
                 await original_sleep(0)
 
-            with patch("asyncio.sleep", counted_sleep), \
-                 patch.object(wsh, "_heartbeat_interval", return_value=None):
+            with (
+                patch("asyncio.sleep", counted_sleep),
+                patch.object(wsh, "_heartbeat_interval", return_value=None),
+            ):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
@@ -2164,8 +2219,10 @@ class TestWarmCacheHeartbeat:
                     raise asyncio.CancelledError()
                 await original_sleep(0)
 
-            with patch("asyncio.sleep", counted_sleep), \
-                 patch.object(wsh, "_heartbeat_interval", return_value=30.0):
+            with (
+                patch("asyncio.sleep", counted_sleep),
+                patch.object(wsh, "_heartbeat_interval", return_value=30.0),
+            ):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
@@ -2204,9 +2261,11 @@ class TestWarmCacheServing:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         async def run():
-            with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock), \
-                 patch.object(wsh, "_send_with_timeout", side_effect=capture_send), \
-                 patch.object(wsh, "_collect_broadcast_data") as mock_collect:
+            with (
+                patch("aiohttp.web.WebSocketResponse", return_value=ws_mock),
+                patch.object(wsh, "_send_with_timeout", side_effect=capture_send),
+                patch.object(wsh, "_collect_broadcast_data") as mock_collect,
+            ):
                 await wsh.websocket_metrics(request)
                 mock_collect.assert_not_called()
 
@@ -2233,8 +2292,10 @@ class TestWarmCacheServing:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         async def run():
-            with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock), \
-                 patch.object(wsh, "_send_with_timeout", new_callable=AsyncMock, return_value=True):
+            with (
+                patch("aiohttp.web.WebSocketResponse", return_value=ws_mock),
+                patch.object(wsh, "_send_with_timeout", new_callable=AsyncMock, return_value=True),
+            ):
                 await wsh.websocket_metrics(request)
 
         asyncio.run(run())
@@ -2254,8 +2315,10 @@ class TestWarmCacheServing:
         ws_mock.__aiter__ = lambda self: _empty_async_iter()
 
         async def run():
-            with patch("aiohttp.web.WebSocketResponse", return_value=ws_mock), \
-                 patch.object(wsh, "_send_with_timeout", new_callable=AsyncMock, return_value=True):
+            with (
+                patch("aiohttp.web.WebSocketResponse", return_value=ws_mock),
+                patch.object(wsh, "_send_with_timeout", new_callable=AsyncMock, return_value=True),
+            ):
                 await wsh.websocket_metrics(request)
 
         asyncio.run(run())
@@ -2381,18 +2444,17 @@ class TestWarmCacheSummaryLog:
                     raise asyncio.CancelledError()
                 await original_sleep(0)
 
-            with patch("asyncio.sleep", counted_sleep), \
-                 patch.object(wsh, "_heartbeat_interval", return_value=0.0), \
-                 patch.object(wsh, "log") as mock_log:
+            with (
+                patch("asyncio.sleep", counted_sleep),
+                patch.object(wsh, "_heartbeat_interval", return_value=0.0),
+                patch.object(wsh, "log") as mock_log,
+            ):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
                     pass
 
-                info_calls = [
-                    c for c in mock_log.info.call_args_list
-                    if "Warm cache:" in str(c)
-                ]
+                info_calls = [c for c in mock_log.info.call_args_list if "Warm cache:" in str(c)]
                 assert len(info_calls) == 1
                 msg = info_calls[0][0][0]
                 assert "heartbeats" in msg
@@ -2426,18 +2488,17 @@ class TestWarmCacheSummaryLog:
                     raise asyncio.CancelledError()
                 await original_sleep(0)
 
-            with patch("asyncio.sleep", counted_sleep), \
-                 patch.object(wsh, "_heartbeat_interval", return_value=0.0), \
-                 patch.object(wsh, "log") as mock_log:
+            with (
+                patch("asyncio.sleep", counted_sleep),
+                patch.object(wsh, "_heartbeat_interval", return_value=0.0),
+                patch.object(wsh, "log") as mock_log,
+            ):
                 try:
                     await wsh._broadcast_metrics(app)
                 except asyncio.CancelledError:
                     pass
 
-                info_calls = [
-                    c for c in mock_log.info.call_args_list
-                    if "Warm cache:" in str(c)
-                ]
+                info_calls = [c for c in mock_log.info.call_args_list if "Warm cache:" in str(c)]
                 assert len(info_calls) == 0
 
         asyncio.run(run())
@@ -2448,7 +2509,8 @@ class TestOffgridWsCommand:
         plugin = MagicMock()
         plugin.app.set_offgrid_mode.return_value = {"enabled": True}
         result = _handle_ws_command(
-            {"action": "set_offgrid_mode", "enabled": True}, plugin,
+            {"action": "set_offgrid_mode", "enabled": True},
+            plugin,
         )
         assert result is not None
         assert result["type"] == "offgrid_mode_set"
@@ -2459,7 +2521,8 @@ class TestOffgridWsCommand:
         plugin = MagicMock()
         plugin.app.set_offgrid_mode.return_value = {"enabled": False}
         result = _handle_ws_command(
-            {"action": "set_offgrid_mode", "enabled": False}, plugin,
+            {"action": "set_offgrid_mode", "enabled": False},
+            plugin,
         )
         assert result is not None
         assert result["type"] == "offgrid_mode_set"
@@ -2468,7 +2531,8 @@ class TestOffgridWsCommand:
     def test_set_offgrid_mode_missing_enabled(self):
         plugin = MagicMock()
         result = _handle_ws_command(
-            {"action": "set_offgrid_mode"}, plugin,
+            {"action": "set_offgrid_mode"},
+            plugin,
         )
         assert result is not None
         assert result["type"] == "offgrid_error"
@@ -2478,7 +2542,8 @@ class TestOffgridWsCommand:
     def test_set_offgrid_mode_non_boolean(self):
         plugin = MagicMock()
         result = _handle_ws_command(
-            {"action": "set_offgrid_mode", "enabled": "true"}, plugin,
+            {"action": "set_offgrid_mode", "enabled": "true"},
+            plugin,
         )
         assert result is not None
         assert result["type"] == "offgrid_error"

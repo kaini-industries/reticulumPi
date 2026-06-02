@@ -108,7 +108,12 @@ def resolve_device(configured: str, caller: str = "") -> int:
                 if caller:
                     _claimed[serial] = caller
             if str(idx) != configured:
-                log.info("Resolved RTL-SDR serial '%s' → index %d (caller: %s)", serial, idx, caller or "?")
+                log.info(
+                    "Resolved RTL-SDR serial '%s' → index %d (caller: %s)",
+                    serial,
+                    idx,
+                    caller or "?",
+                )
             return idx
 
     # Only fall back to numeric index if the value doesn't look like
@@ -122,16 +127,16 @@ def resolve_device(configured: str, caller: str = "") -> int:
     except ValueError:
         idx = None
 
-    if idx is not None and idx >= 0 and configured not in known_serials and (
-        len(configured) != 8 or not devices
+    if (
+        idx is not None
+        and idx >= 0
+        and configured not in known_serials
+        and (len(configured) != 8 or not devices)
     ):
         return idx
 
     available = ", ".join(f"{i}: SN {s}" for i, s in devices)
-    raise RuntimeError(
-        f"RTL-SDR device '{configured}' not found. "
-        f"Available: [{available}]"
-    )
+    raise RuntimeError(f"RTL-SDR device '{configured}' not found. Available: [{available}]")
 
 
 def release_device(configured: str, caller: str = "") -> None:

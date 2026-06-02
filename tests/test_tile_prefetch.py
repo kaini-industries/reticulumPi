@@ -159,8 +159,10 @@ class TestRunPrefetch:
         from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
 
         plugin = self._make_plugin(tmp_path, lat=40.0, lon=-74.0)
-        with patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
-                    new_callable=AsyncMock):
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
             await run_prefetch(plugin)
 
         cached = list((tmp_path / "tiles").rglob("*.png"))
@@ -171,8 +173,10 @@ class TestRunPrefetch:
         from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
 
         plugin = self._make_plugin(tmp_path, bbox=[40.0, -74.5, 41.0, -73.5])
-        with patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
-                    new_callable=AsyncMock):
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
             await run_prefetch(plugin)
 
         cached = list((tmp_path / "tiles").rglob("*.png"))
@@ -189,8 +193,10 @@ class TestRunPrefetch:
         tile_dir.mkdir(parents=True, exist_ok=True)
         (tile_dir / "512.png").write_bytes(b"existing")
 
-        with patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
-                    new_callable=AsyncMock):
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
             await run_prefetch(plugin)
 
         assert (tile_dir / "512.png").read_bytes() == b"existing"
@@ -203,6 +209,7 @@ class TestRunPrefetch:
         plugin._prefetch_session.get.side_effect = Exception("connection refused")
 
         import logging
+
         with caplog.at_level(logging.DEBUG):
             with patch(
                 "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
@@ -217,18 +224,20 @@ class TestRunPrefetch:
         from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
 
         plugin = self._make_plugin(tmp_path, lat=0.0, lon=0.0)
-        with patch(
-            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
-            new_callable=AsyncMock,
-        ), patch(
-            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.tempfile.mkstemp"
-        ) as mock_mkstemp, patch(
-            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.write"
-        ), patch(
-            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.close"
-        ), patch(
-            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.rename"
-        ) as mock_rename:
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.tempfile.mkstemp"
+            ) as mock_mkstemp,
+            patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.write"),
+            patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.close"),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.rename"
+            ) as mock_rename,
+        ):
             mock_mkstemp.return_value = (99, "/tmp/tile.tmp")
             await run_prefetch(plugin)
 
@@ -306,8 +315,10 @@ class TestPrefetchCacheBudget:
         from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
 
         plugin = self._make_plugin(tmp_path, max_bytes=50, cache_bytes=50)
-        with patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
-                    new_callable=AsyncMock):
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
             await run_prefetch(plugin)
 
         cached = list((tmp_path / "tiles").rglob("*.png"))
@@ -318,8 +329,10 @@ class TestPrefetchCacheBudget:
         from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
 
         plugin = self._make_plugin(tmp_path, max_bytes=500 * 1024 * 1024, cache_bytes=0)
-        with patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
-                    new_callable=AsyncMock):
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
             await run_prefetch(plugin)
 
         assert plugin._tile_cache_bytes > 0

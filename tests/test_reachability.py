@@ -165,9 +165,15 @@ class TestComputeReachability:
 
     def test_label_brackets(self):
         """Score labels cover the full range."""
-        for score, expected in [(95, "High"), (70, "Good"), (50, "Fair"),
-                                (30, "Low"), (5, "Unlikely")]:
+        for score, expected in [
+            (95, "High"),
+            (70, "Good"),
+            (50, "Fair"),
+            (30, "Low"),
+            (5, "Unlikely"),
+        ]:
             from reticulumpi.reachability import _score_to_label
+
             assert _score_to_label(score) == expected
 
 
@@ -184,10 +190,22 @@ class TestScoreAllNodes:
     def test_basic_scoring(self):
         now = time.time()
         nodes = [
-            {"destination_hash": "<aa" + "bb" * 15 + ">", "last_seen": now - 60,
-             "app_name": "test", "app_data_str": "NodeA", "hops": 1, "announce_count": 5},
-            {"destination_hash": "<cc" + "dd" * 15 + ">", "last_seen": now - 86400,
-             "app_name": "test", "app_data_str": "NodeB", "hops": 8, "announce_count": 1},
+            {
+                "destination_hash": "<aa" + "bb" * 15 + ">",
+                "last_seen": now - 60,
+                "app_name": "test",
+                "app_data_str": "NodeA",
+                "hops": 1,
+                "announce_count": 5,
+            },
+            {
+                "destination_hash": "<cc" + "dd" * 15 + ">",
+                "last_seen": now - 86400,
+                "app_name": "test",
+                "app_data_str": "NodeB",
+                "hops": 8,
+                "announce_count": 1,
+            },
         ]
         paths = [
             {"hash": "aa" + "bb" * 15, "age_s": 60, "hops": 1, "via": "0" * 32},
@@ -201,10 +219,20 @@ class TestScoreAllNodes:
     def test_sorted_by_score(self):
         now = time.time()
         nodes = [
-            {"destination_hash": "aabb", "last_seen": now - 86400 * 5,
-             "app_name": "t", "hops": 10, "announce_count": 0},
-            {"destination_hash": "ccdd", "last_seen": now - 30,
-             "app_name": "t", "hops": 1, "announce_count": 10},
+            {
+                "destination_hash": "aabb",
+                "last_seen": now - 86400 * 5,
+                "app_name": "t",
+                "hops": 10,
+                "announce_count": 0,
+            },
+            {
+                "destination_hash": "ccdd",
+                "last_seen": now - 30,
+                "app_name": "t",
+                "hops": 1,
+                "announce_count": 10,
+            },
         ]
         result = score_all_nodes(nodes, [])
         # ccdd should be first (recent announce)
@@ -214,8 +242,13 @@ class TestScoreAllNodes:
         now = time.time()
         via_hash = "ee" * 16
         nodes = [
-            {"destination_hash": "aabb", "last_seen": now - 60,
-             "app_name": "t", "hops": 3, "announce_count": 1},
+            {
+                "destination_hash": "aabb",
+                "last_seen": now - 60,
+                "app_name": "t",
+                "hops": 3,
+                "announce_count": 1,
+            },
         ]
         paths = [
             {"hash": "aabb", "age_s": 60, "hops": 3, "via": via_hash},
@@ -231,9 +264,14 @@ class TestScoreAllNodes:
     def test_output_fields(self):
         now = time.time()
         nodes = [
-            {"destination_hash": "aabb", "last_seen": now - 60,
-             "app_name": "TestApp", "app_data_str": "MyNode",
-             "hops": 2, "announce_count": 3},
+            {
+                "destination_hash": "aabb",
+                "last_seen": now - 60,
+                "app_name": "TestApp",
+                "app_data_str": "MyNode",
+                "hops": 2,
+                "announce_count": 3,
+            },
         ]
         result = score_all_nodes(nodes, [])
         assert len(result) == 1
@@ -253,8 +291,13 @@ class TestScoreAllNodes:
         now = time.time()
         raw_hash = "aabbccdd"
         nodes = [
-            {"destination_hash": f"<{raw_hash}>", "last_seen": now - 60,
-             "app_name": "t", "hops": 1, "announce_count": 1},
+            {
+                "destination_hash": f"<{raw_hash}>",
+                "last_seen": now - 60,
+                "app_name": "t",
+                "hops": 1,
+                "announce_count": 1,
+            },
         ]
         paths = [
             {"hash": raw_hash, "age_s": 60, "hops": 1, "via": "0" * 32},

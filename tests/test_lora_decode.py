@@ -37,7 +37,7 @@ class TestGrayEncode:
             g0 = gray_encode(n)
             g1 = gray_encode(n + 1)
             diff = g0 ^ g1
-            assert diff & (diff - 1) == 0, f"more than 1 bit differs: {n}→{n+1}"
+            assert diff & (diff - 1) == 0, f"more than 1 bit differs: {n}→{n + 1}"
 
 
 class TestGrayDecode:
@@ -104,8 +104,7 @@ class TestHammingDecode:
                 corrupted = cw ^ (1 << bit)
                 decoded, err = hamming_decode(corrupted, cr)
                 assert decoded == nib, (
-                    f"CR={cr} nibble={nib} bit={bit}: "
-                    f"got {decoded}, expected {nib}"
+                    f"CR={cr} nibble={nib} bit={bit}: got {decoded}, expected {nib}"
                 )
                 assert err == 1
 
@@ -116,9 +115,7 @@ class TestHammingDecode:
                 for b2 in range(b1 + 1, 8):
                     corrupted = cw ^ (1 << b1) ^ (1 << b2)
                     _, err = hamming_decode(corrupted, 4)
-                    assert err != 0, (
-                        f"double error not detected: nib={nib} bits={b1},{b2}"
-                    )
+                    assert err != 0, f"double error not detected: nib={nib} bits={b1},{b2}"
 
     def test_cr1_error_detection(self):
         for nib in range(16):
@@ -141,14 +138,17 @@ class TestHammingDecode:
 class TestRotation:
     def test_rotate_left_identity(self):
         from reticulumpi.builtin_plugins.lora_decode import _rotate_left
+
         assert _rotate_left(0b10110, 0, 5) == 0b10110
 
     def test_rotate_left_by_1(self):
         from reticulumpi.builtin_plugins.lora_decode import _rotate_left
+
         assert _rotate_left(0b10011, 1, 5) == 0b00111
 
     def test_rotate_full_width(self):
         from reticulumpi.builtin_plugins.lora_decode import _rotate_left
+
         assert _rotate_left(0b10110, 5, 5) == 0b10110
 
     def test_rotate_right_inverse(self):
@@ -156,6 +156,7 @@ class TestRotation:
             _rotate_left,
             _rotate_right,
         )
+
         for val in range(32):
             for k in range(6):
                 assert _rotate_right(_rotate_left(val, k, 5), k, 5) == val
@@ -195,6 +196,7 @@ class TestInterleave:
     @pytest.mark.parametrize("cr", [1, 2, 3, 4])
     def test_round_trip_random_data(self, sf: int, cr: int):
         import random
+
         rng = random.Random(sf * 10 + cr)
         rdd = sf
         ppm = 4 + cr
@@ -287,7 +289,10 @@ class TestFullPipeline:
 
     @staticmethod
     def _encode_block(
-        nibbles: list[int], sf: int, cr: int, reduced: bool = False,
+        nibbles: list[int],
+        sf: int,
+        cr: int,
+        reduced: bool = False,
     ) -> list[int]:
         """Encode nibbles → Hamming → interleave → Gray → symbols."""
         codewords = [hamming_encode(n, cr) for n in nibbles]
@@ -298,7 +303,10 @@ class TestFullPipeline:
 
     @staticmethod
     def _decode_block(
-        symbols: list[int], sf: int, cr: int, reduced: bool = False,
+        symbols: list[int],
+        sf: int,
+        cr: int,
+        reduced: bool = False,
     ) -> tuple[list[int], list[int]]:
         """Symbols → Gray decode → de-interleave → Hamming → nibbles."""
         gray_decoded = [gray_decode(s) for s in symbols]
@@ -369,14 +377,14 @@ class TestFullPipeline:
 
         all_symbols: list[int] = []
         for i in range(0, len(nibbles), sf):
-            block = nibbles[i:i + sf]
+            block = nibbles[i : i + sf]
             all_symbols.extend(self._encode_block(block, sf, cr))
 
         # Decode
         recovered_nibbles: list[int] = []
         ppm = 4 + cr
         for i in range(0, len(all_symbols), ppm):
-            block = all_symbols[i:i + ppm]
+            block = all_symbols[i : i + ppm]
             nibs, _ = self._decode_block(block, sf, cr)
             recovered_nibbles.extend(nibs)
 

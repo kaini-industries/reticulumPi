@@ -64,7 +64,6 @@ border-radius:8px;font-size:1.1em}}
 
 
 class CaptivePortalPlugin(PluginBase):
-
     plugin_name = "captive_portal"
     plugin_version = "1.0.0"
     plugin_description = "Captive portal for hotspot client discovery"
@@ -104,16 +103,17 @@ class CaptivePortalPlugin(PluginBase):
         self._cleanup_stale_rules()
         self._start_http_server()
 
-        should_activate = (
-            self._mode == "always"
-            or (self._mode == "auto" and not self.internet_available)
+        should_activate = self._mode == "always" or (
+            self._mode == "auto" and not self.internet_available
         )
         if should_activate:
             self._activate()
 
         self.log.info(
             "Captive portal ready (mode=%s, port=%d, active=%s)",
-            self._mode, self._portal_port, self._portal_active,
+            self._mode,
+            self._portal_port,
+            self._portal_active,
         )
 
     def stop(self) -> None:
@@ -170,15 +170,20 @@ class CaptivePortalPlugin(PluginBase):
     def _do_activate(self) -> None:
         try:
             self._run_helper(
-                "activate", self._ap_interface,
-                str(self._portal_port), self._ap_ip,
+                "activate",
+                self._ap_interface,
+                str(self._portal_port),
+                self._ap_ip,
             )
             self._portal_active = True
             self.log.info("Captive portal activated (interface=%s)", self._ap_interface)
-            self.event_bus.publish(events.CAPTIVE_PORTAL_ACTIVATED, {
-                "interface": self._ap_interface,
-                "portal_port": self._portal_port,
-            })
+            self.event_bus.publish(
+                events.CAPTIVE_PORTAL_ACTIVATED,
+                {
+                    "interface": self._ap_interface,
+                    "portal_port": self._portal_port,
+                },
+            )
         except Exception:
             self.log.exception("Failed to activate captive portal")
 
@@ -203,12 +208,15 @@ class CaptivePortalPlugin(PluginBase):
     def _run_helper(self, *args: str) -> str:
         result = subprocess.run(
             ["sudo", "-n", self._helper, *args],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if result.returncode != 0:
             self.log.error(
                 "Helper '%s' failed (rc=%d): %s",
-                args[0] if args else "?", result.returncode,
+                args[0] if args else "?",
+                result.returncode,
                 result.stderr.strip(),
             )
             raise RuntimeError(f"captive_portal_helper {args[0]} failed")
@@ -251,13 +259,15 @@ class CaptivePortalPlugin(PluginBase):
 
         try:
             self._httpd = http.server.HTTPServer(
-                (self._ap_ip, self._portal_port), Handler,
+                (self._ap_ip, self._portal_port),
+                Handler,
             )
             self._httpd.timeout = 1
             self._start_thread(self._http_serve_loop, "captive-http")
         except OSError as exc:
-            self.log.error("Cannot start portal HTTP server on %s:%d: %s",
-                           self._ap_ip, self._portal_port, exc)
+            self.log.error(
+                "Cannot start portal HTTP server on %s:%d: %s", self._ap_ip, self._portal_port, exc
+            )
 
     def _http_serve_loop(self) -> None:
         while self._active:
@@ -315,7 +325,11 @@ class CaptivePortalPlugin(PluginBase):
     def _resolve_helper_path(self) -> str:
         if Path(_HELPER_SCRIPT).is_file():
             return _HELPER_SCRIPT
-        local = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "captive_portal_helper.sh"
+        local = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "scripts"
+            / "captive_portal_helper.sh"
+        )
         if local.is_file():
             return str(local)
         found = shutil.which("captive_portal_helper.sh")
@@ -335,9 +349,12 @@ class CaptivePortalPlugin(PluginBase):
     def _detect_interface_ip(iface: str) -> str:
         try:
             import re
+
             out = subprocess.run(
                 ["ip", "-4", "addr", "show", iface],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", out.stdout)
             if m:

@@ -21,7 +21,7 @@ import pytest
 
 RMC_VALID = "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A"
 GGA_VALID = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47"
-GSA_3D    = "$GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39"
+GSA_3D = "$GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39"
 VTG_VALID = "$GPVTG,054.7,T,034.4,M,005.5,N,010.2,K*48"
 
 # A three-message GSV set from the NMEA spec example (12 sats across 3 msgs of 4)
@@ -63,6 +63,7 @@ class FakeSerial:
         if self.closed:
             # readline on closed serial should surface an error
             import serial
+
             raise serial.SerialException("port closed")
         if self._idx < len(self._lines):
             line = self._lines[self._idx]
@@ -158,9 +159,7 @@ class TestValidateConfig:
 
 
 class TestSentenceHandling:
-    def test_rmc_populates_last_fix_and_publishes_first_fix(
-        self, mock_app, gps_config
-    ):
+    def test_rmc_populates_last_fix_and_publishes_first_fix(self, mock_app, gps_config):
         from reticulumpi import events
 
         plugin = _make_plugin(mock_app, gps_config)
@@ -536,9 +535,7 @@ class TestReadLoopAndStaleness:
         published = [c.args[0] for c in mock_app.event_bus.publish.call_args_list]
         assert events.GPS_DEVICE_CONNECTED in published
 
-    def test_typeerror_during_shutdown_does_not_crash_reader(
-        self, mock_app, gps_config
-    ):
+    def test_typeerror_during_shutdown_does_not_crash_reader(self, mock_app, gps_config):
         """Race: stop() closes the serial port while readline() is blocked;
         pyserial zeroes its internal fd and the waking readline() hits
         os.read(None, ...) → TypeError.  By the time that fires stop() has
@@ -559,9 +556,7 @@ class TestReadLoopAndStaleness:
             plugin = plugin_holder[0]
             if plugin is not None:
                 plugin._active = False
-            raise TypeError(
-                "'NoneType' object cannot be interpreted as an integer"
-            )
+            raise TypeError("'NoneType' object cannot be interpreted as an integer")
 
         fake.readline = racing_readline  # type: ignore[method-assign]
 
@@ -591,9 +586,7 @@ class TestReadLoopAndStaleness:
                 # The fix: no unhandled exception escaped the thread.
                 # (Filter to our reader — other daemon threads in the plugin
                 # are unrelated.)
-                reader_crashes = [
-                    h for h in unhandled if h.thread is reader
-                ]
+                reader_crashes = [h for h in unhandled if h.thread is reader]
                 assert not reader_crashes, (
                     "gps-reader crashed with "
                     f"{reader_crashes[0].exc_type.__name__}: "
@@ -611,9 +604,7 @@ class TestReadLoopAndStaleness:
 
 
 class TestSpaceTrackerIntegration:
-    def test_space_tracker_resolves_observer_from_gps_plugin(
-        self, mock_app, gps_config
-    ):
+    def test_space_tracker_resolves_observer_from_gps_plugin(self, mock_app, gps_config):
         """space_tracker._resolve_observer() should pick up last_fix when lat/lon
         are unset in its own config."""
         # Build a gps_telemetry plugin in a known-fixed state

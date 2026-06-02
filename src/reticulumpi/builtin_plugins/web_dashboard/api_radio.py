@@ -91,9 +91,7 @@ async def handle_radio_tune(request: aiohttp.web.Request) -> aiohttp.web.Respons
     if mode is not None and not isinstance(mode, str):
         return _error("'mode' must be a string", 400)
     try:
-        result = await _run_sync(
-            fm.tune, int(freq_mhz * 1_000_000), mode=mode
-        )
+        result = await _run_sync(fm.tune, int(freq_mhz * 1_000_000), mode=mode)
     except (ValueError, AttributeError, TypeError) as exc:
         return _error(str(exc), 400)
     return _ok(result)
@@ -254,9 +252,7 @@ async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.Stream
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
     if not await _run_sync(fm.register_audio_client, queue):
-        raise aiohttp.web.HTTPServiceUnavailable(
-            text="Too many audio clients"
-        )
+        raise aiohttp.web.HTTPServiceUnavailable(text="Too many audio clients")
     try:
         while True:
             try:

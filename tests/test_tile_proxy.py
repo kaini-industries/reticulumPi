@@ -42,14 +42,20 @@ class TestCoordinateValidation:
 
         req = _make_tile_request("10", "512", "512", plugin)
 
-        with patch("reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
-                    return_value=False), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.makedirs"), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.tempfile.mkstemp",
-                    return_value=(99, "/tmp/tile.tmp")), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.write"), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.close"), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.rename"):
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
+                return_value=False,
+            ),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.makedirs"),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.server.tempfile.mkstemp",
+                return_value=(99, "/tmp/tile.tmp"),
+            ),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.write"),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.close"),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.rename"),
+        ):
             resp = asyncio.run(_handle_tile_proxy(req))
             assert resp.status == 200
 
@@ -124,14 +130,20 @@ class TestCoordinateValidation:
         plugin._tile_max_bytes = 500 * 1024 * 1024
         plugin._tile_cache_bytes = 0
 
-        with patch("reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
-                    return_value=False), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.makedirs"), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.tempfile.mkstemp",
-                    return_value=(99, "/tmp/t.tmp")), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.write"), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.close"), \
-             patch("reticulumpi.builtin_plugins.web_dashboard.server.os.rename"):
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
+                return_value=False,
+            ),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.makedirs"),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.server.tempfile.mkstemp",
+                return_value=(99, "/tmp/t.tmp"),
+            ),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.write"),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.close"),
+            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.rename"),
+        ):
             resp = asyncio.run(_handle_tile_proxy(req))
             assert resp.status == 200
 
@@ -214,8 +226,9 @@ class TestCacheMiss:
 
         req = _make_tile_request("10", "512", "512", plugin)
 
-        with patch("reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
-                    return_value=False):
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile", return_value=False
+        ):
             with pytest.raises(aiohttp.web.HTTPBadGateway):
                 asyncio.run(_handle_tile_proxy(req))
 
@@ -234,8 +247,9 @@ class TestCacheMiss:
 
         req = _make_tile_request("10", "512", "512", plugin)
 
-        with patch("reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
-                    return_value=False):
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile", return_value=False
+        ):
             with pytest.raises(aiohttp.web.HTTPGatewayTimeout):
                 asyncio.run(_handle_tile_proxy(req))
 
@@ -350,55 +364,69 @@ class TestBboxConfigValidation:
         return plugin
 
     def test_valid_bbox(self):
-        plugin = self._make_plugin({
-            "enabled": True,
-            "prefetch": {"bbox": [40.0, -74.5, 41.0, -73.5]},
-        })
+        plugin = self._make_plugin(
+            {
+                "enabled": True,
+                "prefetch": {"bbox": [40.0, -74.5, 41.0, -73.5]},
+            }
+        )
         plugin.validate_config()
 
     def test_south_greater_than_north(self):
-        plugin = self._make_plugin({
-            "enabled": True,
-            "prefetch": {"bbox": [41.0, -74.5, 40.0, -73.5]},
-        })
+        plugin = self._make_plugin(
+            {
+                "enabled": True,
+                "prefetch": {"bbox": [41.0, -74.5, 40.0, -73.5]},
+            }
+        )
         with pytest.raises(ValueError, match="south < north"):
             plugin.validate_config()
 
     def test_west_greater_than_east(self):
-        plugin = self._make_plugin({
-            "enabled": True,
-            "prefetch": {"bbox": [40.0, 10.0, 41.0, -10.0]},
-        })
+        plugin = self._make_plugin(
+            {
+                "enabled": True,
+                "prefetch": {"bbox": [40.0, 10.0, 41.0, -10.0]},
+            }
+        )
         with pytest.raises(ValueError, match="west < east"):
             plugin.validate_config()
 
     def test_latitude_out_of_range(self):
-        plugin = self._make_plugin({
-            "enabled": True,
-            "prefetch": {"bbox": [-91.0, -74.5, 41.0, -73.5]},
-        })
+        plugin = self._make_plugin(
+            {
+                "enabled": True,
+                "prefetch": {"bbox": [-91.0, -74.5, 41.0, -73.5]},
+            }
+        )
         with pytest.raises(ValueError, match="south < north"):
             plugin.validate_config()
 
     def test_longitude_out_of_range(self):
-        plugin = self._make_plugin({
-            "enabled": True,
-            "prefetch": {"bbox": [40.0, -181.0, 41.0, -73.5]},
-        })
+        plugin = self._make_plugin(
+            {
+                "enabled": True,
+                "prefetch": {"bbox": [40.0, -181.0, 41.0, -73.5]},
+            }
+        )
         with pytest.raises(ValueError, match="west < east"):
             plugin.validate_config()
 
     def test_wrong_length(self):
-        plugin = self._make_plugin({
-            "enabled": True,
-            "prefetch": {"bbox": [40.0, -74.5, 41.0]},
-        })
+        plugin = self._make_plugin(
+            {
+                "enabled": True,
+                "prefetch": {"bbox": [40.0, -74.5, 41.0]},
+            }
+        )
         with pytest.raises(ValueError, match="south, west, north, east"):
             plugin.validate_config()
 
     def test_null_bbox_is_valid(self):
-        plugin = self._make_plugin({
-            "enabled": True,
-            "prefetch": {"bbox": None},
-        })
+        plugin = self._make_plugin(
+            {
+                "enabled": True,
+                "prefetch": {"bbox": None},
+            }
+        )
         plugin.validate_config()

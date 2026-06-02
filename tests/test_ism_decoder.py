@@ -65,16 +65,19 @@ class TestValidateConfig:
         assert p._max_restarts == 5
 
     def test_custom_config(self):
-        p = ISMDecoder(_make_app(), {
-            "decoder_bin": "/usr/local/bin/rtl_433",
-            "gain": 40,
-            "ppm": 2,
-            "protocols": [40, 41, 42],
-            "protocol_blacklist": [100, 101],
-            "max_devices": 50,
-            "stale_timeout": 300,
-            "max_restarts": 3,
-        })
+        p = ISMDecoder(
+            _make_app(),
+            {
+                "decoder_bin": "/usr/local/bin/rtl_433",
+                "gain": 40,
+                "ppm": 2,
+                "protocols": [40, 41, 42],
+                "protocol_blacklist": [100, 101],
+                "max_devices": 50,
+                "stale_timeout": 300,
+                "max_restarts": 3,
+            },
+        )
         assert p._decoder_bin == "/usr/local/bin/rtl_433"
         assert p._gain == 40
         assert p._ppm == 2
@@ -147,15 +150,17 @@ class TestHandleDevice:
 
     def test_weather_fields(self):
         p = _make_plugin()
-        p._handle_device({
-            "model": "WS",
-            "id": 1,
-            "wind_avg_km_h": 15.5,
-            "wind_max_km_h": 22.0,
-            "wind_dir_deg": 180,
-            "rain_mm": 5.2,
-            "pressure_hPa": 1013.25,
-        })
+        p._handle_device(
+            {
+                "model": "WS",
+                "id": 1,
+                "wind_avg_km_h": 15.5,
+                "wind_max_km_h": 22.0,
+                "wind_dir_deg": 180,
+                "rain_mm": 5.2,
+                "pressure_hPa": 1013.25,
+            }
+        )
         dev = p._devices["WS:1"]
         assert dev["wind_avg_km_h"] == 15.5
         assert dev["wind_max_km_h"] == 22.0
@@ -165,15 +170,17 @@ class TestHandleDevice:
 
     def test_signal_fields(self):
         p = _make_plugin()
-        p._handle_device({
-            "model": "Sensor",
-            "id": 5,
-            "rssi": -85.0,
-            "snr": 12.0,
-            "noise": -97.0,
-            "freq": 433.92,
-            "protocol": 42,
-        })
+        p._handle_device(
+            {
+                "model": "Sensor",
+                "id": 5,
+                "rssi": -85.0,
+                "snr": 12.0,
+                "noise": -97.0,
+                "freq": 433.92,
+                "protocol": 42,
+            }
+        )
         dev = p._devices["Sensor:5"]
         assert dev["rssi"] == -85.0
         assert dev["snr"] == 12.0

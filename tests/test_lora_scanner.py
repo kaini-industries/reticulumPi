@@ -69,12 +69,14 @@ class TestLoraDefaults:
         assert p._waterfall_rows == 256
 
     def test_config_overrides_lora_defaults(self):
-        p = _make_plugin({
-            "freq_start_mhz": 915.0,
-            "freq_stop_mhz": 928.0,
-            "bin_khz": 25.0,
-            "waterfall_rows": 128,
-        })
+        p = _make_plugin(
+            {
+                "freq_start_mhz": 915.0,
+                "freq_stop_mhz": 928.0,
+                "bin_khz": 25.0,
+                "waterfall_rows": 128,
+            }
+        )
         assert p._freq_start_mhz == 915.0
         assert p._freq_stop_mhz == 928.0
         assert p._bin_khz == 25.0

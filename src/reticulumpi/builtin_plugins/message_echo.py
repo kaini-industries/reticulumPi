@@ -47,7 +47,8 @@ class MessageEcho(PluginBase):
         # Auto-select the nearest LXMF propagation node for store-and-forward
         self._best_propagation_hops = RNS.Transport.PATHFINDER_M + 1
         self._announce_sub = self.announce_dispatcher.subscribe(
-            "lxmf.propagation", self._handle_propagation_announce,
+            "lxmf.propagation",
+            self._handle_propagation_announce,
         )
 
         self._active = True

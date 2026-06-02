@@ -14,9 +14,24 @@ from reticulumpi.plugin_base import PluginBase
 
 # Default alert rules
 _DEFAULT_RULES = [
-    {"metric": "cpu_temp", "operator": ">", "threshold": 80, "message": "CPU temperature critical: {value}C"},
-    {"metric": "disk_percent", "operator": ">", "threshold": 90, "message": "Disk usage critical: {value}%"},
-    {"metric": "memory_percent", "operator": ">", "threshold": 90, "message": "Memory usage high: {value}%"},
+    {
+        "metric": "cpu_temp",
+        "operator": ">",
+        "threshold": 80,
+        "message": "CPU temperature critical: {value}C",
+    },
+    {
+        "metric": "disk_percent",
+        "operator": ">",
+        "threshold": 90,
+        "message": "Disk usage critical: {value}%",
+    },
+    {
+        "metric": "memory_percent",
+        "operator": ">",
+        "threshold": 90,
+        "message": "Memory usage high: {value}%",
+    },
 ]
 
 
@@ -108,7 +123,8 @@ class AlertSystemPlugin(PluginBase):
                 "last_alert": self._last_alert,
                 "recipients": len(self._recipient_hashes),
                 "active_cooldowns": sum(
-                    1 for t in self._cooldowns.values()
+                    1
+                    for t in self._cooldowns.values()
                     if time.time() - t < self.config.get("cooldown_seconds", 300)
                 ),
             }
@@ -126,9 +142,7 @@ class AlertSystemPlugin(PluginBase):
             import LXMF
 
             storage_path = os.path.expanduser(
-                self.config.get(
-                    "storage_path", "~/.local/share/reticulumpi/alert_lxmf"
-                )
+                self.config.get("storage_path", "~/.local/share/reticulumpi/alert_lxmf")
             )
             os.makedirs(storage_path, exist_ok=True)
 
@@ -162,11 +176,14 @@ class AlertSystemPlugin(PluginBase):
         with self._lock:
             self._last_alert = {"message": message, "time": now}
 
-        self.event_bus.publish(events.ALERT_TRIGGERED, {
-            "message": message,
-            "rule_key": rule_key,
-            "time": now,
-        })
+        self.event_bus.publish(
+            events.ALERT_TRIGGERED,
+            {
+                "message": message,
+                "rule_key": rule_key,
+                "time": now,
+            },
+        )
 
         if not self._lxmf_router or not self._lxmf_destination:
             return
@@ -220,9 +237,7 @@ class AlertSystemPlugin(PluginBase):
                 with self._lock:
                     self._cooldowns[cooldown_key] = now
                     self._alerts_sent += 1
-                self.log.info(
-                    "Alert sent to %s", RNS.prettyhexrep(recipient_hash)
-                )
+                self.log.info("Alert sent to %s", RNS.prettyhexrep(recipient_hash))
             except Exception:
                 self.log.exception(
                     "Failed to send alert to %s",
@@ -281,7 +296,9 @@ class AlertSystemPlugin(PluginBase):
 
                 if triggered:
                     msg_template = rule.get("message", f"{metric_name} = {{value}}")
-                    message = msg_template.format(value=value, metric=metric_name, threshold=threshold)
+                    message = msg_template.format(
+                        value=value, metric=metric_name, threshold=threshold
+                    )
                     self._send_alert(message, rule_key=f"rule:{metric_name}:{op}:{threshold}")
 
     # --- Reboot detection ---

@@ -123,7 +123,13 @@ class TestInterfaceCheck:
         plugin.app.reticulum.get_interface_stats.return_value = {
             "interfaces": [
                 {"name": "Auto", "type": "AutoInterface", "status": True, "rxb": 0, "txb": 0},
-                {"name": "TCP", "type": "TCPClientInterface", "status": True, "rxb": 100, "txb": 200},
+                {
+                    "name": "TCP",
+                    "type": "TCPClientInterface",
+                    "status": True,
+                    "rxb": 100,
+                    "txb": 200,
+                },
             ]
         }
         issues = plugin._check_interfaces()
@@ -136,7 +142,13 @@ class TestInterfaceCheck:
         plugin.start()
         plugin.app.reticulum.get_interface_stats.return_value = {
             "interfaces": [
-                {"name": "TCP Hub", "type": "TCPClientInterface", "status": False, "rxb": 0, "txb": 0},
+                {
+                    "name": "TCP Hub",
+                    "type": "TCPClientInterface",
+                    "status": False,
+                    "rxb": 0,
+                    "txb": 0,
+                },
             ]
         }
         issues = plugin._check_interfaces()
@@ -161,7 +173,14 @@ class TestInterfaceCheck:
         plugin.start()
         plugin.app.reticulum.get_interface_stats.return_value = {
             "interfaces": [
-                {"name": "I2P", "type": "I2PInterface", "status": True, "rxb": 100, "txb": 200, "i2p_peers": 0},
+                {
+                    "name": "I2P",
+                    "type": "I2PInterface",
+                    "status": True,
+                    "rxb": 100,
+                    "txb": 200,
+                    "i2p_peers": 0,
+                },
             ]
         }
         issues = plugin._check_interfaces()
@@ -170,13 +189,18 @@ class TestInterfaceCheck:
         assert not any("non-functional" in i for i in issues)
         plugin.stop()
 
-
     def test_tcp_hub_stale_after_consecutive_checks(self, plugin):
         """TCP hub only warns after _HUB_STALE_CHECKS consecutive zero-delta checks."""
         plugin.start()
         stats = {
             "interfaces": [
-                {"name": "Hub1", "type": "TCPClientInterface", "status": True, "rxb": 500, "txb": 300},
+                {
+                    "name": "Hub1",
+                    "type": "TCPClientInterface",
+                    "status": True,
+                    "rxb": 500,
+                    "txb": 300,
+                },
             ]
         }
         plugin.app.reticulum.get_interface_stats.return_value = stats
@@ -200,7 +224,13 @@ class TestInterfaceCheck:
         plugin.start()
         stats_idle = {
             "interfaces": [
-                {"name": "Hub1", "type": "TCPClientInterface", "status": True, "rxb": 500, "txb": 300},
+                {
+                    "name": "Hub1",
+                    "type": "TCPClientInterface",
+                    "status": True,
+                    "rxb": 500,
+                    "txb": 300,
+                },
             ]
         }
         plugin.app.reticulum.get_interface_stats.return_value = stats_idle
@@ -213,7 +243,13 @@ class TestInterfaceCheck:
         # Traffic resumes
         stats_active = {
             "interfaces": [
-                {"name": "Hub1", "type": "TCPClientInterface", "status": True, "rxb": 600, "txb": 400},
+                {
+                    "name": "Hub1",
+                    "type": "TCPClientInterface",
+                    "status": True,
+                    "rxb": 600,
+                    "txb": 400,
+                },
             ]
         }
         plugin.app.reticulum.get_interface_stats.return_value = stats_active
@@ -233,12 +269,13 @@ class TestInterfaceCheck:
 class TestI2PCheck:
     def test_sam_reachable_and_ok(self, plugin):
         plugin.start()
-        with patch.object(
-            ConnectivityMonitorPlugin, "_probe_port", return_value=True
-        ), patch.object(
-            ConnectivityMonitorPlugin,
-            "_query_i2pd_console",
-            return_value={"network_status": "OK", "routers": 2000, "client_tunnels": 50},
+        with (
+            patch.object(ConnectivityMonitorPlugin, "_probe_port", return_value=True),
+            patch.object(
+                ConnectivityMonitorPlugin,
+                "_query_i2pd_console",
+                return_value={"network_status": "OK", "routers": 2000, "client_tunnels": 50},
+            ),
         ):
             plugin._i2p_start_time = time.monotonic() - _I2P_BOOTSTRAP_GRACE - 60
             issues = plugin._check_i2p()
@@ -249,9 +286,7 @@ class TestI2PCheck:
 
     def test_sam_unreachable(self, plugin):
         plugin.start()
-        with patch.object(
-            ConnectivityMonitorPlugin, "_probe_port", return_value=False
-        ):
+        with patch.object(ConnectivityMonitorPlugin, "_probe_port", return_value=False):
             issues = plugin._check_i2p()
         assert plugin._health["sam_reachable"] is False
         assert any("SAM API" in i for i in issues)
@@ -260,12 +295,13 @@ class TestI2PCheck:
     def test_i2p_bootstrapping(self, plugin):
         plugin.start()
         plugin._i2p_start_time = time.monotonic()  # just started
-        with patch.object(
-            ConnectivityMonitorPlugin, "_probe_port", return_value=True
-        ), patch.object(
-            ConnectivityMonitorPlugin,
-            "_query_i2pd_console",
-            return_value={"network_status": "Testing", "routers": 0, "client_tunnels": 0},
+        with (
+            patch.object(ConnectivityMonitorPlugin, "_probe_port", return_value=True),
+            patch.object(
+                ConnectivityMonitorPlugin,
+                "_query_i2pd_console",
+                return_value={"network_status": "Testing", "routers": 0, "client_tunnels": 0},
+            ),
         ):
             issues = plugin._check_i2p()
         assert plugin._health["i2p_status"] == "bootstrapping"
@@ -275,12 +311,17 @@ class TestI2PCheck:
     def test_i2p_firewalled(self, plugin):
         plugin.start()
         plugin._i2p_start_time = time.monotonic() - _I2P_BOOTSTRAP_GRACE - 60
-        with patch.object(
-            ConnectivityMonitorPlugin, "_probe_port", return_value=True
-        ), patch.object(
-            ConnectivityMonitorPlugin,
-            "_query_i2pd_console",
-            return_value={"network_status": "Firewalled", "routers": 2000, "client_tunnels": 50},
+        with (
+            patch.object(ConnectivityMonitorPlugin, "_probe_port", return_value=True),
+            patch.object(
+                ConnectivityMonitorPlugin,
+                "_query_i2pd_console",
+                return_value={
+                    "network_status": "Firewalled",
+                    "routers": 2000,
+                    "client_tunnels": 50,
+                },
+            ),
         ):
             issues = plugin._check_i2p()
         assert plugin._health["i2p_status"] == "firewalled"
@@ -291,12 +332,13 @@ class TestI2PCheck:
     def test_i2p_no_routers_after_grace(self, plugin):
         plugin.start()
         plugin._i2p_start_time = time.monotonic() - _I2P_BOOTSTRAP_GRACE - 60
-        with patch.object(
-            ConnectivityMonitorPlugin, "_probe_port", return_value=True
-        ), patch.object(
-            ConnectivityMonitorPlugin,
-            "_query_i2pd_console",
-            return_value={"network_status": "Firewalled", "routers": 0, "client_tunnels": 0},
+        with (
+            patch.object(ConnectivityMonitorPlugin, "_probe_port", return_value=True),
+            patch.object(
+                ConnectivityMonitorPlugin,
+                "_query_i2pd_console",
+                return_value={"network_status": "Firewalled", "routers": 0, "client_tunnels": 0},
+            ),
         ):
             issues = plugin._check_i2p()
         assert any("0 routers" in i for i in issues)
@@ -339,9 +381,7 @@ class TestLogFile:
     def test_diagnostics_writes_log(self, plugin, _tmp_log):
         plugin.start()
         # Mock rnsd as reachable
-        with patch.object(
-            socket, "create_connection", return_value=MagicMock()
-        ):
+        with patch.object(socket, "create_connection", return_value=MagicMock()):
             plugin.app.reticulum.get_interface_stats.return_value = {
                 "interfaces": [
                     {"name": "Auto", "type": "AutoInterface", "status": True, "rxb": 0, "txb": 0},
@@ -360,9 +400,7 @@ class TestLogFile:
 
 class TestProbePort:
     def test_probe_port_open(self):
-        with patch.object(
-            socket, "create_connection", return_value=MagicMock()
-        ):
+        with patch.object(socket, "create_connection", return_value=MagicMock()):
             assert ConnectivityMonitorPlugin._probe_port("127.0.0.1", 7656) is True
 
     def test_probe_port_closed(self):
@@ -460,8 +498,13 @@ class TestRoutingDataCollection:
             _make_path_entry("aa" * 16, 1, "TCP A"),
         ]
         plugin.app.reticulum.get_rate_table.return_value = [
-            {"hash": b"\xaa" * 16, "last": time.time(), "rate_violations": 3,
-             "blocked_until": time.time() + 60, "timestamps": []},
+            {
+                "hash": b"\xaa" * 16,
+                "last": time.time(),
+                "rate_violations": 3,
+                "blocked_until": time.time() + 60,
+                "timestamps": [],
+            },
         ]
         plugin.app.reticulum.get_link_count.return_value = 0
         plugin.app.reticulum.get_blackholed_identities.return_value = {}
@@ -482,12 +525,27 @@ class TestRoutingDataCollection:
             _make_path_entry("aa" * 16, 1, "TCP A"),
         ]
         plugin.app.reticulum.get_rate_table.return_value = [
-            {"hash": b"\xaa" * 16, "last": now, "rate_violations": 3,
-             "blocked_until": now + 60, "timestamps": []},
-            {"hash": b"\xbb" * 16, "last": now - 3600, "rate_violations": 1,
-             "blocked_until": now - 10, "timestamps": []},
-            {"hash": b"\xcc" * 16, "last": now - 7200, "rate_violations": 0,
-             "blocked_until": 0, "timestamps": []},
+            {
+                "hash": b"\xaa" * 16,
+                "last": now,
+                "rate_violations": 3,
+                "blocked_until": now + 60,
+                "timestamps": [],
+            },
+            {
+                "hash": b"\xbb" * 16,
+                "last": now - 3600,
+                "rate_violations": 1,
+                "blocked_until": now - 10,
+                "timestamps": [],
+            },
+            {
+                "hash": b"\xcc" * 16,
+                "last": now - 7200,
+                "rate_violations": 0,
+                "blocked_until": 0,
+                "timestamps": [],
+            },
         ]
         plugin.app.reticulum.get_link_count.return_value = 0
         plugin.app.reticulum.get_blackholed_identities.return_value = {}
@@ -511,10 +569,20 @@ class TestRoutingDataCollection:
             _make_path_entry("aa" * 16, 1, "TCP A"),
         ]
         plugin.app.reticulum.get_rate_table.return_value = [
-            {"hash": b"\xdd" * 16, "last": time.time() - 3600,
-             "rate_violations": 0, "blocked_until": 0, "timestamps": []},
-            {"hash": b"\xee" * 16, "last": time.time() - 7200,
-             "rate_violations": 0, "blocked_until": 0, "timestamps": []},
+            {
+                "hash": b"\xdd" * 16,
+                "last": time.time() - 3600,
+                "rate_violations": 0,
+                "blocked_until": 0,
+                "timestamps": [],
+            },
+            {
+                "hash": b"\xee" * 16,
+                "last": time.time() - 7200,
+                "rate_violations": 0,
+                "blocked_until": 0,
+                "timestamps": [],
+            },
         ]
         plugin.app.reticulum.get_link_count.return_value = 0
         plugin.app.reticulum.get_blackholed_identities.return_value = {}
@@ -546,16 +614,18 @@ class TestRoutingDataCollection:
         entries = []
         for i in range(250):
             h = f"{i:032x}"
-            entries.append({
-                "hash": h,
-                "hops": (i % 5) + 1,
-                "via": "bb" * 16,
-                "interface": "TCP A",
-                "timestamp": time.time() - 60,
-                "age_s": 60,
-                "expires": time.time() + 86400,
-                "expires_in_s": 86400,
-            })
+            entries.append(
+                {
+                    "hash": h,
+                    "hops": (i % 5) + 1,
+                    "via": "bb" * 16,
+                    "interface": "TCP A",
+                    "timestamp": time.time() - 60,
+                    "age_s": 60,
+                    "expires": time.time() + 86400,
+                    "expires_in_s": 86400,
+                }
+            )
         plugin._routing_data["path_table"] = entries
 
         result = plugin.get_routing_data(page=2, per_page=100)
@@ -568,12 +638,36 @@ class TestRoutingDataCollection:
     def test_get_routing_data_filtering(self, plugin):
         plugin.start()
         plugin._routing_data["path_table"] = [
-            {"hash": "aa" * 16, "hops": 1, "via": "", "interface": "TCP Client A",
-             "timestamp": 0, "age_s": 0, "expires": 0, "expires_in_s": 0},
-            {"hash": "bb" * 16, "hops": 2, "via": "", "interface": "I2P Interface",
-             "timestamp": 0, "age_s": 0, "expires": 0, "expires_in_s": 0},
-            {"hash": "cc" * 16, "hops": 3, "via": "", "interface": "TCP Client A",
-             "timestamp": 0, "age_s": 0, "expires": 0, "expires_in_s": 0},
+            {
+                "hash": "aa" * 16,
+                "hops": 1,
+                "via": "",
+                "interface": "TCP Client A",
+                "timestamp": 0,
+                "age_s": 0,
+                "expires": 0,
+                "expires_in_s": 0,
+            },
+            {
+                "hash": "bb" * 16,
+                "hops": 2,
+                "via": "",
+                "interface": "I2P Interface",
+                "timestamp": 0,
+                "age_s": 0,
+                "expires": 0,
+                "expires_in_s": 0,
+            },
+            {
+                "hash": "cc" * 16,
+                "hops": 3,
+                "via": "",
+                "interface": "TCP Client A",
+                "timestamp": 0,
+                "age_s": 0,
+                "expires": 0,
+                "expires_in_s": 0,
+            },
         ]
 
         result = plugin.get_routing_data(iface_filter="I2P")
@@ -584,12 +678,36 @@ class TestRoutingDataCollection:
     def test_get_routing_data_sorting(self, plugin):
         plugin.start()
         plugin._routing_data["path_table"] = [
-            {"hash": "aa" * 16, "hops": 3, "via": "", "interface": "A",
-             "timestamp": 0, "age_s": 0, "expires": 0, "expires_in_s": 0},
-            {"hash": "bb" * 16, "hops": 1, "via": "", "interface": "A",
-             "timestamp": 0, "age_s": 0, "expires": 0, "expires_in_s": 0},
-            {"hash": "cc" * 16, "hops": 2, "via": "", "interface": "A",
-             "timestamp": 0, "age_s": 0, "expires": 0, "expires_in_s": 0},
+            {
+                "hash": "aa" * 16,
+                "hops": 3,
+                "via": "",
+                "interface": "A",
+                "timestamp": 0,
+                "age_s": 0,
+                "expires": 0,
+                "expires_in_s": 0,
+            },
+            {
+                "hash": "bb" * 16,
+                "hops": 1,
+                "via": "",
+                "interface": "A",
+                "timestamp": 0,
+                "age_s": 0,
+                "expires": 0,
+                "expires_in_s": 0,
+            },
+            {
+                "hash": "cc" * 16,
+                "hops": 2,
+                "via": "",
+                "interface": "A",
+                "timestamp": 0,
+                "age_s": 0,
+                "expires": 0,
+                "expires_in_s": 0,
+            },
         ]
 
         # Ascending
@@ -606,8 +724,16 @@ class TestRoutingDataCollection:
     def test_get_routing_data_summary_only(self, plugin):
         plugin.start()
         plugin._routing_data["path_table"] = [
-            {"hash": "aa" * 16, "hops": 1, "via": "", "interface": "A",
-             "timestamp": 0, "age_s": 0, "expires": 0, "expires_in_s": 0},
+            {
+                "hash": "aa" * 16,
+                "hops": 1,
+                "via": "",
+                "interface": "A",
+                "timestamp": 0,
+                "age_s": 0,
+                "expires": 0,
+                "expires_in_s": 0,
+            },
         ]
 
         result = plugin.get_routing_data(per_page=0)

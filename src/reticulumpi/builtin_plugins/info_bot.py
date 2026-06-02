@@ -102,6 +102,7 @@ def _safe_eval(node):
             return val
     raise ValueError("Unsupported expression")
 
+
 # WMO Weather Interpretation Codes (WW)
 # https://open-meteo.com/en/docs
 _WMO_CODES = {
@@ -158,9 +159,7 @@ class InfoBot(PluginBase):
     def start(self) -> None:
         self._lock = threading.Lock()
         default_storage = "~/.local/share/reticulumpi/info_bot_lxmf"
-        storage_path = os.path.expanduser(
-            self.config.get("storage_path", default_storage)
-        )
+        storage_path = os.path.expanduser(self.config.get("storage_path", default_storage))
         os.makedirs(storage_path, exist_ok=True)
 
         # Info Bot needs its own identity so it gets a unique LXMF address
@@ -177,15 +176,15 @@ class InfoBot(PluginBase):
         self.lxmf_router = LXMF.LXMRouter(storagepath=storage_path)
         self.local_lxmf_destination = self.lxmf_router.register_delivery_identity(
             self._bot_identity,
-            display_name=self.config.get("display_name")
-            or f"{self.app.node_name} Info",
+            display_name=self.config.get("display_name") or f"{self.app.node_name} Info",
         )
         self.lxmf_router.register_delivery_callback(self._handle_message)
 
         # Auto-select the nearest LXMF propagation node for store-and-forward
         self._best_propagation_hops = RNS.Transport.PATHFINDER_M + 1
         self._announce_sub = self.announce_dispatcher.subscribe(
-            "lxmf.propagation", self._handle_propagation_announce,
+            "lxmf.propagation",
+            self._handle_propagation_announce,
         )
 
         # Record start time for uptime tracking
@@ -317,14 +316,23 @@ class InfoBot(PluginBase):
 
         # Try common abbreviations
         tz_aliases = {
-            "EST": "US/Eastern", "EDT": "US/Eastern",
-            "CST": "US/Central", "CDT": "US/Central",
-            "MST": "US/Mountain", "MDT": "US/Mountain",
-            "PST": "US/Pacific", "PDT": "US/Pacific",
-            "GMT": "GMT", "CET": "CET", "EET": "EET",
-            "JST": "Asia/Tokyo", "IST": "Asia/Kolkata",
-            "AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",
-            "NZST": "Pacific/Auckland", "NZDT": "Pacific/Auckland",
+            "EST": "US/Eastern",
+            "EDT": "US/Eastern",
+            "CST": "US/Central",
+            "CDT": "US/Central",
+            "MST": "US/Mountain",
+            "MDT": "US/Mountain",
+            "PST": "US/Pacific",
+            "PDT": "US/Pacific",
+            "GMT": "GMT",
+            "CET": "CET",
+            "EET": "EET",
+            "JST": "Asia/Tokyo",
+            "IST": "Asia/Kolkata",
+            "AEST": "Australia/Sydney",
+            "AEDT": "Australia/Sydney",
+            "NZST": "Pacific/Auckland",
+            "NZDT": "Pacific/Auckland",
         }
         resolved = tz_aliases.get(tz_name.upper(), tz_name)
 
@@ -381,8 +389,8 @@ class InfoBot(PluginBase):
         # Disk usage for root
         try:
             st = os.statvfs("/")
-            total_gb = (st.f_blocks * st.f_frsize) / (1024 ** 3)
-            free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+            total_gb = (st.f_blocks * st.f_frsize) / (1024**3)
+            free_gb = (st.f_bavail * st.f_frsize) / (1024**3)
             used_gb = total_gb - free_gb
             lines.append(f"Disk: {used_gb:.1f}/{total_gb:.1f} GB used")
         except OSError:
@@ -392,7 +400,7 @@ class InfoBot(PluginBase):
         try:
             with open("/sys/class/thermal/thermal_zone0/temp") as f:
                 temp_c = int(f.read().strip()) / 1000
-            lines.append(f"CPU temp: {temp_c:.1f}°C ({temp_c * 9/5 + 32:.1f}°F)")
+            lines.append(f"CPU temp: {temp_c:.1f}°C ({temp_c * 9 / 5 + 32:.1f}°F)")
         except (OSError, ValueError):
             pass
 
@@ -404,7 +412,9 @@ class InfoBot(PluginBase):
             venv_bin = os.path.dirname(sys.executable)
             result = subprocess.run(
                 [os.path.join(venv_bin, "rnstatus")],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             output = result.stdout.strip()
             if not output:
@@ -426,7 +436,9 @@ class InfoBot(PluginBase):
             venv_bin = os.path.dirname(sys.executable)
             result = subprocess.run(
                 [os.path.join(venv_bin, "rnstatus"), "-A"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             output = result.stdout.strip()
             if not output:
@@ -486,7 +498,9 @@ class InfoBot(PluginBase):
                 result = int(result)
             return f"{expr} = {result}"
         except (ValueError, TypeError, SyntaxError, ZeroDivisionError) as exc:
-            return f"Error: {exc}\nSupported: +, -, *, /, //, **, %, sqrt, sin, cos, tan, log, pi, e"
+            return (
+                f"Error: {exc}\nSupported: +, -, *, /, //, **, %, sqrt, sin, cos, tan, log, pi, e"
+            )
 
     def _cmd_define(self, args: str = "") -> str:
         """Look up a word definition using the Free Dictionary API."""
@@ -516,7 +530,7 @@ class InfoBot(PluginBase):
                     lines.append(f"  - {defn['definition']}")
                     example = defn.get("example")
                     if example:
-                        lines.append(f"    \"{example}\"")
+                        lines.append(f'    "{example}"')
 
             return "\n".join(lines)
 
@@ -537,20 +551,21 @@ class InfoBot(PluginBase):
             return "News unavailable — node is offline."
         try:
             # Use Wikinews Atom feed — no API key needed
-            url = "https://en.wikinews.org/w/api.php?" + urllib.parse.urlencode({
-                "action": "feedrecentchanges",
-                "feedformat": "atom",
-                "namespace": "0",
-                "limit": "5",
-            })
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "ReticulumPi-InfoBot/2.0"}
+            url = "https://en.wikinews.org/w/api.php?" + urllib.parse.urlencode(
+                {
+                    "action": "feedrecentchanges",
+                    "feedformat": "atom",
+                    "namespace": "0",
+                    "limit": "5",
+                }
             )
+            req = urllib.request.Request(url, headers={"User-Agent": "ReticulumPi-InfoBot/2.0"})
             with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
                 feed_text = resp.read().decode("utf-8")
 
             # Simple XML parsing without external deps
             import re
+
             titles = re.findall(r"<title[^>]*>([^<]+)</title>", feed_text)
             # Skip the feed-level title
             titles = [t for t in titles[1:] if t.strip()][:5]
@@ -561,8 +576,12 @@ class InfoBot(PluginBase):
             lines = ["Latest Wikinews:"]
             for i, title in enumerate(titles, 1):
                 # Unescape basic HTML entities
-                title = (title.replace("&amp;", "&").replace("&lt;", "<")
-                         .replace("&gt;", ">").replace("&quot;", '"'))
+                title = (
+                    title.replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", '"')
+                )
                 lines.append(f"  {i}. {title}")
             return "\n".join(lines)
 
@@ -594,8 +613,7 @@ class InfoBot(PluginBase):
             # Get crew count
             try:
                 crew_data = self._fetch_json("http://api.open-notify.org/astros.json")
-                iss_crew = [p for p in crew_data.get("people", [])
-                            if p.get("craft") == "ISS"]
+                iss_crew = [p for p in crew_data.get("people", []) if p.get("craft") == "ISS"]
                 if iss_crew:
                     lines.append(f"  Crew aboard: {len(iss_crew)}")
             except Exception:
@@ -618,24 +636,33 @@ class InfoBot(PluginBase):
 
         # Map common symbols to CoinGecko IDs
         symbol_map = {
-            "BTC": "bitcoin", "ETH": "ethereum", "LTC": "litecoin",
-            "XRP": "ripple", "DOGE": "dogecoin", "ADA": "cardano",
-            "SOL": "solana", "DOT": "polkadot", "AVAX": "avalanche-2",
-            "MATIC": "matic-network", "LINK": "chainlink", "XMR": "monero",
-            "ATOM": "cosmos", "UNI": "uniswap", "SHIB": "shiba-inu",
+            "BTC": "bitcoin",
+            "ETH": "ethereum",
+            "LTC": "litecoin",
+            "XRP": "ripple",
+            "DOGE": "dogecoin",
+            "ADA": "cardano",
+            "SOL": "solana",
+            "DOT": "polkadot",
+            "AVAX": "avalanche-2",
+            "MATIC": "matic-network",
+            "LINK": "chainlink",
+            "XMR": "monero",
+            "ATOM": "cosmos",
+            "UNI": "uniswap",
+            "SHIB": "shiba-inu",
         }
 
         coin_id = symbol_map.get(symbol, symbol.lower())
 
         try:
-            url = (
-                "https://api.coingecko.com/api/v3/simple/price?"
-                + urllib.parse.urlencode({
+            url = "https://api.coingecko.com/api/v3/simple/price?" + urllib.parse.urlencode(
+                {
                     "ids": coin_id,
                     "vs_currencies": "usd",
                     "include_24hr_change": "true",
                     "include_market_cap": "true",
-                })
+                }
             )
             data = self._fetch_json(url)
 
@@ -654,11 +681,11 @@ class InfoBot(PluginBase):
                 lines.append(f"  24h change: {direction}{change:.2f}%")
             if mcap and mcap > 0:
                 if mcap >= 1e12:
-                    lines.append(f"  Market cap: ${mcap/1e12:.2f}T")
+                    lines.append(f"  Market cap: ${mcap / 1e12:.2f}T")
                 elif mcap >= 1e9:
-                    lines.append(f"  Market cap: ${mcap/1e9:.2f}B")
+                    lines.append(f"  Market cap: ${mcap / 1e9:.2f}B")
                 elif mcap >= 1e6:
-                    lines.append(f"  Market cap: ${mcap/1e6:.2f}M")
+                    lines.append(f"  Market cap: ${mcap / 1e6:.2f}M")
 
             return "\n".join(lines)
 
@@ -726,7 +753,9 @@ class InfoBot(PluginBase):
 
             # Try to get solar flux (F10.7)
             try:
-                flux_url = "https://services.swpc.noaa.gov/products/summary/solar-wind-mag-field.json"
+                flux_url = (
+                    "https://services.swpc.noaa.gov/products/summary/solar-wind-mag-field.json"
+                )
                 flux_data = self._fetch_json(flux_url)
                 bt = flux_data.get("Bt", "N/A")
                 bz = flux_data.get("Bz", "N/A")
@@ -747,9 +776,7 @@ class InfoBot(PluginBase):
         """Convert between Maidenhead grid squares and lat/lon."""
         args = args.strip()
         if not args:
-            return ("Usage:\n"
-                    "  !grid EM10 — grid to lat/lon\n"
-                    "  !grid 30.27 -97.74 — lat/lon to grid")
+            return "Usage:\n  !grid EM10 — grid to lat/lon\n  !grid 30.27 -97.74 — lat/lon to grid"
 
         # Check if input looks like lat/lon
         parts = args.replace(",", " ").split()
@@ -807,7 +834,8 @@ class InfoBot(PluginBase):
         if search:
             scored = score_all_nodes(nodes, path_table, transport_nodes)
             matches = [
-                n for n in scored
+                n
+                for n in scored
                 if search in n.get("destination_hash", "").lower().replace("<", "").replace(">", "")
                 or search in (n.get("app_data") or "").lower()
                 or search in (n.get("app_name") or "").lower()
@@ -816,7 +844,9 @@ class InfoBot(PluginBase):
                 return f"No nodes matching: {search}"
 
             # Show detailed view for first match (or all if few)
-            lines = [f"Reachability for '{search}' ({len(matches)} match{'es' if len(matches) != 1 else ''})"]
+            lines = [
+                f"Reachability for '{search}' ({len(matches)} match{'es' if len(matches) != 1 else ''})"
+            ]
             for entry in matches[:5]:
                 dest = entry.get("destination_hash", "?")
                 clean = dest.replace("<", "").replace(">", "").replace(" ", "")
@@ -1002,9 +1032,8 @@ class InfoBot(PluginBase):
             city_name = parts[0]
             filter_terms = [p.lower() for p in parts[1:] if p]
 
-            geo_url = (
-                "https://geocoding-api.open-meteo.com/v1/search?"
-                + urllib.parse.urlencode({"name": city_name, "count": 10})
+            geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
+                {"name": city_name, "count": 10}
             )
             geo_data = self._fetch_json(geo_url)
 
@@ -1017,12 +1046,14 @@ class InfoBot(PluginBase):
             if filter_terms:
                 for r in results:
                     # Check if any filter term matches admin1, admin2, or country
-                    searchable = " ".join([
-                        r.get("admin1", ""),
-                        r.get("admin2", ""),
-                        r.get("country", ""),
-                        r.get("country_code", ""),
-                    ]).lower()
+                    searchable = " ".join(
+                        [
+                            r.get("admin1", ""),
+                            r.get("admin2", ""),
+                            r.get("country", ""),
+                            r.get("country_code", ""),
+                        ]
+                    ).lower()
                     if all(term in searchable for term in filter_terms):
                         place = r
                         break
@@ -1033,18 +1064,14 @@ class InfoBot(PluginBase):
             admin1 = place.get("admin1", "")  # state/region
 
             # Step 2: Fetch current weather
-            weather_url = (
-                "https://api.open-meteo.com/v1/forecast?"
-                + urllib.parse.urlencode(
-                    {
-                        "latitude": lat,
-                        "longitude": lon,
-                        "current": "temperature_2m,relative_humidity_2m,"
-                        "wind_speed_10m,weather_code",
-                        "temperature_unit": "fahrenheit",
-                        "wind_speed_unit": "mph",
-                    }
-                )
+            weather_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(
+                {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
+                    "temperature_unit": "fahrenheit",
+                    "wind_speed_unit": "mph",
+                }
             )
             weather_data = self._fetch_json(weather_url)
 
@@ -1102,9 +1129,14 @@ class InfoBot(PluginBase):
         square_lat = int(lat % 10)
         sub_lon = int((lon - field_lon * 20 - square_lon * 2) * 12)
         sub_lat = int((lat - field_lat * 10 - square_lat) * 24)
-        return (chr(65 + field_lon) + chr(65 + field_lat)
-                + str(square_lon) + str(square_lat)
-                + chr(97 + sub_lon) + chr(97 + sub_lat))
+        return (
+            chr(65 + field_lon)
+            + chr(65 + field_lat)
+            + str(square_lon)
+            + str(square_lat)
+            + chr(97 + sub_lon)
+            + chr(97 + sub_lat)
+        )
 
     @staticmethod
     def _grid_to_latlon(grid: str) -> tuple:
@@ -1149,17 +1181,13 @@ class InfoBot(PluginBase):
         """Fetch a URL and parse the JSON response."""
         if not self.internet_available:
             raise urllib.error.URLError("Internet unavailable")
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "ReticulumPi-InfoBot/1.0"}
-        )
+        req = urllib.request.Request(url, headers={"User-Agent": "ReticulumPi-InfoBot/1.0"})
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     # ── Propagation node handling (same pattern as message_echo) ─────
 
-    def _handle_propagation_announce(
-        self, destination_hash, announced_identity, app_data
-    ):
+    def _handle_propagation_announce(self, destination_hash, announced_identity, app_data):
         """Auto-select the nearest active propagation node."""
         try:
             if not app_data:

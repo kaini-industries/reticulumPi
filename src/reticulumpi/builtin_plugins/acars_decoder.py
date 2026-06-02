@@ -99,10 +99,14 @@ class ACARSDecoder(SignalPluginBase):
 
         cmd = [
             decoder,
-            "-d", str(device_index),
-            "-p", str(self._ppm),
-            "-o", "4",
-            "-r", "0",
+            "-d",
+            str(device_index),
+            "-p",
+            str(self._ppm),
+            "-o",
+            "4",
+            "-r",
+            "0",
         ]
         if self._gain is not None:
             cmd += ["-g", str(self._gain)]
@@ -223,9 +227,14 @@ class ACARSDecoder(SignalPluginBase):
             self._level_count += 1
 
         try:
-            self.event_bus.publish(events.ACARS_MESSAGE_DECODED, {
-                "flight": flight, "tail": tail, "label": label,
-            })
+            self.event_bus.publish(
+                events.ACARS_MESSAGE_DECODED,
+                {
+                    "flight": flight,
+                    "tail": tail,
+                    "label": label,
+                },
+            )
         except Exception:
             pass
 
@@ -250,10 +259,7 @@ class ACARSDecoder(SignalPluginBase):
             sorted(self._airline_stats.items(), key=lambda x: x[1], reverse=True)[:20],
         )
 
-        level_avg = (
-            round(self._level_sum / self._level_count, 1)
-            if self._level_count > 0 else None
-        )
+        level_avg = round(self._level_sum / self._level_count, 1) if self._level_count > 0 else None
 
         with self._cache_lock:
             self._snapshot_cache = {

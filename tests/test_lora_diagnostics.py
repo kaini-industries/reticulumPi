@@ -157,18 +157,14 @@ class TestMonitoredDestinations:
         assert len(plugin._monitored) == 2
         ratcom = plugin._monitored["c99eced76cb1bbc2e6711b6fbea115eb"]
         assert ratcom["name"] == "Ratcom"
-        assert ratcom["hash_bytes"] == bytes.fromhex(
-            "c99eced76cb1bbc2e6711b6fbea115eb"
-        )
+        assert ratcom["hash_bytes"] == bytes.fromhex("c99eced76cb1bbc2e6711b6fbea115eb")
         assert ratcom["has_path"] is False
         plugin.stop()
 
     @patch("RNS.Transport")
     def test_default_name_from_hash(self, mock_transport, mock_app):
         config = {
-            "monitored_destinations": [
-                {"hash": "aabbccddee0011223344556677889900"}
-            ],
+            "monitored_destinations": [{"hash": "aabbccddee0011223344556677889900"}],
         }
         plugin = _make_plugin(mock_app, config)
         plugin.start()
@@ -255,9 +251,7 @@ class TestPathChecking:
         plugin._monitored["c99eced76cb1bbc2e6711b6fbea115eb"]["has_path"] = True
 
         events_received = []
-        mock_app.event_bus.subscribe(
-            "lora.peer_path_lost", lambda e, d: events_received.append(d)
-        )
+        mock_app.event_bus.subscribe("lora.peer_path_lost", lambda e, d: events_received.append(d))
 
         plugin._check_monitored_paths()
 
@@ -383,9 +377,7 @@ class TestBeacon:
         plugin.stop()
 
     @patch("RNS.Transport")
-    def test_beacon_counts_multiple_destinations(
-        self, mock_transport, mock_app, base_config
-    ):
+    def test_beacon_counts_multiple_destinations(self, mock_transport, mock_app, base_config):
         mock_hb_dest = MagicMock()
         mock_heartbeat = MagicMock()
         mock_heartbeat.destination = mock_hb_dest
@@ -465,7 +457,13 @@ class TestInterfaceStats:
         """Gracefully handles missing LoRa interface in stats."""
         mock_app.reticulum.get_interface_stats.return_value = {
             "interfaces": [
-                {"name": "TCPInterface[TCP Client beleth]", "short_name": "TCP Client beleth", "status": True, "rxb": 100, "txb": 50},
+                {
+                    "name": "TCPInterface[TCP Client beleth]",
+                    "short_name": "TCP Client beleth",
+                    "status": True,
+                    "rxb": 100,
+                    "txb": 50,
+                },
             ],
         }
 
@@ -524,6 +522,7 @@ class TestAnnounceMode:
         plugin.start()
 
         from reticulumpi.rns_config import InterfaceEntry
+
         iface = InterfaceEntry(
             name="RNode LoRa Interface",
             properties={"announce_cap": "5"},
@@ -543,6 +542,7 @@ class TestAnnounceMode:
         plugin.start()
 
         from reticulumpi.rns_config import InterfaceEntry
+
         iface = InterfaceEntry(
             name="RNode LoRa Interface",
             properties={"announce_cap": "1"},
@@ -562,6 +562,7 @@ class TestAnnounceMode:
         plugin.start()
 
         from reticulumpi.rns_config import InterfaceEntry
+
         iface = InterfaceEntry(
             name="RNode LoRa Interface",
             properties={"interface_mode": "access_point", "announce_cap": "5"},
@@ -599,7 +600,13 @@ class TestInterfaceStatsDelta:
     def test_delta_tracking(self, mock_transport, mock_app, base_config):
         mock_app.reticulum.get_interface_stats.return_value = {
             "interfaces": [
-                {"name": "RNodeInterface[RNode LoRa Interface]", "short_name": "RNode LoRa Interface", "status": True, "rxb": 1000, "txb": 500},
+                {
+                    "name": "RNodeInterface[RNode LoRa Interface]",
+                    "short_name": "RNode LoRa Interface",
+                    "status": True,
+                    "rxb": 1000,
+                    "txb": 500,
+                },
             ],
         }
 
@@ -613,7 +620,13 @@ class TestInterfaceStatsDelta:
         # Second poll with updated counters
         mock_app.reticulum.get_interface_stats.return_value = {
             "interfaces": [
-                {"name": "RNodeInterface[RNode LoRa Interface]", "short_name": "RNode LoRa Interface", "status": True, "rxb": 1500, "txb": 800},
+                {
+                    "name": "RNodeInterface[RNode LoRa Interface]",
+                    "short_name": "RNode LoRa Interface",
+                    "status": True,
+                    "rxb": 1500,
+                    "txb": 800,
+                },
             ],
         }
         plugin._poll_interface_stats("RNode LoRa Interface")

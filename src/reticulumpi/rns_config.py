@@ -129,9 +129,7 @@ def parse_rns_config_from_lines(
     return lines, interfaces
 
 
-def set_interface_enabled(
-    lines: list[str], entry: InterfaceEntry, enabled: bool
-) -> list[str]:
+def set_interface_enabled(lines: list[str], entry: InterfaceEntry, enabled: bool) -> list[str]:
     """Toggle an interface's ``enabled`` flag in *lines*, returning a new list."""
     lines = list(lines)  # shallow copy
     val = "yes" if enabled else "no"
@@ -179,9 +177,7 @@ def set_interface_property(
     return lines
 
 
-def remove_interface_property(
-    lines: list[str], entry: InterfaceEntry, key: str
-) -> list[str]:
+def remove_interface_property(lines: list[str], entry: InterfaceEntry, key: str) -> list[str]:
     """Remove a property line from an interface block, returning a new list."""
     lines = list(lines)
     key_lower = key.lower()

@@ -21,6 +21,7 @@ import pytest
 # LXMF's PropagationAnnounceHandler.
 # ---------------------------------------------------------------------------
 
+
 class _Handler3:
     """3-param handler (like LXMFDeliveryAnnounceHandler)."""
 
@@ -41,11 +42,10 @@ class _Handler4:
         self.receive_path_responses = receive_path_responses
         self.calls = []
 
-    def received_announce(self, destination_hash, announced_identity, app_data,
-                          announce_packet_hash):
-        self.calls.append(
-            (destination_hash, announced_identity, app_data, announce_packet_hash)
-        )
+    def received_announce(
+        self, destination_hash, announced_identity, app_data, announce_packet_hash
+    ):
+        self.calls.append((destination_hash, announced_identity, app_data, announce_packet_hash))
 
 
 class _Handler5:
@@ -56,11 +56,11 @@ class _Handler5:
         self.receive_path_responses = receive_path_responses
         self.calls = []
 
-    def received_announce(self, destination_hash, announced_identity, app_data,
-                          announce_packet_hash, is_path_response):
+    def received_announce(
+        self, destination_hash, announced_identity, app_data, announce_packet_hash, is_path_response
+    ):
         self.calls.append(
-            (destination_hash, announced_identity, app_data,
-             announce_packet_hash, is_path_response)
+            (destination_hash, announced_identity, app_data, announce_packet_hash, is_path_response)
         )
 
 
@@ -68,6 +68,7 @@ class _Handler5:
 # Import helpers — we import the launcher module in isolation so that
 # meshchat (which isn't installed in the test env) is not needed.
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mux_classes():
@@ -91,14 +92,14 @@ def mux_classes():
         if loader_src is None:
             # The launcher isn't on sys.path — read it directly
             import pathlib
+
             launcher_path = (
-                pathlib.Path(__file__).resolve().parent.parent
-                / "scripts"
-                / "meshchat_launcher.py"
+                pathlib.Path(__file__).resolve().parent.parent / "scripts" / "meshchat_launcher.py"
             )
             launcher_path.read_text()
         else:
             import inspect
+
             inspect.getsource(importlib.import_module("meshchat_launcher"))
     finally:
         if saved is None:
@@ -161,13 +162,22 @@ def multiplexer(mock_rns):
                 self._subs = [s for s in self._subs if s[0] is not handler]
 
         def received_announce(
-            self, destination_hash, announced_identity, app_data,
-            announce_packet_hash, is_path_response,
+            self,
+            destination_hash,
+            announced_identity,
+            app_data,
+            announce_packet_hash,
+            is_path_response,
         ):
             try:
                 self._q.put_nowait(
-                    (destination_hash, announced_identity, app_data,
-                     announce_packet_hash, is_path_response)
+                    (
+                        destination_hash,
+                        announced_identity,
+                        app_data,
+                        announce_packet_hash,
+                        is_path_response,
+                    )
                 )
             except _queue.Full:
                 pass

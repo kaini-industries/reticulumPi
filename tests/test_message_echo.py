@@ -57,9 +57,7 @@ class TestPropagationAutoSelect:
         ):
             echo_plugin._handle_propagation_announce(node_hash, MagicMock(), app_data)
 
-        echo_plugin.lxmf_router.set_outbound_propagation_node.assert_called_once_with(
-            node_hash
-        )
+        echo_plugin.lxmf_router.set_outbound_propagation_node.assert_called_once_with(node_hash)
         assert echo_plugin._best_propagation_hops == 3
 
     def test_picks_closer_node(self, echo_plugin):
@@ -104,9 +102,7 @@ class TestPropagationAutoSelect:
             echo_plugin._handle_propagation_announce(far_hash, MagicMock(), app_data)
 
         # Should have been called only once with the nearer node
-        echo_plugin.lxmf_router.set_outbound_propagation_node.assert_called_once_with(
-            near_hash
-        )
+        echo_plugin.lxmf_router.set_outbound_propagation_node.assert_called_once_with(near_hash)
         assert echo_plugin._best_propagation_hops == 2
 
     def test_ignores_inactive_node(self, echo_plugin):
@@ -130,9 +126,7 @@ class TestPropagationAutoSelect:
     def test_ignores_invalid_app_data(self, echo_plugin):
         """Invalid app_data should not crash."""
         with patch("LXMF.pn_announce_data_is_valid", return_value=False):
-            echo_plugin._handle_propagation_announce(
-                b"\xaa" * 16, MagicMock(), b"garbage"
-            )
+            echo_plugin._handle_propagation_announce(b"\xaa" * 16, MagicMock(), b"garbage")
         echo_plugin.lxmf_router.set_outbound_propagation_node.assert_not_called()
 
 

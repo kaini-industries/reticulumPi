@@ -81,7 +81,8 @@ class PathWarmerPlugin(PluginBase):
         self._recent_node_hashes: set[str] = set()
         if self.config.get("announce_triggered_warming", True):
             self._announce_sub_id = self.announce_dispatcher.subscribe(
-                None, self._on_announce_received,
+                None,
+                self._on_announce_received,
             )
 
         self._start_thread(self._warm_loop, "path-warmer")
@@ -137,17 +138,18 @@ class PathWarmerPlugin(PluginBase):
                 "priority_nodes": len(self._priority_hashes),
                 "backed_off_nodes": backed_off,
                 "rtt_buckets": rtt_buckets,
-                "warm_interval": self.config.get(
-                    "warm_interval", _DEFAULT_WARM_INTERVAL
-                ),
+                "warm_interval": self.config.get("warm_interval", _DEFAULT_WARM_INTERVAL),
                 "max_requests_per_cycle": self.config.get(
                     "max_requests_per_cycle", _DEFAULT_MAX_PER_CYCLE
                 ),
             }
 
     def ensure_path(
-        self, dest_hash: bytes, timeout: float | None = None,
-        *, interactive: bool = False,
+        self,
+        dest_hash: bytes,
+        timeout: float | None = None,
+        *,
+        interactive: bool = False,
     ) -> bool:
         """Ensure a path exists to *dest_hash*, blocking up to *timeout* seconds.
 
@@ -172,7 +174,8 @@ class PathWarmerPlugin(PluginBase):
 
         self.log.debug(
             "Requesting path for %s (pre-send, timeout=%.1fs)",
-            RNS.prettyhexrep(dest_hash), timeout,
+            RNS.prettyhexrep(dest_hash),
+            timeout,
         )
         t0 = time.time()
         RNS.Transport.request_path(dest_hash)
@@ -218,12 +221,8 @@ class PathWarmerPlugin(PluginBase):
 
     def _run_warm_cycle(self) -> None:
         """Execute one warming cycle."""
-        max_requests = self.config.get(
-            "max_requests_per_cycle", _DEFAULT_MAX_PER_CYCLE
-        )
-        age_threshold = self.config.get(
-            "path_age_threshold", _DEFAULT_AGE_THRESHOLD
-        )
+        max_requests = self.config.get("max_requests_per_cycle", _DEFAULT_MAX_PER_CYCLE)
+        age_threshold = self.config.get("path_age_threshold", _DEFAULT_AGE_THRESHOLD)
         max_backoff = self.config.get("max_backoff", _DEFAULT_MAX_BACKOFF)
 
         # Build path data lookup from connectivity_monitor if available
@@ -233,9 +232,7 @@ class PathWarmerPlugin(PluginBase):
         candidates = self._build_candidates(path_data, age_threshold)
 
         # Refresh recently-seen hash cache for announce-triggered warming
-        self._recent_node_hashes = {
-            c.hex() for c in candidates
-        }
+        self._recent_node_hashes = {c.hex() for c in candidates}
 
         warmed = 0
         failed = 0
@@ -248,8 +245,7 @@ class PathWarmerPlugin(PluginBase):
             k: v for k, v in self._last_warm_attempt.items() if v > stale_cutoff
         }
         self._failure_count = {
-            k: v for k, v in self._failure_count.items()
-            if k in self._last_warm_attempt
+            k: v for k, v in self._failure_count.items() if k in self._last_warm_attempt
         }
 
         for dest_hash in candidates:
@@ -262,7 +258,7 @@ class PathWarmerPlugin(PluginBase):
             last = self._last_warm_attempt.get(hex_hash, 0)
             failures = self._failure_count.get(hex_hash, 0)
             if failures > 0:
-                backoff = min(interval * (2 ** failures), max_backoff)
+                backoff = min(interval * (2**failures), max_backoff)
                 if now - last < backoff:
                     continue
             elif now - last < interval:
@@ -302,9 +298,7 @@ class PathWarmerPlugin(PluginBase):
         if RNS.Transport.has_path(dest_hash):
             return False  # already reachable, not counted as "warmed"
 
-        self.log.debug(
-            "Warming path for %s", RNS.prettyhexrep(dest_hash)
-        )
+        self.log.debug("Warming path for %s", RNS.prettyhexrep(dest_hash))
         t0 = time.time()
         RNS.Transport.request_path(dest_hash)
 
@@ -388,11 +382,7 @@ class PathWarmerPlugin(PluginBase):
                 net_map = self.app.get_plugin("network_map")
                 if net_map and hasattr(net_map, "get_known_nodes"):
                     nodes = net_map.get_known_nodes()
-                    recent = [
-                        n
-                        for n in nodes
-                        if n.get("last_seen", 0) > cutoff
-                    ]
+                    recent = [n for n in nodes if n.get("last_seen", 0) > cutoff]
                     for node in recent:
                         h = node.get("destination_hash", "")
                         clean = h.replace("<", "").replace(">", "").replace(" ", "")
@@ -415,14 +405,10 @@ class PathWarmerPlugin(PluginBase):
                             except (ValueError, TypeError):
                                 pass
             except Exception:
-                self.log.debug(
-                    "Error reading nodes from network_map", exc_info=True
-                )
+                self.log.debug("Error reading nodes from network_map", exc_info=True)
 
         # 3. Paths expiring soon
-        expiry_minutes = self.config.get(
-            "expiry_predict_minutes", _DEFAULT_EXPIRY_PREDICT_MINUTES
-        )
+        expiry_minutes = self.config.get("expiry_predict_minutes", _DEFAULT_EXPIRY_PREDICT_MINUTES)
         if expiry_minutes > 0:
             expiry_threshold_s = expiry_minutes * 60
             for hex_hash, pdata in path_data.items():
@@ -458,9 +444,7 @@ class PathWarmerPlugin(PluginBase):
     def _adaptive_timeout(self, dest_hash: bytes) -> float:
         """Compute adaptive timeout from hop-count RTT history."""
         fallback = self.config.get("pre_send_timeout", _DEFAULT_PRE_SEND_TIMEOUT)
-        safety = self.config.get(
-            "adaptive_safety_factor", _DEFAULT_ADAPTIVE_SAFETY_FACTOR
-        )
+        safety = self.config.get("adaptive_safety_factor", _DEFAULT_ADAPTIVE_SAFETY_FACTOR)
         try:
             hops = RNS.Transport.hops_to(dest_hash)
             if not isinstance(hops, (int, float)) or hops < 0:
@@ -478,7 +462,10 @@ class PathWarmerPlugin(PluginBase):
     # --- Announce-triggered warming ---
 
     def _on_announce_received(
-        self, destination_hash: bytes, _announced_identity: Any, _app_data: Any,
+        self,
+        destination_hash: bytes,
+        _announced_identity: Any,
+        _app_data: Any,
     ) -> None:
         """Lightweight callback from announce dispatcher — queues qualifying hashes."""
         hex_hash = destination_hash.hex()
@@ -510,7 +497,7 @@ class PathWarmerPlugin(PluginBase):
             last = self._last_warm_attempt.get(hex_hash, 0)
             failures = self._failure_count.get(hex_hash, 0)
             if failures > 0:
-                backoff = min(interval * (2 ** failures), max_backoff)
+                backoff = min(interval * (2**failures), max_backoff)
                 if now - last < backoff:
                     continue
             elif now - last < min(interval, 30):

@@ -18,6 +18,7 @@ import pytest
 # Mock the meshcore and paho packages before any plugin imports
 # ---------------------------------------------------------------------------
 
+
 class _MockEventType(Enum):
     SELF_INFO = "self_info"
     DEVICE_INFO = "device_info"
@@ -52,13 +53,16 @@ _mock_paho_client.CallbackAPIVersion.VERSION2 = 2
 @pytest.fixture(autouse=True)
 def _patch_modules():
     """Ensure meshcore and paho are always available as mocks."""
-    with patch.dict(sys.modules, {
-        "meshcore": _mock_meshcore,
-        "meshcore.events": _mock_meshcore_events,
-        "paho": _mock_paho,
-        "paho.mqtt": _mock_paho,
-        "paho.mqtt.client": _mock_paho_client,
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "meshcore": _mock_meshcore,
+            "meshcore.events": _mock_meshcore_events,
+            "paho": _mock_paho,
+            "paho.mqtt": _mock_paho,
+            "paho.mqtt.client": _mock_paho_client,
+        },
+    ):
         _mock_meshcore.MeshCore = MagicMock()
         _mock_meshcore_events.EventType = _MockEventType
         yield
@@ -67,6 +71,7 @@ def _patch_modules():
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def obs_config():
@@ -105,12 +110,14 @@ def shared_config():
 def _make_plugin_no_start(mock_app, config):
     """Create observer without calling start()."""
     from reticulumpi.builtin_plugins.meshcore_observer import MeshCoreObserver
+
     return MeshCoreObserver(mock_app, config)
 
 
 def _make_started_plugin(mock_app, config):
     """Create and start observer, yielding it and cleaning up after."""
     from reticulumpi.builtin_plugins.meshcore_observer import MeshCoreObserver
+
     plugin = MeshCoreObserver(mock_app, config)
     plugin.start()
     yield plugin
@@ -137,8 +144,8 @@ def shared_observer_plugin(mock_app, shared_config):
 # Config validation
 # ---------------------------------------------------------------------------
 
-class TestValidateConfig:
 
+class TestValidateConfig:
     def test_valid_config_accepted(self, mock_app, obs_config):
         plugin = _make_plugin_no_start(mock_app, obs_config)
         assert plugin.plugin_name == "meshcore_observer"
@@ -205,8 +212,8 @@ class TestValidateConfig:
 # Plugin lifecycle
 # ---------------------------------------------------------------------------
 
-class TestLifecycle:
 
+class TestLifecycle:
     def test_start_and_stop(self, observer_plugin):
         assert observer_plugin._active is True
         assert observer_plugin._shared_mode is False
@@ -228,11 +235,24 @@ class TestLifecycle:
     def test_get_status_returns_expected_fields(self, observer_plugin):
         status = observer_plugin.get_status()
         expected_fields = {
-            "active", "mode", "device_connected", "mqtt_connected",
-            "public_key", "iata", "mqtt_broker", "packets_captured",
-            "packets_published", "packets_failed", "last_packet_time",
-            "last_mqtt_publish_time", "connect_count", "reconnect_failures",
-            "signing_mode", "firmware", "model", "queue_depth",
+            "active",
+            "mode",
+            "device_connected",
+            "mqtt_connected",
+            "public_key",
+            "iata",
+            "mqtt_broker",
+            "packets_captured",
+            "packets_published",
+            "packets_failed",
+            "last_packet_time",
+            "last_mqtt_publish_time",
+            "connect_count",
+            "reconnect_failures",
+            "signing_mode",
+            "firmware",
+            "model",
+            "queue_depth",
         }
         assert expected_fields.issubset(set(status.keys()))
 
@@ -241,8 +261,8 @@ class TestLifecycle:
 # Packet capture
 # ---------------------------------------------------------------------------
 
-class TestPacketCapture:
 
+class TestPacketCapture:
     def test_build_packet_json(self, observer_plugin):
         observer_plugin._public_key = "abcdef1234567890" * 4
         payload = {
@@ -323,10 +343,15 @@ class TestPacketCapture:
             type=_MockEventType.RX_LOG_DATA,
             payload={
                 "recv_time": int(time.time()),
-                "snr": 1.0, "rssi": -50,
-                "raw_hex": "ab", "payload_length": 1,
-                "route_typename": "FLOOD", "payload_type": 0,
-                "path_len": 0, "path": "", "pkt_hash": 0,
+                "snr": 1.0,
+                "rssi": -50,
+                "raw_hex": "ab",
+                "payload_length": 1,
+                "route_typename": "FLOOD",
+                "payload_type": 0,
+                "path_len": 0,
+                "path": "",
+                "pkt_hash": 0,
             },
         )
         # Fill the queue
@@ -343,8 +368,8 @@ class TestPacketCapture:
 # JWT generation
 # ---------------------------------------------------------------------------
 
-class TestJWT:
 
+class TestJWT:
     def test_jwt_structure(self, observer_plugin):
         observer_plugin._public_key = "aa" * 32
         observer_plugin._signing_mode = "device"
@@ -363,6 +388,7 @@ class TestJWT:
         assert len(parts) == 3
 
         import base64
+
         header_bytes = base64.urlsafe_b64decode(parts[0] + "==")
         header = json.loads(header_bytes)
         assert header["alg"] == "Ed25519"
@@ -429,8 +455,8 @@ class TestJWT:
 # MQTT publishing
 # ---------------------------------------------------------------------------
 
-class TestMQTT:
 
+class TestMQTT:
     def test_publish_packet_correct_topic(self, observer_plugin):
         observer_plugin._public_key = "ee" * 32
         observer_plugin._connected_mqtt = True
@@ -491,13 +517,15 @@ class TestMQTT:
 # Shared mode
 # ---------------------------------------------------------------------------
 
-class TestSharedMode:
 
+class TestSharedMode:
     def test_attach_to_gateway(self, shared_observer_plugin, mock_app):
         shared_observer_plugin._detach_from_gateway()
         mock_gw = MagicMock()
         mock_gw.get_status.return_value = {
-            "connected": True, "firmware": "1.0", "model": "RAK4631",
+            "connected": True,
+            "firmware": "1.0",
+            "model": "RAK4631",
         }
         mock_mc = MagicMock()
         mock_mc.self_info = {"public_key": "aa" * 32}
@@ -547,7 +575,8 @@ class TestSharedMode:
         shared_observer_plugin._subscriptions = []
 
         shared_observer_plugin._on_gateway_disconnected(
-            "meshcore.disconnected", {"reason": "test"},
+            "meshcore.disconnected",
+            {"reason": "test"},
         )
 
         assert shared_observer_plugin._connected_device is False
@@ -558,7 +587,8 @@ class TestSharedMode:
         shared_observer_plugin._subscriptions = []
 
         shared_observer_plugin._on_plugin_stopping(
-            "plugin.stopping", {"name": "meshcore_gateway"},
+            "plugin.stopping",
+            {"name": "meshcore_gateway"},
         )
 
         assert shared_observer_plugin._connected_device is False
@@ -569,7 +599,8 @@ class TestSharedMode:
         shared_observer_plugin._subscriptions = []
 
         shared_observer_plugin._on_plugin_stopping(
-            "plugin.stopping", {"name": "some_other_plugin"},
+            "plugin.stopping",
+            {"name": "some_other_plugin"},
         )
 
         assert shared_observer_plugin._connected_device is True
@@ -579,8 +610,8 @@ class TestSharedMode:
 # Health check
 # ---------------------------------------------------------------------------
 
-class TestHealthCheck:
 
+class TestHealthCheck:
     def test_healthy_when_connected(self, observer_plugin):
         mock_mc = MagicMock()
         mock_mc.is_connected = True
@@ -608,10 +639,12 @@ class TestHealthCheck:
 # Regression tests for the bug-fix pass
 # ---------------------------------------------------------------------------
 
-class TestBugFixes:
 
+class TestBugFixes:
     def test_shared_stop_does_not_stop_borrowed_loop(
-        self, shared_observer_plugin, mock_app,
+        self,
+        shared_observer_plugin,
+        mock_app,
     ):
         """In shared mode, stop() must not touch the gateway's loop."""
         shared_observer_plugin._detach_from_gateway()
@@ -621,7 +654,9 @@ class TestBugFixes:
 
         mock_gw = MagicMock()
         mock_gw.get_status.return_value = {
-            "connected": True, "firmware": "1.0", "model": "X",
+            "connected": True,
+            "firmware": "1.0",
+            "model": "X",
         }
         mock_mc = MagicMock()
         mock_mc.self_info = {"public_key": "aa" * 32}
@@ -664,14 +699,18 @@ class TestBugFixes:
         assert observer_plugin._connected_mqtt is False
 
     def test_double_attach_subscribes_once(
-        self, shared_observer_plugin, mock_app,
+        self,
+        shared_observer_plugin,
+        mock_app,
     ):
         """Two racing callers must not both subscribe to RX_LOG_DATA."""
         shared_observer_plugin._detach_from_gateway()
 
         mock_gw = MagicMock()
         mock_gw.get_status.return_value = {
-            "connected": True, "firmware": "1.0", "model": "X",
+            "connected": True,
+            "firmware": "1.0",
+            "model": "X",
         }
         mock_mc = MagicMock()
         mock_mc.self_info = {"public_key": "aa" * 32}
@@ -686,15 +725,15 @@ class TestBugFixes:
         assert mock_mc.subscribe.call_count == 1
 
     def test_stop_unsubscribes_gateway_handlers_in_shared_mode(
-        self, shared_observer_plugin,
+        self,
+        shared_observer_plugin,
     ):
         shared_observer_plugin.event_bus.unsubscribe_all.reset_mock()
 
         shared_observer_plugin.stop()
 
         unsub_targets = {
-            call.args[0] for call in
-            shared_observer_plugin.event_bus.unsubscribe_all.call_args_list
+            call.args[0] for call in shared_observer_plugin.event_bus.unsubscribe_all.call_args_list
         }
         assert shared_observer_plugin._on_gateway_connected in unsub_targets
         assert shared_observer_plugin._on_gateway_disconnected in unsub_targets
@@ -730,14 +769,20 @@ class TestBugFixes:
         recv_time = 1713830400
         payload = {
             "recv_time": recv_time,
-            "snr": 0, "rssi": 0,
-            "raw_hex": "", "payload_length": 0,
-            "route_typename": "FLOOD", "payload_type": 0,
-            "path_len": 0, "path": "", "pkt_hash": 0,
+            "snr": 0,
+            "rssi": 0,
+            "raw_hex": "",
+            "payload_length": 0,
+            "route_typename": "FLOOD",
+            "payload_type": 0,
+            "path_len": 0,
+            "path": "",
+            "pkt_hash": 0,
         }
         result = observer_plugin._build_packet_json(payload)
 
         from datetime import datetime, timezone
+
         expected = datetime.fromtimestamp(recv_time, tz=timezone.utc)
         assert result["timestamp"] == expected.isoformat()
         assert result["time"] == expected.strftime("%H:%M:%S")
@@ -786,6 +831,7 @@ class TestBugFixes:
     def test_jwt_expiry_triggers_clean_reconnect(self, observer_plugin):
         """Drain loop must cleanly reconnect when JWT is near expiry."""
         import threading
+
         observer_plugin._public_key = "aa" * 32
         observer_plugin._jwt_token = "expiring.token"
         observer_plugin._jwt_expires = time.time() + 10  # inside 300s buffer
@@ -804,11 +850,17 @@ class TestBugFixes:
             real_disconnect()
             disconnect_called.set()
 
-        with patch.object(observer_plugin, "_disconnect_mqtt", side_effect=spy_disconnect), \
-             patch.object(observer_plugin, "_connect_mqtt",
-                          side_effect=lambda: setattr(observer_plugin, "_active", False)):
+        with (
+            patch.object(observer_plugin, "_disconnect_mqtt", side_effect=spy_disconnect),
+            patch.object(
+                observer_plugin,
+                "_connect_mqtt",
+                side_effect=lambda: setattr(observer_plugin, "_active", False),
+            ),
+        ):
             loop_thread = threading.Thread(
-                target=observer_plugin._mqtt_connection_loop, daemon=True,
+                target=observer_plugin._mqtt_connection_loop,
+                daemon=True,
             )
             loop_thread.start()
             assert disconnect_called.wait(timeout=3), (
@@ -821,6 +873,7 @@ class TestBugFixes:
     def test_jwt_valid_does_not_trigger_reconnect(self, observer_plugin):
         """Drain loop must not reconnect when JWT has plenty of lifetime left."""
         import threading
+
         observer_plugin._public_key = "aa" * 32
         observer_plugin._jwt_token = "fresh.token"
         observer_plugin._jwt_expires = time.time() + 3600  # full hour
@@ -832,10 +885,13 @@ class TestBugFixes:
         observer_plugin._mqtt_client = mock_client
         observer_plugin._packet_queue = queue.Queue(maxsize=10)
 
-        with patch.object(observer_plugin, "_disconnect_mqtt") as mock_disc, \
-             patch.object(observer_plugin, "_connect_mqtt"):
+        with (
+            patch.object(observer_plugin, "_disconnect_mqtt") as mock_disc,
+            patch.object(observer_plugin, "_connect_mqtt"),
+        ):
             loop_thread = threading.Thread(
-                target=observer_plugin._mqtt_connection_loop, daemon=True,
+                target=observer_plugin._mqtt_connection_loop,
+                daemon=True,
             )
             loop_thread.start()
             # Let the loop do ~2 drain iterations (each ~1s due to get-timeout).
@@ -862,8 +918,11 @@ class TestBugFixes:
         _mock_paho_client.MQTT_ERR_SUCCESS = 0
 
         observer_plugin._handle_mqtt_connect(
-            mock_client, rc=0,
-            broker="broker", port=443, iata="AUS",
+            mock_client,
+            rc=0,
+            broker="broker",
+            port=443,
+            iata="AUS",
             status_topic="meshcore/AUS/key/status",
         )
 
@@ -876,8 +935,12 @@ class TestBugFixes:
         mock_client = MagicMock()
 
         observer_plugin._handle_mqtt_connect(
-            mock_client, rc=1,  # non-zero → failure
-            broker="b", port=443, iata="AUS", status_topic="t",
+            mock_client,
+            rc=1,  # non-zero → failure
+            broker="b",
+            port=443,
+            iata="AUS",
+            status_topic="t",
         )
 
         mock_client.publish.assert_not_called()
@@ -912,10 +975,15 @@ class TestBugFixes:
             type=_MockEventType.RX_LOG_DATA,
             payload={
                 "recv_time": int(time.time()),
-                "snr": 0, "rssi": 0,
-                "raw_hex": "", "payload_length": 0,
-                "route_typename": "FLOOD", "payload_type": 0,
-                "path_len": 0, "path": "", "pkt_hash": 0,
+                "snr": 0,
+                "rssi": 0,
+                "raw_hex": "",
+                "payload_length": 0,
+                "route_typename": "FLOOD",
+                "payload_type": 0,
+                "path_len": 0,
+                "path": "",
+                "pkt_hash": 0,
             },
         )
 
@@ -930,20 +998,24 @@ class TestBugFixes:
 # WebSocket keepalive patch
 # ---------------------------------------------------------------------------
 
-class TestWebSocketPatch:
 
+class TestWebSocketPatch:
     def test_patch_adds_ping_method(self):
         from reticulumpi.builtin_plugins.meshcore_observer import _patch_paho_websocket
+
         _patch_paho_websocket()
         from paho.mqtt.client import _WebsocketWrapper
+
         assert hasattr(_WebsocketWrapper, "ping")
         assert callable(_WebsocketWrapper.ping)
 
     def test_patch_is_idempotent(self):
         from reticulumpi.builtin_plugins.meshcore_observer import _patch_paho_websocket
+
         _patch_paho_websocket()
         _patch_paho_websocket()
         from paho.mqtt.client import _WebsocketWrapper
+
         assert hasattr(_WebsocketWrapper, "ping")
 
     def test_ws_ping_thread_starts_on_connect(self, observer_plugin):
@@ -956,8 +1028,11 @@ class TestWebSocketPatch:
         _mock_paho_client.MQTT_ERR_SUCCESS = 0
 
         observer_plugin._handle_mqtt_connect(
-            mock_client, rc=0,
-            broker="broker", port=443, iata="AUS",
+            mock_client,
+            rc=0,
+            broker="broker",
+            port=443,
+            iata="AUS",
             status_topic="meshcore/AUS/key/status",
         )
 
@@ -976,8 +1051,11 @@ class TestWebSocketPatch:
         _mock_paho_client.MQTT_ERR_SUCCESS = 0
 
         observer_plugin._handle_mqtt_connect(
-            mock_client, rc=0,
-            broker="broker", port=443, iata="AUS",
+            mock_client,
+            rc=0,
+            broker="broker",
+            port=443,
+            iata="AUS",
             status_topic="meshcore/AUS/key/status",
         )
         assert observer_plugin._ws_ping_thread is not None
@@ -1016,8 +1094,11 @@ class TestWebSocketPatch:
             _mock_paho_client.MQTT_ERR_SUCCESS = 0
 
             plugin._handle_mqtt_connect(
-                mock_client, rc=0,
-                broker="test", port=1883, iata="AUS",
+                mock_client,
+                rc=0,
+                broker="test",
+                port=1883,
+                iata="AUS",
                 status_topic="meshcore/AUS/key/status",
             )
 

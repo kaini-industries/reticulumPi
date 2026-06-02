@@ -215,8 +215,11 @@ class InternetProbe:
             self._wan_ip = wan_ip
 
         event_type = events.INTERNET_ONLINE if online else events.INTERNET_OFFLINE
-        self._event_bus.publish(event_type, {
-            "timestamp": time.time(),
-            "wan_ip": wan_ip,
-            "lan_ip": lan_ip,
-        })
+        self._event_bus.publish(
+            event_type,
+            {
+                "timestamp": time.time(),
+                "wan_ip": wan_ip,
+                "lan_ip": lan_ip,
+            },
+        )

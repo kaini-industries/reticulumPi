@@ -36,9 +36,7 @@ def _make_request(method, path, headers=None, peername=None):
     protocol.max_field_size = 8190
     protocol.max_line_length = 8190
     protocol.max_headers = 128
-    type(protocol).peername = property(
-        lambda self: transport.get_extra_info("peername")
-    )
+    type(protocol).peername = property(lambda self: transport.get_extra_info("peername"))
     type(protocol).ssl_context = property(lambda self: None)
 
     async def _noop_write_headers(*a):

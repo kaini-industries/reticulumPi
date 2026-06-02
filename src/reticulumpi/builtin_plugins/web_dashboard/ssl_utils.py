@@ -45,10 +45,12 @@ def generate_self_signed_cert(
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
     # Build certificate
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, common_name or "ReticulumPi"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ReticulumPi"),
-    ])
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name or "ReticulumPi"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ReticulumPi"),
+        ]
+    )
 
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
@@ -68,11 +70,13 @@ def generate_self_signed_cert(
 
     # Write private key
     with open(key_path, "wb") as f:
-        f.write(key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        ))
+        f.write(
+            key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
     os.chmod(key_path, 0o600)
 
     # Write certificate

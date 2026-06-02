@@ -198,18 +198,20 @@ def score_all_nodes(
 
         reach = compute_reachability(node, path, relay)
 
-        results.append({
-            "destination_hash": dest_hash,
-            "app_name": node.get("app_name", ""),
-            "app_data": node.get("app_data_str", ""),
-            "hops": path.get("hops") if path else node.get("hops"),
-            "last_seen": node.get("last_seen"),
-            "announce_count": node.get("announce_count", 0),
-            "interface": path.get("interface", "") if path else "",
-            "score": reach["score"],
-            "label": reach["label"],
-            "factors": reach["factors"],
-        })
+        results.append(
+            {
+                "destination_hash": dest_hash,
+                "app_name": node.get("app_name", ""),
+                "app_data": node.get("app_data_str", ""),
+                "hops": path.get("hops") if path else node.get("hops"),
+                "last_seen": node.get("last_seen"),
+                "announce_count": node.get("announce_count", 0),
+                "interface": path.get("interface", "") if path else "",
+                "score": reach["score"],
+                "label": reach["label"],
+                "factors": reach["factors"],
+            }
+        )
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results

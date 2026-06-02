@@ -85,6 +85,7 @@ class AircraftState:
 def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in nautical miles."""
     from reticulumpi.geo import haversine_nm
+
     return haversine_nm(lat1, lon1, lat2, lon2)
 
 
@@ -156,17 +157,28 @@ class AdsbRadarPlugin(PluginBase):
             gps = self.app.get_plugin("gps_telemetry") if hasattr(self.app, "get_plugin") else None
             if gps is not None and hasattr(gps, "last_fix"):
                 fix = getattr(gps, "last_fix", None)
-                if isinstance(fix, dict) and fix.get("lat") is not None and fix.get("lon") is not None:
+                if (
+                    isinstance(fix, dict)
+                    and fix.get("lat") is not None
+                    and fix.get("lon") is not None
+                ):
                     self._receiver_lat = float(fix["lat"])
                     self._receiver_lon = float(fix["lon"])
-                    self.log.info("Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon)
+                    self.log.info(
+                        "Receiver position from GPS: %.4f, %.4f",
+                        self._receiver_lat,
+                        self._receiver_lon,
+                    )
 
         self._start_thread(self._supervisor_loop, name="adsb-supervisor")
         self._start_thread(self._maintenance_loop, name="adsb-maintenance")
 
         self.log.info(
             "adsb_radar started: device %s, gain %s, ppm %d, SBS port %d",
-            self._device_id, self._gain, self._ppm, self._sbs_port,
+            self._device_id,
+            self._gain,
+            self._ppm,
+            self._sbs_port,
         )
 
     def stop(self) -> None:
@@ -178,6 +190,7 @@ class AdsbRadarPlugin(PluginBase):
             self._set_bias_tee(False)
         try:
             from reticulumpi.rtlsdr import release_device
+
             release_device(self._device_id, caller=self.plugin_name)
         except Exception:
             pass
@@ -239,12 +252,14 @@ class AdsbRadarPlugin(PluginBase):
                 "install dump1090, dump1090-mutability, dump1090-fa, or readsb",
             )
             self.log.warning(
-                "%s not found; adsb_radar will stay idle", self._dump1090_bin,
+                "%s not found; adsb_radar will stay idle",
+                self._dump1090_bin,
             )
             return
 
         try:
             from reticulumpi.rtlsdr import resolve_device
+
             self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
         except RuntimeError as exc:
             self._set_status("error", str(exc))
@@ -294,11 +309,13 @@ class AdsbRadarPlugin(PluginBase):
                 )
                 break
 
-            backoff = min(60.0, 2.0 ** self._restart_count)
+            backoff = min(60.0, 2.0**self._restart_count)
             self._set_status("restarting", f"backoff {backoff:.0f}s")
             self.log.info(
                 "Restarting dump1090 in %.0fs (attempt %d/%d)",
-                backoff, self._restart_count, self._max_restarts,
+                backoff,
+                self._restart_count,
+                self._max_restarts,
             )
             self._sleep_while_active(backoff)
 
@@ -321,11 +338,15 @@ class AdsbRadarPlugin(PluginBase):
         assert self._dump1090_path is not None
         cmd = [
             self._dump1090_path,
-            "--device-index", str(self._resolved_index if self._resolved_index is not None else self._device_id),
-            "--gain", self._gain,
-            "--ppm", str(self._ppm),
+            "--device-index",
+            str(self._resolved_index if self._resolved_index is not None else self._device_id),
+            "--gain",
+            self._gain,
+            "--ppm",
+            str(self._ppm),
             "--net",
-            "--net-sbs-port", str(self._sbs_port),
+            "--net-sbs-port",
+            str(self._sbs_port),
             "--quiet",
         ]
         if self._receiver_lat is not None and self._receiver_lon is not None:
@@ -366,7 +387,8 @@ class AdsbRadarPlugin(PluginBase):
         try:
             result = subprocess.run(
                 [self._rtl_biast_path, "-d", str(idx), "-b", flag],
-                capture_output=True, timeout=10,
+                capture_output=True,
+                timeout=10,
             )
             if result.returncode == 0:
                 self._bias_tee_active = on
@@ -525,7 +547,10 @@ class AdsbRadarPlugin(PluginBase):
                             if self._receiver_lat is not None and self._receiver_lon is not None:
                                 ac.distance_nm = round(
                                     _haversine_nm(
-                                        self._receiver_lat, self._receiver_lon, lat, lon,
+                                        self._receiver_lat,
+                                        self._receiver_lon,
+                                        lat,
+                                        lon,
                                     ),
                                     1,
                                 )
@@ -567,11 +592,14 @@ class AdsbRadarPlugin(PluginBase):
             }
             self._emergency_history.append(emerg_record)
 
-            self._publish(events.ADSB_EMERGENCY_SQUAWK, {
-                "icao": icao,
-                "squawk": squawk_val,
-                "callsign": callsign or None,
-            })
+            self._publish(
+                events.ADSB_EMERGENCY_SQUAWK,
+                {
+                    "icao": icao,
+                    "squawk": squawk_val,
+                    "callsign": callsign or None,
+                },
+            )
 
     # ── maintenance ───────────────────────────────────────────────────
 
@@ -602,7 +630,9 @@ class AdsbRadarPlugin(PluginBase):
                 self._receiver_lat = float(lat)
                 self._receiver_lon = float(lon)
             if not had_position:
-                self.log.info("Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon)
+                self.log.info(
+                    "Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon
+                )
 
     # ── helpers ───────────────────────────────────────────────────────
 
@@ -612,11 +642,14 @@ class AdsbRadarPlugin(PluginBase):
             self._status = status
             self._last_error = error
         if status != prev:
-            self._publish(events.ADSB_STATUS, {
-                "status": status,
-                "error": error,
-                "timestamp": time.time(),
-            })
+            self._publish(
+                events.ADSB_STATUS,
+                {
+                    "status": status,
+                    "error": error,
+                    "timestamp": time.time(),
+                },
+            )
 
     def _publish(self, event: str, data: dict) -> None:
         try:

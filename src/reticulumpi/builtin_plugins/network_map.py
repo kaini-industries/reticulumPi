@@ -69,9 +69,7 @@ class NetworkMapPlugin(PluginBase):
         self._nodes_lock = threading.Lock()
 
         db_path = os.path.expanduser(
-            self.config.get(
-                "db_path", "~/.local/share/reticulumpi/network_map.db"
-            )
+            self.config.get("db_path", "~/.local/share/reticulumpi/network_map.db")
         )
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._db_path = db_path
@@ -97,17 +95,16 @@ class NetworkMapPlugin(PluginBase):
 
         self._sub_ids: list[str] = []
         for aspect in aspects:
+
             def _on_aspect(dest, identity, app_data, _a=aspect):
                 self.record_announce(dest, identity, app_data, _a)
-            self._sub_ids.append(
-                self.announce_dispatcher.subscribe(aspect, _on_aspect)
-            )
+
+            self._sub_ids.append(self.announce_dispatcher.subscribe(aspect, _on_aspect))
 
         def _on_wildcard(dest, identity, app_data):
             self.record_announce(dest, identity, app_data, "", from_wildcard=True)
-        self._sub_ids.append(
-            self.announce_dispatcher.subscribe(None, _on_wildcard)
-        )
+
+        self._sub_ids.append(self.announce_dispatcher.subscribe(None, _on_wildcard))
 
         self._broadcast_cache: tuple[float, int, dict] | None = None
         self._broadcast_cache_ttl = 15.0
@@ -129,8 +126,7 @@ class NetworkMapPlugin(PluginBase):
         self._start_thread(self._maintenance_loop, "network-map")
 
         self.log.info(
-            "Network map active — monitoring announces for %d aspects + "
-            "wildcard (DB: %s)",
+            "Network map active — monitoring announces for %d aspects + wildcard (DB: %s)",
             len(aspects),
             db_path,
         )
@@ -169,7 +165,11 @@ class NetworkMapPlugin(PluginBase):
             mesh["node_count"] = self.get_node_count()
         if hasattr(self, "get_recent_announces"):
             ra_age = now - self._recent_announces_time
-            if self._announces_dirty.is_set() or ra_age >= self._recent_announces_ttl or self._recent_announces_cache is None:
+            if (
+                self._announces_dirty.is_set()
+                or ra_age >= self._recent_announces_ttl
+                or self._recent_announces_cache is None
+            ):
                 self._recent_announces_cache = self.get_recent_announces()
                 self._recent_announces_time = now
                 self._announces_dirty.clear()
@@ -194,16 +194,18 @@ class NetworkMapPlugin(PluginBase):
         with self._nodes_lock:
             items = list(self._known_nodes.items())
         for dest_hash, info in items:
-            nodes.append({
-                "destination_hash": RNS.prettyhexrep(dest_hash),
-                "app_name": info.get("app_name", ""),
-                "aspects": info.get("aspects", ""),
-                "hops": info.get("hops"),
-                "last_seen": info.get("last_seen"),
-                "first_seen": info.get("first_seen"),
-                "announce_count": info.get("announce_count", 0),
-                "app_data": info.get("app_data_str", ""),
-            })
+            nodes.append(
+                {
+                    "destination_hash": RNS.prettyhexrep(dest_hash),
+                    "app_name": info.get("app_name", ""),
+                    "aspects": info.get("aspects", ""),
+                    "hops": info.get("hops"),
+                    "last_seen": info.get("last_seen"),
+                    "first_seen": info.get("first_seen"),
+                    "announce_count": info.get("announce_count", 0),
+                    "app_data": info.get("app_data_str", ""),
+                }
+            )
         return sorted(nodes, key=lambda n: n.get("last_seen", 0), reverse=True)
 
     def get_node_name(self, destination_hash: str) -> str | None:
@@ -267,9 +269,7 @@ class NetworkMapPlugin(PluginBase):
                     conditions.append("hops IS NOT NULL AND hops <= 4")
                     view_default_sort = "hops ASC, last_seen DESC"
                 elif view == "recent":
-                    conditions.append(
-                        "last_seen > (strftime('%s','now') - 3600)"
-                    )
+                    conditions.append("last_seen > (strftime('%s','now') - 3600)")
                     view_default_sort = "last_seen DESC"
                 elif view == "lxmf":
                     conditions.append("app_name = 'lxmf'")
@@ -348,16 +348,18 @@ class NetworkMapPlugin(PluginBase):
                     # Format hash with angle brackets to match get_known_nodes()
                     raw_hash = row["destination_hash"] or ""
                     fmt_hash = "<" + raw_hash + ">" if raw_hash else ""
-                    nodes.append({
-                        "destination_hash": fmt_hash,
-                        "app_name": row["app_name"] or "",
-                        "aspects": row["aspects"] or "",
-                        "hops": row["hops"],
-                        "last_seen": row["last_seen"],
-                        "first_seen": row["first_seen"],
-                        "announce_count": row["announce_count"] or 0,
-                        "app_data": row["app_data_str"] or "",
-                    })
+                    nodes.append(
+                        {
+                            "destination_hash": fmt_hash,
+                            "app_name": row["app_name"] or "",
+                            "aspects": row["aspects"] or "",
+                            "hops": row["hops"],
+                            "last_seen": row["last_seen"],
+                            "first_seen": row["first_seen"],
+                            "announce_count": row["announce_count"] or 0,
+                            "app_data": row["app_data_str"] or "",
+                        }
+                    )
 
                 return {
                     "nodes": nodes,
@@ -440,9 +442,14 @@ class NetworkMapPlugin(PluginBase):
                 }
         except Exception:
             self.log.exception("Error computing mesh summary")
-            return {"total_nodes": 0, "app_breakdown": {},
-                    "hop_distribution": {}, "activity_stats": {},
-                    "growth": {}, "nearby": 0}
+            return {
+                "total_nodes": 0,
+                "app_breakdown": {},
+                "hop_distribution": {},
+                "activity_stats": {},
+                "growth": {},
+                "nearby": 0,
+            }
 
     def get_recent_announces(self, since: float = 0, limit: int = 10) -> list[dict[str, Any]]:
         """Return nodes announced since a given timestamp (for WS deltas).
@@ -454,8 +461,7 @@ class NetworkMapPlugin(PluginBase):
             with self._read_db_lock:
                 conn = self._read_conn
                 rows = conn.execute(
-                    "SELECT * FROM known_nodes WHERE last_seen > ? "
-                    "ORDER BY last_seen DESC LIMIT ?",
+                    "SELECT * FROM known_nodes WHERE last_seen > ? ORDER BY last_seen DESC LIMIT ?",
                     (since, limit),
                 ).fetchall()
                 return [
@@ -517,8 +523,9 @@ class NetworkMapPlugin(PluginBase):
                 (destination_hash, identity, app_data, aspect, from_wildcard)
             )
         except queue.Full:
-            self.log.warning("Announce queue full — dropped announce from %s",
-                             RNS.prettyhexrep(destination_hash))
+            self.log.warning(
+                "Announce queue full — dropped announce from %s", RNS.prettyhexrep(destination_hash)
+            )
 
     def _process_announce(
         self,
@@ -541,6 +548,7 @@ class NetworkMapPlugin(PluginBase):
             # Try msgpack first (many nodes send structured data)
             try:
                 import RNS.vendor.umsgpack as umsgpack
+
                 unpacked = umsgpack.unpackb(app_data)
                 if isinstance(unpacked, dict):
                     app_data_str = str(
@@ -605,9 +613,7 @@ class NetworkMapPlugin(PluginBase):
                 if app_data_str:
                     existing["app_data_str"] = app_data_str
 
-                existing["announce_count"] = (
-                    existing.get("announce_count", 0) + 1
-                )
+                existing["announce_count"] = existing.get("announce_count", 0) + 1
                 is_new = False
             else:
                 self._known_nodes[destination_hash] = {
@@ -641,12 +647,15 @@ class NetworkMapPlugin(PluginBase):
                 aspect_parts,
                 hops if hops is not None else "?",
             )
-            self.event_bus.publish(events.NODE_DISCOVERED, {
-                "destination_hash": destination_hash,
-                "app_name": app_name,
-                "aspects": aspect_parts,
-                "hops": hops,
-            })
+            self.event_bus.publish(
+                events.NODE_DISCOVERED,
+                {
+                    "destination_hash": destination_hash,
+                    "app_name": app_name,
+                    "aspects": aspect_parts,
+                    "hops": hops,
+                },
+            )
 
     def _announce_worker(self) -> None:
         """Drain the announce queue and batch-write to SQLite.
@@ -663,9 +672,7 @@ class NetworkMapPlugin(PluginBase):
                 item = self._announce_queue.get(timeout=1.0)
                 dest_hash, identity, app_data, aspect, from_wildcard = item
                 try:
-                    self._process_announce(
-                        dest_hash, identity, app_data, aspect, from_wildcard
-                    )
+                    self._process_announce(dest_hash, identity, app_data, aspect, from_wildcard)
                 except Exception:
                     self.log.debug("Error processing announce", exc_info=True)
                 finally:
@@ -699,21 +706,24 @@ class NetworkMapPlugin(PluginBase):
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
                 for dest_hash, info in batch.items():
-                    conn.execute("""
+                    conn.execute(
+                        """
                         INSERT OR REPLACE INTO known_nodes
                         (destination_hash, app_name, aspects, hops,
                          last_seen, first_seen, announce_count, app_data_str)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        dest_hash.hex(),
-                        info.get("app_name", ""),
-                        info.get("aspects", ""),
-                        info.get("hops"),
-                        info.get("last_seen"),
-                        info.get("first_seen"),
-                        info.get("announce_count", 1),
-                        info.get("app_data_str", ""),
-                    ))
+                    """,
+                        (
+                            dest_hash.hex(),
+                            info.get("app_name", ""),
+                            info.get("aspects", ""),
+                            info.get("hops"),
+                            info.get("last_seen"),
+                            info.get("first_seen"),
+                            info.get("announce_count", 1),
+                            info.get("app_data_str", ""),
+                        ),
+                    )
         except Exception:
             self.log.debug(
                 "Error flushing %d node upserts to database",
@@ -751,12 +761,22 @@ class NetworkMapPlugin(PluginBase):
                     peers INTEGER
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_app_name ON known_nodes(app_name)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_last_seen ON known_nodes(last_seen DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_announce_count ON known_nodes(announce_count DESC)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_known_nodes_app_name ON known_nodes(app_name)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_known_nodes_last_seen ON known_nodes(last_seen DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_known_nodes_announce_count ON known_nodes(announce_count DESC)"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_hops ON known_nodes(hops)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_known_nodes_app_lastseen ON known_nodes(app_name, last_seen DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_interface_stats_timestamp ON interface_stats(timestamp)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_known_nodes_app_lastseen ON known_nodes(app_name, last_seen DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_interface_stats_timestamp ON interface_stats(timestamp)"
+            )
 
     def _load_from_db(self) -> None:
         try:
@@ -779,7 +799,7 @@ class NetworkMapPlugin(PluginBase):
                     key=lambda kv: kv[1].get("last_seen", 0),
                     reverse=True,
                 )
-                self._known_nodes = dict(by_recency[:self._max_cached_nodes])
+                self._known_nodes = dict(by_recency[: self._max_cached_nodes])
             self.log.info("Loaded %d known nodes from database", len(self._known_nodes))
         except Exception:
             self.log.exception("Error loading known nodes from database")
@@ -825,20 +845,23 @@ class NetworkMapPlugin(PluginBase):
         """
         try:
             with sqlite3.connect(self._db_path) as conn:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT OR REPLACE INTO known_nodes
                     (destination_hash, app_name, aspects, hops, last_seen, first_seen, announce_count, app_data_str)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    dest_hash.hex(),
-                    info.get("app_name", ""),
-                    info.get("aspects", ""),
-                    info.get("hops"),
-                    info.get("last_seen"),
-                    info.get("first_seen"),
-                    info.get("announce_count", 1),
-                    info.get("app_data_str", ""),
-                ))
+                """,
+                    (
+                        dest_hash.hex(),
+                        info.get("app_name", ""),
+                        info.get("aspects", ""),
+                        info.get("hops"),
+                        info.get("last_seen"),
+                        info.get("first_seen"),
+                        info.get("announce_count", 1),
+                        info.get("app_data_str", ""),
+                    ),
+                )
         except Exception:
             self.log.debug("Error upserting node to database", exc_info=True)
 
@@ -850,19 +873,22 @@ class NetworkMapPlugin(PluginBase):
         try:
             with sqlite3.connect(self._db_path) as conn:
                 for s in stats:
-                    conn.execute("""
+                    conn.execute(
+                        """
                         INSERT INTO interface_stats (timestamp, name, type, online, rxb, txb, bitrate, peers)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        now,
-                        s.get("name", ""),
-                        s.get("type", ""),
-                        1 if s.get("online", True) else 0,
-                        s.get("rxb"),
-                        s.get("txb"),
-                        s.get("bitrate"),
-                        s.get("peers"),
-                    ))
+                    """,
+                        (
+                            now,
+                            s.get("name", ""),
+                            s.get("type", ""),
+                            1 if s.get("online", True) else 0,
+                            s.get("rxb"),
+                            s.get("txb"),
+                            s.get("bitrate"),
+                            s.get("peers"),
+                        ),
+                    )
         except Exception:
             self.log.debug("Error saving interface stats", exc_info=True)
 
@@ -899,5 +925,3 @@ class NetworkMapPlugin(PluginBase):
             if cycles_since_prune >= 60:
                 self._prune_old_data()
                 cycles_since_prune = 0
-
-

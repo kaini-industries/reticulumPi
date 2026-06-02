@@ -102,7 +102,9 @@ def test_handle_ping(mock_dest, mock_transport, mock_app, plugin_config, authori
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
-def test_handle_ping_rejects_unauthorized(mock_dest, mock_transport, mock_app, plugin_config, unauthorized_identity):
+def test_handle_ping_rejects_unauthorized(
+    mock_dest, mock_transport, mock_app, plugin_config, unauthorized_identity
+):
     from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
     import RNS.vendor.umsgpack as umsgpack
 
@@ -151,7 +153,9 @@ def test_handle_status(mock_dest, mock_transport, mock_app, plugin_config, autho
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
-def test_handle_metrics_no_monitor(mock_dest, mock_transport, mock_app, plugin_config, authorized_identity):
+def test_handle_metrics_no_monitor(
+    mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+):
     from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
     import RNS.vendor.umsgpack as umsgpack
 

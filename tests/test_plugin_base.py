@@ -102,6 +102,7 @@ def test_join_threads(mock_app):
 
 def test_validate_config_called(mock_app):
     """validate_config is called during construction."""
+
     class ValidatingPlugin(PluginBase):
         plugin_name = "validating"
         plugin_version = "1.0.0"
@@ -110,8 +111,11 @@ def test_validate_config_called(mock_app):
         def validate_config(self):
             ValidatingPlugin.validated = True
 
-        def start(self): pass
-        def stop(self): pass
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
 
     ValidatingPlugin(mock_app, {"enabled": True})
     assert ValidatingPlugin.validated is True

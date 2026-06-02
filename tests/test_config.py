@@ -74,9 +74,7 @@ def test_node_name_from_config(tmp_path):
 
 def test_reticulum_config_dir_expansion(tmp_path):
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "reticulumpi:\n  reticulum_config_dir: ~/my_reticulum\n"
-    )
+    cfg.write_text("reticulumpi:\n  reticulum_config_dir: ~/my_reticulum\n")
     config = AppConfig(str(cfg))
     assert "~" not in config.reticulum_config_dir
     assert config.reticulum_config_dir.endswith("my_reticulum")

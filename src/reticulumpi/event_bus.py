@@ -48,7 +48,8 @@ class EventBus:
         self._subscribers: dict[str, list[EventCallback]] = {}
         self._offload_map: dict[EventCallback, EventCallback] = {}
         self._offload_executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="eventbus",
+            max_workers=4,
+            thread_name_prefix="eventbus",
         )
         self._offload_semaphore = threading.BoundedSemaphore(
             value=_OFFLOAD_MAX_PENDING,
@@ -80,6 +81,7 @@ class EventBus:
                         )
                         return
                     executor.submit(_safe_offload, callback, evt, data, sem)
+
                 self._offload_map[callback] = _wrapper
                 wrapper = _wrapper
         self.subscribe(event_type, wrapper)

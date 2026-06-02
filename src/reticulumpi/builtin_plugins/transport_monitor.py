@@ -60,8 +60,7 @@ class TransportMonitorPlugin(PluginBase):
     plugin_name = "transport_monitor"
     plugin_version = "1.1.0"
     plugin_description = (
-        "Monitors TCP hub health, activates fallback connections, "
-        "and auto-discovers community hubs"
+        "Monitors TCP hub health, activates fallback connections, and auto-discovers community hubs"
     )
     broadcast_tier = 0
     broadcast_keys = "transport"
@@ -107,9 +106,7 @@ class TransportMonitorPlugin(PluginBase):
 
             mcd = auto.get("max_cooldown_seconds", 3600)
             if not isinstance(mcd, (int, float)) or mcd < cd:
-                raise ValueError(
-                    "auto_discovery.max_cooldown_seconds must be >= cooldown_seconds"
-                )
+                raise ValueError("auto_discovery.max_cooldown_seconds must be >= cooldown_seconds")
 
             extra = auto.get("extra_hubs", [])
             if not isinstance(extra, list):
@@ -118,13 +115,9 @@ class TransportMonitorPlugin(PluginBase):
                 if not isinstance(hub, dict):
                     raise ValueError(f"auto_discovery.extra_hubs[{i}] must be a dict")
                 if "target_host" not in hub:
-                    raise ValueError(
-                        f"auto_discovery.extra_hubs[{i}] missing 'target_host'"
-                    )
+                    raise ValueError(f"auto_discovery.extra_hubs[{i}] missing 'target_host'")
                 if "target_port" not in hub:
-                    raise ValueError(
-                        f"auto_discovery.extra_hubs[{i}] missing 'target_port'"
-                    )
+                    raise ValueError(f"auto_discovery.extra_hubs[{i}] missing 'target_port'")
 
             hlp = auto.get("hub_list_path")
             if hlp is not None and not isinstance(hlp, str):
@@ -243,9 +236,7 @@ class TransportMonitorPlugin(PluginBase):
                 "auto_target": self._target_connections if self._auto_enabled else 0,
                 "auto_connected": len(self._auto_interfaces),
                 "pool_size": len(self._hub_pool),
-                "in_cooldown": sum(
-                    1 for c in self._hub_cooldowns.values() if c["until"] > now
-                ),
+                "in_cooldown": sum(1 for c in self._hub_cooldowns.values() if c["until"] > now),
                 "exchange_peers": len(self._exchange_peers),
             }
 
@@ -283,27 +274,31 @@ class TransportMonitorPlugin(PluginBase):
 
             fallbacks = []
             for iface in self._active_fallbacks:
-                fallbacks.append({
-                    "name": getattr(iface, "name", "unknown"),
-                    "online": getattr(iface, "online", False),
-                    "target_host": getattr(iface, "target_ip", ""),
-                    "target_port": getattr(iface, "target_port", 0),
-                    "rxb": getattr(iface, "rxb", 0),
-                    "txb": getattr(iface, "txb", 0),
-                })
+                fallbacks.append(
+                    {
+                        "name": getattr(iface, "name", "unknown"),
+                        "online": getattr(iface, "online", False),
+                        "target_host": getattr(iface, "target_ip", ""),
+                        "target_port": getattr(iface, "target_port", 0),
+                        "rxb": getattr(iface, "rxb", 0),
+                        "txb": getattr(iface, "txb", 0),
+                    }
+                )
 
             now = time.monotonic()
             pool_hubs = []
             for key, iface in self._auto_interfaces.items():
-                pool_hubs.append({
-                    "key": key,
-                    "name": getattr(iface, "name", key),
-                    "online": True,
-                    "target_host": getattr(iface, "target_ip", ""),
-                    "target_port": getattr(iface, "target_port", 0),
-                    "rxb": getattr(iface, "rxb", 0),
-                    "txb": getattr(iface, "txb", 0),
-                })
+                pool_hubs.append(
+                    {
+                        "key": key,
+                        "name": getattr(iface, "name", key),
+                        "online": True,
+                        "target_host": getattr(iface, "target_ip", ""),
+                        "target_port": getattr(iface, "target_port", 0),
+                        "rxb": getattr(iface, "rxb", 0),
+                        "txb": getattr(iface, "txb", 0),
+                    }
+                )
 
             return {
                 "primaries": primaries,
@@ -420,7 +415,8 @@ class TransportMonitorPlugin(PluginBase):
 
     def _resolve_tcp_state_path(self) -> str:
         base = os.environ.get(
-            "XDG_DATA_HOME", os.path.expanduser("~/.local/share"),
+            "XDG_DATA_HOME",
+            os.path.expanduser("~/.local/share"),
         )
         return os.path.join(base, "reticulumpi", _TCP_STATE_FILENAME)
 
@@ -442,7 +438,8 @@ class TransportMonitorPlugin(PluginBase):
             self._tam_disabled_names = list(disabled_names)
         except Exception:
             self.log.warning(
-                "Failed to persist TCP auto-disable state", exc_info=True,
+                "Failed to persist TCP auto-disable state",
+                exc_info=True,
             )
 
     def _clear_tcp_state(self) -> None:
@@ -463,14 +460,16 @@ class TransportMonitorPlugin(PluginBase):
             if self._tam_timer is not None:
                 return
             timer = threading.Timer(
-                self._tam_stabilization, self._on_stabilization_expired,
+                self._tam_stabilization,
+                self._on_stabilization_expired,
             )
             timer.daemon = True
             timer.name = "tcp-auto-disable-timer"
             timer.start()
             self._tam_timer = timer
         self.log.info(
-            "TCP auto-disable scheduled in %ds", self._tam_stabilization,
+            "TCP auto-disable scheduled in %ds",
+            self._tam_stabilization,
         )
 
     def _cancel_tcp_disable(self) -> None:
@@ -487,9 +486,7 @@ class TransportMonitorPlugin(PluginBase):
         if not self._active:
             return
         if self.internet_available:
-            self.log.info(
-                "Stabilization expired but internet is back — skipping disable"
-            )
+            self.log.info("Stabilization expired but internet is back — skipping disable")
             return
         self.log.warning("Stabilization period expired — disabling TCP interfaces")
         try:
@@ -499,16 +496,15 @@ class TransportMonitorPlugin(PluginBase):
 
     def _disable_tcp_interfaces(self) -> None:
         from reticulumpi.rns_config import (
-            parse_rns_config, set_interface_enabled, write_rns_config,
+            parse_rns_config,
+            set_interface_enabled,
+            write_rns_config,
         )
 
         config_path = self._get_rns_config_path()
         lines, interfaces = parse_rns_config(config_path)
 
-        to_disable = [
-            e for e in interfaces
-            if e.iface_type == "TCPClientInterface" and e.enabled
-        ]
+        to_disable = [e for e in interfaces if e.iface_type == "TCPClientInterface" and e.enabled]
         if not to_disable:
             self.log.info("No enabled TCPClientInterface entries to disable")
             return
@@ -536,15 +532,21 @@ class TransportMonitorPlugin(PluginBase):
         self._persist_tcp_state(disabled_names)
         self.log.warning(
             "Auto-disabled %d TCP interface(s): %s",
-            len(disabled_names), ", ".join(disabled_names),
+            len(disabled_names),
+            ", ".join(disabled_names),
         )
-        self.event_bus.publish(events.TCP_INTERFACES_AUTO_DISABLED, {
-            "interfaces": disabled_names,
-        })
+        self.event_bus.publish(
+            events.TCP_INTERFACES_AUTO_DISABLED,
+            {
+                "interfaces": disabled_names,
+            },
+        )
 
     def _enable_tcp_interfaces(self) -> None:
         from reticulumpi.rns_config import (
-            parse_rns_config, set_interface_enabled, write_rns_config,
+            parse_rns_config,
+            set_interface_enabled,
+            write_rns_config,
         )
 
         state = self._load_tcp_state()
@@ -586,11 +588,15 @@ class TransportMonitorPlugin(PluginBase):
         self._clear_tcp_state()
         self.log.info(
             "Re-enabled %d TCP interface(s): %s",
-            len(re_enabled), ", ".join(re_enabled),
+            len(re_enabled),
+            ", ".join(re_enabled),
         )
-        self.event_bus.publish(events.TCP_INTERFACES_AUTO_ENABLED, {
-            "interfaces": re_enabled,
-        })
+        self.event_bus.publish(
+            events.TCP_INTERFACES_AUTO_ENABLED,
+            {
+                "interfaces": re_enabled,
+            },
+        )
 
     def _restart_rnsd(self, reason: str) -> bool:
         now = time.monotonic()
@@ -621,7 +627,9 @@ class TransportMonitorPlugin(PluginBase):
         while time.monotonic() < deadline:
             try:
                 result = subprocess.run(
-                    ["rnstatus"], capture_output=True, timeout=5,
+                    ["rnstatus"],
+                    capture_output=True,
+                    timeout=5,
                 )
                 if result.returncode == 0:
                     return True
@@ -639,14 +647,16 @@ class TransportMonitorPlugin(PluginBase):
             return
         if self.internet_available:
             self.log.info(
-                "Internet is online but %d interface(s) were auto-disabled "
-                "— re-enabling: %s", len(disabled), ", ".join(disabled),
+                "Internet is online but %d interface(s) were auto-disabled — re-enabling: %s",
+                len(disabled),
+                ", ".join(disabled),
             )
             self._enable_tcp_interfaces()
         else:
             self.log.info(
-                "Internet still offline — %d interface(s) remain "
-                "auto-disabled: %s", len(disabled), ", ".join(disabled),
+                "Internet still offline — %d interface(s) remain auto-disabled: %s",
+                len(disabled),
+                ", ".join(disabled),
             )
 
     def _check_health(self) -> None:
@@ -676,24 +686,34 @@ class TransportMonitorPlugin(PluginBase):
             if was_online and not online:
                 self.log.warning(
                     "Transport hub OFFLINE: %s (%s:%s)",
-                    hub.get("name", key), hub["target_host"], hub["target_port"],
+                    hub.get("name", key),
+                    hub["target_host"],
+                    hub["target_port"],
                 )
-                self.event_bus.publish(events.HUB_OFFLINE, {
-                    "name": hub.get("name", key),
-                    "target_host": hub["target_host"],
-                    "target_port": hub["target_port"],
-                })
+                self.event_bus.publish(
+                    events.HUB_OFFLINE,
+                    {
+                        "name": hub.get("name", key),
+                        "target_host": hub["target_host"],
+                        "target_port": hub["target_port"],
+                    },
+                )
 
             elif not was_online and online:
                 self.log.info(
                     "Transport hub ONLINE: %s (%s:%s)",
-                    hub.get("name", key), hub["target_host"], hub["target_port"],
+                    hub.get("name", key),
+                    hub["target_host"],
+                    hub["target_port"],
                 )
-                self.event_bus.publish(events.HUB_ONLINE, {
-                    "name": hub.get("name", key),
-                    "target_host": hub["target_host"],
-                    "target_port": hub["target_port"],
-                })
+                self.event_bus.publish(
+                    events.HUB_ONLINE,
+                    {
+                        "name": hub.get("name", key),
+                        "target_host": hub["target_host"],
+                        "target_port": hub["target_port"],
+                    },
+                )
 
             if online:
                 any_online = True
@@ -749,13 +769,18 @@ class TransportMonitorPlugin(PluginBase):
                     self._fallback_active = True
                 self.log.info(
                     "Fallback hub activated: %s (%s:%s)",
-                    name, hub["target_host"], hub["target_port"],
+                    name,
+                    hub["target_host"],
+                    hub["target_port"],
                 )
-                self.event_bus.publish(events.FALLBACK_ACTIVATED, {
-                    "fallback_name": name,
-                    "target_host": hub["target_host"],
-                    "target_port": hub["target_port"],
-                })
+                self.event_bus.publish(
+                    events.FALLBACK_ACTIVATED,
+                    {
+                        "fallback_name": name,
+                        "target_host": hub["target_host"],
+                        "target_port": hub["target_port"],
+                    },
+                )
                 return  # Stop after first successful creation
             except Exception:
                 self.log.exception("Failed to create fallback interface: %s", name)
@@ -780,10 +805,13 @@ class TransportMonitorPlugin(PluginBase):
                 self.log.exception("Error deactivating fallback: %s", name)
 
         if fallbacks:
-            self.event_bus.publish(events.FALLBACK_DEACTIVATED, {
-                "reason": "primary_recovered",
-                "count": len(fallbacks),
-            })
+            self.event_bus.publish(
+                events.FALLBACK_DEACTIVATED,
+                {
+                    "reason": "primary_recovered",
+                    "count": len(fallbacks),
+                },
+            )
 
     # --- Auto-discovery internals ---
 
@@ -797,9 +825,7 @@ class TransportMonitorPlugin(PluginBase):
                 with open(path) as f:
                     data = yaml.safe_load(f)
             else:
-                ref = importlib.resources.files("reticulumpi").joinpath(
-                    "data/community_hubs.yaml"
-                )
+                ref = importlib.resources.files("reticulumpi").joinpath("data/community_hubs.yaml")
                 data = yaml.safe_load(ref.read_text(encoding="utf-8"))
 
             if isinstance(data, dict):
@@ -947,22 +973,25 @@ class TransportMonitorPlugin(PluginBase):
         with self._lock:
             still_needed = self._target_connections - len(self._auto_interfaces)
             pool_size = len(self._hub_pool)
-            in_cooldown = sum(
-                1 for c in self._hub_cooldowns.values() if c["until"] > now
-            )
+            in_cooldown = sum(1 for c in self._hub_cooldowns.values() if c["until"] > now)
 
         if still_needed > 0 and connected == 0:
             self.log.warning(
                 "Hub pool exhausted: need %d more connections, "
                 "%d hubs in cooldown out of %d in pool",
-                still_needed, in_cooldown, pool_size,
+                still_needed,
+                in_cooldown,
+                pool_size,
             )
-            self.event_bus.publish(events.HUB_POOL_EXHAUSTED, {
-                "target": self._target_connections,
-                "connected": self._target_connections - still_needed,
-                "in_cooldown": in_cooldown,
-                "pool_size": pool_size,
-            })
+            self.event_bus.publish(
+                events.HUB_POOL_EXHAUSTED,
+                {
+                    "target": self._target_connections,
+                    "connected": self._target_connections - still_needed,
+                    "in_cooldown": in_cooldown,
+                    "pool_size": pool_size,
+                },
+            )
 
     def _select_candidates(self, needed: int) -> list[dict[str, Any]]:
         """Pick the best candidates from the hub pool for connection."""
@@ -1007,7 +1036,7 @@ class TransportMonitorPlugin(PluginBase):
 
             available.sort(key=sort_key)
 
-        return available[:needed * 2]  # Return extra candidates in case some fail probes
+        return available[: needed * 2]  # Return extra candidates in case some fail probes
 
     def _connect_auto_hub(self, hub: dict[str, Any]) -> bool:
         """Probe and connect to a single community hub. Returns True on success."""
@@ -1049,15 +1078,21 @@ class TransportMonitorPlugin(PluginBase):
                         break
             self.log.info(
                 "Pool hub connected: %s (%s:%d, region=%s)",
-                name, host, port, hub.get("region", "unknown"),
+                name,
+                host,
+                port,
+                hub.get("region", "unknown"),
             )
-            self.event_bus.publish(events.HUB_POOL_CONNECTED, {
-                "name": name,
-                "target_host": host,
-                "target_port": port,
-                "region": hub.get("region", "unknown"),
-                "pool_count": len(self._auto_interfaces),
-            })
+            self.event_bus.publish(
+                events.HUB_POOL_CONNECTED,
+                {
+                    "name": name,
+                    "target_host": host,
+                    "target_port": port,
+                    "region": hub.get("region", "unknown"),
+                    "pool_count": len(self._auto_interfaces),
+                },
+            )
             return True
         except Exception:
             self.log.exception("Failed to create pool interface: %s", key)
@@ -1084,12 +1119,15 @@ class TransportMonitorPlugin(PluginBase):
 
         host, port_str = key.rsplit(":", 1)
         self.log.info("Pool hub disconnected: %s (%s)", name, reason)
-        self.event_bus.publish(events.HUB_POOL_DISCONNECTED, {
-            "name": name,
-            "target_host": host,
-            "target_port": int(port_str),
-            "reason": reason,
-        })
+        self.event_bus.publish(
+            events.HUB_POOL_DISCONNECTED,
+            {
+                "name": name,
+                "target_host": host,
+                "target_port": int(port_str),
+                "reason": reason,
+            },
+        )
 
     def _teardown_auto_interfaces(self) -> None:
         """Tear down all auto-discovered pool interfaces (called from stop)."""
@@ -1148,7 +1186,8 @@ class TransportMonitorPlugin(PluginBase):
             # Listen for other nodes announcing hub exchange
             _aspect = f"{_HUB_EXCHANGE_APP}.{_HUB_EXCHANGE_ASPECT}"
             self._announce_sub = self.announce_dispatcher.subscribe(
-                _aspect, self._on_hub_announce,
+                _aspect,
+                self._on_hub_announce,
             )
 
             # Announce ourselves so other nodes can find us
@@ -1176,8 +1215,13 @@ class TransportMonitorPlugin(PluginBase):
         self.log.debug("Hub exchange: incoming link from %s", link)
 
     def _handle_hub_request(
-        self, path: str, data: Any, request_id: Any,
-        link_id: Any, remote_identity: Any, requested_at: Any,
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
     ) -> Any:
         """Serve our known-working hub list to a requesting peer."""
         with self._lock:
@@ -1190,12 +1234,14 @@ class TransportMonitorPlugin(PluginBase):
                 # Skip hubs in cooldown (they're known-broken)
                 if cd and cd["until"] > time.monotonic():
                     continue
-                working_hubs.append({
-                    "h": hub["target_host"],
-                    "p": int(hub["target_port"]),
-                    "n": hub.get("name", ""),
-                    "r": hub.get("region", ""),
-                })
+                working_hubs.append(
+                    {
+                        "h": hub["target_host"],
+                        "p": int(hub["target_port"]),
+                        "n": hub.get("name", ""),
+                        "r": hub.get("region", ""),
+                    }
+                )
 
         self.log.debug("Hub exchange: serving %d hubs to peer", len(working_hubs))
         return umsgpack.packb({"hubs": working_hubs, "v": 1})
@@ -1307,14 +1353,19 @@ class TransportMonitorPlugin(PluginBase):
             added = self._merge_exchanged_hubs(received_hubs)
             self.log.info(
                 "Hub exchange: received %d hubs from <%s>, %d new",
-                len(received_hubs), dest_hex, added,
+                len(received_hubs),
+                dest_hex,
+                added,
             )
             if added > 0:
-                self.event_bus.publish(events.HUB_POOL_DISCOVERED, {
-                    "source": dest_hex,
-                    "received": len(received_hubs),
-                    "new": added,
-                })
+                self.event_bus.publish(
+                    events.HUB_POOL_DISCOVERED,
+                    {
+                        "source": dest_hex,
+                        "received": len(received_hubs),
+                        "new": added,
+                    },
+                )
             # Update last-queried time
             with self._lock:
                 self._exchange_peers[dest_hash] = time.monotonic()
@@ -1336,35 +1387,32 @@ class TransportMonitorPlugin(PluginBase):
             before = len(self._hub_pool)
             connected_keys = set(self._auto_interfaces.keys())
             self._hub_pool = [
-                hub for hub in self._hub_pool
+                hub
+                for hub in self._hub_pool
                 if hub.get("last_seen", now) > cutoff
                 or f"{hub['target_host']}:{hub['target_port']}" in connected_keys
                 or hub.get("source") != "exchange"
             ]
             removed = before - len(self._hub_pool)
 
-            pool_keys = {
-                f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool
-            }
-            stale_cooldowns = [
-                k for k in self._hub_cooldowns if k not in pool_keys
-            ]
+            pool_keys = {f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool}
+            stale_cooldowns = [k for k in self._hub_cooldowns if k not in pool_keys]
             for k in stale_cooldowns:
                 del self._hub_cooldowns[k]
 
         if removed > 0:
             self.log.info(
                 "Hub pool sweep: removed %d stale hubs (threshold=%dh, pool=%d)",
-                removed, int(self._stale_hours), len(self._hub_pool),
+                removed,
+                int(self._stale_hours),
+                len(self._hub_pool),
             )
 
     def _merge_exchanged_hubs(self, received: list[dict]) -> int:
         """Merge hubs received from a peer into our pool. Returns count of new hubs."""
         added = 0
         with self._lock:
-            existing_keys = {
-                f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool
-            }
+            existing_keys = {f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool}
             pinned = set(self._pinned_hubs)
 
         for entry in received:
@@ -1402,8 +1450,7 @@ class TransportMonitorPlugin(PluginBase):
         announced_identity: Any,
         app_data: bytes | None,
     ) -> None:
-        if self._exchange_destination and \
-                destination_hash == self._exchange_destination.hash:
+        if self._exchange_destination and destination_hash == self._exchange_destination.hash:
             return
         self._on_peer_announced(destination_hash)
 
@@ -1422,5 +1469,3 @@ class TransportMonitorPlugin(PluginBase):
             "Hub exchange: discovered peer <%s>",
             dest_hash.hex()[:12],
         )
-
-

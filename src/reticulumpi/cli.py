@@ -28,12 +28,14 @@ def main() -> None:
         description="ReticulumPi - An extensible Reticulum network node",
     )
     parser.add_argument(
-        "--version", "-V",
+        "--version",
+        "-V",
         action="version",
         version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
-        "--config", "-c",
+        "--config",
+        "-c",
         default=None,
         help="Path to reticulumPi config YAML (default: ~/.config/reticulumpi/config.yaml)",
     )
@@ -108,7 +110,7 @@ def main() -> None:
         choices=["status", "pause", "resume"],
         default=None,
         help="Control the Meshtastic↔MeshCore bridge via the local dashboard API. "
-             "Requires RETICULUMPI_DASHBOARD_PASSWORD env var or prompts for it.",
+        "Requires RETICULUMPI_DASHBOARD_PASSWORD env var or prompts for it.",
     )
     args = parser.parse_args()
 
@@ -119,6 +121,7 @@ def main() -> None:
     if args.hash_password:
         import getpass
         from reticulumpi.builtin_plugins.web_dashboard.auth import hash_password
+
         pw = getpass.getpass("Enter dashboard password: ")
         if not pw:
             print("Error: password cannot be empty")
@@ -129,7 +132,7 @@ def main() -> None:
             sys.exit(1)
         print()
         print("Add this to your config.yaml under plugins.web_dashboard:")
-        print(f"  password_hash: \"{hash_password(pw)}\"")
+        print(f'  password_hash: "{hash_password(pw)}"')
         sys.exit(0)
 
     if args.remote:
@@ -159,6 +162,7 @@ def main() -> None:
     if args.backup_identity:
         import os
         import shutil
+
         config_path_tmp = args.config
         if config_path_tmp is None:
             default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
@@ -177,6 +181,7 @@ def main() -> None:
     if args.restore_identity:
         import os
         import shutil
+
         config_path_tmp = args.config
         if config_path_tmp is None:
             default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
@@ -190,6 +195,7 @@ def main() -> None:
         # Validate the backup is a loadable RNS identity
         try:
             import RNS
+
             test_id = RNS.Identity.from_file(src)
             if test_id is None:
                 raise ValueError("Identity.from_file returned None")
@@ -205,6 +211,7 @@ def main() -> None:
     config_path = args.config
     if config_path is None:
         import os
+
         default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
         if os.path.isfile(default_path):
             config_path = default_path
@@ -226,12 +233,14 @@ def main() -> None:
 
         class _JsonFormatter(logging.Formatter):
             def format(self, record: logging.LogRecord) -> str:
-                return _json.dumps({
-                    "ts": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(record.created)),
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "msg": record.getMessage(),
-                })
+                return _json.dumps(
+                    {
+                        "ts": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(record.created)),
+                        "level": record.levelname,
+                        "logger": record.name,
+                        "msg": record.getMessage(),
+                    }
+                )
 
         handler = logging.StreamHandler()
         handler.setFormatter(_JsonFormatter())
@@ -287,6 +296,7 @@ def _run_mesh_bridge_cli(action: str, config_path: str | None) -> None:
     if config_path and os.path.isfile(config_path):
         try:
             import yaml
+
             with open(config_path) as f:
                 cfg = yaml.safe_load(f) or {}
             wd = (cfg.get("plugins", {}) or {}).get("web_dashboard", {}) or {}
@@ -325,13 +335,16 @@ def _run_mesh_bridge_cli(action: str, config_path: str | None) -> None:
     if action == "status":
         url = f"{base}/api/mesh_bridge/status"
         req = urllib.request.Request(
-            url, headers={"Authorization": f"Bearer {token}"},
+            url,
+            headers={"Authorization": f"Bearer {token}"},
         )
     else:
         url = f"{base}/api/mesh_bridge/running"
         body = _json.dumps({"running": action == "resume"}).encode("utf-8")
         req = urllib.request.Request(
-            url, data=body, method="POST",
+            url,
+            data=body,
+            method="POST",
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",

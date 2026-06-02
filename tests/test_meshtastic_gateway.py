@@ -40,26 +40,29 @@ _mock_crypto_ciphers = MagicMock()
 @pytest.fixture(autouse=True)
 def _patch_meshtastic():
     """Ensure meshtastic and pubsub are always available as mocks."""
-    with patch.dict(sys.modules, {
-        "meshtastic": _mock_meshtastic,
-        "meshtastic.serial_interface": _mock_meshtastic_serial,
-        "meshtastic.protobuf": _mock_meshtastic_protobuf,
-        "meshtastic.protobuf.mesh_pb2": _mock_meshtastic_mesh_pb2,
-        "meshtastic.protobuf.mqtt_pb2": _mock_meshtastic_mqtt_pb2,
-        "meshtastic.protobuf.portnums_pb2": _mock_meshtastic_portnums_pb2,
-        "meshtastic.mesh_pb2": _mock_meshtastic_mesh_pb2,
-        "meshtastic.mqtt_pb2": _mock_meshtastic_mqtt_pb2,
-        "meshtastic.portnums_pb2": _mock_meshtastic_portnums_pb2,
-        "pubsub": _mock_pubsub,
-        "pubsub.pub": _mock_pub,
-        "paho": _mock_paho,
-        "paho.mqtt": _mock_paho,
-        "paho.mqtt.client": _mock_paho_client,
-        "cryptography": _mock_crypto,
-        "cryptography.hazmat": MagicMock(),
-        "cryptography.hazmat.primitives": MagicMock(),
-        "cryptography.hazmat.primitives.ciphers": _mock_crypto_ciphers,
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "meshtastic": _mock_meshtastic,
+            "meshtastic.serial_interface": _mock_meshtastic_serial,
+            "meshtastic.protobuf": _mock_meshtastic_protobuf,
+            "meshtastic.protobuf.mesh_pb2": _mock_meshtastic_mesh_pb2,
+            "meshtastic.protobuf.mqtt_pb2": _mock_meshtastic_mqtt_pb2,
+            "meshtastic.protobuf.portnums_pb2": _mock_meshtastic_portnums_pb2,
+            "meshtastic.mesh_pb2": _mock_meshtastic_mesh_pb2,
+            "meshtastic.mqtt_pb2": _mock_meshtastic_mqtt_pb2,
+            "meshtastic.portnums_pb2": _mock_meshtastic_portnums_pb2,
+            "pubsub": _mock_pubsub,
+            "pubsub.pub": _mock_pub,
+            "paho": _mock_paho,
+            "paho.mqtt": _mock_paho,
+            "paho.mqtt.client": _mock_paho_client,
+            "cryptography": _mock_crypto,
+            "cryptography.hazmat": MagicMock(),
+            "cryptography.hazmat.primitives": MagicMock(),
+            "cryptography.hazmat.primitives.ciphers": _mock_crypto_ciphers,
+        },
+    ):
         yield
 
 
@@ -435,8 +438,11 @@ class TestMeshToLxmf:
         gateway_plugin._connected = True
         gateway_plugin._mesh_interface = _make_mock_mesh_interface()
         gateway_plugin._on_mesh_text(self._make_packet())
-        calls = [c for c in gateway_plugin.event_bus.publish.call_args_list
-                 if c[0][0] == "meshtastic.message_received"]
+        calls = [
+            c
+            for c in gateway_plugin.event_bus.publish.call_args_list
+            if c[0][0] == "meshtastic.message_received"
+        ]
         assert len(calls) == 1
 
 
@@ -911,6 +917,7 @@ class TestConnectionManagement:
         gateway_plugin.event_bus.publish.assert_called()
         # Find the MESHTASTIC_CONNECTED call
         from reticulumpi import events
+
         found = any(
             call.args[0] == events.MESHTASTIC_CONNECTED
             for call in gateway_plugin.event_bus.publish.call_args_list
@@ -926,8 +933,10 @@ class TestConnectionManagement:
         gateway_plugin._on_mesh_connect(interface=iface)
         # Should NOT publish MESHTASTIC_CONNECTED
         from reticulumpi import events
+
         connected_calls = [
-            c for c in gateway_plugin.event_bus.publish.call_args_list
+            c
+            for c in gateway_plugin.event_bus.publish.call_args_list
             if c.args[0] == events.MESHTASTIC_CONNECTED
         ]
         assert len(connected_calls) == 0
@@ -1241,6 +1250,7 @@ class TestNodeInfoAnnouncement:
         mock_iface._logger = None
 
         from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
         _MeshtasticMQTTClient._on_connect(mock_iface, MagicMock(), None, None, None)
         mock_iface.sendNodeInfo.assert_called_once()
 
@@ -1251,6 +1261,7 @@ class TestNodeInfoAnnouncement:
         mock_iface._nodeinfo_interval = 900
 
         from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
         _MeshtasticMQTTClient.maybe_send_nodeinfo(mock_iface)
         mock_iface.sendNodeInfo.assert_not_called()
 
@@ -1261,6 +1272,7 @@ class TestNodeInfoAnnouncement:
         mock_iface._nodeinfo_interval = 900
 
         from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
         _MeshtasticMQTTClient.maybe_send_nodeinfo(mock_iface)
         mock_iface.sendNodeInfo.assert_called_once()
 
@@ -1279,6 +1291,7 @@ class TestNodeInfoAnnouncement:
         # In test context the mock interface doesn't have real nodes, so test
         # the module-level helper directly
         from reticulumpi.builtin_plugins.meshtastic_gateway import _MeshtasticMQTTClient
+
         client = MagicMock(spec=_MeshtasticMQTTClient)
         client._my_node_num = 0xAABBCCDD
         client._long_name = "Test Gateway"
@@ -1392,22 +1405,26 @@ class TestDeriveShortName:
 
     def test_four_words(self):
         from reticulumpi.builtin_plugins.meshtastic_gateway import _derive_short_name
+
         assert _derive_short_name("ReticulumPi Mesh Gateway Node") == "RMGN"
 
     def test_three_words(self):
         from reticulumpi.builtin_plugins.meshtastic_gateway import _derive_short_name
+
         result = _derive_short_name("ReticulumPi Mesh Gateway")
         assert len(result) == 4
         assert result == "RMGR"  # initials "RMG" + pad from "ReticulumPiMeshGateway"
 
     def test_single_word(self):
         from reticulumpi.builtin_plugins.meshtastic_gateway import _derive_short_name
+
         result = _derive_short_name("Gateway")
         assert len(result) == 4
         assert result == "GGAT"  # initial "G" + "Gateway"[:3]
 
     def test_empty_string(self):
         from reticulumpi.builtin_plugins.meshtastic_gateway import _derive_short_name
+
         assert _derive_short_name("") == "NODE"
 
 
@@ -1421,6 +1438,7 @@ class TestLoadOrCreateNodeNum:
 
     def test_creates_new_file(self, tmp_path):
         from reticulumpi.builtin_plugins.meshtastic_gateway import _load_or_create_node_num
+
         path = str(tmp_path / "node_num")
         num = _load_or_create_node_num(path)
         assert 0x10000000 <= num <= 0x7FFFFFFF
@@ -1430,6 +1448,7 @@ class TestLoadOrCreateNodeNum:
 
     def test_loads_existing_file(self, tmp_path):
         from reticulumpi.builtin_plugins.meshtastic_gateway import _load_or_create_node_num
+
         path = str(tmp_path / "node_num")
         with open(path, "w") as f:
             f.write("deadbeef\n")
@@ -1438,6 +1457,7 @@ class TestLoadOrCreateNodeNum:
 
     def test_regenerates_on_corrupt_file(self, tmp_path):
         from reticulumpi.builtin_plugins.meshtastic_gateway import _load_or_create_node_num
+
         path = str(tmp_path / "node_num")
         with open(path, "w") as f:
             f.write("not-valid-hex\n")
@@ -1461,6 +1481,7 @@ def _init_queue_state(plugin):
     """Set up the queue/lock attributes that start() normally initializes."""
     import collections
     import threading
+
     plugin._lock = threading.Lock()
     plugin._active = True
     plugin._connected = True
@@ -2046,7 +2067,9 @@ class TestStartupHangDetection:
         with (
             patch.object(wd_plugin, "_close_leaked_serial_fd"),
             patch.object(wd_plugin, "_check_usb_present", return_value=True),
-            patch.object(wd_plugin, "_resolve_usb_device_path", return_value="/dev/bus/usb/004/011"),
+            patch.object(
+                wd_plugin, "_resolve_usb_device_path", return_value="/dev/bus/usb/004/011"
+            ),
             patch.object(wd_plugin, "_usb_bus_reset", return_value={"ok": True}),
             patch.object(wd_plugin, "_record_reset") as mock_record,
             patch.object(wd_plugin, "_post_recovery_wait"),

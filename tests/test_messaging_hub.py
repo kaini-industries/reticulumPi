@@ -132,7 +132,9 @@ class TestMessageStore:
 
     def test_get_message_by_id(self, store):
         msg_id = store.store(
-            transport="meshtastic", direction="sent", msg_type="broadcast",
+            transport="meshtastic",
+            direction="sent",
+            msg_type="broadcast",
             text="Test msg",
         )
         msg = store.get_message(msg_id)
@@ -173,7 +175,9 @@ class TestMessageStore:
     def test_pagination(self, store):
         for i in range(10):
             store.store(
-                transport="lxmf", direction="received", msg_type="direct",
+                transport="lxmf",
+                direction="received",
+                msg_type="direct",
                 text=f"Msg {i}",
             )
         page1 = store.get_messages(limit=3, offset=0)
@@ -185,8 +189,11 @@ class TestMessageStore:
 
     def test_update_status(self, store):
         msg_id = store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="pending",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="pending",
         )
         store.update_status(msg_id, "delivered")
         msg = store.get_message(msg_id)
@@ -194,8 +201,11 @@ class TestMessageStore:
 
     def test_update_status_unless_terminal_blocks_overwrite(self, store):
         msg_id = store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="delivered",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="delivered",
         )
         terminal = frozenset({"delivered", "delivery_failed", "failed"})
         updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
@@ -204,8 +214,11 @@ class TestMessageStore:
 
     def test_update_status_unless_terminal_allows_non_terminal(self, store):
         msg_id = store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="sent",
         )
         terminal = frozenset({"delivered", "delivery_failed", "failed"})
         updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
@@ -227,7 +240,9 @@ class TestMessageStore:
     def test_prune(self, store):
         for i in range(10):
             store.store(
-                transport="lxmf", direction="received", msg_type="direct",
+                transport="lxmf",
+                direction="received",
+                msg_type="direct",
                 text=f"Msg {i}",
             )
         deleted = store.prune(5)
@@ -245,13 +260,17 @@ class TestMessageStore:
         # broadcasts) starve a sparse one (lxmf) by evicting it entirely.
         for i in range(10):
             store.store(
-                transport="meshtastic", direction="received",
-                msg_type="broadcast", text=f"mt {i}",
+                transport="meshtastic",
+                direction="received",
+                msg_type="broadcast",
+                text=f"mt {i}",
             )
         for i in range(2):
             store.store(
-                transport="lxmf", direction="received",
-                msg_type="direct", text=f"lx {i}",
+                transport="lxmf",
+                direction="received",
+                msg_type="direct",
+                text=f"lx {i}",
             )
         deleted = store.prune(5)
         assert deleted == 5  # only the 5 oldest meshtastic rows
@@ -259,7 +278,7 @@ class TestMessageStore:
         by_t = {}
         for m in msgs:
             by_t[m["transport"]] = by_t.get(m["transport"], 0) + 1
-        assert by_t.get("lxmf") == 2     # untouched
+        assert by_t.get("lxmf") == 2  # untouched
         assert by_t.get("meshtastic") == 5
 
     def test_prune_is_per_sub_transport(self, store):
@@ -268,13 +287,19 @@ class TestMessageStore:
         # meshtastic bucket. Prune must bucket per (transport, sub_transport).
         for i in range(10):
             store.store(
-                transport="meshtastic", direction="received",
-                sub_transport="mqtt", msg_type="broadcast", text=f"mq {i}",
+                transport="meshtastic",
+                direction="received",
+                sub_transport="mqtt",
+                msg_type="broadcast",
+                text=f"mq {i}",
             )
         for i in range(2):
             store.store(
-                transport="meshtastic", direction="received",
-                sub_transport="lora", msg_type="direct", text=f"lr {i}",
+                transport="meshtastic",
+                direction="received",
+                sub_transport="lora",
+                msg_type="direct",
+                text=f"lr {i}",
             )
         deleted = store.prune(5)
         assert deleted == 5  # only the 5 oldest mqtt rows
@@ -282,21 +307,33 @@ class TestMessageStore:
         by_sub: dict[str, int] = {}
         for m in msgs:
             by_sub[m["sub_transport"]] = by_sub.get(m["sub_transport"], 0) + 1
-        assert by_sub.get("lora") == 2     # untouched
+        assert by_sub.get("lora") == 2  # untouched
         assert by_sub.get("mqtt") == 5
 
     def test_delete_conversation_removes_only_that_thread(self, store):
         store.store(
-            transport="lxmf", direction="received", msg_type="direct",
-            text="keep A", from_id="aaaa", to_id="zzzz",
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="keep A",
+            from_id="aaaa",
+            to_id="zzzz",
         )
         store.store(
-            transport="lxmf", direction="received", msg_type="direct",
-            text="delete me 1", from_id="bbbb", to_id="zzzz",
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="delete me 1",
+            from_id="bbbb",
+            to_id="zzzz",
         )
         store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="delete me 2", from_id="zzzz", to_id="bbbb",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="delete me 2",
+            from_id="zzzz",
+            to_id="bbbb",
         )
         deleted = store.delete_conversation("bbbb")
         assert deleted == 2
@@ -311,8 +348,11 @@ class TestMessageStore:
     def test_metadata_round_trip(self, store):
         meta = {"key": "value", "num": 42}
         msg_id = store.store(
-            transport="lxmf", direction="received", msg_type="direct",
-            text="Test", metadata=meta,
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="Test",
+            metadata=meta,
         )
         msg = store.get_message(msg_id)
         assert msg["metadata"] == meta
@@ -320,13 +360,21 @@ class TestMessageStore:
     def test_dm_contact_id_splits_by_sub_transport(self, store):
         """DMs from the same Meshtastic peer split by MQTT vs LoRa source."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="Hello via LoRa", from_id="!aabb1122", to_id="!ccdd3344",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="Hello via LoRa",
+            from_id="!aabb1122",
+            to_id="!ccdd3344",
             sub_transport="lora",
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="Hello via MQTT", from_id="!aabb1122", to_id="!ccdd3344",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="Hello via MQTT",
+            from_id="!aabb1122",
+            to_id="!ccdd3344",
             sub_transport="mqtt",
         )
         convos = store.get_conversations()
@@ -338,13 +386,21 @@ class TestMessageStore:
     def test_dm_same_sub_transport_groups(self, store):
         """Two DMs from the same peer via the same sub_transport group."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="First via LoRa", from_id="!aabb1122", to_id="!ccdd3344",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="First via LoRa",
+            from_id="!aabb1122",
+            to_id="!ccdd3344",
             sub_transport="lora",
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="Second via LoRa", from_id="!aabb1122", to_id="!ccdd3344",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="Second via LoRa",
+            from_id="!aabb1122",
+            to_id="!ccdd3344",
             sub_transport="lora",
         )
         convos = store.get_conversations()
@@ -354,13 +410,20 @@ class TestMessageStore:
     def test_broadcast_and_dm_are_separate_conversations(self, store):
         """Broadcast and DM from the same peer create separate conversations."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="Broadcast msg", from_id="!aabb1122",
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="Broadcast msg",
+            from_id="!aabb1122",
             sub_transport="lora",
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="Direct msg", from_id="!aabb1122", to_id="!ccdd3344",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="Direct msg",
+            from_id="!aabb1122",
+            to_id="!ccdd3344",
             sub_transport="lora",
         )
         convos = store.get_conversations()
@@ -372,20 +435,28 @@ class TestMessageStore:
     def test_sub_transport_filter_on_conversations(self, store):
         """get_conversations(sub_transport=...) filters by source channel."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="MQTT broadcast", from_id="!aabb1122",
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="MQTT broadcast",
+            from_id="!aabb1122",
             sub_transport="mqtt",
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="LoRa broadcast", from_id="!ccdd3344",
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="LoRa broadcast",
+            from_id="!ccdd3344",
             sub_transport="lora",
         )
         mqtt_convos = store.get_conversations(
-            transport="meshtastic", sub_transport="mqtt",
+            transport="meshtastic",
+            sub_transport="mqtt",
         )
         lora_convos = store.get_conversations(
-            transport="meshtastic", sub_transport="lora",
+            transport="meshtastic",
+            sub_transport="lora",
         )
         assert len(mqtt_convos) == 1
         assert len(lora_convos) == 1
@@ -395,12 +466,20 @@ class TestMessageStore:
     def test_sub_transport_filter_on_messages(self, store):
         """get_messages(sub_transport=...) filters by source channel."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="MQTT msg", from_id="!aa", sub_transport="mqtt",
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="MQTT msg",
+            from_id="!aa",
+            sub_transport="mqtt",
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="LoRa msg", from_id="!aa", sub_transport="lora",
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="LoRa msg",
+            from_id="!aa",
+            sub_transport="lora",
         )
         mqtt = store.get_messages(sub_transport="mqtt")
         lora = store.get_messages(sub_transport="lora")
@@ -410,14 +489,22 @@ class TestMessageStore:
     def test_broadcast_contact_id_splits_by_channel(self, store):
         """Broadcasts on different Meshtastic channels get their own threads."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="Primary", from_id="!aabb1122",
-            sub_transport="lora", channel=0,
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="Primary",
+            from_id="!aabb1122",
+            sub_transport="lora",
+            channel=0,
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="Private channel", from_id="!aabb1122",
-            sub_transport="lora", channel=1,
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="Private channel",
+            from_id="!aabb1122",
+            sub_transport="lora",
+            channel=1,
         )
         contact_ids = [c["contact_id"] for c in store.get_conversations()]
         assert "__broadcast_meshtastic_lora_ch0__" in contact_ids
@@ -427,14 +514,24 @@ class TestMessageStore:
     def test_dm_contact_id_ignores_channel(self, store):
         """DMs from the same peer stay in one thread regardless of channel."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="via ch0", from_id="!aabb1122", to_id="!ccdd3344",
-            sub_transport="lora", channel=0,
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="via ch0",
+            from_id="!aabb1122",
+            to_id="!ccdd3344",
+            sub_transport="lora",
+            channel=0,
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="via ch3", from_id="!aabb1122", to_id="!ccdd3344",
-            sub_transport="lora", channel=3,
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="via ch3",
+            from_id="!aabb1122",
+            to_id="!ccdd3344",
+            sub_transport="lora",
+            channel=3,
         )
         contact_ids = [c["contact_id"] for c in store.get_conversations()]
         assert contact_ids == ["!aabb1122__lora"]
@@ -442,8 +539,13 @@ class TestMessageStore:
     def test_store_records_channel_in_metadata(self, store):
         """channel kwarg mirrors into metadata['channel'] for display/query."""
         msg_id = store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="hi", from_id="!aa", sub_transport="lora", channel=2,
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="hi",
+            from_id="!aa",
+            sub_transport="lora",
+            channel=2,
         )
         msg = store.get_message(msg_id)
         assert msg["metadata"]["channel"] == 2
@@ -451,9 +553,13 @@ class TestMessageStore:
     def test_broadcast_channel_accepts_string(self, store):
         """String channel (MQTT peer on an unmapped channel) creates its own thread."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="from LongFast peer", from_id="!aa",
-            sub_transport="mqtt", channel="LongFast",
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="from LongFast peer",
+            from_id="!aa",
+            sub_transport="mqtt",
+            channel="LongFast",
         )
         contact_ids = [c["contact_id"] for c in store.get_conversations()]
         assert "__broadcast_meshtastic_mqtt_chLongFast__" in contact_ids
@@ -461,14 +567,22 @@ class TestMessageStore:
     def test_broadcast_int_and_str_channels_are_distinct(self, store):
         """int 0 and str 'LongFast' create separate conversations even if they semantically overlap."""
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="via index 0", from_id="!aa",
-            sub_transport="mqtt", channel=0,
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="via index 0",
+            from_id="!aa",
+            sub_transport="mqtt",
+            channel=0,
         )
         store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="via name", from_id="!bb",
-            sub_transport="mqtt", channel="LongFast",
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="via name",
+            from_id="!bb",
+            sub_transport="mqtt",
+            channel="LongFast",
         )
         contact_ids = [c["contact_id"] for c in store.get_conversations()]
         assert "__broadcast_meshtastic_mqtt_ch0__" in contact_ids
@@ -482,6 +596,7 @@ class TestMessageStore:
         # broadcast (no channels -> shouldn't be purged) and a DM.
         s1 = MessageStore(db)
         import sqlite3
+
         with sqlite3.connect(db) as conn:
             # Insert a legacy-format broadcast row directly to simulate
             # pre-upgrade data that the new code can't bucket by channel.
@@ -638,8 +753,11 @@ class TestMessagingHubPlugin:
         hub_plugin.register_adapter(adapter)
 
         hub_plugin.send_message(
-            "meshtastic", "hello", "broadcast",
-            msg_type="broadcast", sub_transport="lora",
+            "meshtastic",
+            "hello",
+            "broadcast",
+            msg_type="broadcast",
+            sub_transport="lora",
         )
         msgs = hub_plugin.get_messages()
         assert len(msgs) == 1
@@ -647,17 +765,19 @@ class TestMessagingHubPlugin:
 
     def test_adapter_message_propagates_channel(self, hub_plugin):
         """Inbound broadcast with channel kwarg lands in per-channel thread."""
-        hub_plugin._on_adapter_message({
-            "transport": "meshtastic",
-            "sub_transport": "lora",
-            "from_id": "!aabb1122",
-            "from_name": "Alice",
-            "to_id": None,
-            "to_name": None,
-            "text": "private chat",
-            "msg_type": "broadcast",
-            "channel": 4,
-        })
+        hub_plugin._on_adapter_message(
+            {
+                "transport": "meshtastic",
+                "sub_transport": "lora",
+                "from_id": "!aabb1122",
+                "from_name": "Alice",
+                "to_id": None,
+                "to_name": None,
+                "text": "private chat",
+                "msg_type": "broadcast",
+                "channel": 4,
+            }
+        )
         msgs = hub_plugin.get_messages()
         assert len(msgs) == 1
         assert msgs[0]["contact_id"] == "__broadcast_meshtastic_lora_ch4__"
@@ -783,11 +903,13 @@ class TestMessagingHubPlugin:
             # Bypass the 30s prune throttle so every store triggers a prune
             # and we can observe the history limit taking effect deterministically.
             hub_plugin._last_prune_ts = 0.0
-            hub_plugin._on_adapter_message({
-                "transport": "lxmf",
-                "text": f"msg {i}",
-                "msg_type": "direct",
-            })
+            hub_plugin._on_adapter_message(
+                {
+                    "transport": "lxmf",
+                    "text": f"msg {i}",
+                    "msg_type": "direct",
+                }
+            )
         msgs = hub_plugin.get_messages(limit=100)
         assert len(msgs) == 5
 
@@ -811,8 +933,12 @@ class TestMessagingHubPlugin:
         hub_plugin.register_adapter(adapter)
 
         hub_plugin._store.store(
-            transport="test", direction="received", msg_type="direct",
-            text="hello", from_id="alice1", from_name="Alice",
+            transport="test",
+            direction="received",
+            msg_type="direct",
+            text="hello",
+            from_id="alice1",
+            from_name="Alice",
         )
 
         snapshot = hub_plugin.broadcast_snapshot(cycle_count=0)
@@ -1068,9 +1194,7 @@ class TestLXMFNameResolution:
         finally:
             self._teardown(patches)
 
-    def test_inbound_falls_back_to_pretty_hash_when_plugin_absent(
-        self, mock_app, tmp_path
-    ):
+    def test_inbound_falls_back_to_pretty_hash_when_plugin_absent(self, mock_app, tmp_path):
         adapter, hub, patches = self._build_adapter(mock_app, tmp_path)
         try:
             mock_app.get_plugin.return_value = None
@@ -1088,9 +1212,7 @@ class TestLXMFNameResolution:
         finally:
             self._teardown(patches)
 
-    def test_inbound_falls_back_when_plugin_returns_none(
-        self, mock_app, tmp_path
-    ):
+    def test_inbound_falls_back_when_plugin_returns_none(self, mock_app, tmp_path):
         adapter, hub, patches = self._build_adapter(mock_app, tmp_path)
         try:
             nm = MagicMock()
@@ -1130,9 +1252,7 @@ class TestLXMFNameResolution:
         finally:
             self._teardown(patches)
 
-    def test_finalize_send_lxmf_uses_network_map_for_to_name(
-        self, hub_plugin
-    ):
+    def test_finalize_send_lxmf_uses_network_map_for_to_name(self, hub_plugin):
         """Outbound LXMF without contact match should resolve to_name via network_map."""
         adapter = MagicMock(spec=TransportAdapter)
         adapter.transport_name = "lxmf"
@@ -1152,9 +1272,7 @@ class TestLXMFNameResolution:
         assert stored["to_name"] == "Bob"
         nm.get_node_name.assert_called_once_with("deadbeef" * 4)
 
-    def test_finalize_send_non_lxmf_does_not_consult_network_map(
-        self, hub_plugin
-    ):
+    def test_finalize_send_non_lxmf_does_not_consult_network_map(self, hub_plugin):
         """Regression guard: Meshtastic/MeshCore paths must not hit network_map."""
         adapter = MagicMock(spec=TransportAdapter)
         adapter.transport_name = "meshtastic"
@@ -1211,8 +1329,11 @@ class TestMeshtasticAdapter:
         result = adapter.send("Hello mesh!", "!abcd1234")
 
         gw.send_message.assert_called_once_with(
-            "Hello mesh!", destination_id="!abcd1234", channel=None,
-            via="lora", on_ack=ANY,
+            "Hello mesh!",
+            destination_id="!abcd1234",
+            channel=None,
+            via="lora",
+            on_ack=ANY,
         )
         assert result["sent"] is True
 
@@ -1229,7 +1350,10 @@ class TestMeshtasticAdapter:
         result = adapter.send("Hello all!", "broadcast")
 
         gw.send_message.assert_called_once_with(
-            "Hello all!", destination_id=None, channel=None, via="",
+            "Hello all!",
+            destination_id=None,
+            channel=None,
+            via="",
             on_ack=ANY,
         )
         assert result["sent"] is True
@@ -1247,7 +1371,10 @@ class TestMeshtasticAdapter:
         result = adapter.send("Local msg!", "broadcast", sub_transport="lora")
 
         gw.send_message.assert_called_once_with(
-            "Local msg!", destination_id=None, channel=None, via="lora",
+            "Local msg!",
+            destination_id=None,
+            channel=None,
+            via="lora",
             on_ack=ANY,
         )
         assert result["sent"] is True
@@ -1334,13 +1461,16 @@ class TestMeshtasticAdapter:
         adapter.on_message_received(callback)
 
         # Simulate broadcast event from gateway
-        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
-            "from_id": "!aabb1122",
-            "text": "Hello from mesh",
-            "forwarded_to": 1,
-            "is_broadcast": True,
-            "source": "LoRa",
-        })
+        adapter._on_mesh_event(
+            events.MESHTASTIC_MESSAGE_RECEIVED,
+            {
+                "from_id": "!aabb1122",
+                "text": "Hello from mesh",
+                "forwarded_to": 1,
+                "is_broadcast": True,
+                "source": "LoRa",
+            },
+        )
 
         callback.assert_called_once()
         call_args = callback.call_args[0][0]
@@ -1359,14 +1489,17 @@ class TestMeshtasticAdapter:
         callback = MagicMock()
         adapter.on_message_received(callback)
 
-        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
-            "from_id": "!aabb1122",
-            "from_name": "Solar Node",
-            "to_id": "!ccdd3344",
-            "is_broadcast": False,
-            "text": "Hello direct",
-            "source": "LoRa",
-        })
+        adapter._on_mesh_event(
+            events.MESHTASTIC_MESSAGE_RECEIVED,
+            {
+                "from_id": "!aabb1122",
+                "from_name": "Solar Node",
+                "to_id": "!ccdd3344",
+                "is_broadcast": False,
+                "text": "Hello direct",
+                "source": "LoRa",
+            },
+        )
 
         callback.assert_called_once()
         call_args = callback.call_args[0][0]
@@ -1388,13 +1521,16 @@ class TestMeshtasticAdapter:
         callback = MagicMock()
         adapter.on_message_received(callback)
 
-        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
-            "from_id": "!aabb1122",
-            "to_id": "!ccdd3344",
-            "is_broadcast": False,
-            "text": "Hello via MQTT",
-            "source": "MQTT",
-        })
+        adapter._on_mesh_event(
+            events.MESHTASTIC_MESSAGE_RECEIVED,
+            {
+                "from_id": "!aabb1122",
+                "to_id": "!ccdd3344",
+                "is_broadcast": False,
+                "text": "Hello via MQTT",
+                "source": "MQTT",
+            },
+        )
 
         call_args = callback.call_args[0][0]
         assert call_args["msg_type"] == "direct"
@@ -1410,11 +1546,14 @@ class TestMeshtasticAdapter:
         callback = MagicMock()
         adapter.on_message_received(callback)
 
-        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
-            "from_id": "!aabb1122",
-            "text": "No source field",
-            "is_broadcast": True,
-        })
+        adapter._on_mesh_event(
+            events.MESHTASTIC_MESSAGE_RECEIVED,
+            {
+                "from_id": "!aabb1122",
+                "text": "No source field",
+                "is_broadcast": True,
+            },
+        )
 
         assert callback.call_args[0][0]["sub_transport"] == "lora"
 
@@ -1428,11 +1567,14 @@ class TestMeshtasticAdapter:
         adapter.on_message_received(callback)
 
         # Old-format event without is_broadcast field
-        adapter._on_mesh_event(events.MESHTASTIC_MESSAGE_RECEIVED, {
-            "from_id": "!aabb1122",
-            "text": "Legacy format",
-            "source": "LoRa",
-        })
+        adapter._on_mesh_event(
+            events.MESHTASTIC_MESSAGE_RECEIVED,
+            {
+                "from_id": "!aabb1122",
+                "text": "Legacy format",
+                "source": "LoRa",
+            },
+        )
 
         callback.assert_called_once()
         call_args = callback.call_args[0][0]
@@ -1485,7 +1627,9 @@ class TestLXMFDeliveryTracking:
         adapter._on_lxmf_delivery(fake_msg)
 
         hub._on_delivery_status_update.assert_called_once_with(
-            42, "lxmf", "delivered",
+            42,
+            "lxmf",
+            "delivered",
         )
         assert "aabbccdd" not in adapter.get_pending_delivery()
 
@@ -1507,7 +1651,9 @@ class TestLXMFDeliveryTracking:
 
         adapter._on_lxmf_delivery(fake_msg)
         hub._on_delivery_status_update.assert_called_once_with(
-            43, "lxmf", "propagated",
+            43,
+            "lxmf",
+            "propagated",
         )
 
     def test_lxmf_failed_callback(self, mock_app, tmp_path):
@@ -1525,7 +1671,9 @@ class TestLXMFDeliveryTracking:
 
         adapter._on_lxmf_failed(fake_msg)
         hub._on_delivery_status_update.assert_called_once_with(
-            44, "lxmf", "delivery_failed",
+            44,
+            "lxmf",
+            "delivery_failed",
         )
 
     def test_lxmf_callback_ignores_unknown_hash(self, mock_app, tmp_path):
@@ -1577,7 +1725,9 @@ class TestMeshtasticDeliveryTracking:
         # Simulate ack
         on_ack(True)
         hub._on_delivery_status_update.assert_called_once_with(
-            55, "meshtastic", "delivered",
+            55,
+            "meshtastic",
+            "delivered",
         )
 
     def test_nak_callback_sets_delivery_failed(self, mock_app):
@@ -1601,7 +1751,9 @@ class TestMeshtasticDeliveryTracking:
 
         on_ack(False)
         hub._on_delivery_status_update.assert_called_once_with(
-            56, "meshtastic", "delivery_failed",
+            56,
+            "meshtastic",
+            "delivery_failed",
         )
 
 
@@ -1623,7 +1775,9 @@ class TestMeshCoreDeliveryTracking:
         )
 
         hub._on_delivery_status_update.assert_called_once_with(
-            60, "meshcore", "delivered",
+            60,
+            "meshcore",
+            "delivered",
         )
         assert "abcd1234" not in adapter.get_pending_delivery()
 
@@ -1645,8 +1799,11 @@ class TestHubDeliveryStatus:
     def test_on_delivery_status_update(self, hub_plugin):
         """_on_delivery_status_update persists status and publishes event."""
         msg_id = hub_plugin._store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="sent",
         )
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
 
@@ -1654,20 +1811,25 @@ class TestHubDeliveryStatus:
         assert msg["status"] == "delivered"
         hub_plugin.event_bus.publish.assert_any_call(
             events.MESSAGE_STATUS_CHANGED,
-            pytest.approx({
-                "id": msg_id,
-                "transport": "lxmf",
-                "status": "delivered",
-                "timestamp": pytest.approx(time.time(), abs=2),
-                "contact_id": "__unknown__",
-                "sub_transport": "",
-            }),
+            pytest.approx(
+                {
+                    "id": msg_id,
+                    "transport": "lxmf",
+                    "status": "delivered",
+                    "timestamp": pytest.approx(time.time(), abs=2),
+                    "contact_id": "__unknown__",
+                    "sub_transport": "",
+                }
+            ),
         )
 
     def test_timeout_does_not_overwrite_delivered(self, hub_plugin):
         msg_id = hub_plugin._store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="sent",
         )
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
@@ -1675,8 +1837,11 @@ class TestHubDeliveryStatus:
 
     def test_timeout_does_not_overwrite_delivery_failed(self, hub_plugin):
         msg_id = hub_plugin._store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="sent",
         )
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivery_failed")
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
@@ -1684,8 +1849,11 @@ class TestHubDeliveryStatus:
 
     def test_expired_does_not_overwrite_delivered(self, hub_plugin):
         msg_id = hub_plugin._store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="sent",
         )
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "delivered")
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "expired")
@@ -1693,8 +1861,11 @@ class TestHubDeliveryStatus:
 
     def test_timeout_does_not_overwrite_failed(self, hub_plugin):
         msg_id = hub_plugin._store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="sent",
         )
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "failed")
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
@@ -1702,8 +1873,11 @@ class TestHubDeliveryStatus:
 
     def test_timeout_can_overwrite_sent(self, hub_plugin):
         msg_id = hub_plugin._store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="Test", status="sent",
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Test",
+            status="sent",
         )
         hub_plugin._on_delivery_status_update(msg_id, "lxmf", "timeout")
         assert hub_plugin._store.get_message(msg_id)["status"] == "timeout"
@@ -1712,8 +1886,11 @@ class TestHubDeliveryStatus:
         """expire_stale_pending marks old entries as timeout."""
         # Store a message first so we have a valid msg_id
         msg_id = hub_plugin._store.store(
-            transport="test_lxmf", direction="sent", msg_type="direct",
-            text="Stale", status="sent",
+            transport="test_lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="Stale",
+            status="sent",
         )
 
         # Register a mock adapter with a stale pending entry using the real msg_id
@@ -1770,18 +1947,20 @@ class TestOutboundQueueEvents:
         msg_id = result["msg_id"]
         hub_plugin.event_bus.publish.assert_any_call(
             events.MESSAGE_SENT,
-            pytest.approx({
-                "id": msg_id,
-                "transport": "test",
-                "sub_transport": "",
-                "contact_id": "dest-x",
-                "direction": "sent",
-                "status": "queued",
-                "destination": "dest-x",
-                "text": "hi",
-                "msg_type": "direct",
-                "timestamp": pytest.approx(time.time(), abs=2),
-            }),
+            pytest.approx(
+                {
+                    "id": msg_id,
+                    "transport": "test",
+                    "sub_transport": "",
+                    "contact_id": "dest-x",
+                    "direction": "sent",
+                    "status": "queued",
+                    "destination": "dest-x",
+                    "text": "hi",
+                    "msg_type": "direct",
+                    "timestamp": pytest.approx(time.time(), abs=2),
+                }
+            ),
         )
 
     def test_queue_stores_row_with_queued_status(self, hub_plugin):
@@ -1816,14 +1995,16 @@ class TestOutboundQueueEvents:
         assert (sent, requeued, expired) == (1, 0, 0)
         hub_plugin.event_bus.publish.assert_any_call(
             events.MESSAGE_STATUS_CHANGED,
-            pytest.approx({
-                "id": msg_id,
-                "transport": "test",
-                "status": "sent",
-                "timestamp": pytest.approx(time.time(), abs=2),
-                "contact_id": "dest-x",
-                "sub_transport": "",
-            }),
+            pytest.approx(
+                {
+                    "id": msg_id,
+                    "transport": "test",
+                    "status": "sent",
+                    "timestamp": pytest.approx(time.time(), abs=2),
+                    "contact_id": "dest-x",
+                    "sub_transport": "",
+                }
+            ),
         )
 
     def test_drain_success_still_publishes_message_sent(self, hub_plugin):
@@ -1838,9 +2019,9 @@ class TestOutboundQueueEvents:
         hub_plugin._drain_outbound_queue("test")
 
         sent_calls = [
-            call for call in hub_plugin.event_bus.publish.call_args_list
-            if call.args[0] == events.MESSAGE_SENT
-            and call.args[1].get("id") == msg_id
+            call
+            for call in hub_plugin.event_bus.publish.call_args_list
+            if call.args[0] == events.MESSAGE_SENT and call.args[1].get("id") == msg_id
         ]
         assert len(sent_calls) == 1
 
@@ -1869,14 +2050,16 @@ class TestOutboundQueueEvents:
         assert (sent, requeued, expired) == (0, 0, 1)
         hub_plugin.event_bus.publish.assert_any_call(
             events.MESSAGE_STATUS_CHANGED,
-            pytest.approx({
-                "id": msg_id,
-                "transport": "test",
-                "status": "failed",
-                "timestamp": pytest.approx(time.time(), abs=2),
-                "contact_id": "dest-x",
-                "sub_transport": "",
-            }),
+            pytest.approx(
+                {
+                    "id": msg_id,
+                    "transport": "test",
+                    "status": "failed",
+                    "timestamp": pytest.approx(time.time(), abs=2),
+                    "contact_id": "dest-x",
+                    "sub_transport": "",
+                }
+            ),
         )
 
     def test_drain_respects_time_budget(self, hub_plugin):
@@ -1891,10 +2074,12 @@ class TestOutboundQueueEvents:
         # Make adapter available so drain attempts sends, but each send
         # is slow enough that only one fits in the budget.
         call_count = 0
+
         def slow_send(text, destination, **kw):
             nonlocal call_count
             call_count += 1
             return {"sent": True}
+
         adapter.send.side_effect = slow_send
         adapter.is_available.return_value = True
 
@@ -2007,6 +2192,7 @@ class TestQueueRecoveryOnRestart:
         hub2 = MessagingHubPlugin(mock_app, config)
         hub2.start()
         from collections import deque
+
         q = hub2._outbound_queues.get("test", deque())
         assert len(q) == 1
         assert q[0]["msg_id"] == msg_id
@@ -2043,6 +2229,7 @@ class TestQueueRecoveryOnRestart:
         hub2 = MessagingHubPlugin(mock_app, config)
         hub2.start()
         from collections import deque
+
         q = hub2._outbound_queues.get("test", deque())
         assert len(q) == 0
         hub2.stop()
@@ -2074,6 +2261,7 @@ class TestQueueRecoveryOnRestart:
         hub2 = MessagingHubPlugin(mock_app, config)
         hub2.start()
         from collections import deque
+
         q = hub2._outbound_queues.get("test", deque())
         assert len(q) <= 2
         hub2.stop()
@@ -2083,20 +2271,18 @@ class TestGetQueuedSent:
     """Verify MessageStore.get_queued_sent filtering."""
 
     def test_returns_only_queued_sent(self, store):
-        store.store(transport="t", direction="sent", msg_type="direct",
-                    text="a", status="queued")
-        store.store(transport="t", direction="sent", msg_type="direct",
-                    text="b", status="sent")
-        store.store(transport="t", direction="received", msg_type="direct",
-                    text="c", status="received")
+        store.store(transport="t", direction="sent", msg_type="direct", text="a", status="queued")
+        store.store(transport="t", direction="sent", msg_type="direct", text="b", status="sent")
+        store.store(
+            transport="t", direction="received", msg_type="direct", text="c", status="received"
+        )
 
         rows = store.get_queued_sent()
         assert len(rows) == 1
         assert rows[0]["text"] == "a"
 
     def test_max_age_filters_old(self, store):
-        store.store(transport="t", direction="sent", msg_type="direct",
-                    text="old", status="queued")
+        store.store(transport="t", direction="sent", msg_type="direct", text="old", status="queued")
         # Backdate the row.
         store._conn.execute(
             "UPDATE messages SET timestamp = ? WHERE text = 'old'",
@@ -2127,8 +2313,11 @@ class TestBroadcastSentStatus:
         hub_plugin.register_adapter(adapter)
 
         result = hub_plugin.send_message(
-            "meshtastic", "Hello mesh!", "broadcast",
-            msg_type="broadcast", sub_transport="lora",
+            "meshtastic",
+            "Hello mesh!",
+            "broadcast",
+            msg_type="broadcast",
+            sub_transport="lora",
         )
         assert result["sent"] is True
         msg = hub_plugin._store.get_message(result["msg_id"])
@@ -2149,8 +2338,11 @@ class TestBroadcastSentStatus:
 
     def test_broadcast_sent_is_terminal(self, store):
         msg_id = store.store(
-            transport="meshtastic", direction="sent", msg_type="broadcast",
-            text="bcast", status="broadcast_sent",
+            transport="meshtastic",
+            direction="sent",
+            msg_type="broadcast",
+            text="bcast",
+            status="broadcast_sent",
         )
         terminal = MessagingHubPlugin._TERMINAL_STATUSES
         updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
@@ -2168,7 +2360,10 @@ class TestBroadcastSentStatus:
         hub_plugin.register_adapter(adapter)
 
         result = hub_plugin.send_message(
-            "future", "broadcast!", "broadcast", msg_type="broadcast",
+            "future",
+            "broadcast!",
+            "broadcast",
+            msg_type="broadcast",
         )
         msg = hub_plugin._store.get_message(result["msg_id"])
         assert msg["status"] == "sent"
@@ -2182,23 +2377,32 @@ class TestBroadcastSentStatus:
 class TestFindSentByPacketId:
     def test_finds_matching_sent_message(self, store):
         msg_id = store.store(
-            transport="meshtastic", direction="sent", msg_type="direct",
-            text="hello", metadata={"packet_id": 12345},
+            transport="meshtastic",
+            direction="sent",
+            msg_type="direct",
+            text="hello",
+            metadata={"packet_id": 12345},
         )
         found = store.find_sent_by_packet_id(12345)
         assert found == msg_id
 
     def test_ignores_received_messages(self, store):
         store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="hi", metadata={"packet_id": 777},
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="hi",
+            metadata={"packet_id": 777},
         )
         assert store.find_sent_by_packet_id(777) is None
 
     def test_ignores_other_transports(self, store):
         store.store(
-            transport="lxmf", direction="sent", msg_type="direct",
-            text="hi", metadata={"packet_id": 888},
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="hi",
+            metadata={"packet_id": 888},
         )
         assert store.find_sent_by_packet_id(888) is None
 
@@ -2209,31 +2413,43 @@ class TestFindSentByPacketId:
 class TestReadReceipts:
     def test_inbound_read_receipt_updates_status(self, hub_plugin):
         msg_id = hub_plugin._store.store(
-            transport="meshtastic", direction="sent", msg_type="direct",
-            text="hello", status="delivered",
+            transport="meshtastic",
+            direction="sent",
+            msg_type="direct",
+            text="hello",
+            status="delivered",
             metadata={"packet_id": 42},
         )
 
         adapter = MeshtasticAdapter(hub_plugin)
         adapter._hub = hub_plugin
-        adapter._on_read_receipt("meshtastic.read_receipt_received", {
-            "from_id": "!aabb1122",
-            "packet_id": 42,
-        })
+        adapter._on_read_receipt(
+            "meshtastic.read_receipt_received",
+            {
+                "from_id": "!aabb1122",
+                "packet_id": 42,
+            },
+        )
         assert hub_plugin._store.get_status(msg_id) == "read"
 
     def test_inbound_read_receipt_unknown_packet_ignored(self, hub_plugin):
         adapter = MeshtasticAdapter(hub_plugin)
         adapter._hub = hub_plugin
-        adapter._on_read_receipt("meshtastic.read_receipt_received", {
-            "from_id": "!aabb1122",
-            "packet_id": 99999,
-        })
+        adapter._on_read_receipt(
+            "meshtastic.read_receipt_received",
+            {
+                "from_id": "!aabb1122",
+                "packet_id": 99999,
+            },
+        )
 
     def test_read_is_terminal(self, store):
         msg_id = store.store(
-            transport="meshtastic", direction="sent", msg_type="direct",
-            text="hi", status="read",
+            transport="meshtastic",
+            direction="sent",
+            msg_type="direct",
+            text="hi",
+            status="read",
         )
         terminal = MessagingHubPlugin._TERMINAL_STATUSES
         updated = store.update_status_unless_terminal(msg_id, "timeout", terminal)
@@ -2247,8 +2463,11 @@ class TestReadReceipts:
         hub_plugin._adapters["meshtastic"] = adapter
 
         hub_plugin._store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="hi there", from_id="!aabb1122",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="hi there",
+            from_id="!aabb1122",
             metadata={"packet_id": 55},
             sub_transport="lora",
         )
@@ -2270,9 +2489,13 @@ class TestReadReceipts:
         hub_plugin.app.get_plugin.return_value = mock_gw
 
         hub_plugin._store.store(
-            transport="meshtastic", direction="received", msg_type="broadcast",
-            text="bcast", from_id="!aabb1122",
-            sub_transport="lora", channel=0,
+            transport="meshtastic",
+            direction="received",
+            msg_type="broadcast",
+            text="bcast",
+            from_id="!aabb1122",
+            sub_transport="lora",
+            channel=0,
         )
 
         hub_plugin.mark_read("__broadcast_meshtastic_lora_ch0__")
@@ -2288,8 +2511,11 @@ class TestReadReceipts:
         hub_plugin.app.get_plugin.return_value = mock_gw
 
         hub_plugin._store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="hi", from_id="!aabb1122",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="hi",
+            from_id="!aabb1122",
             metadata={"packet_id": 77},
             sub_transport="lora",
         )
@@ -2305,8 +2531,11 @@ class TestReadReceipts:
         hub_plugin._adapters["meshtastic"] = adapter
 
         hub_plugin._store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="hi", from_id="!aabb1122",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="hi",
+            from_id="!aabb1122",
             metadata={"packet_id": 88},
             sub_transport="lora",
         )
@@ -2320,8 +2549,11 @@ class TestReadReceipts:
 
         # Second mark within cooldown — should be rate-limited
         hub_plugin._store.store(
-            transport="meshtastic", direction="received", msg_type="direct",
-            text="again", from_id="!aabb1122",
+            transport="meshtastic",
+            direction="received",
+            msg_type="direct",
+            text="again",
+            from_id="!aabb1122",
             metadata={"packet_id": 89},
             sub_transport="lora",
         )

@@ -26,11 +26,7 @@ class MeshChatServer(PluginBase):
         if install_dir is None:
             # Default: <project_root>/meshchat (sibling to src/)
             install_dir = os.path.join(
-                os.path.dirname(
-                    os.path.dirname(
-                        os.path.dirname(os.path.dirname(__file__))
-                    )
-                ),
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
                 "meshchat",
             )
         install_dir = os.path.expanduser(install_dir)
@@ -103,26 +99,26 @@ class MeshChatServer(PluginBase):
         self._host = self.config.get("host", "0.0.0.0")
         self._port = self.config.get("port", 8000)
         self._storage_dir = os.path.expanduser(
-            self.config.get(
-                "storage_dir", os.path.join(self._install_dir, "storage")
-            )
+            self.config.get("storage_dir", os.path.join(self._install_dir, "storage"))
         )
 
         os.makedirs(self._storage_dir, exist_ok=True)
 
-        rns_config_dir = self.app._reticulum_config_dir or os.path.expanduser(
-            "~/.reticulum"
-        )
+        rns_config_dir = self.app._reticulum_config_dir or os.path.expanduser("~/.reticulum")
 
         script = self._launcher_script or self._meshchat_script
         cmd = [
             self._python_bin,
             script,
             "--headless",
-            "--host", self._host,
-            "--port", str(self._port),
-            "--storage-dir", self._storage_dir,
-            "--reticulum-config-dir", rns_config_dir,
+            "--host",
+            self._host,
+            "--port",
+            str(self._port),
+            "--storage-dir",
+            self._storage_dir,
+            "--reticulum-config-dir",
+            rns_config_dir,
         ]
         env = os.environ.copy()
         env["MESHCHAT_DIR"] = self._install_dir
@@ -205,9 +201,7 @@ class MeshChatServer(PluginBase):
 
             if self._process is not None and self._process.poll() is not None:
                 exit_code = self._process.returncode
-                self.log.warning(
-                    "MeshChat process exited unexpectedly (code: %s)", exit_code
-                )
+                self.log.warning("MeshChat process exited unexpectedly (code: %s)", exit_code)
 
                 if auto_restart and self._restart_count < max_restarts:
                     self._restart_count += 1

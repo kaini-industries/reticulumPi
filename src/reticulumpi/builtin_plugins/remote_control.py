@@ -25,12 +25,14 @@ class _LogRingBuffer(logging.Handler):
         self._buffer: collections.deque[dict[str, Any]] = collections.deque(maxlen=maxlen)
 
     def emit(self, record: logging.LogRecord) -> None:
-        self._buffer.append({
-            "ts": record.created,
-            "level": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-        })
+        self._buffer.append(
+            {
+                "ts": record.created,
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }
+        )
 
     def get_lines(self, count: int = 100) -> list[dict[str, Any]]:
         return list(self._buffer)[-count:]
@@ -156,7 +158,9 @@ class RemoteControlPlugin(PluginBase):
             "active": self._active,
             "active_links": link_count,
             "allowed_identities": len(self._allowed_hashes),
-            "address": RNS.prettyhexrep(self.destination.hash) if hasattr(self, "destination") and self.destination else None,
+            "address": RNS.prettyhexrep(self.destination.hash)
+            if hasattr(self, "destination") and self.destination
+            else None,
         }
 
     # --- Link lifecycle ---
@@ -218,23 +222,49 @@ class RemoteControlPlugin(PluginBase):
     # requests are queued promptly, but we enforce our own allowlist before
     # processing any data.
 
-    def _handle_ping(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_ping(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
         return umsgpack.packb({"ok": True, "time": time.time(), "node": self.app.node_name})
 
-    def _handle_status(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_status(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
         status = self.app.get_status()
         status["node_name"] = self.app.node_name
-        status["identity_hash"] = RNS.prettyhexrep(self.app.identity.hash) if self.app.identity else ""
+        status["identity_hash"] = (
+            RNS.prettyhexrep(self.app.identity.hash) if self.app.identity else ""
+        )
         status["uptime"] = time.time() - self._start_time
         return umsgpack.packb({"ok": True, "data": status})
 
-    def _handle_metrics(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_metrics(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
@@ -243,7 +273,15 @@ class RemoteControlPlugin(PluginBase):
             return umsgpack.packb({"ok": True, "data": monitor.latest_metrics})
         return umsgpack.packb({"ok": False, "error": "system_monitor not available"})
 
-    def _handle_plugins(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_plugins(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
@@ -259,7 +297,15 @@ class RemoteControlPlugin(PluginBase):
                 plugins[name] = {"error": "status collection failed"}
         return umsgpack.packb({"ok": True, "data": plugins})
 
-    def _handle_interfaces(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_interfaces(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
@@ -280,11 +326,20 @@ class RemoteControlPlugin(PluginBase):
             pass
         return umsgpack.packb({"ok": True, "data": interfaces})
 
-    def _handle_config(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_config(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
         import copy
+
         config_data = copy.deepcopy(self.app.config._data)
         # Strip sensitive values
         plugins = config_data.get("plugins", {})
@@ -294,7 +349,15 @@ class RemoteControlPlugin(PluginBase):
                     plugin_cfg.pop(key, None)
         return umsgpack.packb({"ok": True, "data": config_data})
 
-    def _handle_logs(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_logs(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
@@ -309,7 +372,15 @@ class RemoteControlPlugin(PluginBase):
         lines = self._log_buffer.get_lines(count)
         return umsgpack.packb({"ok": True, "data": lines})
 
-    def _handle_plugin_enable(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_plugin_enable(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
@@ -327,7 +398,15 @@ class RemoteControlPlugin(PluginBase):
         except Exception as e:
             return umsgpack.packb({"ok": False, "error": str(e)})
 
-    def _handle_plugin_disable(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_plugin_disable(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
@@ -345,7 +424,15 @@ class RemoteControlPlugin(PluginBase):
         except Exception as e:
             return umsgpack.packb({"ok": False, "error": str(e)})
 
-    def _handle_announce(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_announce(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         """Trigger an immediate announce from heartbeat_announce."""
         denied = self._check_auth(remote_identity)
         if denied:

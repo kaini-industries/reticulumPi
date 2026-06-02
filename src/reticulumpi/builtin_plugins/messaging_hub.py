@@ -99,7 +99,9 @@ class MessageStore:
         # Separate read-only connection: WAL mode supports concurrent
         # readers, so read queries no longer block behind writes.
         self._read_conn = sqlite3.connect(
-            db_path, check_same_thread=False, timeout=10,
+            db_path,
+            check_same_thread=False,
+            timeout=10,
         )
         self._read_conn.execute("PRAGMA query_only=ON")
         self._read_conn.row_factory = sqlite3.Row
@@ -135,20 +137,11 @@ class MessageStore:
 
     def _migrate_schema(self) -> None:
         """Add conversation-related columns if missing (v2/v3 migration)."""
-        cols = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "contact_id" not in cols:
-            self._conn.execute(
-                "ALTER TABLE messages ADD COLUMN contact_id TEXT"
-            )
-            self._conn.execute(
-                "ALTER TABLE messages ADD COLUMN read INTEGER DEFAULT 0"
-            )
-            self._conn.execute(
-                "ALTER TABLE messages ADD COLUMN search_text TEXT"
-            )
+            self._conn.execute("ALTER TABLE messages ADD COLUMN contact_id TEXT")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN read INTEGER DEFAULT 0")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN search_text TEXT")
             # Backfill contact_id from existing data
             self._conn.execute("""
                 UPDATE messages SET contact_id = CASE
@@ -162,21 +155,17 @@ class MessageStore:
             """)
             # Backfill search_text
             self._conn.execute(
-                "UPDATE messages SET search_text = lower(text) "
-                "WHERE search_text IS NULL"
+                "UPDATE messages SET search_text = lower(text) WHERE search_text IS NULL"
             )
             # Mark all existing received messages as read
             self._conn.execute(
-                "UPDATE messages SET read = 1 "
-                "WHERE direction = 'received' AND read = 0"
+                "UPDATE messages SET read = 1 WHERE direction = 'received' AND read = 0"
             )
             self._conn.commit()
 
         # v3: sub_transport column for MQTT/LoRa split on Meshtastic
         if "sub_transport" not in cols:
-            self._conn.execute(
-                "ALTER TABLE messages ADD COLUMN sub_transport TEXT DEFAULT ''"
-            )
+            self._conn.execute("ALTER TABLE messages ADD COLUMN sub_transport TEXT DEFAULT ''")
             # Historical Meshtastic messages had sub_transport embedded in
             # contact_id for broadcasts only.  Back-fill the new column
             # from that, and assume "lora" for any Meshtastic DM whose
@@ -206,21 +195,15 @@ class MessageStore:
             self._conn.commit()
 
         # Ensure indexes exist (idempotent)
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_contact ON messages(contact_id)")
         self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_contact "
-            "ON messages(contact_id)"
+            "CREATE INDEX IF NOT EXISTS idx_msg_contact_ts ON messages(contact_id, timestamp DESC)"
         )
         self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_contact_ts "
-            "ON messages(contact_id, timestamp DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_msg_read ON messages(read) WHERE read = 0"
         )
         self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_read "
-            "ON messages(read) WHERE read = 0"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_sub_transport "
-            "ON messages(transport, sub_transport)"
+            "CREATE INDEX IF NOT EXISTS idx_msg_sub_transport ON messages(transport, sub_transport)"
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_conv_cover "
@@ -268,8 +251,11 @@ class MessageStore:
 
     @staticmethod
     def _compute_contact_id(
-        direction: str, msg_type: str, transport: str,
-        from_id: str | None, to_id: str | None,
+        direction: str,
+        msg_type: str,
+        transport: str,
+        from_id: str | None,
+        to_id: str | None,
         sub_transport: str = "",
         channel: int | str | None = None,
     ) -> str:
@@ -330,8 +316,13 @@ class MessageStore:
         except (TypeError, ValueError):
             meta_json = json.dumps(metadata, default=str) if metadata else None
         contact_id = self._compute_contact_id(
-            direction, msg_type, transport, from_id, to_id,
-            sub_transport=sub_transport, channel=channel,
+            direction,
+            msg_type,
+            transport,
+            from_id,
+            to_id,
+            sub_transport=sub_transport,
+            channel=channel,
         )
         search_text = text.lower() if text else None
         # New received messages default to unread
@@ -359,10 +350,21 @@ class MessageStore:
                     contact_id, read, search_text, sub_transport)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    ts, transport, direction, msg_type,
-                    from_id, from_name, to_id, to_name,
-                    text, status, meta_json,
-                    contact_id, read_flag, search_text, sub_transport,
+                    ts,
+                    transport,
+                    direction,
+                    msg_type,
+                    from_id,
+                    from_name,
+                    to_id,
+                    to_name,
+                    text,
+                    status,
+                    meta_json,
+                    contact_id,
+                    read_flag,
+                    search_text,
+                    sub_transport,
                 ),
             )
             self._conn.commit()
@@ -371,13 +373,14 @@ class MessageStore:
     def update_status(self, msg_id: int, status: str) -> None:
         """Update the delivery status of a message."""
         with self._lock:
-            self._conn.execute(
-                "UPDATE messages SET status = ? WHERE id = ?", (status, msg_id)
-            )
+            self._conn.execute("UPDATE messages SET status = ? WHERE id = ?", (status, msg_id))
             self._conn.commit()
 
     def update_status_unless_terminal(
-        self, msg_id: int, status: str, terminal: frozenset[str],
+        self,
+        msg_id: int,
+        status: str,
+        terminal: frozenset[str],
     ) -> bool:
         """Update status only if current status is not in *terminal*.
 
@@ -386,8 +389,7 @@ class MessageStore:
         placeholders = ",".join("?" for _ in terminal)
         with self._lock:
             cur = self._conn.execute(
-                f"UPDATE messages SET status = ? WHERE id = ? "
-                f"AND status NOT IN ({placeholders})",
+                f"UPDATE messages SET status = ? WHERE id = ? AND status NOT IN ({placeholders})",
                 (status, msg_id, *terminal),
             )
             self._conn.commit()
@@ -425,12 +427,14 @@ class MessageStore:
             reactions = meta.get("reactions", [])
             if any(r["emoji"] == emoji and r["from_id"] == from_id for r in reactions):
                 return msg_id
-            reactions.append({
-                "emoji": emoji,
-                "from_id": from_id,
-                "from_name": from_name or from_id,
-                "timestamp": time.time(),
-            })
+            reactions.append(
+                {
+                    "emoji": emoji,
+                    "from_id": from_id,
+                    "from_name": from_name or from_id,
+                    "timestamp": time.time(),
+                }
+            )
             meta["reactions"] = reactions
             self._conn.execute(
                 "UPDATE messages SET metadata = ? WHERE id = ?",
@@ -535,9 +539,7 @@ class MessageStore:
 
     def get_message(self, msg_id: int) -> dict[str, Any] | None:
         """Retrieve a single message by ID."""
-        row = self._read_conn.execute(
-            "SELECT * FROM messages WHERE id = ?", (msg_id,)
-        ).fetchone()
+        row = self._read_conn.execute("SELECT * FROM messages WHERE id = ?", (msg_id,)).fetchone()
         return self._row_to_dict(row) if row else None
 
     def get_queued_sent(self, max_age_s: float | None = None) -> list[dict[str, Any]]:
@@ -558,9 +560,7 @@ class MessageStore:
             "SELECT transport, direction, COUNT(*) as cnt "
             "FROM messages GROUP BY transport, direction"
         ).fetchall()
-        total = self._read_conn.execute(
-            "SELECT COUNT(*) FROM messages"
-        ).fetchone()[0]
+        total = self._read_conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         by_transport: dict[str, int] = {}
         by_direction: dict[str, int] = {}
         for r in rows:
@@ -576,7 +576,8 @@ class MessageStore:
     # ── Conversation queries ─────────────────────────────────────────
 
     def get_conversations(
-        self, transport: str | None = None,
+        self,
+        transport: str | None = None,
         sub_transport: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return conversation summaries, one per contact_id.
@@ -683,10 +684,7 @@ class MessageStore:
             params.append(sub_transport)
         where = " AND ".join(clauses)
         params.append(limit)
-        sql = (
-            f"SELECT * FROM messages WHERE {where} "
-            "ORDER BY timestamp DESC LIMIT ?"
-        )
+        sql = f"SELECT * FROM messages WHERE {where} ORDER BY timestamp DESC LIMIT ?"
         rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
@@ -708,7 +706,8 @@ class MessageStore:
         """Delete all messages for a conversation.  Returns rows deleted."""
         with self._lock:
             cur = self._conn.execute(
-                "DELETE FROM messages WHERE contact_id = ?", (contact_id,),
+                "DELETE FROM messages WHERE contact_id = ?",
+                (contact_id,),
             )
             self._conn.commit()
             return cur.rowcount
@@ -728,10 +727,7 @@ class MessageStore:
             clauses.append("sub_transport = ?")
             params.append(sub_transport)
         where = " AND ".join(clauses)
-        sql = (
-            f"SELECT contact_id, COUNT(*) AS cnt FROM messages "
-            f"WHERE {where} GROUP BY contact_id"
-        )
+        sql = f"SELECT contact_id, COUNT(*) AS cnt FROM messages WHERE {where} GROUP BY contact_id"
         rows = self._read_conn.execute(sql, params).fetchall()
         return {r["contact_id"]: r["cnt"] for r in rows}
 
@@ -844,9 +840,7 @@ class LXMFAdapter(TransportAdapter):
         import LXMF
 
         cfg = self._hub.config.get("lxmf", {})
-        storage_path = os.path.expanduser(
-            cfg.get("storage_path", _DEFAULT_LXMF_STORAGE)
-        )
+        storage_path = os.path.expanduser(cfg.get("storage_path", _DEFAULT_LXMF_STORAGE))
         os.makedirs(storage_path, exist_ok=True)
 
         # Identity management — same pattern as message_echo.py lines 42-49
@@ -877,13 +871,15 @@ class LXMFAdapter(TransportAdapter):
             self._router = LXMF.LXMRouter(storagepath=storage_path)
         display_name = cfg.get("display_name") or f"{self._hub.app.node_name} Messages"
         self._destination = self._router.register_delivery_identity(
-            self._identity, display_name=display_name,
+            self._identity,
+            display_name=display_name,
         )
         self._router.register_delivery_callback(self._on_lxmf_message)
 
         # Auto-select nearest propagation node for store-and-forward
         self._announce_sub = self._hub.announce_dispatcher.subscribe(
-            "lxmf.propagation", self._handle_propagation_announce,
+            "lxmf.propagation",
+            self._handle_propagation_announce,
         )
 
         self._hub.log.info(
@@ -983,10 +979,14 @@ class LXMFAdapter(TransportAdapter):
 
             self._hub.log.info(
                 "LXMF message %s: %s (msg_id=%d)",
-                lxm_hash[:12], status, entry["msg_id"],
+                lxm_hash[:12],
+                status,
+                entry["msg_id"],
             )
             self._hub._on_delivery_status_update(
-                entry["msg_id"], "lxmf", status,
+                entry["msg_id"],
+                "lxmf",
+                status,
             )
         except Exception:
             self._hub.log.exception("Error in LXMF delivery callback")
@@ -1004,10 +1004,13 @@ class LXMFAdapter(TransportAdapter):
 
             self._hub.log.warning(
                 "LXMF message %s: delivery_failed (msg_id=%d)",
-                lxm_hash[:12], entry["msg_id"],
+                lxm_hash[:12],
+                entry["msg_id"],
             )
             self._hub._on_delivery_status_update(
-                entry["msg_id"], "lxmf", "delivery_failed",
+                entry["msg_id"],
+                "lxmf",
+                "delivery_failed",
             )
 
             # Invalidate identity cache for this destination
@@ -1056,19 +1059,19 @@ class LXMFAdapter(TransportAdapter):
             sender_hash = message.source_hash.hex()
             sender_pretty = RNS.prettyhexrep(message.source_hash)
             content = message.content_as_string()
-            self._hub.log.info(
-                "LXMF message from %s: %s", sender_pretty, content[:80]
+            self._hub.log.info("LXMF message from %s: %s", sender_pretty, content[:80])
+            self._hub_callback(
+                {
+                    "transport": "lxmf",
+                    "from_id": sender_hash,
+                    "from_name": self._resolve_lxmf_name(sender_hash) or sender_pretty,
+                    "to_id": self.address,
+                    "to_name": None,
+                    "text": content,
+                    "msg_type": "direct",
+                    "metadata": {"source_hash": sender_pretty},
+                }
             )
-            self._hub_callback({
-                "transport": "lxmf",
-                "from_id": sender_hash,
-                "from_name": self._resolve_lxmf_name(sender_hash) or sender_pretty,
-                "to_id": self.address,
-                "to_name": None,
-                "text": content,
-                "msg_type": "direct",
-                "metadata": {"source_hash": sender_pretty},
-            })
         except Exception:
             self._hub.log.exception("Error handling incoming LXMF message")
 
@@ -1102,23 +1105,22 @@ class LXMFAdapter(TransportAdapter):
                     existing["last_seen"] = now
                     existing["failures"] = 0
                 else:
-                    self._propagation_nodes.append({
-                        "hash": destination_hash,
-                        "hops": hops,
-                        "last_seen": now,
-                        "failures": 0,
-                    })
+                    self._propagation_nodes.append(
+                        {
+                            "hash": destination_hash,
+                            "hops": hops,
+                            "last_seen": now,
+                            "failures": 0,
+                        }
+                    )
 
                 # Prune stale entries
                 self._propagation_nodes = [
-                    e for e in self._propagation_nodes
-                    if now - e["last_seen"] < self._PROP_STALE_S
+                    e for e in self._propagation_nodes if now - e["last_seen"] < self._PROP_STALE_S
                 ]
                 # Sort by hops, then freshness
-                self._propagation_nodes.sort(
-                    key=lambda e: (e["hops"], -e["last_seen"])
-                )
-                self._propagation_nodes = self._propagation_nodes[:self._MAX_PROP_NODES]
+                self._propagation_nodes.sort(key=lambda e: (e["hops"], -e["last_seen"]))
+                self._propagation_nodes = self._propagation_nodes[: self._MAX_PROP_NODES]
 
                 best = self._select_best_prop_node()
 
@@ -1151,8 +1153,7 @@ class LXMFAdapter(TransportAdapter):
         with self._prop_lock:
             before = len(self._propagation_nodes)
             self._propagation_nodes = [
-                e for e in self._propagation_nodes
-                if (now - e["last_seen"]) < self._PROP_STALE_S
+                e for e in self._propagation_nodes if (now - e["last_seen"]) < self._PROP_STALE_S
             ]
             if len(self._propagation_nodes) < before:
                 self._hub.log.debug(
@@ -1199,8 +1200,7 @@ class LXMFAdapter(TransportAdapter):
                 if len(self._identity_cache) > 500:
                     cutoff = now - self._IDENTITY_CACHE_TTL
                     self._identity_cache = {
-                        k: v for k, v in self._identity_cache.items()
-                        if v[1] > cutoff
+                        k: v for k, v in self._identity_cache.items() if v[1] > cutoff
                     }
         return identity
 
@@ -1254,20 +1254,14 @@ class MeshtasticAdapter(TransportAdapter):
         # silently drops messages under event-bus backpressure — the
         # gateway's own parsing is already complete by the time it
         # publishes, so a brief block is harmless.
-        self._hub.event_bus.subscribe(
-            events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event
-        )
-        self._hub.event_bus.subscribe(
-            events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event
-        )
+        self._hub.event_bus.subscribe(events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event)
+        self._hub.event_bus.subscribe(events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event)
         self._hub.event_bus.subscribe(
             events.MESHTASTIC_READ_RECEIPT_RECEIVED, self._on_read_receipt
         )
 
     def stop(self) -> None:
-        self._hub.event_bus.unsubscribe(
-            events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event
-        )
+        self._hub.event_bus.unsubscribe(events.MESHTASTIC_MESSAGE_RECEIVED, self._on_mesh_event)
         self._hub.event_bus.unsubscribe(
             events.MESHTASTIC_REACTION_RECEIVED, self._on_reaction_event
         )
@@ -1302,12 +1296,15 @@ class MeshtasticAdapter(TransportAdapter):
         msg_id = self._hub._store.find_sent_by_packet_id(packet_id)
         if msg_id is None:
             self._hub.log.debug(
-                "Read receipt for unknown packet_id %d — ignoring", packet_id,
+                "Read receipt for unknown packet_id %d — ignoring",
+                packet_id,
             )
             return
         self._hub.log.info(
             "Read receipt from %s for msg %d (packet_id=%d)",
-            data.get("from_id", "?"), msg_id, packet_id,
+            data.get("from_id", "?"),
+            msg_id,
+            packet_id,
         )
         self._hub._on_delivery_status_update(msg_id, "meshtastic", "read")
 
@@ -1347,11 +1344,7 @@ class MeshtasticAdapter(TransportAdapter):
         from_id = data.get("from_id", "")
         # Prefer the name resolved by the gateway (checks MQTT, serial,
         # and persistent cache).  Fall back to our own lookup.
-        from_name = (
-            data.get("from_name")
-            or self._resolve_node_name(from_id)
-            or from_id
-        )
+        from_name = data.get("from_name") or self._resolve_node_name(from_id) or from_id
         # Normalize the gateway's "LoRa"/"MQTT" source tag to lowercase
         # sub_transport values; fall back to "lora" for legacy events
         # that predate the source field.
@@ -1386,18 +1379,20 @@ class MeshtasticAdapter(TransportAdapter):
         # Tag every Meshtastic message (broadcast AND direct) with
         # sub_transport so the dashboard can show MQTT and LoRa traffic
         # in separate panels.
-        self._hub_callback({
-            "transport": "meshtastic",
-            "sub_transport": source,
-            "from_id": from_id,
-            "from_name": from_name,
-            "to_id": None if is_broadcast else data.get("to_id", ""),
-            "to_name": None,
-            "text": data.get("text", ""),
-            "msg_type": "broadcast" if is_broadcast else "direct",
-            "channel": channel if is_broadcast else None,
-            "metadata": {k: v for k, v in data.items() if k not in ("text",)},
-        })
+        self._hub_callback(
+            {
+                "transport": "meshtastic",
+                "sub_transport": source,
+                "from_id": from_id,
+                "from_name": from_name,
+                "to_id": None if is_broadcast else data.get("to_id", ""),
+                "to_name": None,
+                "text": data.get("text", ""),
+                "msg_type": "broadcast" if is_broadcast else "direct",
+                "channel": channel if is_broadcast else None,
+                "metadata": {k: v for k, v in data.items() if k not in ("text",)},
+            }
+        )
 
     def _resolve_node_name(self, node_id: str) -> str | None:
         """Look up a Meshtastic node's human-readable name from the gateway."""
@@ -1450,7 +1445,9 @@ class MeshtasticAdapter(TransportAdapter):
                 self._pending_delivery.pop(msg_id, None)
             status = "delivered" if acked else "delivery_failed"
             self._hub.log.info(
-                "Meshtastic message ack: %s (msg_id=%d)", status, msg_id,
+                "Meshtastic message ack: %s (msg_id=%d)",
+                status,
+                msg_id,
             )
             self._hub._on_delivery_status_update(msg_id, "meshtastic", status)
 
@@ -1484,7 +1481,10 @@ class MeshtasticAdapter(TransportAdapter):
                     ),
                 }
         result = gw.send_message(
-            text, destination_id=dest_id, channel=tx_channel, via=via,
+            text,
+            destination_id=dest_id,
+            channel=tx_channel,
+            via=via,
             on_ack=_on_ack,
         )
         # Stash the holder ref so the hub's send_message can bind msg_id
@@ -1560,31 +1560,19 @@ class MeshCoreAdapter(TransportAdapter):
             return dict(self._pending_delivery)
 
     def start(self) -> None:
-        self._hub.event_bus.subscribe(
-            events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event
-        )
-        self._hub.event_bus.subscribe(
-            events.MESHCORE_MESSAGE_ACKED, self._on_meshcore_ack
-        )
+        self._hub.event_bus.subscribe(events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event)
+        self._hub.event_bus.subscribe(events.MESHCORE_MESSAGE_ACKED, self._on_meshcore_ack)
 
     def stop(self) -> None:
-        self._hub.event_bus.unsubscribe(
-            events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event
-        )
-        self._hub.event_bus.unsubscribe(
-            events.MESHCORE_MESSAGE_ACKED, self._on_meshcore_ack
-        )
+        self._hub.event_bus.unsubscribe(events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event)
+        self._hub.event_bus.unsubscribe(events.MESHCORE_MESSAGE_ACKED, self._on_meshcore_ack)
 
     def _on_meshcore_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Event bus callback for incoming MeshCore messages."""
         if not self._hub_callback:
             return
         from_key = data.get("from_key", "")
-        from_name = (
-            data.get("from_name")
-            or self._resolve_contact_name(from_key)
-            or from_key[:12]
-        )
+        from_name = data.get("from_name") or self._resolve_contact_name(from_key) or from_key[:12]
         msg_type = data.get("msg_type", "direct")
 
         channel = data.get("channel")
@@ -1593,18 +1581,20 @@ class MeshCoreAdapter(TransportAdapter):
         except (TypeError, ValueError):
             channel = None
 
-        self._hub_callback({
-            "transport": "meshcore",
-            "sub_transport": "",
-            "from_id": from_key,
-            "from_name": from_name,
-            "to_id": None,
-            "to_name": None,
-            "text": data.get("text", ""),
-            "msg_type": msg_type,
-            "channel": channel,
-            "metadata": {k: v for k, v in data.items() if k not in ("text",)},
-        })
+        self._hub_callback(
+            {
+                "transport": "meshcore",
+                "sub_transport": "",
+                "from_id": from_key,
+                "from_name": from_name,
+                "to_id": None,
+                "to_name": None,
+                "text": data.get("text", ""),
+                "msg_type": msg_type,
+                "channel": channel,
+                "metadata": {k: v for k, v in data.items() if k not in ("text",)},
+            }
+        )
 
     def _on_meshcore_ack(self, event_type: str, data: dict[str, Any]) -> None:
         """Event bus callback for MeshCore ACK events."""
@@ -1617,10 +1607,13 @@ class MeshCoreAdapter(TransportAdapter):
             return
         self._hub.log.info(
             "MeshCore message ACK received: %s (msg_id=%d)",
-            ack_code, entry["msg_id"],
+            ack_code,
+            entry["msg_id"],
         )
         self._hub._on_delivery_status_update(
-            entry["msg_id"], "meshcore", "delivered",
+            entry["msg_id"],
+            "meshcore",
+            "delivered",
         )
 
     def _resolve_contact_name(self, public_key: str) -> str | None:
@@ -1697,25 +1690,15 @@ class MessagingHubPlugin(PluginBase):
         # transport's CONNECTED event and on a periodic sweep.
         self._outbound_lock = threading.Lock()
         self._outbound_queues: dict[str, deque[dict[str, Any]]] = {}
-        self._outbound_max_per_transport = int(
-            self.config.get("outbound_queue_max", 50)
-        )
-        self._outbound_max_age_s = float(
-            self.config.get("outbound_queue_ttl_seconds", 600.0)
-        )
-        self._drain_time_budget_s = float(
-            self.config.get("drain_time_budget_seconds", 30.0)
-        )
+        self._outbound_max_per_transport = int(self.config.get("outbound_queue_max", 50))
+        self._outbound_max_age_s = float(self.config.get("outbound_queue_ttl_seconds", 600.0))
+        self._drain_time_budget_s = float(self.config.get("drain_time_budget_seconds", 30.0))
 
         # Initialize SQLite store
-        db_path = os.path.expanduser(
-            self.config.get("db_path", _DEFAULT_DB_PATH)
-        )
+        db_path = os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH))
         self._store = MessageStore(db_path)
         self._recover_queued_messages()
-        self._history_limit = self.config.get(
-            "message_history_limit", _DEFAULT_HISTORY_LIMIT
-        )
+        self._history_limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)
         self._last_prune_ts = 0.0
         self._broadcast_cache: tuple[float, dict] | None = None
         self._broadcast_cache_ttl: float = 10.0
@@ -1745,22 +1728,14 @@ class MessagingHubPlugin(PluginBase):
         self.event_bus.subscribe_offloaded(
             events.MESHTASTIC_CONNECTED, self._on_transport_connected
         )
-        self.event_bus.subscribe_offloaded(
-            events.MESHCORE_CONNECTED, self._on_transport_connected
-        )
+        self.event_bus.subscribe_offloaded(events.MESHCORE_CONNECTED, self._on_transport_connected)
 
         self._active = True
-        self.event_bus.subscribe(
-            events.MESSAGE_RECEIVED, self._invalidate_broadcast_cache
-        )
-        self.event_bus.subscribe(
-            events.MESSAGE_SENT, self._invalidate_broadcast_cache
-        )
+        self.event_bus.subscribe(events.MESSAGE_RECEIVED, self._invalidate_broadcast_cache)
+        self.event_bus.subscribe(events.MESSAGE_SENT, self._invalidate_broadcast_cache)
         # MESSAGE_STATUS_CHANGED intentionally omitted — status updates
         # (delivered/read) don't change conversation summaries.
-        self._delivery_timeout = float(
-            self.config.get("delivery_timeout", 300)
-        )
+        self._delivery_timeout = float(self.config.get("delivery_timeout", 300))
         self._start_thread(self._delivery_timeout_loop, name="msg-delivery-timeout")
         self._start_thread(self._adapter_maintenance_loop, name="msg-adapter-maint")
         self.log.info(
@@ -1783,9 +1758,7 @@ class MessagingHubPlugin(PluginBase):
             try:
                 adapter.stop()
             except Exception:
-                self.log.exception(
-                    "Error stopping adapter %s", adapter.transport_name
-                )
+                self.log.exception("Error stopping adapter %s", adapter.transport_name)
         self._adapters.clear()
         # Don't close the store here: plugins stop in reverse order, so
         # messaging_hub stops before web_dashboard (the HTTP server).
@@ -1821,9 +1794,7 @@ class MessagingHubPlugin(PluginBase):
         try:
             adapter.start()
         except Exception:
-            self.log.exception(
-                "Failed to start adapter %s", adapter.transport_name
-            )
+            self.log.exception("Failed to start adapter %s", adapter.transport_name)
             return
         with self._lock:
             self._adapters[adapter.transport_name] = adapter
@@ -1855,24 +1826,30 @@ class MessagingHubPlugin(PluginBase):
             # path (when the stored row isn't yet readable) still carries
             # the fields panels use to route events to the right tab.
             contact_id = MessageStore._compute_contact_id(
-                "received", msg_type, msg["transport"],
-                msg.get("from_id"), msg.get("to_id"),
+                "received",
+                msg_type,
+                msg["transport"],
+                msg.get("from_id"),
+                msg.get("to_id"),
                 sub_transport=sub_transport,
                 channel=msg.get("channel"),
             )
-            self.event_bus.publish(events.MESSAGE_RECEIVED, {
-                "id": msg_id,
-                "transport": msg["transport"],
-                "sub_transport": sub_transport,
-                "contact_id": contact_id,
-                "direction": "received",
-                "status": "received",
-                "from_id": msg.get("from_id"),
-                "from_name": msg.get("from_name"),
-                "text": msg["text"],
-                "msg_type": msg_type,
-                "timestamp": time.time(),
-            })
+            self.event_bus.publish(
+                events.MESSAGE_RECEIVED,
+                {
+                    "id": msg_id,
+                    "transport": msg["transport"],
+                    "sub_transport": sub_transport,
+                    "contact_id": contact_id,
+                    "direction": "received",
+                    "status": "received",
+                    "from_id": msg.get("from_id"),
+                    "from_name": msg.get("from_name"),
+                    "text": msg["text"],
+                    "msg_type": msg_type,
+                    "timestamp": time.time(),
+                },
+            )
         except Exception:
             self.log.exception("Error storing inbound message")
 
@@ -1889,26 +1866,34 @@ class MessagingHubPlugin(PluginBase):
         """Store an emoji reaction and push it to connected clients."""
         try:
             msg_id = self._store.add_reaction(
-                packet_id, emoji, from_id, from_name,
+                packet_id,
+                emoji,
+                from_id,
+                from_name,
             )
             if msg_id is None:
                 self.log.debug(
                     "Reaction from %s (target packet %d) — no matching message",
-                    from_id, packet_id,
+                    from_id,
+                    packet_id,
                 )
                 return
             row = self._store.get_message(msg_id)
-            self.event_bus.publish(events.MESSAGE_REACTION_RECEIVED, {
-                "id": msg_id,
-                "transport": row.get("transport", "meshtastic") if row else "meshtastic",
-                "sub_transport": row.get("sub_transport", sub_transport) if row else sub_transport,
-                "contact_id": row.get("contact_id") if row else None,
-                "emoji": emoji,
-                "from_id": from_id,
-                "from_name": from_name,
-                "reactions": (row.get("metadata") or {}).get("reactions", [])
-                    if row else [],
-            })
+            self.event_bus.publish(
+                events.MESSAGE_REACTION_RECEIVED,
+                {
+                    "id": msg_id,
+                    "transport": row.get("transport", "meshtastic") if row else "meshtastic",
+                    "sub_transport": row.get("sub_transport", sub_transport)
+                    if row
+                    else sub_transport,
+                    "contact_id": row.get("contact_id") if row else None,
+                    "emoji": emoji,
+                    "from_id": from_id,
+                    "from_name": from_name,
+                    "reactions": (row.get("metadata") or {}).get("reactions", []) if row else [],
+                },
+            )
         except Exception:
             self.log.exception("Error storing reaction")
 
@@ -1943,14 +1928,16 @@ class MessagingHubPlugin(PluginBase):
         # is_available() was True — e.g. "not_connected" (Meshtastic/MeshCore
         # radio flap) or "Path not found, requested" (LXMF async path
         # discovery over LoRa).  Queue these for the periodic retry loop.
-        if (
-            not result.get("sent")
-            and self._is_retryable_reason(result.get("reason", ""))
-        ):
+        if not result.get("sent") and self._is_retryable_reason(result.get("reason", "")):
             return self._queue_outbound(transport, text, destination, kwargs)
 
         return self._finalize_send(
-            adapter, transport, text, destination, kwargs, result,
+            adapter,
+            transport,
+            text,
+            destination,
+            kwargs,
+            result,
         )
 
     def _finalize_send(
@@ -2006,23 +1993,29 @@ class MessagingHubPlugin(PluginBase):
 
         if result.get("sent"):
             contact_id = MessageStore._compute_contact_id(
-                "sent", msg_type, transport,
-                "self", destination,
+                "sent",
+                msg_type,
+                transport,
+                "self",
+                destination,
                 sub_transport=sub_transport,
                 channel=channel,
             )
-            self.event_bus.publish(events.MESSAGE_SENT, {
-                "id": msg_id,
-                "transport": transport,
-                "sub_transport": sub_transport,
-                "contact_id": contact_id,
-                "direction": "sent",
-                "status": "sent",
-                "destination": destination,
-                "text": text,
-                "msg_type": msg_type,
-                "timestamp": time.time(),
-            })
+            self.event_bus.publish(
+                events.MESSAGE_SENT,
+                {
+                    "id": msg_id,
+                    "transport": transport,
+                    "sub_transport": sub_transport,
+                    "contact_id": contact_id,
+                    "direction": "sent",
+                    "status": "sent",
+                    "destination": destination,
+                    "text": text,
+                    "msg_type": msg_type,
+                    "timestamp": time.time(),
+                },
+            )
             # Register for delivery tracking if the adapter supports it
             self._register_delivery_tracking(adapter, msg_id, result)
 
@@ -2071,7 +2064,8 @@ class MessagingHubPlugin(PluginBase):
         if recovered or expired:
             self.log.info(
                 "Recovered %d queued messages from store (%d expired)",
-                recovered, expired,
+                recovered,
+                expired,
             )
         return recovered
 
@@ -2129,14 +2123,19 @@ class MessagingHubPlugin(PluginBase):
         if evicted is not None:
             self.log.warning(
                 "Outbound queue for %s full; evicting oldest msg_id=%d",
-                transport, evicted["msg_id"],
+                transport,
+                evicted["msg_id"],
             )
             self._on_delivery_status_update(
-                evicted["msg_id"], transport, "failed",
+                evicted["msg_id"],
+                transport,
+                "failed",
             )
         self.log.info(
             "Queued outbound %s msg_id=%d for retry (dest=%s)",
-            transport, msg_id, destination,
+            transport,
+            msg_id,
+            destination,
         )
         # Reuse MESSAGE_SENT so the dashboard picks up the queued row and
         # renders a bubble with status="queued" right away instead of
@@ -2144,23 +2143,29 @@ class MessagingHubPlugin(PluginBase):
         # handler, which enriches via `_lookup_message_row` and reads the
         # status off the stored row — no consumers misinterpret this.
         contact_id = MessageStore._compute_contact_id(
-            "sent", msg_type, transport,
-            "self", destination,
+            "sent",
+            msg_type,
+            transport,
+            "self",
+            destination,
             sub_transport=sub_transport,
             channel=channel,
         )
-        self.event_bus.publish(events.MESSAGE_SENT, {
-            "id": msg_id,
-            "transport": transport,
-            "sub_transport": sub_transport,
-            "contact_id": contact_id,
-            "direction": "sent",
-            "status": "queued",
-            "destination": destination,
-            "text": text,
-            "msg_type": msg_type,
-            "timestamp": time.time(),
-        })
+        self.event_bus.publish(
+            events.MESSAGE_SENT,
+            {
+                "id": msg_id,
+                "transport": transport,
+                "sub_transport": sub_transport,
+                "contact_id": contact_id,
+                "direction": "sent",
+                "status": "queued",
+                "destination": destination,
+                "text": text,
+                "msg_type": msg_type,
+                "timestamp": time.time(),
+            },
+        )
         return {
             "sent": False,
             "queued": True,
@@ -2177,15 +2182,20 @@ class MessagingHubPlugin(PluginBase):
             if drained or requeued or expired:
                 self.log.info(
                     "Outbound queue drain for %s: sent=%d requeued=%d expired=%d",
-                    transport, drained, requeued, expired,
+                    transport,
+                    drained,
+                    requeued,
+                    expired,
                 )
         except Exception:
             self.log.exception(
-                "Error draining outbound queue for %s", transport,
+                "Error draining outbound queue for %s",
+                transport,
             )
 
     def _drain_outbound_queue(
-        self, transport: str,
+        self,
+        transport: str,
     ) -> tuple[int, int, int]:
         """Retry queued sends for *transport*. Returns (sent, requeued, expired)."""
         with self._outbound_lock:
@@ -2201,7 +2211,9 @@ class MessagingHubPlugin(PluginBase):
             # Transport vanished; expire everything.
             for item in pending:
                 self._on_delivery_status_update(
-                    item["msg_id"], transport, "failed",
+                    item["msg_id"],
+                    transport,
+                    "failed",
                 )
             return 0, 0, len(pending)
 
@@ -2212,14 +2224,17 @@ class MessagingHubPlugin(PluginBase):
             age = now - item["queued_at"]
             if age > self._outbound_max_age_s:
                 self._on_delivery_status_update(
-                    item["msg_id"], transport, "expired",
+                    item["msg_id"],
+                    transport,
+                    "expired",
                 )
                 expired += 1
                 continue
             if time.time() - drain_start > self._drain_time_budget_s:
                 with self._outbound_lock:
                     dest_q = self._outbound_queues.setdefault(
-                        transport, deque(),
+                        transport,
+                        deque(),
                     )
                     for remaining in pending[idx:]:
                         if now - remaining["queued_at"] <= self._outbound_max_age_s:
@@ -2229,7 +2244,9 @@ class MessagingHubPlugin(PluginBase):
                             expired += 1
                 self.log.info(
                     "Drain time budget (%.0fs) exceeded for %s, requeued %d",
-                    self._drain_time_budget_s, transport, requeued,
+                    self._drain_time_budget_s,
+                    transport,
+                    requeued,
                 )
                 break
             if not adapter.is_available():
@@ -2238,7 +2255,8 @@ class MessagingHubPlugin(PluginBase):
                 # availability again for each item in the same drain.
                 with self._outbound_lock:
                     dest_q = self._outbound_queues.setdefault(
-                        transport, deque(),
+                        transport,
+                        deque(),
                     )
                     for remaining in pending[idx:]:
                         dest_q.append(remaining)
@@ -2247,11 +2265,14 @@ class MessagingHubPlugin(PluginBase):
             item["attempts"] += 1
             try:
                 result = adapter.send(
-                    item["text"], item["destination"], **item["kwargs"],
+                    item["text"],
+                    item["destination"],
+                    **item["kwargs"],
                 )
             except Exception:
                 self.log.exception(
-                    "Error retrying queued send msg_id=%d", item["msg_id"],
+                    "Error retrying queued send msg_id=%d",
+                    item["msg_id"],
                 )
                 result = {"sent": False, "reason": "exception during retry"}
             if result.get("sent"):
@@ -2262,7 +2283,9 @@ class MessagingHubPlugin(PluginBase):
                 # for any pure-transmit subscribers; the WS client
                 # deduplicates by id so it arrives as a no-op there.
                 self._on_delivery_status_update(
-                    item["msg_id"], transport, "sent",
+                    item["msg_id"],
+                    transport,
+                    "sent",
                 )
                 drain_kwargs = item.get("kwargs") or {}
                 drain_msg_type = drain_kwargs.get("msg_type", "direct")
@@ -2271,23 +2294,29 @@ class MessagingHubPlugin(PluginBase):
                 if drain_channel is None and drain_msg_type == "broadcast":
                     drain_channel = 0
                 drain_contact_id = MessageStore._compute_contact_id(
-                    "sent", drain_msg_type, transport,
-                    "self", item["destination"],
+                    "sent",
+                    drain_msg_type,
+                    transport,
+                    "self",
+                    item["destination"],
                     sub_transport=drain_sub,
                     channel=drain_channel,
                 )
-                self.event_bus.publish(events.MESSAGE_SENT, {
-                    "id": item["msg_id"],
-                    "transport": transport,
-                    "sub_transport": drain_sub,
-                    "contact_id": drain_contact_id,
-                    "direction": "sent",
-                    "status": "sent",
-                    "destination": item["destination"],
-                    "text": item["text"],
-                    "msg_type": drain_msg_type,
-                    "timestamp": time.time(),
-                })
+                self.event_bus.publish(
+                    events.MESSAGE_SENT,
+                    {
+                        "id": item["msg_id"],
+                        "transport": transport,
+                        "sub_transport": drain_sub,
+                        "contact_id": drain_contact_id,
+                        "direction": "sent",
+                        "status": "sent",
+                        "destination": item["destination"],
+                        "text": item["text"],
+                        "msg_type": drain_msg_type,
+                        "timestamp": time.time(),
+                    },
+                )
                 self._register_delivery_tracking(adapter, item["msg_id"], result)
                 sent += 1
             elif self._is_retryable_reason(result.get("reason", "")):
@@ -2296,7 +2325,9 @@ class MessagingHubPlugin(PluginBase):
                 requeued += 1
             else:
                 self._on_delivery_status_update(
-                    item["msg_id"], transport, "failed",
+                    item["msg_id"],
+                    transport,
+                    "failed",
                 )
                 expired += 1
         if sent or expired:
@@ -2318,7 +2349,9 @@ class MessagingHubPlugin(PluginBase):
                 self._outbound_queues[transport] = kept
         for transport, item in expired:
             self._on_delivery_status_update(
-                item["msg_id"], transport, "expired",
+                item["msg_id"],
+                transport,
+                "expired",
             )
         return len(expired)
 
@@ -2330,7 +2363,10 @@ class MessagingHubPlugin(PluginBase):
     # ── Delivery tracking ─────────────────────────────────────────
 
     def _register_delivery_tracking(
-        self, adapter: TransportAdapter, msg_id: int, result: dict[str, Any],
+        self,
+        adapter: TransportAdapter,
+        msg_id: int,
+        result: dict[str, Any],
     ) -> None:
         """Register an outbound message for delivery tracking with its adapter."""
         if not hasattr(adapter, "track_pending"):
@@ -2356,24 +2392,36 @@ class MessagingHubPlugin(PluginBase):
 
     # Terminal statuses are final — once set, later updates from slower
     # sources (e.g. 300s stale-pending sweeper) must not overwrite them.
-    _TERMINAL_STATUSES = frozenset({
-        "delivered", "delivery_failed", "failed", "broadcast_sent", "read",
-    })
+    _TERMINAL_STATUSES = frozenset(
+        {
+            "delivered",
+            "delivery_failed",
+            "failed",
+            "broadcast_sent",
+            "read",
+        }
+    )
     _NON_OVERWRITING_STATUSES = frozenset({"timeout", "expired"})
 
     def _on_delivery_status_update(
-        self, msg_id: int, transport: str, status: str,
+        self,
+        msg_id: int,
+        transport: str,
+        status: str,
     ) -> None:
         """Called by adapter callbacks when a delivery status changes."""
         try:
             if status in self._NON_OVERWRITING_STATUSES:
                 updated = self._store.update_status_unless_terminal(
-                    msg_id, status, self._TERMINAL_STATUSES,
+                    msg_id,
+                    status,
+                    self._TERMINAL_STATUSES,
                 )
                 if not updated:
                     self.log.debug(
                         "Ignoring %s for msg %d — already terminal",
-                        status, msg_id,
+                        status,
+                        msg_id,
                     )
                     return
             else:
@@ -2428,7 +2476,9 @@ class MessagingHubPlugin(PluginBase):
                         else:
                             adapter._pending_delivery.pop(key, None)
                 self._on_delivery_status_update(
-                    msg_id, adapter.transport_name, "timeout",
+                    msg_id,
+                    adapter.transport_name,
+                    "timeout",
                 )
                 expired += 1
         if expired:
@@ -2459,11 +2509,16 @@ class MessagingHubPlugin(PluginBase):
                     if sent or expired:
                         self.log.info(
                             "Periodic drain for %s: sent=%d requeued=%d expired=%d",
-                            transport, sent, requeued, expired,
+                            transport,
+                            sent,
+                            requeued,
+                            expired,
                         )
                 except Exception:
                     self.log.debug(
-                        "Error in periodic drain for %s", transport, exc_info=True,
+                        "Error in periodic drain for %s",
+                        transport,
+                        exc_info=True,
                     )
             # 15s interval — fast enough for LXMF path-found retries
             # (path requests resolve in 2-10s over LoRa), low overhead
@@ -2523,7 +2578,8 @@ class MessagingHubPlugin(PluginBase):
                 contacts.extend(a.get_contacts())
             except Exception:
                 self.log.debug(
-                    "Error getting contacts from %s", a.transport_name,
+                    "Error getting contacts from %s",
+                    a.transport_name,
                     exc_info=True,
                 )
 
@@ -2531,14 +2587,14 @@ class MessagingHubPlugin(PluginBase):
         if query:
             q = query.lower()
             contacts = [
-                c for c in contacts
-                if q in (c.get("name") or "").lower()
-                or q in (c.get("id") or "").lower()
+                c
+                for c in contacts
+                if q in (c.get("name") or "").lower() or q in (c.get("id") or "").lower()
             ]
 
         # Sort by last_heard descending (None sorts last)
         contacts.sort(
-            key=lambda c: (c.get("last_heard") or 0),
+            key=lambda c: c.get("last_heard") or 0,
             reverse=True,
         )
         return contacts
@@ -2552,7 +2608,9 @@ class MessagingHubPlugin(PluginBase):
         return self._store.get_conversations(**kwargs)
 
     def get_conversation_messages(
-        self, contact_id: str, **kwargs: Any,
+        self,
+        contact_id: str,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Fetch messages for a single conversation."""
         return self._store.get_conversation_messages(contact_id, **kwargs)
@@ -2604,10 +2662,7 @@ class MessagingHubPlugin(PluginBase):
     def get_status(self) -> dict[str, Any]:
         stats = self._store.get_stats()
         with self._lock:
-            transports = {
-                name: adapter.is_available()
-                for name, adapter in self._adapters.items()
-            }
+            transports = {name: adapter.is_available() for name, adapter in self._adapters.items()}
         return {
             "active": self._active,
             "transports": transports,

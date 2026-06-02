@@ -53,8 +53,12 @@ def _tile_list(lat: float, lon: float, min_zoom: int, max_zoom: int) -> list[tup
 
 
 def _tile_list_bbox(
-    south: float, west: float, north: float, east: float,
-    min_zoom: int, max_zoom: int,
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    min_zoom: int,
+    max_zoom: int,
 ) -> list[tuple[int, int, int]]:
     """Return [(z, x, y), ...] covering a bounding box at each zoom level."""
     tiles = []
@@ -95,7 +99,13 @@ async def run_prefetch(plugin: WebDashboardPlugin) -> None:
         tiles = _tile_list_bbox(south, west, north, east, min_zoom, max_zoom)
         log.info(
             "Tile prefetch: %d tiles for bbox [%.4f,%.4f,%.4f,%.4f] (z%d–z%d)",
-            len(tiles), south, west, north, east, min_zoom, max_zoom,
+            len(tiles),
+            south,
+            west,
+            north,
+            east,
+            min_zoom,
+            max_zoom,
         )
     else:
         lat = pf.get("latitude")
@@ -108,13 +118,18 @@ async def run_prefetch(plugin: WebDashboardPlugin) -> None:
         tiles = _tile_list(lat, lon, min_zoom, max_zoom)
         log.info(
             "Tile prefetch: %d tiles for %.4f, %.4f (z%d–z%d)",
-            len(tiles), lat, lon, min_zoom, max_zoom,
+            len(tiles),
+            lat,
+            lon,
+            min_zoom,
+            max_zoom,
         )
 
     if len(tiles) > MAX_PREFETCH_TILES:
         log.warning(
             "Tile prefetch: %d tiles exceeds limit of %d, truncating",
-            len(tiles), MAX_PREFETCH_TILES,
+            len(tiles),
+            MAX_PREFETCH_TILES,
         )
         tiles = tiles[:MAX_PREFETCH_TILES]
 
@@ -176,7 +191,11 @@ def _detect_position(plugin: WebDashboardPlugin) -> tuple[float | None, float | 
         try:
             nodes = msh.get_meshtastic_nodes()
             for n in nodes:
-                if n.get("is_self") and n.get("latitude") is not None and n.get("longitude") is not None:
+                if (
+                    n.get("is_self")
+                    and n.get("latitude") is not None
+                    and n.get("longitude") is not None
+                ):
                     log.info("Tile prefetch: using Meshtastic self-node position")
                     return n["latitude"], n["longitude"]
         except Exception:

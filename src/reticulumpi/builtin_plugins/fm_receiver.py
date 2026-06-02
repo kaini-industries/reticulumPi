@@ -27,17 +27,29 @@ _VALID_MODES = ("wbfm", "fm", "am", "usb", "lsb")
 
 _MODE_DEFAULTS: dict[str, dict[str, int]] = {
     "wbfm": {"sample_rate_hz": 170_000, "output_rate_hz": 32_000},
-    "fm":   {"sample_rate_hz": 12_000,  "output_rate_hz": 12_000},
-    "am":   {"sample_rate_hz": 12_000,  "output_rate_hz": 12_000},
-    "usb":  {"sample_rate_hz": 12_000,  "output_rate_hz": 12_000},
-    "lsb":  {"sample_rate_hz": 12_000,  "output_rate_hz": 12_000},
+    "fm": {"sample_rate_hz": 12_000, "output_rate_hz": 12_000},
+    "am": {"sample_rate_hz": 12_000, "output_rate_hz": 12_000},
+    "usb": {"sample_rate_hz": 12_000, "output_rate_hz": 12_000},
+    "lsb": {"sample_rate_hz": 12_000, "output_rate_hz": 12_000},
 }
 
 _E4000_LO_GAP_MHZ = (1101.0, 1234.0)
 
 _COMMON_GAIN_STEPS_DB = (
-    -1.0, 1.5, 4.0, 6.5, 9.0, 11.5, 14.0, 16.5,
-    19.0, 21.5, 24.0, 29.0, 34.0, 42.0,
+    -1.0,
+    1.5,
+    4.0,
+    6.5,
+    9.0,
+    11.5,
+    14.0,
+    16.5,
+    19.0,
+    21.5,
+    24.0,
+    29.0,
+    34.0,
+    42.0,
 )
 
 _BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
@@ -280,7 +292,8 @@ class FMReceiver(PluginBase):
 
         self.log.info(
             "Restored state: %.3f MHz %s",
-            self._frequency_hz / 1_000_000, self._mode.upper(),
+            self._frequency_hz / 1_000_000,
+            self._mode.upper(),
         )
 
     def _persist_state(self) -> None:
@@ -348,11 +361,10 @@ class FMReceiver(PluginBase):
         )
         self._max_recording_size_bytes = (
             int(self.config.get("max_recording_size_mb", _MAX_RECORDING_SIZE_MB_DEFAULT))
-            * 1024 * 1024
+            * 1024
+            * 1024
         )
-        self._max_recordings = int(
-            self.config.get("max_recordings", _MAX_RECORDINGS_DEFAULT)
-        )
+        self._max_recordings = int(self.config.get("max_recordings", _MAX_RECORDINGS_DEFAULT))
 
         self._active = True
 
@@ -370,6 +382,7 @@ class FMReceiver(PluginBase):
         else:
             try:
                 from reticulumpi.rtlsdr import resolve_device
+
                 self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
                 self._dongle_active = True
             except (RuntimeError, ValueError) as exc:
@@ -408,6 +421,7 @@ class FMReceiver(PluginBase):
         else:
             try:
                 from reticulumpi.rtlsdr import release_device
+
                 release_device(self._device_id, caller=self.plugin_name)
             except Exception:
                 pass
@@ -538,11 +552,14 @@ class FMReceiver(PluginBase):
         self._persist_state()
 
         try:
-            self.event_bus.publish(events.FM_RECEIVER_TUNED, {
-                "frequency_hz": frequency_hz,
-                "frequency_mhz": freq_mhz,
-                "mode": self._mode,
-            })
+            self.event_bus.publish(
+                events.FM_RECEIVER_TUNED,
+                {
+                    "frequency_hz": frequency_hz,
+                    "frequency_mhz": freq_mhz,
+                    "mode": self._mode,
+                },
+            )
         except Exception:
             self.log.debug("event_bus publish failed", exc_info=True)
 
@@ -740,11 +757,14 @@ class FMReceiver(PluginBase):
 
         self.log.info("Recording started: %s", filename)
         try:
-            self.event_bus.publish(events.FM_RECEIVER_RECORDING_STARTED, {
-                "filename": filename,
-                "frequency_mhz": freq_mhz,
-                "mode": self._mode,
-            })
+            self.event_bus.publish(
+                events.FM_RECEIVER_RECORDING_STARTED,
+                {
+                    "filename": filename,
+                    "frequency_mhz": freq_mhz,
+                    "mode": self._mode,
+                },
+            )
         except Exception:
             self.log.debug("event_bus publish failed", exc_info=True)
 
@@ -772,15 +792,21 @@ class FMReceiver(PluginBase):
         duration = time.time() - start_ts if start_ts else 0.0
         filename = os.path.basename(path) if path else ""
         self.log.info(
-            "Recording stopped (%s): %s (%.1fs)", reason, filename, duration,
+            "Recording stopped (%s): %s (%.1fs)",
+            reason,
+            filename,
+            duration,
         )
         try:
-            self.event_bus.publish(events.FM_RECEIVER_RECORDING_STOPPED, {
-                "filename": filename,
-                "duration_seconds": round(duration, 1),
-                "size_bytes": data_bytes,
-                "reason": reason,
-            })
+            self.event_bus.publish(
+                events.FM_RECEIVER_RECORDING_STOPPED,
+                {
+                    "filename": filename,
+                    "duration_seconds": round(duration, 1),
+                    "size_bytes": data_bytes,
+                    "reason": reason,
+                },
+            )
         except Exception:
             self.log.debug("event_bus publish failed", exc_info=True)
 
@@ -827,18 +853,26 @@ class FMReceiver(PluginBase):
         block_align = channels * (bits // 8)
         return struct.pack(
             "<4sI4s4sIHHIIHH4sI",
-            b"RIFF", 36, b"WAVE",
-            b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits,
-            b"data", 0,
+            b"RIFF",
+            36,
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            bits,
+            b"data",
+            0,
         )
 
     def _write_recording_chunk(self, chunk: bytes) -> None:
         with self._rec_lock:
             if not self._recording or self._recording_file is None:
                 return
-            over_size = (
-                self._recording_bytes + len(chunk) > self._max_recording_size_bytes
-            )
+            over_size = self._recording_bytes + len(chunk) > self._max_recording_size_bytes
             over_time = (
                 self._recording_start_ts is not None
                 and time.time() - self._recording_start_ts > self._max_recording_seconds
@@ -855,12 +889,15 @@ class FMReceiver(PluginBase):
         filename = os.path.basename(path) if path else ""
         self.log.info("Recording auto-stopped (limit): %s (%.1fs)", filename, duration)
         try:
-            self.event_bus.publish(events.FM_RECEIVER_RECORDING_STOPPED, {
-                "filename": filename,
-                "duration_seconds": round(duration, 1),
-                "size_bytes": data_bytes,
-                "reason": "limit",
-            })
+            self.event_bus.publish(
+                events.FM_RECEIVER_RECORDING_STOPPED,
+                {
+                    "filename": filename,
+                    "duration_seconds": round(duration, 1),
+                    "size_bytes": data_bytes,
+                    "reason": "limit",
+                },
+            )
         except Exception:
             self.log.debug("event_bus publish failed", exc_info=True)
 
@@ -870,8 +907,7 @@ class FMReceiver(PluginBase):
             return []
         try:
             return sorted(
-                f for f in os.listdir(rec_dir)
-                if f.endswith(".wav") and not f.startswith(".")
+                f for f in os.listdir(rec_dir) if f.endswith(".wav") and not f.startswith(".")
             )
         except OSError:
             return []
@@ -906,14 +942,16 @@ class FMReceiver(PluginBase):
                         pass
                 elif part in _VALID_MODES:
                     mode = part
-            result.append({
-                "filename": filename,
-                "size_bytes": stat.st_size,
-                "created_at": stat.st_mtime,
-                "frequency_mhz": freq_mhz,
-                "mode": mode,
-                "duration_seconds": round(duration, 1),
-            })
+            result.append(
+                {
+                    "filename": filename,
+                    "size_bytes": stat.st_size,
+                    "created_at": stat.st_mtime,
+                    "frequency_mhz": freq_mhz,
+                    "mode": mode,
+                    "duration_seconds": round(duration, 1),
+                }
+            )
         return result
 
     def delete_recording(self, filename: str) -> bool:
@@ -1033,7 +1071,8 @@ class FMReceiver(PluginBase):
             snap["recording"] = {
                 "active": True,
                 "duration_seconds": round(
-                    time.time() - (self._recording_start_ts or time.time()), 1,
+                    time.time() - (self._recording_start_ts or time.time()),
+                    1,
                 ),
                 "filename": os.path.basename(self._recording_path or ""),
             }
@@ -1112,11 +1151,13 @@ class FMReceiver(PluginBase):
                 self._playing = False
                 break
 
-            backoff = min(60.0, 2.0 ** self._restart_count)
+            backoff = min(60.0, 2.0**self._restart_count)
             self._set_status("restarting", f"backoff {backoff:.0f}s")
             self.log.info(
                 "Restarting rtl_fm in %.0fs (attempt %d/%d)",
-                backoff, self._restart_count, self._max_restarts,
+                backoff,
+                self._restart_count,
+                self._max_restarts,
             )
             self._sleep_while_active(backoff)
 
@@ -1135,24 +1176,28 @@ class FMReceiver(PluginBase):
         self._start_stderr_reader(self._process, prefix="rtl_fm")
         self.log.info(
             "Started rtl_fm at %.3f MHz %s (PID %d)",
-            self._frequency_hz / 1_000_000, self._mode.upper(), self._pid,
+            self._frequency_hz / 1_000_000,
+            self._mode.upper(),
+            self._pid,
         )
 
     def _build_cmd(self) -> list[str]:
         assert self._rtl_fm_path is not None
-        device_idx = (
-            self._resolved_index
-            if self._resolved_index is not None
-            else self._device_id
-        )
+        device_idx = self._resolved_index if self._resolved_index is not None else self._device_id
         cmd = [
             self._rtl_fm_path,
-            "-f", str(self._frequency_hz),
-            "-M", self._mode,
-            "-s", str(self._sample_rate_hz),
-            "-d", str(device_idx),
-            "-p", str(self._ppm),
-            "-l", str(self._squelch_level),
+            "-f",
+            str(self._frequency_hz),
+            "-M",
+            self._mode,
+            "-s",
+            str(self._sample_rate_hz),
+            "-d",
+            str(device_idx),
+            "-p",
+            str(self._ppm),
+            "-l",
+            str(self._squelch_level),
         ]
         if self._output_rate_hz != self._sample_rate_hz:
             cmd += ["-r", str(self._output_rate_hz)]
@@ -1195,7 +1240,7 @@ class FMReceiver(PluginBase):
     def _apply_volume(chunk: bytes, volume: float) -> bytes:
         n_samples = len(chunk) // 2
         fmt = f"<{n_samples}h"
-        samples = struct.unpack(fmt, chunk[:n_samples * 2])
+        samples = struct.unpack(fmt, chunk[: n_samples * 2])
         scaled = [max(-32768, min(32767, int(s * volume))) for s in samples]
         return struct.pack(fmt, *scaled)
 
@@ -1205,7 +1250,7 @@ class FMReceiver(PluginBase):
             return
         fmt = f"<{n_samples}h"
         try:
-            samples = struct.unpack(fmt, chunk[:n_samples * 2])
+            samples = struct.unpack(fmt, chunk[: n_samples * 2])
         except struct.error:
             return
         sum_sq = sum(s * s for s in samples)

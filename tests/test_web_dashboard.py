@@ -544,7 +544,9 @@ def dashboard_app(mock_app):
         "timestamp": 1711500000.0,
     }
 
-    mock_app.get_plugin = MagicMock(side_effect=lambda name: monitor if name == "system_monitor" else None)
+    mock_app.get_plugin = MagicMock(
+        side_effect=lambda name: monitor if name == "system_monitor" else None
+    )
     mock_app.get_status.return_value = {
         "version": "0.1.2",
         "plugins": {"system_monitor": {"active": True}},
@@ -620,6 +622,7 @@ class TestAPIEndpoints:
     @pytest.fixture
     def event_loop(self):
         import asyncio
+
         loop = asyncio.new_event_loop()
         yield loop
         loop.close()
@@ -629,6 +632,7 @@ class TestAPIEndpoints:
             resp = await client.post("/api/auth/login", json={"password": "testpass"})
             data = await resp.json()
             return data["data"]["token"]
+
         return event_loop.run_until_complete(_do())
 
     def test_login_success(self, client, event_loop):
@@ -638,6 +642,7 @@ class TestAPIEndpoints:
             data = await resp.json()
             assert data["ok"] is True
             assert "token" in data["data"]
+
         event_loop.run_until_complete(_do())
 
     def test_login_wrong_password(self, client, event_loop):
@@ -646,12 +651,14 @@ class TestAPIEndpoints:
             assert resp.status == 401
             data = await resp.json()
             assert data["ok"] is False
+
         event_loop.run_until_complete(_do())
 
     def test_unauthenticated_api_returns_401(self, client, event_loop):
         async def _do():
             resp = await client.get("/api/status", headers={"Accept": "application/json"})
             assert resp.status == 401
+
         event_loop.run_until_complete(_do())
 
     def test_status_endpoint(self, client, event_loop):
@@ -666,6 +673,7 @@ class TestAPIEndpoints:
             data = await resp.json()
             assert data["ok"] is True
             assert "version" in data["data"]
+
         event_loop.run_until_complete(_do())
 
     def test_node_endpoint(self, client, event_loop):
@@ -679,6 +687,7 @@ class TestAPIEndpoints:
             assert resp.status == 200
             data = await resp.json()
             assert data["data"]["node_name"] == "TestNode"
+
         event_loop.run_until_complete(_do())
 
     def test_metrics_endpoint(self, client, event_loop):
@@ -692,6 +701,7 @@ class TestAPIEndpoints:
             assert resp.status == 200
             data = await resp.json()
             assert data["data"]["cpu_percent"] == 15.2
+
         event_loop.run_until_complete(_do())
 
     def test_plugins_endpoint(self, client, event_loop):
@@ -705,6 +715,7 @@ class TestAPIEndpoints:
             assert resp.status == 200
             data = await resp.json()
             assert "plugins" in data["data"]
+
         event_loop.run_until_complete(_do())
 
     def test_config_endpoint_strips_sensitive_keys(self, client, event_loop):
@@ -721,6 +732,7 @@ class TestAPIEndpoints:
             for name, cfg in data["data"]["plugins"].items():
                 assert "password_hash" not in cfg
                 assert "password" not in cfg
+
         event_loop.run_until_complete(_do())
 
     def test_logout(self, client, event_loop):
@@ -740,6 +752,7 @@ class TestAPIEndpoints:
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             )
             assert resp.status == 401
+
         event_loop.run_until_complete(_do())
 
     def test_security_headers(self, client, event_loop):
@@ -748,6 +761,7 @@ class TestAPIEndpoints:
             assert resp.headers.get("X-Content-Type-Options") == "nosniff"
             assert resp.headers.get("X-Frame-Options") == "DENY"
             assert "Content-Security-Policy" in resp.headers
+
         event_loop.run_until_complete(_do())
 
     def test_sw_js_headers(self, client, event_loop):
@@ -758,6 +772,7 @@ class TestAPIEndpoints:
             assert resp.headers.get("Cache-Control") == "no-cache"
             csp = resp.headers.get("Content-Security-Policy", "")
             assert "worker-src 'self'" in csp
+
         event_loop.run_until_complete(_do())
 
     def test_rate_limiting(self, client, event_loop):
@@ -770,6 +785,7 @@ class TestAPIEndpoints:
             resp = await client.post("/api/auth/login", json={"password": "wrong"})
             assert resp.status == 429
             assert "Retry-After" in resp.headers
+
         event_loop.run_until_complete(_do())
 
 
@@ -794,6 +810,7 @@ class TestFormLogin:
     @pytest.fixture
     def event_loop(self):
         import asyncio
+
         loop = asyncio.new_event_loop()
         yield loop
         loop.close()
@@ -808,6 +825,7 @@ class TestFormLogin:
             assert resp.status == 302
             assert resp.headers.get("Location") == "/"
             assert "session=" in resp.headers.get("Set-Cookie", "")
+
         event_loop.run_until_complete(_do())
 
     def test_form_login_redirects_on_wrong_password(self, client, event_loop):
@@ -819,6 +837,7 @@ class TestFormLogin:
             )
             assert resp.status == 302
             assert "error=invalid" in resp.headers.get("Location", "")
+
         event_loop.run_until_complete(_do())
 
     def test_form_login_cookie_grants_access(self, client, event_loop):
@@ -836,6 +855,7 @@ class TestFormLogin:
             assert resp.status == 200
             data = await resp.json()
             assert data["ok"] is True
+
         event_loop.run_until_complete(_do())
 
 

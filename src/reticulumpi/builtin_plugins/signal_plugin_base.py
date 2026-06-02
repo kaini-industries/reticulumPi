@@ -49,8 +49,7 @@ class SignalPluginBase(PluginBase):
 
     def start(self) -> None:
         self._dongle_serial = str(
-            self.config.get("device_serial")
-            or self.config.get("device_index", ""),
+            self.config.get("device_serial") or self.config.get("device_index", ""),
         )
         self._active = True
 
@@ -134,7 +133,8 @@ class SignalPluginBase(PluginBase):
         self._preempted_until_ts = preempted_until_ts
         self.log.info(
             "Yielding dongle to %s (%s)",
-            preempted_by, preempted_by_label,
+            preempted_by,
+            preempted_by_label,
         )
         self._kill_subprocess()
         self._update_snapshot_cache()

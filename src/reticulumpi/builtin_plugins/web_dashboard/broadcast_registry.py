@@ -19,7 +19,6 @@ _SLOW_THRESHOLD = 0.2
 
 
 class BroadcastRegistry:
-
     def __init__(self, metrics_interval: float = 5.0) -> None:
         self._tier1_budget = metrics_interval * 0.75 * 0.70
         self._tier2_budget = metrics_interval * 0.75 * 0.30
@@ -39,7 +38,9 @@ class BroadcastRegistry:
         elapsed_ms = (time.monotonic() - t) * 1000
         if elapsed_ms > _SLOW_THRESHOLD * 1000:
             log.warning(
-                "Slow broadcast plugin %s: %.0fms", name, elapsed_ms,
+                "Slow broadcast plugin %s: %.0fms",
+                name,
+                elapsed_ms,
             )
 
         if result is None:
@@ -88,7 +89,8 @@ class BroadcastRegistry:
 
         if skipped:
             log.info(
-                "Broadcast budget exceeded — skipped: %s", ", ".join(skipped),
+                "Broadcast budget exceeded — skipped: %s",
+                ", ".join(skipped),
             )
 
         return data

@@ -27,9 +27,7 @@ def test_version_flag(capsys):
 
 def test_main_starts_app(tmp_path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text(
-        "reticulumpi:\n  log_level: 4\n  plugins: {}\n"
-    )
+    config_file.write_text("reticulumpi:\n  log_level: 4\n  plugins: {}\n")
     mock_app = MagicMock()
     with (
         patch("sys.argv", ["reticulumpi", "--config", str(config_file)]),
@@ -47,9 +45,7 @@ def test_main_starts_app(tmp_path):
 
 def test_main_keyboard_interrupt_calls_shutdown(tmp_path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text(
-        "reticulumpi:\n  log_level: 4\n  plugins: {}\n"
-    )
+    config_file.write_text("reticulumpi:\n  log_level: 4\n  plugins: {}\n")
     mock_app = MagicMock()
     mock_app.start.side_effect = KeyboardInterrupt
     with (
@@ -63,9 +59,7 @@ def test_main_keyboard_interrupt_calls_shutdown(tmp_path):
 
 def test_main_fatal_error_exits(tmp_path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text(
-        "reticulumpi:\n  log_level: 4\n  plugins: {}\n"
-    )
+    config_file.write_text("reticulumpi:\n  log_level: 4\n  plugins: {}\n")
     mock_app = MagicMock()
     mock_app.start.side_effect = RuntimeError("boom")
     with pytest.raises(SystemExit) as exc_info:
@@ -79,9 +73,7 @@ def test_main_fatal_error_exits(tmp_path):
 
 def test_main_log_level_override(tmp_path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text(
-        "reticulumpi:\n  log_level: 4\n  plugins: {}\n"
-    )
+    config_file.write_text("reticulumpi:\n  log_level: 4\n  plugins: {}\n")
     mock_app = MagicMock()
     with (
         patch("sys.argv", ["reticulumpi", "--config", str(config_file), "--log-level", "7"]),
@@ -124,11 +116,7 @@ def test_check_flag_exits_zero_on_valid_config(tmp_path):
 def test_check_flag_exits_one_on_missing_plugin(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "reticulumpi:\n"
-        "  log_level: 4\n"
-        "  plugins:\n"
-        "    nonexistent:\n"
-        "      enabled: true\n"
+        "reticulumpi:\n  log_level: 4\n  plugins:\n    nonexistent:\n      enabled: true\n"
     )
     with pytest.raises(SystemExit) as exc_info:
         with patch("sys.argv", ["reticulumpi", "--config", str(config_file), "--check"]):

@@ -132,7 +132,9 @@ def test_adc_driver_missing_path():
     from reticulumpi.builtin_plugins.sensor_framework import ADCDriver
 
     # Path must be under /sys/ to pass validation; use a nonexistent sysfs path
-    driver = ADCDriver({"sysfs_path": "/sys/bus/iio/devices/nonexistent", "reading_name": "voltage"})
+    driver = ADCDriver(
+        {"sysfs_path": "/sys/bus/iio/devices/nonexistent", "reading_name": "voltage"}
+    )
     reading = driver.read()
     assert "error" in reading
 
@@ -264,11 +266,14 @@ def test_event_published_on_read(mock_dest, mock_app, plugin_config):
         reading = driver.read()
         reading["timestamp"] = time.time()
         plugin._last_readings[sensor_cfg["name"]] = reading
-        plugin.event_bus.publish("sensor.reading", {
-            "sensor": sensor_cfg["name"],
-            "driver": sensor_cfg["driver"],
-            "reading": reading,
-        })
+        plugin.event_bus.publish(
+            "sensor.reading",
+            {
+                "sensor": sensor_cfg["name"],
+                "driver": sensor_cfg["driver"],
+                "reading": reading,
+            },
+        )
 
     assert len(events_received) == 1
     assert events_received[0]["sensor"] == "test_temp"

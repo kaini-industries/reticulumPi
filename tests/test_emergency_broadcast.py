@@ -189,6 +189,7 @@ def test_ttl_decrement_rebroadcast(mock_dest, mock_transport, mock_app, plugin_c
 
     # Verify TTL was decremented in the rebroadcast
     import RNS.vendor.umsgpack as umsgpack
+
     call_kwargs = mock_dest_instance.announce.call_args
     rebroadcast_data = umsgpack.unpackb(call_kwargs[1]["app_data"])
     assert rebroadcast_data["ttl"] == 2  # Was 3, now 2

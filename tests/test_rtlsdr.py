@@ -28,6 +28,7 @@ def _clear_cache():
 def _mock_rtl_test(output: str = _RTL_TEST_OUTPUT, which: str = "/usr/bin/rtl_test"):
     """Patch shutil.which and _run_rtl_test to return canned device list."""
     from reticulumpi.rtlsdr import _DEVICE_RE
+
     devices = []
     for line in output.splitlines():
         m = _DEVICE_RE.match(line)

@@ -51,9 +51,7 @@ def load_or_create(identity_path: str) -> RNS.Identity:
     identity = RNS.Identity()
 
     try:
-        fd, tmp_path = tempfile.mkstemp(
-            dir=parent_dir or ".", prefix=".identity_", suffix=".tmp"
-        )
+        fd, tmp_path = tempfile.mkstemp(dir=parent_dir or ".", prefix=".identity_", suffix=".tmp")
         os.close(fd)
         identity.to_file(tmp_path)
         os.replace(tmp_path, identity_path)

@@ -94,9 +94,7 @@ class GpsTelemetry(PluginBase):
         self._reconnect_delay: float = float(self.config.get("reconnect_delay", 5))
         self._max_reconnect_attempts: int = self.config.get("max_reconnect_attempts", 0)
         self._fix_stale_seconds: float = float(self.config.get("fix_stale_seconds", 30))
-        self._stale_check_interval: float = float(
-            self.config.get("stale_check_interval", 5)
-        )
+        self._stale_check_interval: float = float(self.config.get("stale_check_interval", 5))
         self._gpsd_host: str = self.config.get("gpsd_host", "localhost")
         self._gpsd_port: int = self.config.get("gpsd_port", 2947)
 
@@ -131,12 +129,14 @@ class GpsTelemetry(PluginBase):
         if self._source == "gpsd":
             self.log.info(
                 "GPS telemetry started (gpsd %s:%d)",
-                self._gpsd_host, self._gpsd_port,
+                self._gpsd_host,
+                self._gpsd_port,
             )
         else:
             self.log.info(
                 "GPS telemetry started on %s @ %d baud",
-                self._serial_port, self._baudrate,
+                self._serial_port,
+                self._baudrate,
             )
 
     def stop(self) -> None:
@@ -157,9 +157,7 @@ class GpsTelemetry(PluginBase):
         if lock is None:
             return {"active": False, "connected": False}
         with lock:
-            last_age = (
-                time.time() - self._last_msg_time if self._last_msg_time else None
-            )
+            last_age = time.time() - self._last_msg_time if self._last_msg_time else None
             return {
                 "active": self._active,
                 "connected": self._connected,
@@ -187,8 +185,7 @@ class GpsTelemetry(PluginBase):
             for s in self._sats_in_use_by_talker.values():
                 in_use |= s
             snap["satellites_in_view"] = [
-                {**sat, "in_use": sat.get("prn") in in_use}
-                for sat in self._satellites_in_view
+                {**sat, "in_use": sat.get("prn") in in_use} for sat in self._satellites_in_view
             ]
             snap["satellites_used_prns"] = sorted(in_use)
         return snap
@@ -202,28 +199,19 @@ class GpsTelemetry(PluginBase):
         attempt = 0
         while self._active:
             try:
-                ser = serial.Serial(
-                    self._serial_port, self._baudrate, timeout=self._read_timeout
-                )
+                ser = serial.Serial(self._serial_port, self._baudrate, timeout=self._read_timeout)
             except (SerialException, OSError) as exc:
                 attempt += 1
                 self._reconnect_failures += 1
-                self.log.warning(
-                    "GPS open failed (attempt %d): %s", attempt, exc
-                )
-                if (
-                    self._max_reconnect_attempts > 0
-                    and attempt >= self._max_reconnect_attempts
-                ):
+                self.log.warning("GPS open failed (attempt %d): %s", attempt, exc)
+                if self._max_reconnect_attempts > 0 and attempt >= self._max_reconnect_attempts:
                     self.log.error(
                         "GPS exceeded max reconnect attempts (%d), giving up",
                         self._max_reconnect_attempts,
                     )
                     self._active = False
                     return
-                delay = min(
-                    self._reconnect_delay * (2 ** min(attempt - 1, 5)), 300.0
-                )
+                delay = min(self._reconnect_delay * (2 ** min(attempt - 1, 5)), 300.0)
                 self._sleep_while_active(delay)
                 continue
 
@@ -438,12 +426,8 @@ class GpsTelemetry(PluginBase):
                 {
                     "prn": prn,
                     "talker": talker,
-                    "elevation_deg": _int_or_none(
-                        getattr(msg, f"elevation_deg_{i}", None)
-                    ),
-                    "azimuth_deg": _int_or_none(
-                        getattr(msg, f"azimuth_{i}", None)
-                    ),
+                    "elevation_deg": _int_or_none(getattr(msg, f"elevation_deg_{i}", None)),
+                    "azimuth_deg": _int_or_none(getattr(msg, f"azimuth_{i}", None)),
                     "snr_db": _int_or_none(getattr(msg, f"snr_{i}", None)),
                 }
             )
@@ -460,9 +444,7 @@ class GpsTelemetry(PluginBase):
                 }
                 # Mark this talker's accumulation as complete by leaving the
                 # list in _gsv_accum; next msg_num==1 will reset it.
-                self._satellites_in_view = [
-                    s for t in combined for s in combined[t]
-                ]
+                self._satellites_in_view = [s for t in combined for s in combined[t]]
 
     def _apply_vtg(self, msg: Any, now: float) -> None:
         speed_kn = _decimal_or_none(getattr(msg, "spd_over_grnd_kts", None))
@@ -497,27 +479,20 @@ class GpsTelemetry(PluginBase):
             except (OSError, _socket.error) as exc:
                 attempt += 1
                 self._reconnect_failures += 1
-                self.log.warning(
-                    "gpsd connect failed (attempt %d): %s", attempt, exc
-                )
+                self.log.warning("gpsd connect failed (attempt %d): %s", attempt, exc)
                 if sock:
                     try:
                         sock.close()
                     except Exception:
                         pass
-                if (
-                    self._max_reconnect_attempts > 0
-                    and attempt >= self._max_reconnect_attempts
-                ):
+                if self._max_reconnect_attempts > 0 and attempt >= self._max_reconnect_attempts:
                     self.log.error(
                         "gpsd exceeded max reconnect attempts (%d), giving up",
                         self._max_reconnect_attempts,
                     )
                     self._active = False
                     return
-                delay = min(
-                    self._reconnect_delay * (2 ** min(attempt - 1, 5)), 300.0
-                )
+                delay = min(self._reconnect_delay * (2 ** min(attempt - 1, 5)), 300.0)
                 self._sleep_while_active(delay)
                 continue
 

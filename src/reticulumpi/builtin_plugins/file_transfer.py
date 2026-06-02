@@ -41,9 +41,7 @@ class FileTransferPlugin(PluginBase):
         self._current_transfers: dict[str, dict[str, Any]] = {}
 
         self._shared_dir = os.path.expanduser(
-            self.config.get(
-                "shared_dir", "~/.local/share/reticulumpi/shared_files"
-            )
+            self.config.get("shared_dir", "~/.local/share/reticulumpi/shared_files")
         )
         os.makedirs(self._shared_dir, exist_ok=True)
 
@@ -146,6 +144,7 @@ class FileTransferPlugin(PluginBase):
         # Check disk space
         try:
             import shutil
+
             free = shutil.disk_usage(self._shared_dir).free
             if resource.size > free * 0.9:  # Leave 10% headroom
                 self.log.warning("Rejecting resource: insufficient disk space")
@@ -190,11 +189,14 @@ class FileTransferPlugin(PluginBase):
                         f.write(data)
                     self.log.info("File received: %s (%d bytes)", filename, len(data))
 
-                    self.event_bus.publish(events.FILE_RECEIVED, {
-                        "filename": filename,
-                        "size": len(data),
-                        "path": filepath,
-                    })
+                    self.event_bus.publish(
+                        events.FILE_RECEIVED,
+                        {
+                            "filename": filename,
+                            "size": len(data),
+                            "path": filepath,
+                        },
+                    )
             except Exception:
                 self.log.exception("Error saving received file")
         else:
@@ -204,13 +206,31 @@ class FileTransferPlugin(PluginBase):
 
     # --- Request handlers ---
 
-    def _handle_list(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_list(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         import RNS.vendor.umsgpack as umsgpack
+
         files = self._list_shared_files()
         return umsgpack.packb({"ok": True, "data": files})
 
-    def _handle_info(self, path: str, data: Any, request_id: Any, link_id: Any, remote_identity: Any, requested_at: Any) -> Any:
+    def _handle_info(
+        self,
+        path: str,
+        data: Any,
+        request_id: Any,
+        link_id: Any,
+        remote_identity: Any,
+        requested_at: Any,
+    ) -> Any:
         import RNS.vendor.umsgpack as umsgpack
+
         if not isinstance(data, bytes):
             return umsgpack.packb({"ok": False, "error": "filename required"})
         try:
@@ -228,11 +248,16 @@ class FileTransferPlugin(PluginBase):
             return umsgpack.packb({"ok": False, "error": "file not found"})
 
         stat = os.lstat(filepath)  # lstat: don't follow symlinks
-        return umsgpack.packb({"ok": True, "data": {
-            "name": safe_name,
-            "size": stat.st_size,
-            "modified": stat.st_mtime,
-        }})
+        return umsgpack.packb(
+            {
+                "ok": True,
+                "data": {
+                    "name": safe_name,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                },
+            }
+        )
 
     # --- Helpers ---
 
@@ -260,11 +285,13 @@ class FileTransferPlugin(PluginBase):
                     self.log.warning("Skipping symlink outside shared dir: %s", entry.name)
                     continue
                 stat = entry.stat(follow_symlinks=False)
-                files.append({
-                    "name": entry.name,
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime,
-                })
+                files.append(
+                    {
+                        "name": entry.name,
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime,
+                    }
+                )
         except Exception:
             self.log.debug("Error listing shared files", exc_info=True)
         return sorted(files, key=lambda f: f.get("modified", 0), reverse=True)

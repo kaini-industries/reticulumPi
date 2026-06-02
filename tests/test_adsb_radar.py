@@ -26,6 +26,7 @@ from reticulumpi.builtin_plugins.adsb_radar import (
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_app() -> MagicMock:
     app = MagicMock()
     app.reticulum = MagicMock()
@@ -62,6 +63,7 @@ def _make_plugin(config: dict | None = None) -> AdsbRadarPlugin:
 # validate_config
 # ---------------------------------------------------------------------------
 
+
 class TestValidateConfig:
     def test_defaults(self):
         p = _make_plugin()
@@ -76,17 +78,19 @@ class TestValidateConfig:
         assert p._receiver_lon is None
 
     def test_custom_config(self):
-        p = _make_plugin({
-            "dump1090_bin": "/opt/dump1090-fa/dump1090-fa",
-            "device_index": 1,
-            "gain": "40",
-            "ppm": -3,
-            "enable_bias_tee": True,
-            "sbs_port": 30004,
-            "stale_timeout": 120,
-            "receiver_lat": 40.7128,
-            "receiver_lon": -74.0060,
-        })
+        p = _make_plugin(
+            {
+                "dump1090_bin": "/opt/dump1090-fa/dump1090-fa",
+                "device_index": 1,
+                "gain": "40",
+                "ppm": -3,
+                "enable_bias_tee": True,
+                "sbs_port": 30004,
+                "stale_timeout": 120,
+                "receiver_lat": 40.7128,
+                "receiver_lon": -74.0060,
+            }
+        )
         assert p._dump1090_bin == "/opt/dump1090-fa/dump1090-fa"
         assert p._device_id == "1"
         assert p._gain == "40"
@@ -106,6 +110,7 @@ class TestValidateConfig:
 # ---------------------------------------------------------------------------
 # _build_cmd
 # ---------------------------------------------------------------------------
+
 
 class TestBuildCmd:
     def test_basic_command(self):
@@ -150,6 +155,7 @@ class TestBuildCmd:
 # _set_bias_tee
 # ---------------------------------------------------------------------------
 
+
 class TestSetBiasTee:
     def test_enable_calls_rtl_biast(self):
         p = _make_plugin({"enable_bias_tee": True})
@@ -160,7 +166,8 @@ class TestSetBiasTee:
             p._set_bias_tee(True)
         mock_run.assert_called_once_with(
             ["/usr/bin/rtl_biast", "-d", "0", "-b", "1"],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         assert p._bias_tee_active is True
 
@@ -174,7 +181,8 @@ class TestSetBiasTee:
             p._set_bias_tee(False)
         mock_run.assert_called_once_with(
             ["/usr/bin/rtl_biast", "-d", "0", "-b", "0"],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         assert p._bias_tee_active is False
 
@@ -207,6 +215,7 @@ class TestSetBiasTee:
 # ---------------------------------------------------------------------------
 # SBS parsing — _parse_sbs_line
 # ---------------------------------------------------------------------------
+
 
 class TestSbsParsing:
     def _msg(
@@ -331,6 +340,7 @@ class TestSbsParsing:
 # Emergency squawk detection
 # ---------------------------------------------------------------------------
 
+
 class TestEmergencySquawk:
     def _msg(self, icao="AABBCC", squawk="1200"):
         return (
@@ -343,45 +353,51 @@ class TestEmergencySquawk:
         p = _make_plugin()
         p._parse_sbs_line(self._msg(squawk="7700"))
         p.event_bus.publish.assert_called()
-        calls = [c for c in p.event_bus.publish.call_args_list
-                 if c[0][0] == "adsb.emergency_squawk"]
+        calls = [
+            c for c in p.event_bus.publish.call_args_list if c[0][0] == "adsb.emergency_squawk"
+        ]
         assert len(calls) == 1
         assert calls[0][0][1]["squawk"] == "7700"
 
     def test_7600_triggers_event(self):
         p = _make_plugin()
         p._parse_sbs_line(self._msg(squawk="7600"))
-        calls = [c for c in p.event_bus.publish.call_args_list
-                 if c[0][0] == "adsb.emergency_squawk"]
+        calls = [
+            c for c in p.event_bus.publish.call_args_list if c[0][0] == "adsb.emergency_squawk"
+        ]
         assert len(calls) == 1
 
     def test_7500_triggers_event(self):
         p = _make_plugin()
         p._parse_sbs_line(self._msg(squawk="7500"))
-        calls = [c for c in p.event_bus.publish.call_args_list
-                 if c[0][0] == "adsb.emergency_squawk"]
+        calls = [
+            c for c in p.event_bus.publish.call_args_list if c[0][0] == "adsb.emergency_squawk"
+        ]
         assert len(calls) == 1
 
     def test_normal_squawk_no_event(self):
         p = _make_plugin()
         p._parse_sbs_line(self._msg(squawk="1200"))
-        calls = [c for c in p.event_bus.publish.call_args_list
-                 if c[0][0] == "adsb.emergency_squawk"]
+        calls = [
+            c for c in p.event_bus.publish.call_args_list if c[0][0] == "adsb.emergency_squawk"
+        ]
         assert len(calls) == 0
 
     def test_same_emergency_squawk_only_fires_once(self):
         p = _make_plugin()
         p._parse_sbs_line(self._msg(squawk="7700"))
         p._parse_sbs_line(self._msg(squawk="7700"))
-        calls = [c for c in p.event_bus.publish.call_args_list
-                 if c[0][0] == "adsb.emergency_squawk"]
+        calls = [
+            c for c in p.event_bus.publish.call_args_list if c[0][0] == "adsb.emergency_squawk"
+        ]
         assert len(calls) == 1
 
     def test_new_aircraft_detected_event(self):
         p = _make_plugin()
         p._parse_sbs_line(self._msg(icao="AABBCC"))
-        calls = [c for c in p.event_bus.publish.call_args_list
-                 if c[0][0] == "adsb.aircraft_detected"]
+        calls = [
+            c for c in p.event_bus.publish.call_args_list if c[0][0] == "adsb.aircraft_detected"
+        ]
         assert len(calls) == 1
         assert calls[0][0][1]["icao"] == "AABBCC"
 
@@ -389,6 +405,7 @@ class TestEmergencySquawk:
 # ---------------------------------------------------------------------------
 # Aircraft expiry (maintenance)
 # ---------------------------------------------------------------------------
+
 
 class TestAircraftExpiry:
     def test_stale_aircraft_removed(self):
@@ -401,6 +418,7 @@ class TestAircraftExpiry:
         p._stop_event.clear()
 
         call_count = [0]
+
         def _fake_sleep(s):
             call_count[0] += 1
             if call_count[0] >= 2:
@@ -410,8 +428,7 @@ class TestAircraftExpiry:
             p._maintenance_loop()
 
         assert "AABBCC" not in p._aircraft
-        calls = [c for c in p.event_bus.publish.call_args_list
-                 if c[0][0] == "adsb.aircraft_lost"]
+        calls = [c for c in p.event_bus.publish.call_args_list if c[0][0] == "adsb.aircraft_lost"]
         assert len(calls) == 1
 
     def test_fresh_aircraft_not_removed(self):
@@ -424,6 +441,7 @@ class TestAircraftExpiry:
         p._stop_event.clear()
 
         call_count = [0]
+
         def _fake_sleep(s):
             call_count[0] += 1
             if call_count[0] >= 2:
@@ -438,6 +456,7 @@ class TestAircraftExpiry:
 # ---------------------------------------------------------------------------
 # Snapshot
 # ---------------------------------------------------------------------------
+
 
 class TestSnapshot:
     def test_empty_snapshot_shape(self):
@@ -478,6 +497,7 @@ class TestSnapshot:
 # ---------------------------------------------------------------------------
 # Haversine distance
 # ---------------------------------------------------------------------------
+
 
 class TestHaversine:
     def test_same_point_is_zero(self):
@@ -526,6 +546,7 @@ class TestDeviceResolution:
 # Supervisor: missing binary → graceful 'unavailable' status
 # ---------------------------------------------------------------------------
 
+
 class TestSupervisorMissingBinary:
     def test_status_unavailable_when_dump1090_missing(self):
         p = _make_plugin()
@@ -546,6 +567,7 @@ class TestSupervisorMissingBinary:
 # GPS event handler
 # ---------------------------------------------------------------------------
 
+
 class TestGpsHandler:
     def test_updates_receiver_position(self):
         p = _make_plugin()
@@ -555,7 +577,9 @@ class TestGpsHandler:
 
     def test_first_fix_event(self):
         p = _make_plugin()
-        p._on_gps_fix("gps.fix_received", {"lat": 51.5, "lon": -0.1, "alt_m": 10.0, "timestamp": 1.0})
+        p._on_gps_fix(
+            "gps.fix_received", {"lat": 51.5, "lon": -0.1, "alt_m": 10.0, "timestamp": 1.0}
+        )
         assert p._receiver_lat == pytest.approx(51.5)
         assert p._receiver_lon == pytest.approx(-0.1)
 
@@ -613,6 +637,7 @@ class TestGpsHandler:
 # AircraftState dataclass
 # ---------------------------------------------------------------------------
 
+
 class TestAircraftState:
     def test_to_dict_round_trip(self):
         ac = AircraftState(
@@ -633,8 +658,19 @@ class TestAircraftState:
         assert d["altitude"] == 35000
         assert d["on_ground"] is False
         assert set(d.keys()) == {
-            "icao", "callsign", "altitude", "ground_speed", "track",
-            "latitude", "longitude", "vertical_rate", "squawk",
-            "on_ground", "category", "first_seen", "last_seen",
-            "message_count", "distance_nm",
+            "icao",
+            "callsign",
+            "altitude",
+            "ground_speed",
+            "track",
+            "latitude",
+            "longitude",
+            "vertical_rate",
+            "squawk",
+            "on_ground",
+            "category",
+            "first_seen",
+            "last_seen",
+            "message_count",
+            "distance_nm",
         }

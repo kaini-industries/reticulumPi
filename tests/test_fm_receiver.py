@@ -71,9 +71,7 @@ def _make_plugin(config: dict | None = None) -> FMReceiver:
     plugin._rec_lock = threading.Lock()
     cfg = config or {}
     plugin._max_recording_seconds = int(cfg.get("max_recording_seconds", 3600))
-    plugin._max_recording_size_bytes = (
-        int(cfg.get("max_recording_size_mb", 500)) * 1024 * 1024
-    )
+    plugin._max_recording_size_bytes = int(cfg.get("max_recording_size_mb", 500)) * 1024 * 1024
     plugin._max_recordings = int(cfg.get("max_recordings", 50))
     return plugin
 
@@ -97,18 +95,20 @@ class TestValidateConfig:
         assert p._freq_max_mhz == 2200.0
 
     def test_custom_config(self):
-        p = _make_plugin({
-            "default_frequency_mhz": 121.5,
-            "default_mode": "am",
-            "gain_db": 34.0,
-            "squelch_level": 50,
-            "default_volume": 50,
-            "ppm": 3,
-            "enable_bias_tee": True,
-            "max_restarts": 10,
-            "freq_min_mhz": 24.0,
-            "freq_max_mhz": 1766.0,
-        })
+        p = _make_plugin(
+            {
+                "default_frequency_mhz": 121.5,
+                "default_mode": "am",
+                "gain_db": 34.0,
+                "squelch_level": 50,
+                "default_volume": 50,
+                "ppm": 3,
+                "enable_bias_tee": True,
+                "max_restarts": 10,
+                "freq_min_mhz": 24.0,
+                "freq_max_mhz": 1766.0,
+            }
+        )
         assert p._frequency_hz == 121_500_000
         assert p._mode == "am"
         assert p._gain_db == 34.0
@@ -147,15 +147,17 @@ class TestValidateConfig:
             assert p._output_rate_hz == defaults["output_rate_hz"]
 
     def test_user_presets_merge(self):
-        p = _make_plugin({
-            "presets": {
-                "my_band": {
-                    "label": "Custom",
-                    "mode": "am",
-                    "frequencies": [{"freq_mhz": 100.0, "label": "Test"}],
+        p = _make_plugin(
+            {
+                "presets": {
+                    "my_band": {
+                        "label": "Custom",
+                        "mode": "am",
+                        "frequencies": [{"freq_mhz": 100.0, "label": "Test"}],
+                    }
                 }
             }
-        })
+        )
         assert "my_band" in p._presets
         assert p._presets["my_band"]["label"] == "Custom"
         assert "aviation" in p._presets
@@ -395,11 +397,22 @@ class TestSnapshot:
         p = _make_plugin()
         snap = p.get_snapshot()
         expected_keys = {
-            "status", "playing", "frequency_hz", "frequency_mhz",
-            "mode", "gain_db", "squelch_level", "volume",
-            "signal_rms", "signal_db", "output_rate_hz",
-            "freq_min_mhz", "freq_max_mhz",
-            "restart_count", "error", "dead_zone_warning",
+            "status",
+            "playing",
+            "frequency_hz",
+            "frequency_mhz",
+            "mode",
+            "gain_db",
+            "squelch_level",
+            "volume",
+            "signal_rms",
+            "signal_db",
+            "output_rate_hz",
+            "freq_min_mhz",
+            "freq_max_mhz",
+            "restart_count",
+            "error",
+            "dead_zone_warning",
             "audio_clients",
         }
         assert expected_keys.issubset(set(snap.keys()))
@@ -437,15 +450,17 @@ class TestPresets:
         assert isinstance(fm["frequencies"], list)
 
     def test_user_preset_merged(self):
-        p = _make_plugin({
-            "presets": {
-                "custom": {
-                    "label": "Custom Band",
-                    "mode": "am",
-                    "frequencies": [{"freq_mhz": 200.0, "label": "Test"}],
+        p = _make_plugin(
+            {
+                "presets": {
+                    "custom": {
+                        "label": "Custom Band",
+                        "mode": "am",
+                        "frequencies": [{"freq_mhz": 200.0, "label": "Test"}],
+                    }
                 }
             }
-        })
+        )
         presets = p.get_presets()
         assert "custom" in presets
         assert presets["custom"]["label"] == "Custom Band"
@@ -505,13 +520,17 @@ class TestStatePersistence:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         state_dir = tmp_path / "reticulumpi" / "fm_receiver"
         state_dir.mkdir(parents=True)
-        (state_dir / _STATE_FILENAME).write_text(json.dumps({
-            "frequency_mhz": 121.5,
-            "mode": "am",
-            "gain_db": 34.0,
-            "squelch_level": 50,
-            "volume": 0.6,
-        }))
+        (state_dir / _STATE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "frequency_mhz": 121.5,
+                    "mode": "am",
+                    "gain_db": 34.0,
+                    "squelch_level": 50,
+                    "volume": 0.6,
+                }
+            )
+        )
         p = _make_plugin()
         p._load_state()
         assert p._frequency_hz == 121_500_000
@@ -526,10 +545,14 @@ class TestStatePersistence:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         state_dir = tmp_path / "reticulumpi" / "fm_receiver"
         state_dir.mkdir(parents=True)
-        (state_dir / _STATE_FILENAME).write_text(json.dumps({
-            "frequency_mhz": 9999.0,
-            "mode": "wbfm",
-        }))
+        (state_dir / _STATE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "frequency_mhz": 9999.0,
+                    "mode": "wbfm",
+                }
+            )
+        )
         p = _make_plugin()
         orig_freq = p._frequency_hz
         p._load_state()
@@ -539,9 +562,13 @@ class TestStatePersistence:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         state_dir = tmp_path / "reticulumpi" / "fm_receiver"
         state_dir.mkdir(parents=True)
-        (state_dir / _STATE_FILENAME).write_text(json.dumps({
-            "mode": "cw",
-        }))
+        (state_dir / _STATE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "mode": "cw",
+                }
+            )
+        )
         p = _make_plugin()
         p._load_state()
         assert p._mode == "wbfm"
@@ -565,9 +592,13 @@ class TestStatePersistence:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         state_dir = tmp_path / "reticulumpi" / "fm_receiver"
         state_dir.mkdir(parents=True)
-        (state_dir / _STATE_FILENAME).write_text(json.dumps({
-            "gain_db": None,
-        }))
+        (state_dir / _STATE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "gain_db": None,
+                }
+            )
+        )
         p = _make_plugin({"gain_db": 20.0})
         p._load_state()
         assert p._gain_db is None
@@ -576,9 +607,13 @@ class TestStatePersistence:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         state_dir = tmp_path / "reticulumpi" / "fm_receiver"
         state_dir.mkdir(parents=True)
-        (state_dir / _STATE_FILENAME).write_text(json.dumps({
-            "gain_db": 100.0,
-        }))
+        (state_dir / _STATE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "gain_db": 100.0,
+                }
+            )
+        )
         p = _make_plugin()
         p._load_state()
         assert p._gain_db is None
@@ -730,9 +765,13 @@ class TestFavorites:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         fav_dir = tmp_path / "reticulumpi" / "fm_receiver"
         fav_dir.mkdir(parents=True)
-        (fav_dir / _FAVORITES_FILENAME).write_text(json.dumps([
-            {"id": "abc", "label": "Saved", "frequency_mhz": 101.1, "mode": "wbfm"},
-        ]))
+        (fav_dir / _FAVORITES_FILENAME).write_text(
+            json.dumps(
+                [
+                    {"id": "abc", "label": "Saved", "frequency_mhz": 101.1, "mode": "wbfm"},
+                ]
+            )
+        )
         p = _make_plugin()
         p._load_favorites()
         assert len(p.get_favorites()) == 1
@@ -878,6 +917,7 @@ class TestRecording:
         p.start_recording()
         p.stop_recording()
         import time
+
         time.sleep(0.01)
         p.start_recording()
         p.stop_recording()
@@ -956,6 +996,7 @@ class TestRecording:
         p._playing = True
         p.start_recording()
         import time
+
         time.sleep(0.01)
         p._write_recording_chunk(b"\x00" * 10)
         assert p._recording is False

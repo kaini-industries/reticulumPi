@@ -225,9 +225,7 @@ class TestCooldown:
         assert responder._check_cooldown("!aabb1122") is True
         # Simulate time passing beyond cooldown
         with responder._lock:
-            responder._node_cooldowns["!aabb1122"] = (
-                time.time() - responder._cooldown_seconds - 1
-            )
+            responder._node_cooldowns["!aabb1122"] = time.time() - responder._cooldown_seconds - 1
         assert responder._check_cooldown("!aabb1122") is True
 
     def test_different_nodes_independent(self, responder):
@@ -549,14 +547,16 @@ class TestIndividualCommands:
 
     def test_weather_success(self, responder):
         geo_response = {
-            "results": [{
-                "latitude": 30.27,
-                "longitude": -97.74,
-                "name": "Austin",
-                "admin1": "Texas",
-                "country": "United States",
-                "country_code": "US",
-            }]
+            "results": [
+                {
+                    "latitude": 30.27,
+                    "longitude": -97.74,
+                    "name": "Austin",
+                    "admin1": "Texas",
+                    "country": "United States",
+                    "country_code": "US",
+                }
+            ]
         }
         weather_response = {
             "current": {
@@ -570,9 +570,7 @@ class TestIndividualCommands:
         call_count = [0]
 
         def _side_effect(url, **kwargs):
-            result = (
-                geo_response if call_count[0] == 0 else weather_response
-            )
+            result = geo_response if call_count[0] == 0 else weather_response
             call_count[0] += 1
             return _mock_urlopen(result)
 
@@ -744,14 +742,10 @@ class TestStartStop:
             bus = mock_app.event_bus
             wrapper = bus._offload_map.get(plugin._on_mesh_message)
             assert wrapper is not None
-            assert wrapper in bus._subscribers.get(
-                events.MESHTASTIC_MESSAGE_RECEIVED, []
-            )
+            assert wrapper in bus._subscribers.get(events.MESHTASTIC_MESSAGE_RECEIVED, [])
             mc_wrapper = bus._offload_map.get(plugin._on_meshcore_message)
             assert mc_wrapper is not None
-            assert mc_wrapper in bus._subscribers.get(
-                events.MESHCORE_MESSAGE_RECEIVED, []
-            )
+            assert mc_wrapper in bus._subscribers.get(events.MESHCORE_MESSAGE_RECEIVED, [])
         finally:
             plugin.stop()
 
@@ -764,12 +758,8 @@ class TestStartStop:
         plugin.start()
         plugin.stop()
         bus = mock_app.event_bus
-        assert bus._subscribers.get(
-            events.MESHTASTIC_MESSAGE_RECEIVED, []
-        ) == []
-        assert bus._subscribers.get(
-            events.MESHCORE_MESSAGE_RECEIVED, []
-        ) == []
+        assert bus._subscribers.get(events.MESHTASTIC_MESSAGE_RECEIVED, []) == []
+        assert bus._subscribers.get(events.MESHCORE_MESSAGE_RECEIVED, []) == []
 
     def test_get_status(self, responder, mock_gateway, mock_app):
         mock_app.get_plugin.return_value = mock_gateway

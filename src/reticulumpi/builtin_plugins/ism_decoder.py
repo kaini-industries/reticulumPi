@@ -33,9 +33,7 @@ class ISMDecoder(SignalPluginBase):
         self._decoder_bin = str(self.config.get("decoder_bin", "rtl_433"))
         self._gain = self.config.get("gain", None)
         self._ppm = int(self.config.get("ppm", 0))
-        self._protocols: list[int] = [
-            int(p) for p in self.config.get("protocols", [])
-        ]
+        self._protocols: list[int] = [int(p) for p in self.config.get("protocols", [])]
         self._protocol_blacklist: list[int] = [
             int(p) for p in self.config.get("protocol_blacklist", [])
         ]
@@ -69,12 +67,18 @@ class ISMDecoder(SignalPluginBase):
 
         cmd = [
             decoder,
-            "-d", str(device_index),
-            "-F", "json",
-            "-M", "utc",
-            "-M", "protocol",
-            "-M", "level",
-            "-p", str(self._ppm),
+            "-d",
+            str(device_index),
+            "-F",
+            "json",
+            "-M",
+            "utc",
+            "-M",
+            "protocol",
+            "-M",
+            "level",
+            "-p",
+            str(self._ppm),
         ]
         if self._gain is not None:
             cmd.extend(["-g", str(self._gain)])
@@ -149,9 +153,14 @@ class ISMDecoder(SignalPluginBase):
             self._stats["devices_total"] += 1
             self.log.info("New ISM device: %s", key)
             try:
-                self.event_bus.publish(events.ISM_DEVICE_DETECTED, {
-                    "key": key, "model": model, "id": dev_id,
-                })
+                self.event_bus.publish(
+                    events.ISM_DEVICE_DETECTED,
+                    {
+                        "key": key,
+                        "model": model,
+                        "id": dev_id,
+                    },
+                )
             except Exception:
                 pass
 
@@ -186,19 +195,21 @@ class ISMDecoder(SignalPluginBase):
     def _evict_stale(self) -> None:
         now = time.time()
         stale_keys = [
-            k for k, v in self._devices.items()
-            if now - v["last_seen"] > self._stale_timeout
+            k for k, v in self._devices.items() if now - v["last_seen"] > self._stale_timeout
         ]
         for key in stale_keys:
             dev = self._devices.pop(key)
             self.log.debug("ISM device lost: %s", key)
             try:
-                self.event_bus.publish(events.ISM_DEVICE_LOST, {
-                    "key": key,
-                    "model": dev.get("model"),
-                    "id": dev.get("id"),
-                    "last_seen": dev.get("last_seen"),
-                })
+                self.event_bus.publish(
+                    events.ISM_DEVICE_LOST,
+                    {
+                        "key": key,
+                        "model": dev.get("model"),
+                        "id": dev.get("id"),
+                        "last_seen": dev.get("last_seen"),
+                    },
+                )
             except Exception:
                 pass
         self._update_snapshot_cache()
