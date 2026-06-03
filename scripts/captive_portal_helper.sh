@@ -124,13 +124,13 @@ cmd_cleanup() {
     fi
 
     if [ -f "$DNSMASQ_CONF" ]; then
-        rm -f "$DNSMASQ_CONF"
+        rm -f "$DNSMASQ_CONF" || true
         if systemctl is-active --quiet dnsmasq; then
             systemctl reload dnsmasq 2>/dev/null || true
         fi
     fi
 
-    rm -f "$STATE_FILE"
+    rm -f "$STATE_FILE" || true
 
     echo "cleaned"
 }
