@@ -1238,6 +1238,74 @@
     if (lanEl) lanEl.textContent = lanIp || '';
   }
 
+  // --- Toast notifications ---
+
+  var _toastContainer = null;
+
+  function _ensureToastContainer() {
+    if (_toastContainer) return _toastContainer;
+    _toastContainer = document.createElement('div');
+    _toastContainer.id = 'toast-container';
+    document.body.appendChild(_toastContainer);
+    return _toastContainer;
+  }
+
+  function showToast(message, level, durationMs) {
+    if (durationMs === undefined) durationMs = 6000;
+    var container = _ensureToastContainer();
+    var el = document.createElement('div');
+    el.className = 'toast toast-' + (level || 'info');
+    el.textContent = message;
+    container.appendChild(el);
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() { el.classList.add('show'); });
+    });
+    function dismiss() {
+      el.classList.remove('show');
+      el.classList.add('hide');
+      el.addEventListener('transitionend', function() { el.remove(); }, {once: true});
+      setTimeout(function() { el.remove(); }, 400);
+    }
+    el.addEventListener('click', dismiss);
+    if (durationMs > 0) setTimeout(dismiss, durationMs);
+  }
+  RPI.showToast = showToast;
+
+  // --- Firmware hang banner & events ---
+
+  var _FW_REASONS = {
+    usb_disappeared: 'USB device disappeared',
+    probe_timeout: 'device not responding to probe',
+    serial_open_timeout: 'serial port open failure'
+  };
+
+  function updateFirmwareHangBanner(hang, reason) {
+    var banner = document.getElementById('firmware-hang-banner');
+    if (!banner) return;
+    if (hang) {
+      var reasonText = _FW_REASONS[reason] || 'device unresponsive';
+      banner.textContent = 'Meshtastic Firmware Hang — ' + reasonText;
+      banner.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+
+  var _lastFwHang = false;
+
+  function handleFirmwareEvent(data) {
+    if (data.hang) {
+      var reasonText = _FW_REASONS[data.reason] || 'device unresponsive';
+      showToast('Meshtastic firmware hang: ' + reasonText, 'error', 0);
+      updateFirmwareHangBanner(true, data.reason);
+    } else {
+      showToast('Meshtastic firmware recovered', 'success', 8000);
+      updateFirmwareHangBanner(false);
+    }
+    _lastFwHang = data.hang;
+    if (RPI.onFirmwareEvent) RPI.onFirmwareEvent(data);
+  }
+
   // --- Config ---
 
   function fetchConfig() {
@@ -1415,6 +1483,14 @@
     if (d.connectivity) updateConnectivity(d.connectivity);
     if (d.routing && RPI.updateRoutingSummary) RPI.updateRoutingSummary(d.routing);
     if (d.meshtastic_device && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(d.meshtastic_device);
+    if (d.meshtastic_status) {
+      var _fw = d.meshtastic_status.firmware_watchdog;
+      if (_fw && _fw.enabled) {
+        var _fwHang = !!_fw.hang_detected;
+        updateFirmwareHangBanner(_fwHang, _fw.hang_reason || null);
+        _lastFwHang = _fwHang;
+      }
+    }
     if (d.meshtastic_nodes) {
       if (RPI.updateMeshtastic) RPI.updateMeshtastic(d.meshtastic_status || {}, d.meshtastic_nodes);
       if (RPI.updateMap) RPI.updateMap(d.meshtastic_nodes);
@@ -1519,6 +1595,10 @@
         }
         if (msg.type === 'internet_status' && msg.data) {
           updateInternetStatus(msg.data);
+          return;
+        }
+        if (msg.type === 'firmware_status' && msg.data) {
+          handleFirmwareEvent(msg.data);
           return;
         }
         if (msg.type === 'offgrid_mode_changed' && msg.data) {

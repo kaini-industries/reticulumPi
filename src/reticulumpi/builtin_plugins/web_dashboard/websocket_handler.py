@@ -1050,6 +1050,10 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.INTERNET_ONLINE, _on_internet_event)
         event_bus.subscribe(_events.INTERNET_OFFLINE, _on_internet_event)
         event_bus.subscribe(_events.OFFGRID_MODE_CHANGED, _on_offgrid_event)
+        event_bus.subscribe(_events.MESHTASTIC_FIRMWARE_HANG, _on_firmware_event)
+        event_bus.subscribe(
+            _events.MESHTASTIC_FIRMWARE_RECOVERED, _on_firmware_event
+        )
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -1079,6 +1083,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_alert_event)
             event_bus.unsubscribe_all(_on_internet_event)
             event_bus.unsubscribe_all(_on_offgrid_event)
+            event_bus.unsubscribe_all(_on_firmware_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _spectrum_task:
@@ -1356,6 +1361,27 @@ def _on_internet_event(event_type: str, data: dict) -> None:
     }
     try:
         _ws_loop.call_soon_threadsafe(_schedule_push, "internet_status", payload)
+    except RuntimeError:
+        pass
+
+
+def _on_firmware_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for MESHTASTIC_FIRMWARE_HANG/RECOVERED."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    from reticulumpi import events as _ev
+
+    payload = {
+        "hang": event_type == _ev.MESHTASTIC_FIRMWARE_HANG,
+        "reason": data.get("reason"),
+        "silence_seconds": data.get("silence_seconds"),
+        "total_hangs": data.get("total_hangs"),
+        "total_resets": data.get("total_resets"),
+        "consecutive_failures": data.get("consecutive_failures"),
+        "duration_seconds": data.get("duration_seconds"),
+    }
+    try:
+        _ws_loop.call_soon_threadsafe(_schedule_push, "firmware_status", payload)
     except RuntimeError:
         pass
 

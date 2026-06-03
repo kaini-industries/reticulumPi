@@ -14,6 +14,17 @@
   var _mshVisible = 25;
   var _mshConnected = false;
   var _fwWatchdog = null;
+  var _fwHangReason = null;
+
+  var _FW_REASON_SHORT = {
+    usb_disappeared: 'USB gone',
+    probe_timeout: 'no probe response',
+    serial_open_timeout: 'serial open failure'
+  };
+
+  R.onFirmwareEvent = function(data) {
+    _fwHangReason = data.hang ? (data.reason || null) : null;
+  };
 
   function sortMeshtasticNodes(nodes, key, asc) {
     return nodes.slice().sort(function(a, b) {
@@ -188,6 +199,11 @@
     var connected = status.connected;
     _mshConnected = connected;
     _fwWatchdog = status.firmware_watchdog || null;
+    if (_fwWatchdog && _fwWatchdog.hang_detected && _fwWatchdog.hang_reason) {
+      _fwHangReason = _fwWatchdog.hang_reason;
+    } else if (_fwWatchdog && !_fwWatchdog.hang_detected) {
+      _fwHangReason = null;
+    }
     var hangDetected = _fwWatchdog && _fwWatchdog.hang_detected;
     var openFailing = _fwWatchdog && _fwWatchdog.consecutive_open_failures > 0;
     if (badge) {
@@ -453,6 +469,9 @@
     if (hangDetected) {
       state = 'crit';
       stateLabel = 'Hang Detected';
+      if (_fwHangReason && _FW_REASON_SHORT[_fwHangReason]) {
+        stateLabel += ' — ' + _FW_REASON_SHORT[_fwHangReason];
+      }
     } else if (pct > 75) {
       state = 'warn';
       stateLabel = 'Degraded';
@@ -497,6 +516,13 @@
         label: 'Open Fails',
         value: wd.consecutive_open_failures + '/' + (wd.open_failure_threshold || 3),
         cls: wd.consecutive_open_failures >= (wd.open_failure_threshold || 3) ? 'metric-crit' : 'metric-warn'
+      });
+    }
+    if (wd.open_failure_duration_seconds > 0) {
+      stats.push({
+        label: 'Failing For',
+        value: formatSilence(wd.open_failure_duration_seconds),
+        cls: 'metric-crit'
       });
     }
     if (!wd.auto_reset) {

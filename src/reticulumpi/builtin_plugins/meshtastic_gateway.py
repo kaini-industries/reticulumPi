@@ -953,6 +953,7 @@ class MeshtasticGateway(PluginBase):
         self._last_fw_probe_time: float = 0.0
         self._fw_reset_timestamps: list[float] = []
         self._fw_hang_detected: bool = False
+        self._fw_hang_reason: str | None = None
         self._fw_total_hangs: int = 0
         self._fw_total_resets: int = 0
         self._fw_open_failure_threshold: int = fw_wd_cfg.get("open_failure_threshold", 3)
@@ -1337,6 +1338,7 @@ class MeshtasticGateway(PluginBase):
             self._connect_count += 1
             self._last_device_activity = time.monotonic()
             self._fw_hang_detected = False
+            self._fw_hang_reason = None
 
         # Identify ourselves
         node_id = self._get_own_node_id(iface)
@@ -1724,6 +1726,7 @@ class MeshtasticGateway(PluginBase):
             with self._lock:
                 self._last_device_activity = time.monotonic()
                 self._fw_hang_detected = False
+            self._fw_hang_reason = None
             try:
                 # Inner loop: refresh device info from the LIVE interface
                 # without closing it.  The meshtastic library's reader
@@ -2304,6 +2307,7 @@ class MeshtasticGateway(PluginBase):
         now = time.monotonic()
         with self._lock:
             self._fw_hang_detected = True
+            self._fw_hang_reason = reason
             self._fw_total_hangs += 1
 
         self.event_bus.publish(
@@ -2418,6 +2422,7 @@ class MeshtasticGateway(PluginBase):
 
         with self._lock:
             self._fw_hang_detected = True
+            self._fw_hang_reason = "serial_open_timeout"
             self._fw_total_hangs += 1
 
         self.log.error(
@@ -2739,6 +2744,7 @@ class MeshtasticGateway(PluginBase):
                 self._mqtt_suspended = False
                 self._last_device_activity = time.monotonic()
                 self._fw_hang_detected = False
+            self._fw_hang_reason = None
         if was_disconnected:
             self.log.info("Meshtastic connection re-established (auto-reconnect)")
             self.event_bus.publish(
@@ -3004,6 +3010,7 @@ class MeshtasticGateway(PluginBase):
             last_disconnect_time = self._last_disconnect_time
             fw_watchdog_enabled = self._fw_watchdog_enabled
             fw_hang_detected = self._fw_hang_detected
+            fw_hang_reason = self._fw_hang_reason
             last_device_activity = self._last_device_activity
             fw_silence_timeout = self._fw_silence_timeout
             fw_total_hangs = self._fw_total_hangs
@@ -3067,6 +3074,7 @@ class MeshtasticGateway(PluginBase):
             status["firmware_watchdog"] = {
                 "enabled": True,
                 "hang_detected": fw_hang_detected,
+                "hang_reason": fw_hang_reason,
                 "silence_seconds": silence,
                 "silence_timeout": int(fw_silence_timeout),
                 "total_hangs": fw_total_hangs,

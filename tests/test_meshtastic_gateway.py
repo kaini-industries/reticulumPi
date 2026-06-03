@@ -2096,6 +2096,7 @@ class TestStartupHangDetection:
         plugin._fw_max_resets_per_hour = 3
         plugin._fw_reset_timestamps = []
         plugin._fw_hang_detected = False
+        plugin._fw_hang_reason = None
         plugin._fw_total_hangs = 0
         plugin._fw_total_resets = 0
         plugin._fw_silence_timeout = 300.0

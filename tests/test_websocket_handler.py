@@ -28,6 +28,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _heartbeat_interval,
     _lookup_message_row,
     _on_alert_event,
+    _on_firmware_event,
     _on_internet_event,
     _on_message_event,
     _on_status_event,
@@ -2864,6 +2865,75 @@ class TestOnInternetEvent:
             _ws_clients.discard(ws)
             wsh_module._ws_loop = None
             wsh_module._ws_plugin = None
+
+
+# ── Firmware event tests ─────────────────────────────────────────────
+
+
+class TestOnFirmwareEvent:
+    def test_hang_event_payload(self):
+        loop = MagicMock()
+        captured = []
+        loop.call_soon_threadsafe.side_effect = lambda fn, *a: captured.append(a)
+        ws = MagicMock()
+
+        wsh_module._ws_loop = loop
+        _ws_clients.add(ws)
+        try:
+            _on_firmware_event(
+                "meshtastic.firmware_hang",
+                {"reason": "usb_disappeared", "silence_seconds": 320, "total_hangs": 2},
+            )
+            assert len(captured) == 1
+            push_type, payload = captured[0]
+            assert push_type == "firmware_status"
+            assert payload["hang"] is True
+            assert payload["reason"] == "usb_disappeared"
+            assert payload["silence_seconds"] == 320
+            assert payload["total_hangs"] == 2
+        finally:
+            _ws_clients.discard(ws)
+            wsh_module._ws_loop = None
+
+    def test_recovered_event_payload(self):
+        loop = MagicMock()
+        captured = []
+        loop.call_soon_threadsafe.side_effect = lambda fn, *a: captured.append(a)
+        ws = MagicMock()
+
+        wsh_module._ws_loop = loop
+        _ws_clients.add(ws)
+        try:
+            _on_firmware_event(
+                "meshtastic.firmware_recovered",
+                {"total_resets": 3},
+            )
+            assert len(captured) == 1
+            push_type, payload = captured[0]
+            assert push_type == "firmware_status"
+            assert payload["hang"] is False
+            assert payload["total_resets"] == 3
+        finally:
+            _ws_clients.discard(ws)
+            wsh_module._ws_loop = None
+
+    def test_noop_when_no_clients(self):
+        loop = MagicMock()
+        wsh_module._ws_loop = loop
+        try:
+            _on_firmware_event("meshtastic.firmware_hang", {"reason": "probe_timeout"})
+            loop.call_soon_threadsafe.assert_not_called()
+        finally:
+            wsh_module._ws_loop = None
+
+    def test_noop_when_loop_missing(self):
+        wsh_module._ws_loop = None
+        ws = MagicMock()
+        _ws_clients.add(ws)
+        try:
+            _on_firmware_event("meshtastic.firmware_hang", {"reason": "probe_timeout"})
+        finally:
+            _ws_clients.discard(ws)
 
 
 # ── Origin validation tests ──────────────────────────────────────────

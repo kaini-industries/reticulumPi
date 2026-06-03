@@ -5188,6 +5188,56 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
 .nt-chip-mc .nt-chip-remove { color: rgba(255, 107, 107, 0.7); }
 .nt-source-badge { font-size: 0.6rem; vertical-align: middle; }
 
+/* ── Toast notifications ───────────────────────────────────────── */
+#toast-container {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  min-width: 260px;
+  max-width: 420px;
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(40px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.toast.show { opacity: 1; transform: translateX(0); }
+.toast.hide { opacity: 0; transform: translateX(40px); }
+.toast-info    { background: #1a2a44; color: var(--cyan); border: 1px solid rgba(0,229,255,0.25); }
+.toast-warn    { background: #2a2000; color: var(--yellow); border: 1px solid rgba(255,182,39,0.3); }
+.toast-error   { background: #2a0a0a; color: var(--red); border: 1px solid rgba(255,23,68,0.35); }
+.toast-success { background: #0a2a14; color: var(--green); border: 1px solid rgba(0,255,159,0.3); }
+
+/* ── Firmware hang banner ─────────────────────────────────────── */
+.firmware-hang-banner {
+  background: #b71c1c;
+  color: #fff;
+  text-align: center;
+  padding: 8px 16px;
+  font-size: 0.9em;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1075;
+  animation: fw-banner-pulse 2s ease-in-out infinite;
+}
+@keyframes fw-banner-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
 /* ── Metric summary ────────────────────────────────────────────── */
 .metric-summary {
   padding: 0.6rem 1rem;
