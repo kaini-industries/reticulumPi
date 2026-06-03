@@ -151,8 +151,20 @@ def release_device(configured: str, caller: str = "") -> None:
             log.debug("Released RTL-SDR device '%s' (caller: %s)", configured, caller or "?")
 
 
+def invalidate_cache() -> None:
+    """Clear cached device enumeration so the next resolve re-enumerates USB.
+
+    Unlike ``reset_cache``, this preserves device claims.  Use when a
+    dongle may have dropped off USB and re-enumerated at a different
+    index.
+    """
+    global _cache
+    with _cache_lock:
+        _cache = None
+
+
 def reset_cache() -> None:
-    """Clear cached enumeration (for testing)."""
+    """Clear cached enumeration and claims (for testing)."""
     global _cache
     with _cache_lock:
         _cache = None

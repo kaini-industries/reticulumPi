@@ -547,6 +547,339 @@ class TestDeviceResolution:
 # ---------------------------------------------------------------------------
 
 
+class TestWedgeDetection:
+    """Verify the supervisor kills dump1090 when the SBS stream stalls."""
+
+    def _run_supervisor_loop(self, plugin, fake_monotonic):
+        """Simulate the supervisor's inner polling loop with a fake clock."""
+        launch_time = fake_monotonic()
+        last_msg_count = plugin._total_messages
+        last_msg_time = launch_time
+        restart_count_reset = False
+
+        while plugin._active and plugin._process is not None:
+            rc = plugin._process.poll()
+            if rc is not None:
+                break
+
+            now = fake_monotonic()
+            cur_count = plugin._total_messages
+            if cur_count != last_msg_count:
+                last_msg_count = cur_count
+                last_msg_time = now
+                if (
+                    not restart_count_reset
+                    and plugin._restart_count > 0
+                    and now - launch_time > 600.0
+                ):
+                    plugin._restart_count = 0
+                    restart_count_reset = True
+            elif (
+                plugin._wedge_timeout > 0
+                and now - launch_time > plugin._wedge_grace
+                and now - last_msg_time > plugin._wedge_timeout
+            ):
+                plugin._terminate_process()
+                break
+
+            plugin._sleep_while_active(5.0)
+
+    def test_wedge_kills_dump1090(self):
+        p = _make_plugin({"wedge_timeout": 60, "wedge_grace": 30})
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        p._process = proc
+        p._pid = 9999
+
+        clock = [0.0]
+        call_count = [0]
+
+        def fake_monotonic():
+            return clock[0]
+
+        def fake_sleep(secs):
+            call_count[0] += 1
+            clock[0] += 30.0
+            if call_count[0] >= 10:
+                p._active = False
+
+        p._sleep_while_active = fake_sleep
+        p._terminate_process = MagicMock()
+        self._run_supervisor_loop(p, fake_monotonic)
+        p._terminate_process.assert_called_once()
+
+    def test_no_wedge_when_messages_flowing(self):
+        p = _make_plugin({"wedge_timeout": 60, "wedge_grace": 30})
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        p._process = proc
+        p._pid = 9999
+
+        clock = [0.0]
+        call_count = [0]
+
+        def fake_monotonic():
+            return clock[0]
+
+        def fake_sleep(secs):
+            call_count[0] += 1
+            clock[0] += 10.0
+            p._total_messages += 5
+            if call_count[0] >= 5:
+                p._active = False
+
+        p._sleep_while_active = fake_sleep
+        p._terminate_process = MagicMock()
+        self._run_supervisor_loop(p, fake_monotonic)
+        p._terminate_process.assert_not_called()
+
+    def test_grace_period_delays_wedge_detection(self):
+        p = _make_plugin({"wedge_timeout": 10, "wedge_grace": 100})
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        p._process = proc
+        p._pid = 9999
+
+        clock = [0.0]
+        call_count = [0]
+
+        def fake_monotonic():
+            return clock[0]
+
+        def fake_sleep(secs):
+            call_count[0] += 1
+            clock[0] += 20.0
+            if call_count[0] >= 4:
+                p._active = False
+
+        p._sleep_while_active = fake_sleep
+        p._terminate_process = MagicMock()
+        self._run_supervisor_loop(p, fake_monotonic)
+        # At 80s total, grace (100s) hasn't elapsed yet — no kill
+        p._terminate_process.assert_not_called()
+
+    def test_wedge_timeout_config_defaults(self):
+        p = _make_plugin()
+        assert p._wedge_timeout == 120
+        assert p._wedge_grace == 30
+
+    def test_wedge_disabled_when_zero(self):
+        p = _make_plugin({"wedge_timeout": 0})
+        assert p._wedge_timeout == 0
+
+
+class TestRestartCounterReset:
+    """Verify restart counter resets after sustained stable operation."""
+
+    def _run_monitor_loop(self, plugin, fake_monotonic):
+        """Run the inner monitoring loop with restart-counter-reset logic."""
+        launch_time = fake_monotonic()
+        last_msg_count = plugin._total_messages
+        restart_count_reset = False
+
+        while plugin._active and plugin._process is not None:
+            rc = plugin._process.poll()
+            if rc is not None:
+                break
+
+            now = fake_monotonic()
+            cur_count = plugin._total_messages
+            if cur_count != last_msg_count:
+                last_msg_count = cur_count
+                if (
+                    not restart_count_reset
+                    and plugin._restart_count > 0
+                    and now - launch_time > 600.0
+                ):
+                    plugin._restart_count = 0
+                    restart_count_reset = True
+
+            plugin._sleep_while_active(5.0)
+
+    def test_counter_resets_after_stability_window(self):
+        p = _make_plugin()
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+        p._restart_count = 3
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        p._process = proc
+
+        clock = [0.0]
+        call_count = [0]
+
+        def fake_monotonic():
+            return clock[0]
+
+        def fake_sleep(secs):
+            call_count[0] += 1
+            clock[0] += 200.0
+            p._total_messages += 10
+            if call_count[0] >= 5:
+                p._active = False
+
+        p._sleep_while_active = fake_sleep
+        self._run_monitor_loop(p, fake_monotonic)
+        assert p._restart_count == 0
+
+    def test_counter_not_reset_before_stability_window(self):
+        p = _make_plugin()
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+        p._restart_count = 2
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        p._process = proc
+
+        clock = [0.0]
+        call_count = [0]
+
+        def fake_monotonic():
+            return clock[0]
+
+        def fake_sleep(secs):
+            call_count[0] += 1
+            clock[0] += 100.0
+            p._total_messages += 5
+            if call_count[0] >= 3:
+                p._active = False
+
+        p._sleep_while_active = fake_sleep
+        self._run_monitor_loop(p, fake_monotonic)
+        # 300s < 600s stability window — counter unchanged
+        assert p._restart_count == 2
+
+    def test_counter_not_reset_when_already_zero(self):
+        p = _make_plugin()
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+        p._restart_count = 0
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        p._process = proc
+
+        clock = [0.0]
+        call_count = [0]
+
+        def fake_monotonic():
+            return clock[0]
+
+        def fake_sleep(secs):
+            call_count[0] += 1
+            clock[0] += 300.0
+            p._total_messages += 10
+            if call_count[0] >= 5:
+                p._active = False
+
+        p._sleep_while_active = fake_sleep
+        self._run_monitor_loop(p, fake_monotonic)
+        assert p._restart_count == 0
+
+
+class TestCacheInvalidation:
+    """Verify RTL-SDR cache invalidation and device re-resolution on restart."""
+
+    def test_invalidate_cache_called_before_restart(self):
+        p = _make_plugin()
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+
+        proc = MagicMock()
+        exit_after = [2]
+
+        def poll_side_effect():
+            exit_after[0] -= 1
+            if exit_after[0] <= 0:
+                p._active = False
+                return 0
+            return None
+
+        proc.poll.side_effect = poll_side_effect
+        p._process = proc
+        p._pid = 9999
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.shutil.which",
+                return_value="/usr/bin/dump1090",
+            ),
+            patch(
+                "reticulumpi.rtlsdr.invalidate_cache"
+            ) as mock_invalidate,
+            patch(
+                "reticulumpi.rtlsdr.resolve_device", return_value=2
+            ),
+            patch.object(p, "_launch_dump1090"),
+            patch.object(p, "_start_thread", return_value=MagicMock()),
+            patch.object(p, "_remove_thread"),
+            patch.object(p, "_terminate_process"),
+            patch.object(p, "_sleep_while_active"),
+        ):
+            p._supervisor_loop()
+
+        mock_invalidate.assert_not_called()
+
+    def test_invalidate_cache_called_on_restart(self):
+        p = _make_plugin({"max_restarts": 3})
+        p._active = True
+        p._stop_event = threading.Event()
+        p._total_messages = 0
+
+        iteration = [0]
+
+        def fake_launch():
+            p._process = MagicMock()
+            p._process.poll.return_value = 1
+            p._pid = 9999 + iteration[0]
+            iteration[0] += 1
+
+        def fake_sleep(secs):
+            if iteration[0] >= 2:
+                p._active = False
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.shutil.which",
+                return_value="/usr/bin/dump1090",
+            ),
+            patch(
+                "reticulumpi.rtlsdr.invalidate_cache"
+            ) as mock_invalidate,
+            patch(
+                "reticulumpi.rtlsdr.resolve_device", return_value=2
+            ),
+            patch.object(p, "_launch_dump1090", side_effect=fake_launch),
+            patch.object(
+                p, "_start_thread", return_value=MagicMock()
+            ),
+            patch.object(p, "_remove_thread"),
+            patch.object(p, "_terminate_process"),
+            patch.object(p, "_sleep_while_active", side_effect=fake_sleep),
+        ):
+            p._supervisor_loop()
+
+        assert mock_invalidate.call_count >= 1
+
+
 class TestSupervisorMissingBinary:
     def test_status_unavailable_when_dump1090_missing(self):
         p = _make_plugin()

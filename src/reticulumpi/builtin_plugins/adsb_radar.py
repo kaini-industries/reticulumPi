@@ -113,6 +113,8 @@ class AdsbRadarPlugin(PluginBase):
         self._stale_timeout = float(cfg.get("stale_timeout", 300))
         self._max_restarts = int(cfg.get("max_restarts", 5))
         self._max_aircraft = int(cfg.get("max_aircraft", 500))
+        self._wedge_timeout = float(cfg.get("wedge_timeout", 120))
+        self._wedge_grace = float(cfg.get("wedge_grace", 30))
 
         self._receiver_lat: float | None = None
         self._receiver_lon: float | None = None
@@ -257,14 +259,7 @@ class AdsbRadarPlugin(PluginBase):
             )
             return
 
-        try:
-            from reticulumpi.rtlsdr import resolve_device
-
-            self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
-        except RuntimeError as exc:
-            self._set_status("error", str(exc))
-            self.log.error("%s", exc)
-            return
+        from reticulumpi.rtlsdr import invalidate_cache, resolve_device
 
         if self._enable_bias_tee:
             self._rtl_biast_path = shutil.which("rtl_biast")
@@ -274,6 +269,41 @@ class AdsbRadarPlugin(PluginBase):
                 )
 
         while self._active:
+            # Resolve device each iteration.  On restarts the cache has
+            # been invalidated so we re-enumerate USB in case the dongle
+            # dropped off and came back at a different index.
+            try:
+                self._resolved_index = resolve_device(
+                    self._device_id, caller=self.plugin_name
+                )
+            except RuntimeError as exc:
+                if self._restart_count == 0:
+                    self._set_status("error", str(exc))
+                    self.log.error("%s", exc)
+                    return
+                self._restart_count += 1
+                if self._restart_count > self._max_restarts:
+                    self._set_status(
+                        "error",
+                        f"dump1090 exceeded max_restarts ({self._max_restarts})",
+                    )
+                    self.log.error(
+                        "dump1090 exceeded max_restarts (%d); giving up",
+                        self._max_restarts,
+                    )
+                    break
+                backoff = min(60.0, 2.0**self._restart_count)
+                self._set_status("restarting", f"device not found, backoff {backoff:.0f}s")
+                self.log.warning(
+                    "%s — retrying in %.0fs (attempt %d/%d)",
+                    exc,
+                    backoff,
+                    self._restart_count,
+                    self._max_restarts,
+                )
+                self._sleep_while_active(backoff)
+                continue
+
             try:
                 self._launch_dump1090()
             except Exception as exc:
@@ -283,11 +313,49 @@ class AdsbRadarPlugin(PluginBase):
 
             parser = self._start_thread(self._parser_loop, name="adsb-parser")
 
+            launch_time = time.monotonic()
+            last_msg_count = self._total_messages
+            last_msg_time = launch_time
+            restart_count_reset = False
+
             while self._active and self._process is not None:
                 rc = self._process.poll()
                 if rc is not None:
                     self.log.warning("dump1090 exited (code %s)", rc)
                     break
+
+                now = time.monotonic()
+                cur_count = self._total_messages
+                if cur_count != last_msg_count:
+                    last_msg_count = cur_count
+                    last_msg_time = now
+                    if (
+                        not restart_count_reset
+                        and self._restart_count > 0
+                        and now - launch_time > 600.0
+                    ):
+                        self.log.info(
+                            "dump1090 stable for %.0fs; resetting restart "
+                            "counter (was %d)",
+                            now - launch_time,
+                            self._restart_count,
+                        )
+                        self._restart_count = 0
+                        restart_count_reset = True
+                elif (
+                    self._wedge_timeout > 0
+                    and now - launch_time > self._wedge_grace
+                    and now - last_msg_time > self._wedge_timeout
+                ):
+                    self.log.warning(
+                        "No SBS messages for %.0fs — dongle may be wedged; "
+                        "killing dump1090 (PID %s)",
+                        now - last_msg_time,
+                        self._pid,
+                    )
+                    self._terminate_process()
+                    break
+
                 self._sleep_while_active(5.0)
 
             parser.join(timeout=3.0)
@@ -296,6 +364,8 @@ class AdsbRadarPlugin(PluginBase):
 
             if not self._active:
                 break
+
+            invalidate_cache()
 
             self._restart_count += 1
             if self._restart_count > self._max_restarts:

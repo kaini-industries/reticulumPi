@@ -4459,7 +4459,7 @@ body {
 .adsb-emergency-row { background: rgba(248, 81, 73, 0.12) !important; }
 .adsb-emergency-row:hover { background: rgba(248, 81, 73, 0.2) !important; }
 
-.adsb-status-error { color: var(--red); }
+.adsb-status-error { color: var(--red); padding-left: 0.5rem; }
 .adsb-status-starting { color: var(--yellow); }
 .adsb-status-unavailable { color: var(--text-muted); }
 

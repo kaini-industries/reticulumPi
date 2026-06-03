@@ -676,6 +676,7 @@ reticulumpi:
     #  sbs_port: 30003                    # SBS BaseStation TCP port
     #  stale_timeout: 300                 # Remove aircraft after N seconds without a message
     #  max_restarts: 5                    # Subprocess crash-restart cap
+    #  wedge_timeout: 120                 # Kill dump1090 after N seconds of zero messages (dongle wedge)
     #  receiver_lat: null                 # Receiver position for distance calc (or use GPS plugin)
     #  receiver_lon: null
 
