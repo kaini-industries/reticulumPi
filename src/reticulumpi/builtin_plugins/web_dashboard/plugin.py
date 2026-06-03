@@ -133,19 +133,14 @@ class WebDashboardPlugin(PluginBase):
             secret_dir = self.config.get("secret_dir", "~/.config/reticulumpi")
             password_hash, generated_password = load_or_create_password_hash(secret_dir)
             if generated_password:
-                banner = (
-                    "\n"
-                    "============================================================\n"
-                    f"  Web dashboard password (first run): {generated_password}\n"
-                    "  Save this password! It will not be shown again.\n"
-                    "  To reset: delete ~/.config/reticulumpi/dashboard_secret\n"
-                    "  Or set RETICULUMPI_DASHBOARD_PASSWORD env var.\n"
-                    "  Retrieve from journal: journalctl -u reticulumpi | grep password\n"
-                    "============================================================"
+                secret_dir_resolved = os.path.expanduser(secret_dir)
+                pw_file = os.path.join(secret_dir_resolved, "dashboard_password.txt")
+                fd = os.open(pw_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(generated_password + "\n")
+                self.log.warning(
+                    "Generated new dashboard password — saved to %s", pw_file
                 )
-                self.log.warning(banner)
-                # Also print to stdout for interactive use / systemd journal
-                print(banner, flush=True)
         elif plaintext_password and not password_hash:
             self.log.warning(
                 "Using plaintext password in config. Generate a hash with "

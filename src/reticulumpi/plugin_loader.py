@@ -23,10 +23,19 @@ class PluginLoader:
         Returns a dict mapping plugin_name -> plugin class.
         """
         found: dict[str, type[PluginBase]] = {}
+        builtin_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "builtin_plugins"
+        )
         for directory in plugin_dirs:
             if not os.path.isdir(directory):
                 log.warning("Plugin directory does not exist: %s", directory)
                 continue
+            if os.path.abspath(directory) != os.path.abspath(builtin_dir):
+                log.warning(
+                    "Loading plugins from external directory: %s "
+                    "— ensure only trusted code is present",
+                    directory,
+                )
             for filepath in sorted(glob.glob(os.path.join(directory, "*.py"))):
                 basename = os.path.basename(filepath)
                 if basename.startswith("_"):

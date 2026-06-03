@@ -148,7 +148,7 @@ class NomadNetServer(PluginBase):
             stderr=subprocess.STDOUT,
         )
         self._pid = self._process.pid
-        self._start_log_reader(self._process, prefix="nomadnet")
+        self._log_thread = self._start_log_reader(self._process, prefix="nomadnet")
 
     def _terminate_process(self) -> None:
         if self._process is None:
@@ -195,6 +195,9 @@ class NomadNetServer(PluginBase):
                         max_restarts,
                     )
                     try:
+                        old_log = getattr(self, "_log_thread", None)
+                        if old_log is not None:
+                            self._remove_thread(old_log)
                         self._launch_process(self._cmd)
                         self.log.info("NomadNet restarted (PID: %d)", self._pid)
                     except Exception:

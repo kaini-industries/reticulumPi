@@ -45,6 +45,41 @@ class TestPasswordHashing:
         h2 = hash_password("same")
         assert h1 != h2  # Different salts
 
+    def test_rejects_extreme_scrypt_params(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import verify_password
+
+        salt_hex = "aa" * 16
+        hash_hex = "bb" * 32
+        # n=2^20 far exceeds the 2^15 cap
+        crafted = f"scrypt:{salt_hex}:{2**20}:8:2:{hash_hex}"
+        assert not verify_password("anything", crafted)
+
+    def test_rejects_extreme_r_param(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import verify_password
+
+        salt_hex = "aa" * 16
+        hash_hex = "bb" * 32
+        crafted = f"scrypt:{salt_hex}:{2**14}:64:2:{hash_hex}"
+        assert not verify_password("anything", crafted)
+
+    def test_rejects_extreme_p_param(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import verify_password
+
+        salt_hex = "aa" * 16
+        hash_hex = "bb" * 32
+        crafted = f"scrypt:{salt_hex}:{2**14}:8:100:{hash_hex}"
+        assert not verify_password("anything", crafted)
+
+    def test_accepts_valid_v2_params(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import (
+            hash_password,
+            verify_password,
+        )
+
+        pw = "test"
+        hashed = hash_password(pw)
+        assert verify_password(pw, hashed)
+
 
 class TestAutoGeneratePassword:
     def test_generates_new_password_and_saves_hash(self, tmp_path):
@@ -151,11 +186,29 @@ class TestRateLimiter:
         rl.MAX_TRACKED_IPS = 5
         for i in range(10):
             rl.record_attempt(f"10.0.0.{i}")
-        # Inline cap in record_attempt blocks new IPs beyond MAX_TRACKED_IPS
+        # LRU eviction keeps the dict at MAX_TRACKED_IPS
         assert len(rl._attempts) == 5
-        # Existing IPs still tracked correctly
-        assert rl._attempts.get("10.0.0.0") is not None
-        assert rl._attempts.get("10.0.0.9") is None
+        # Most recent IPs are retained, oldest evicted
+        assert rl._attempts.get("10.0.0.9") is not None
+        assert rl._attempts.get("10.0.0.0") is None
+
+    def test_ip_cap_evicts_oldest_instead_of_bypassing(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
+
+        rl = RateLimiter(max_attempts=2, window_seconds=60)
+        rl.MAX_TRACKED_IPS = 3
+        rl.record_attempt("10.0.0.1")
+        rl.record_attempt("10.0.0.2")
+        rl.record_attempt("10.0.0.3")
+        assert len(rl._attempts) == 3
+        # New IP should evict oldest and still be recorded (not bypassed)
+        rl.record_attempt("10.0.0.4")
+        assert len(rl._attempts) == 3
+        assert "10.0.0.4" in rl._attempts
+        assert "10.0.0.1" not in rl._attempts
+        # The new IP is tracked, so a second attempt should count
+        rl.record_attempt("10.0.0.4")
+        assert not rl.is_allowed("10.0.0.4")
 
     def test_gc_loop_cleans_rate_limiter(self):
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
@@ -728,10 +781,11 @@ class TestAPIEndpoints:
             )
             assert resp.status == 200
             data = await resp.json()
-            # Check that password_hash is stripped from plugins
+            # Check that sensitive values are masked in plugins
             for name, cfg in data["data"]["plugins"].items():
-                assert "password_hash" not in cfg
-                assert "password" not in cfg
+                for key in ("password_hash", "password", "secret", "api_key"):
+                    if key in cfg:
+                        assert cfg[key] == "***"
 
         event_loop.run_until_complete(_do())
 
@@ -906,3 +960,48 @@ class TestTmpPasswordFile:
 
         WebDashboardPlugin(app, config)
         assert not os.path.exists(pw_file)
+
+    def test_generated_password_written_to_file(self, tmp_path):
+        """Auto-generated password is saved to a file, not logged."""
+        import os
+        from unittest.mock import patch
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import verify_password
+        from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+        from reticulumpi.event_bus import EventBus
+
+        app = MagicMock()
+        app.event_bus = EventBus()
+        app.identity = MagicMock()
+        app.identity.hash = b"\x01" * 16
+        app.node_name = "TestNode"
+        app.plugins = {}
+        app.get_status.return_value = {"version": "test"}
+
+        secret_dir = str(tmp_path / "secrets")
+        config = {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 18081,
+            "secret_dir": secret_dir,
+        }
+
+        plugin = WebDashboardPlugin(app, config)
+        with (
+            patch.object(plugin, "_setup_ssl", return_value=None),
+            patch.object(plugin, "_start_thread"),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.server.create_app",
+                return_value=MagicMock(),
+            ),
+        ):
+            plugin.start()
+
+        pw_file = os.path.join(secret_dir, "dashboard_password.txt")
+        assert os.path.isfile(pw_file)
+        assert oct(os.stat(pw_file).st_mode & 0o777) == "0o600"
+
+        password = open(pw_file).read().strip()
+        hash_file = os.path.join(secret_dir, "dashboard_secret")
+        stored_hash = open(hash_file).read().strip()
+        assert verify_password(password, stored_hash)

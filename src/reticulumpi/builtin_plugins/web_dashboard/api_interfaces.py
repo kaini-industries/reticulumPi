@@ -97,11 +97,13 @@ def _validate_interface_config(iface_type: str, properties: dict) -> str | None:
         if not _check_type(properties[key], expected_type):
             return f"Property '{key}' must be {expected_type.__name__}, got '{properties[key]}'"
 
-    # Type-check optional properties if present
+    # Type-check optional properties if present; reject unknown keys
     all_props = {**schema.get("required", {}), **schema.get("optional", {})}
     for key, val in properties.items():
         if key.lower() in ("type", "enabled", "mode"):
             continue
+        if key not in all_props:
+            return f"Unknown property '{key}' for {iface_type}"
         expected = all_props.get(key)
         if expected and not _check_type(val, expected):
             return f"Property '{key}' must be {expected.__name__}, got '{val}'"

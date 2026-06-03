@@ -27,6 +27,20 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _check_ws_origin(request: aiohttp.web.Request) -> bool:
+    """Reject cross-origin WebSocket upgrades (CSWSH mitigation)."""
+    origin = request.headers.get("Origin")
+    if not origin:
+        return True
+    try:
+        from urllib.parse import urlparse
+
+        origin_host = urlparse(origin).netloc
+    except Exception:
+        return False
+    return origin_host == request.host
+
+
 def _diff_payload(data: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any]:
     """Return only keys whose value changed since last broadcast."""
     result = {}
@@ -375,6 +389,12 @@ _spectrum_task: asyncio.Task | None = None
 
 async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Dedicated WebSocket for spectrum/waterfall panels."""
+    if not _check_ws_origin(request):
+        ws = aiohttp.web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close(code=4003, message=b"Origin not allowed")
+        return ws
+
     plugin = request.app["plugin"]
     max_clients = plugin.config.get("max_websocket_clients", 10)
 
@@ -588,6 +608,12 @@ async def _handle_snapshot_request(ws: aiohttp.web.WebSocketResponse, plugin: An
 
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Handle WebSocket connections for live metrics streaming."""
+    if not _check_ws_origin(request):
+        ws = aiohttp.web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close(code=4003, message=b"Origin not allowed")
+        return ws
+
     global _cache_hits
     plugin = request.app["plugin"]
     max_clients = plugin.config.get("max_websocket_clients", 10)

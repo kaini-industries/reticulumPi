@@ -37,6 +37,18 @@ SENSITIVE_KEYS = frozenset(
 API_VERSION = "1.0"
 
 
+def _scrub_sensitive(obj: Any) -> Any:
+    """Recursively replace values whose key is in SENSITIVE_KEYS with '***'."""
+    if isinstance(obj, dict):
+        return {
+            k: "***" if k in SENSITIVE_KEYS else _scrub_sensitive(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_scrub_sensitive(item) for item in obj]
+    return obj
+
+
 # ── Shared utilities (imported by sub-modules) ───────────────────────
 
 
@@ -517,7 +529,7 @@ async def handle_config(request: aiohttp.web.Request) -> aiohttp.web.Response:
     # Build sanitized plugin config
     plugins_config = {}
     for name, cfg in config.plugins.items():
-        plugins_config[name] = {k: v for k, v in cfg.items() if k not in SENSITIVE_KEYS}
+        plugins_config[name] = _scrub_sensitive(cfg)
 
     data = {
         "node_name": config.node_name,

@@ -1,5 +1,7 @@
 """Tests for the plugin loader."""
 
+import logging
+
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.plugin_loader import PluginLoader
 
@@ -57,3 +59,19 @@ def test_plugin_instantiation(plugin_dir, mock_app):
     assert plugin._active is True
     plugin.stop()
     assert plugin._active is False
+
+
+def test_discover_warns_on_external_directory(tmp_path, caplog):
+    (tmp_path / "ext_plugin.py").write_text(
+        "from reticulumpi.plugin_base import PluginBase\n"
+        "class ExtPlugin(PluginBase):\n"
+        "    plugin_name = 'ext'\n"
+        "    plugin_version = '1.0.0'\n"
+        "    def start(self): pass\n"
+        "    def stop(self): pass\n"
+    )
+    loader = PluginLoader()
+    with caplog.at_level(logging.WARNING):
+        found = loader.discover([str(tmp_path)])
+    assert "ext" in found
+    assert any("external directory" in r.message for r in caplog.records)

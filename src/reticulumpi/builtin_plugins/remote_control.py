@@ -13,6 +13,32 @@ import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi.plugin_base import PluginBase
 
+_SENSITIVE_KEYS = frozenset(
+    {
+        "password",
+        "password_hash",
+        "token",
+        "secret",
+        "api_key",
+        "private_key",
+        "credentials",
+        "auth_token",
+    }
+)
+
+
+def _scrub_sensitive(obj: Any) -> Any:
+    """Recursively replace values whose key is in _SENSITIVE_KEYS with '***'."""
+    if isinstance(obj, dict):
+        return {
+            k: "***" if k in _SENSITIVE_KEYS else _scrub_sensitive(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_scrub_sensitive(item) for item in obj]
+    return obj
+
+
 # Ring buffer for log capture
 _LOG_BUFFER_SIZE = 500
 
@@ -340,13 +366,7 @@ class RemoteControlPlugin(PluginBase):
             return denied
         import copy
 
-        config_data = copy.deepcopy(self.app.config._data)
-        # Strip sensitive values
-        plugins = config_data.get("plugins", {})
-        for plugin_cfg in plugins.values():
-            if isinstance(plugin_cfg, dict):
-                for key in ("password", "password_hash", "secret"):
-                    plugin_cfg.pop(key, None)
+        config_data = _scrub_sensitive(copy.deepcopy(self.app.config._data))
         return umsgpack.packb({"ok": True, "data": config_data})
 
     def _handle_logs(

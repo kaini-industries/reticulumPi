@@ -587,3 +587,34 @@ class TestPluginDependencyOrdering:
         with caplog.at_level("WARNING"):
             app._load_plugins()
         assert "depends on 'nonexistent' which is not enabled" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ThreadPoolExecutor timeout behavior (REL-1)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_plugin_with_timeout_does_not_block_on_hung_plugin():
+    """pool.shutdown(wait=False) prevents a hung stop() from blocking the caller."""
+    import threading
+    import time
+
+    app = ReticulumPiApp()
+    plugin = MagicMock()
+    hang_time = 10
+
+    def _hang():
+        threading.current_thread()._stop_event = threading.Event()
+        threading.current_thread()._stop_event.wait(hang_time)
+
+    plugin.stop.side_effect = _hang
+
+    timeout = 0.3
+    t0 = time.monotonic()
+    app._stop_plugin_with_timeout("hung", plugin, timeout)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 1.0, (
+        f"_stop_plugin_with_timeout blocked for {elapsed:.1f}s; "
+        f"expected < 1s (timeout={timeout}s)"
+    )

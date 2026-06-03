@@ -45,9 +45,9 @@ if ! sudo -u "$SERVICE_USER" test -r "$INSTALL_DIR/src"; then
 fi
 
 VENV="$INSTALL_DIR/.venv"
-RNS_VERSION_BEFORE=$(sudo "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
-sudo "$VENV/bin/pip" install --upgrade pip
-if ! sudo "$VENV/bin/pip" install --upgrade -e "$INSTALL_DIR"; then
+RNS_VERSION_BEFORE=$(sudo -u "$SERVICE_USER" "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
+sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade pip
+if ! sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade -e "$INSTALL_DIR"; then
     echo "Error: pip install failed. Check dependencies."
     exit 1
 fi
@@ -55,21 +55,21 @@ fi
 sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$VENV"
 
 # Upgrade aiohttp if installed (web dashboard)
-if sudo "$VENV/bin/pip" show aiohttp &>/dev/null; then
+if sudo -u "$SERVICE_USER" "$VENV/bin/pip" show aiohttp &>/dev/null; then
     echo "  Upgrading aiohttp (web dashboard)..."
-    sudo "$VENV/bin/pip" install --upgrade "aiohttp>=3.9,<4.0"
+    sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade "aiohttp>=3.9,<4.0"
 fi
 
 # Upgrade rnodeconf if installed
-if sudo "$VENV/bin/pip" show rnodeconf &>/dev/null; then
+if sudo -u "$SERVICE_USER" "$VENV/bin/pip" show rnodeconf &>/dev/null; then
     echo "  Upgrading rnodeconf (LoRa/RNode tools)..."
-    sudo "$VENV/bin/pip" install --upgrade rnodeconf
+    sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade rnodeconf
 fi
 
 # Upgrade NomadNet if installed
-if sudo "$VENV/bin/pip" show nomadnet &>/dev/null; then
+if sudo -u "$SERVICE_USER" "$VENV/bin/pip" show nomadnet &>/dev/null; then
     echo "  Upgrading NomadNet..."
-    sudo "$VENV/bin/pip" install --upgrade nomadnet
+    sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade nomadnet
 fi
 
 # Upgrade MeshChat if installed
@@ -80,7 +80,7 @@ if [ -d "$MESHCHAT_DIR/.git" ]; then
     MESHCHAT_OLD=$(git -C "$MESHCHAT_DIR" rev-parse HEAD)
     sudo -u "$MESHCHAT_OWNER" git -C "$MESHCHAT_DIR" pull || echo "  Warning: MeshChat git pull failed."
     MESHCHAT_NEW=$(git -C "$MESHCHAT_DIR" rev-parse HEAD)
-    sudo "$MESHCHAT_DIR/.venv/bin/pip" install -r "$MESHCHAT_DIR/requirements.txt"
+    sudo -u "$SERVICE_USER" "$MESHCHAT_DIR/.venv/bin/pip" install -r "$MESHCHAT_DIR/requirements.txt"
     sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$MESHCHAT_DIR/.venv"
     # Rebuild frontend if source changed
     if [ "$MESHCHAT_OLD" != "$MESHCHAT_NEW" ] && [ -f "$MESHCHAT_DIR/package.json" ]; then
@@ -181,7 +181,7 @@ echo "[5/5] Restarting services..."
 # Only restart rnsd if something rnsd-relevant changed (service file, RNS package).
 # Unnecessary restarts wipe the in-memory path table, breaking LXMF delivery until
 # peers re-announce (up to 3 hours).
-RNS_VERSION_AFTER=$(sudo "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
+RNS_VERSION_AFTER=$(sudo -u "$SERVICE_USER" "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
 RNSD_NEEDS_RESTART=false
 if [ "$RNSD_SERVICE_CHANGED" = true ]; then
     RNSD_NEEDS_RESTART=true

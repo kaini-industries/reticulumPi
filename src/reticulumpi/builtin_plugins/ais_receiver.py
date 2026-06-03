@@ -105,7 +105,7 @@ class AISReceiver(SignalPluginBase):
             self._status = "unavailable"
             self._last_error = f"{self._decoder_bin} not found on PATH"
             self.log.warning(self._last_error)
-            return
+            raise RuntimeError(self._last_error)
 
         if "AIS-catcher" in self._decoder_bin or "ais-catcher" in self._decoder_bin.lower():
             cmd = [decoder, "-d", str(device_index), "-p", str(self._ppm), "-o", "5"]

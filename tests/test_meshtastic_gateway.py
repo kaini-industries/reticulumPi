@@ -259,6 +259,20 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="max_messages_per_minute"):
             _make_plugin_no_start(mock_app, gw_config)
 
+    def test_raises_on_invalid_startup_delay(self, mock_app, gw_config):
+        gw_config["device_probe_startup_delay"] = 2
+        with pytest.raises(ValueError, match="device_probe_startup_delay"):
+            _make_plugin_no_start(mock_app, gw_config)
+
+    def test_startup_delay_default_accepted(self, mock_app, gw_config):
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        assert "device_probe_startup_delay" not in plugin.config
+
+    def test_startup_delay_custom_accepted(self, mock_app, gw_config):
+        gw_config["device_probe_startup_delay"] = 30
+        plugin = _make_plugin_no_start(mock_app, gw_config)
+        assert plugin.config["device_probe_startup_delay"] == 30
+
     def test_valid_config_passes(self, mock_app, gw_config):
         plugin = _make_plugin_no_start(mock_app, gw_config)
         assert plugin.plugin_name == "meshtastic_gateway"
@@ -940,6 +954,95 @@ class TestConnectionManagement:
             if c.args[0] == events.MESHTASTIC_CONNECTED
         ]
         assert len(connected_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestGracefulDeviceShutdown
+# ---------------------------------------------------------------------------
+
+
+class TestGracefulDeviceShutdown:
+    def test_reboot_called_with_serial_listener(self, gateway_plugin):
+        mock_node = MagicMock()
+        iface = _make_mock_mesh_interface()
+        iface.localNode = mock_node
+        gateway_plugin._serial_listener = iface
+        gateway_plugin._reboot_device_on_stop = True
+        with patch("reticulumpi.builtin_plugins.meshtastic_gateway.time.sleep") as mock_sleep:
+            gateway_plugin._graceful_device_shutdown()
+        mock_node.reboot.assert_called_once_with(secs=2)
+        mock_sleep.assert_called_once_with(0.3)
+
+    def test_reboot_called_with_serial_mode_interface(self, gateway_plugin):
+        mock_node = MagicMock()
+        iface = _make_mock_mesh_interface()
+        iface.localNode = mock_node
+        gateway_plugin._serial_listener = None
+        gateway_plugin._mesh_interface = iface
+        gateway_plugin._mode = "serial"
+        gateway_plugin._reboot_device_on_stop = True
+        with patch("reticulumpi.builtin_plugins.meshtastic_gateway.time.sleep") as mock_sleep:
+            gateway_plugin._graceful_device_shutdown()
+        mock_node.reboot.assert_called_once_with(secs=2)
+        mock_sleep.assert_called_once_with(0.3)
+
+    def test_skipped_when_disabled(self, gateway_plugin):
+        mock_node = MagicMock()
+        iface = _make_mock_mesh_interface()
+        iface.localNode = mock_node
+        gateway_plugin._serial_listener = iface
+        gateway_plugin._reboot_device_on_stop = False
+        gateway_plugin._graceful_device_shutdown()
+        mock_node.reboot.assert_not_called()
+
+    def test_skipped_in_mqtt_only_mode(self, gateway_plugin):
+        mock_node = MagicMock()
+        iface = _make_mock_mesh_interface()
+        iface.localNode = mock_node
+        gateway_plugin._serial_listener = None
+        gateway_plugin._mesh_interface = iface
+        gateway_plugin._mode = "mqtt"
+        gateway_plugin._reboot_device_on_stop = True
+        gateway_plugin._graceful_device_shutdown()
+        mock_node.reboot.assert_not_called()
+
+    def test_exception_does_not_block(self, gateway_plugin):
+        mock_node = MagicMock()
+        mock_node.reboot.side_effect = RuntimeError("serial gone")
+        iface = _make_mock_mesh_interface()
+        iface.localNode = mock_node
+        gateway_plugin._serial_listener = iface
+        gateway_plugin._reboot_device_on_stop = True
+        gateway_plugin._graceful_device_shutdown()  # Should not raise
+
+    def test_skipped_when_local_node_is_none(self, gateway_plugin):
+        iface = _make_mock_mesh_interface()
+        iface.localNode = None
+        gateway_plugin._serial_listener = iface
+        gateway_plugin._reboot_device_on_stop = True
+        gateway_plugin._graceful_device_shutdown()  # Should not raise
+
+    def test_config_validation_rejects_non_bool(self, mock_app, gw_config):
+        gw_config["reboot_device_on_stop"] = "yes"
+        with pytest.raises(ValueError, match="reboot_device_on_stop"):
+            _make_plugin_no_start(mock_app, gw_config)
+
+    def test_stop_calls_shutdown_before_deactivating(self, gateway_plugin):
+        active_during_shutdown = []
+
+        def capture_active():
+            active_during_shutdown.append(gateway_plugin._active)
+
+        gateway_plugin._reboot_device_on_stop = True
+        with patch.object(
+            gateway_plugin, "_graceful_device_shutdown", side_effect=capture_active
+        ):
+            gateway_plugin.stop()
+        assert active_during_shutdown == [True]
+
+    def test_instance_vars_set_after_start(self, gateway_plugin):
+        assert gateway_plugin._device_probe_startup_delay == 20
+        assert gateway_plugin._reboot_device_on_stop is False
 
 
 # ---------------------------------------------------------------------------

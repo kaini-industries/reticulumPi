@@ -587,17 +587,21 @@ class SdrScheduler:
             dongle.locked_by = caller
             dongle.relock_after = None
 
+        self._condition.release()
         try:
-            self._event_bus.publish(
-                events.SDR_DONGLE_GRANTED,
-                {
-                    "serial": serial,
-                    "caller": caller,
-                    "priority": priority,
-                },
-            )
-        except Exception:
-            pass
+            try:
+                self._event_bus.publish(
+                    events.SDR_DONGLE_GRANTED,
+                    {
+                        "serial": serial,
+                        "caller": caller,
+                        "priority": priority,
+                    },
+                )
+            except Exception:
+                pass
+        finally:
+            self._condition.acquire()
 
     def _advance_bg_index(self, dongle: DongleState) -> None:
         if dongle.bg_order:

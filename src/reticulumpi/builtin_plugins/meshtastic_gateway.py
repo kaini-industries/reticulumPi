@@ -832,6 +832,10 @@ class MeshtasticGateway(PluginBase):
         if not isinstance(sri, (int, float)) or sri < 5:
             raise ValueError("serial_retry_interval must be >= 5 seconds")
 
+        dpsd = self.config.get("device_probe_startup_delay", 20)
+        if not isinstance(dpsd, (int, float)) or dpsd < 5:
+            raise ValueError("device_probe_startup_delay must be >= 5 seconds")
+
         sqs = self.config.get("send_queue_size", 10)
         if not isinstance(sqs, int) or sqs < 0:
             raise ValueError("send_queue_size must be a non-negative integer")
@@ -867,6 +871,10 @@ class MeshtasticGateway(PluginBase):
         fw_open_thresh = fw_wd.get("open_failure_threshold", 3)
         if not isinstance(fw_open_thresh, int) or fw_open_thresh < 1:
             raise ValueError("firmware_watchdog.open_failure_threshold must be >= 1")
+
+        rdos = self.config.get("reboot_device_on_stop", False)
+        if not isinstance(rdos, bool):
+            raise ValueError("reboot_device_on_stop must be a boolean")
 
         # Validate short_name (optional, max 4 chars)
         short_name = self.config.get("short_name", "")
@@ -963,6 +971,10 @@ class MeshtasticGateway(PluginBase):
         self._device_probe_port: str = self.config.get("device_probe_port", "")
         self._device_probe_interval: float = self.config.get("device_probe_interval", 300)
         self._serial_retry_interval: float = self.config.get("serial_retry_interval", 30)
+        self._device_probe_startup_delay: float = self.config.get(
+            "device_probe_startup_delay", 20
+        )
+        self._reboot_device_on_stop: bool = self.config.get("reboot_device_on_stop", False)
         # Bounded wait on the blocking SerialInterface() constructor.  If the
         # radio never returns config_complete_id the probe thread would
         # otherwise hang forever with no log.
@@ -1098,14 +1110,38 @@ class MeshtasticGateway(PluginBase):
             RNS.prettyhexrep(self.local_lxmf_destination.hash),
         )
 
+    def _graceful_device_shutdown(self) -> None:
+        """Send reboot command so the device flushes state to flash."""
+        if not self._reboot_device_on_stop:
+            return
+        with self._lock:
+            iface = self._serial_listener or (
+                self._mesh_interface if self._mode == MODE_SERIAL else None
+            )
+        if iface is None:
+            return
+        local_node = getattr(iface, "localNode", None)
+        if local_node is None:
+            return
+        try:
+            local_node.reboot(secs=2)
+            self.log.info("Sent reboot to device for graceful flash flush")
+            time.sleep(0.3)
+        except Exception:
+            self.log.debug("Could not send device reboot on stop", exc_info=True)
+
     def stop(self) -> None:
+        # Send device reboot BEFORE setting _active=False — the probe loop's
+        # finally block clears _serial_listener once _active is False.
+        self._graceful_device_shutdown()
         self._active = False
         self._save_node_data_cache()
         self._save_name_cache()
         # Close persistent serial listener (if any) before joining threads
         try:
-            listener = self._serial_listener
-            self._serial_listener = None
+            with self._lock:
+                listener = self._serial_listener
+                self._serial_listener = None
             if listener is not None:
                 listener.close()
         except Exception:
@@ -1636,8 +1672,15 @@ class MeshtasticGateway(PluginBase):
         multi-second reception gap every cycle; this keeps LoRa
         reception uninterrupted except during startup or error recovery.
         """
-        # Small initial delay so the gateway MQTT connection settles first
-        self._sleep_while_active(10)
+        # Initial delay: let the gateway MQTT connection settle and give
+        # the nRF52 firmware time to fully initialize its USB CDC stack
+        # after a cold boot (can take 10-15s on RAK4631).
+        self.log.info(
+            "Waiting %.0fs for device USB initialization"
+            " (device_probe_startup_delay)...",
+            self._device_probe_startup_delay,
+        )
+        self._sleep_while_active(self._device_probe_startup_delay)
 
         # Outer loop: manage the serial interface lifecycle.  Each
         # iteration opens the device once, runs the inner probe loop

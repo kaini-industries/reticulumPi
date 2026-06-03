@@ -128,7 +128,7 @@ class RadiosondeTracker(SignalPluginBase):
             self._status = "unavailable"
             self._last_error = f"Missing: {', '.join(missing)}"
             self.log.warning(self._last_error)
-            return
+            raise RuntimeError(self._last_error)
 
         freq_hz = self._default_freq_hz
         rtl_cmd = [

@@ -19,6 +19,7 @@ import pytest
 from reticulumpi.builtin_plugins.web_dashboard import websocket_handler as wsh_module
 from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _broadcast_metrics,
+    _check_ws_origin,
     _collect_broadcast_data,
     _collect_interfaces,
     _enrich_transport_traffic,
@@ -37,6 +38,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _stop_broadcast_task,
     _ws_clients,
     websocket_metrics,
+    websocket_spectrum,
 )
 
 
@@ -2551,6 +2553,244 @@ class TestOffgridWsCommand:
         plugin.app.set_offgrid_mode.assert_not_called()
 
 
+class TestRadioCommands:
+    def _make_plugin(self, fm=None):
+        plugin = MagicMock()
+        plugin.app.plugins = {"fm_receiver": fm} if fm else {}
+        return plugin
+
+    def test_no_fm_receiver_returns_none(self):
+        plugin = self._make_plugin(fm=None)
+        result = _handle_ws_command({"action": "radio_tune", "frequency_mhz": 99.5}, plugin)
+        assert result is None
+
+    def test_tune_valid_frequency(self):
+        fm = MagicMock()
+        fm.tune.return_value = {"frequency_hz": 99_500_000, "mode": "wbfm"}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_tune", "frequency_mhz": 99.5}, plugin
+        )
+        assert result["type"] == "radio_tuned"
+        assert result["frequency_hz"] == 99_500_000
+        fm.tune.assert_called_once_with(99_500_000, mode=None)
+
+    def test_tune_with_mode(self):
+        fm = MagicMock()
+        fm.tune.return_value = {"frequency_hz": 99_500_000, "mode": "nbfm"}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_tune", "frequency_mhz": 99.5, "mode": "nbfm"}, plugin
+        )
+        assert result["type"] == "radio_tuned"
+        fm.tune.assert_called_once_with(99_500_000, mode="nbfm")
+
+    def test_tune_missing_frequency(self):
+        fm = MagicMock()
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_tune"}, plugin)
+        assert result["type"] == "radio_error"
+        assert "frequency_mhz required" in result["error"]
+        fm.tune.assert_not_called()
+
+    def test_tune_invalid_frequency(self):
+        fm = MagicMock()
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_tune", "frequency_mhz": "not_a_number"}, plugin
+        )
+        assert result["type"] == "radio_error"
+        assert "invalid frequency_mhz" in result["error"]
+        fm.tune.assert_not_called()
+
+    def test_tune_non_string_mode_rejected(self):
+        fm = MagicMock()
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_tune", "frequency_mhz": 99.5, "mode": 123}, plugin
+        )
+        assert result["type"] == "radio_error"
+        assert "mode must be a string" in result["error"]
+
+    def test_tune_raises_value_error(self):
+        fm = MagicMock()
+        fm.tune.side_effect = ValueError("out of range")
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_tune", "frequency_mhz": 99.5}, plugin
+        )
+        assert result["type"] == "radio_error"
+        assert "out of range" in result["error"]
+
+    def test_stop(self):
+        fm = MagicMock()
+        fm.stop_playback.return_value = {"stopped": True}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_stop"}, plugin)
+        assert result["type"] == "radio_stop"
+        assert result["stopped"] is True
+        fm.stop_playback.assert_called_once()
+
+    def test_play(self):
+        fm = MagicMock()
+        fm.play.return_value = {"playing": True}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_play"}, plugin)
+        assert result["type"] == "radio_play"
+        assert result["playing"] is True
+
+    def test_volume_valid(self):
+        fm = MagicMock()
+        fm.set_volume.return_value = {"volume": 0.5}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_volume", "volume": 0.5}, plugin)
+        assert result["type"] == "radio_volume"
+        assert result["volume"] == 0.5
+        fm.set_volume.assert_called_once_with(0.5)
+
+    def test_volume_out_of_range(self):
+        fm = MagicMock()
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_volume", "volume": 1.5}, plugin)
+        assert result["type"] == "radio_error"
+        assert "0.0-1.0" in result["error"]
+        fm.set_volume.assert_not_called()
+
+    def test_volume_negative(self):
+        fm = MagicMock()
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_volume", "volume": -0.1}, plugin)
+        assert result["type"] == "radio_error"
+        assert "0.0-1.0" in result["error"]
+
+    def test_gain(self):
+        fm = MagicMock()
+        fm.set_gain.return_value = {"gain_db": 20}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_gain", "gain_db": 20}, plugin)
+        assert result["type"] == "radio_gain"
+        assert result["gain_db"] == 20
+        fm.set_gain.assert_called_once_with(20.0)
+
+    def test_squelch(self):
+        fm = MagicMock()
+        fm.set_squelch.return_value = {"level": 5}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_squelch", "level": 5}, plugin)
+        assert result["type"] == "radio_squelch"
+        fm.set_squelch.assert_called_once_with(5)
+
+    def test_lock(self):
+        fm = MagicMock()
+        fm.lock_dongle.return_value = {"locked": True}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_lock"}, plugin)
+        assert result["type"] == "radio_lock"
+        assert result["locked"] is True
+
+    def test_unlock(self):
+        fm = MagicMock()
+        fm.unlock_dongle.return_value = {"unlocked": True}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_unlock"}, plugin)
+        assert result["type"] == "radio_unlock"
+        assert result["unlocked"] is True
+
+    def test_add_favorite(self):
+        fm = MagicMock()
+        fm.add_favorite.return_value = {"id": "fav1", "label": "Rock FM"}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {
+                "action": "radio_add_favorite",
+                "label": "Rock FM",
+                "frequency_mhz": 99.5,
+                "mode": "wbfm",
+            },
+            plugin,
+        )
+        assert result["type"] == "radio_favorite_added"
+        assert result["label"] == "Rock FM"
+        fm.add_favorite.assert_called_once_with(
+            label="Rock FM", frequency_mhz=99.5, mode="wbfm", gain_db=None
+        )
+
+    def test_remove_favorite_success(self):
+        fm = MagicMock()
+        fm.remove_favorite.return_value = True
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_remove_favorite", "favorite_id": "fav1"}, plugin
+        )
+        assert result["type"] == "radio_favorite_removed"
+        assert result["id"] == "fav1"
+
+    def test_remove_favorite_not_found(self):
+        fm = MagicMock()
+        fm.remove_favorite.return_value = False
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_remove_favorite", "favorite_id": "nope"}, plugin
+        )
+        assert result["type"] == "radio_error"
+        assert "not found" in result["error"].lower()
+
+    def test_tune_favorite(self):
+        fm = MagicMock()
+        fm.tune_favorite.return_value = {"frequency_hz": 99_500_000}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_tune_favorite", "favorite_id": "fav1"}, plugin
+        )
+        assert result["type"] == "radio_tuned"
+        fm.tune_favorite.assert_called_once_with("fav1")
+
+    def test_tune_favorite_not_found(self):
+        fm = MagicMock()
+        fm.tune_favorite.side_effect = ValueError("Favorite not found")
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_tune_favorite", "favorite_id": "nope"}, plugin
+        )
+        assert result["type"] == "radio_error"
+        assert "not found" in result["error"].lower()
+
+    def test_record_start(self):
+        fm = MagicMock()
+        fm.start_recording.return_value = {"recording": True, "file": "rec_001.wav"}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command(
+            {"action": "radio_record_start", "label": "test"}, plugin
+        )
+        assert result["type"] == "radio_record_started"
+        assert result["recording"] is True
+        fm.start_recording.assert_called_once_with(label="test")
+
+    def test_record_start_error(self):
+        fm = MagicMock()
+        fm.start_recording.return_value = {"error": "Already recording"}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_record_start"}, plugin)
+        assert result["type"] == "radio_error"
+        assert "Already recording" in result["error"]
+
+    def test_record_stop(self):
+        fm = MagicMock()
+        fm.stop_recording.return_value = {"recording": False, "file": "rec_001.wav"}
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_record_stop"}, plugin)
+        assert result["type"] == "radio_record_stopped"
+        assert result["recording"] is False
+        fm.stop_recording.assert_called_once()
+
+    def test_unknown_radio_action_with_fm(self):
+        """Unknown radio_* sub-action returns None when fm_receiver exists."""
+        fm = MagicMock()
+        plugin = self._make_plugin(fm)
+        result = _handle_ws_command({"action": "radio_nonexistent"}, plugin)
+        assert result is None
+
+
 class TestOnInternetEvent:
     def test_includes_force_offline_true(self):
         probe = MagicMock()
@@ -2624,3 +2864,75 @@ class TestOnInternetEvent:
             _ws_clients.discard(ws)
             wsh_module._ws_loop = None
             wsh_module._ws_plugin = None
+
+
+# ── Origin validation tests ──────────────────────────────────────────
+
+
+class TestCheckWsOrigin:
+    def _make_request(self, origin=None, host="localhost:8080"):
+        req = MagicMock()
+        headers = {}
+        if origin is not None:
+            headers["Origin"] = origin
+        req.headers = headers
+        req.host = host
+        return req
+
+    def test_no_origin_header_allows(self):
+        req = self._make_request(origin=None)
+        assert _check_ws_origin(req) is True
+
+    def test_same_origin_allows(self):
+        req = self._make_request(origin="http://localhost:8080", host="localhost:8080")
+        assert _check_ws_origin(req) is True
+
+    def test_cross_origin_rejects(self):
+        req = self._make_request(origin="http://evil.com", host="localhost:8080")
+        assert _check_ws_origin(req) is False
+
+    def test_same_host_different_scheme(self):
+        req = self._make_request(origin="https://myhost:8080", host="myhost:8080")
+        assert _check_ws_origin(req) is True
+
+    def test_different_port_rejects(self):
+        req = self._make_request(origin="http://localhost:9999", host="localhost:8080")
+        assert _check_ws_origin(req) is False
+
+    def test_empty_origin_string_rejects(self):
+        req = self._make_request(origin="", host="localhost:8080")
+        assert _check_ws_origin(req) is True
+
+    def test_malformed_origin_rejects(self):
+        req = self._make_request(origin="not-a-url", host="localhost:8080")
+        assert _check_ws_origin(req) is False
+
+
+class TestWsOriginIntegration:
+    @pytest.mark.asyncio
+    async def test_metrics_rejects_cross_origin(self):
+        req = MagicMock()
+        req.headers = {"Origin": "http://evil.com"}
+        req.host = "localhost:8080"
+        req.app = {"plugin": MagicMock()}
+        with patch("aiohttp.web.WebSocketResponse") as MockWS:
+            mock_ws = AsyncMock()
+            MockWS.return_value = mock_ws
+            await websocket_metrics(req)
+            mock_ws.prepare.assert_awaited_once_with(req)
+            mock_ws.close.assert_awaited_once()
+            assert mock_ws.close.call_args[1]["code"] == 4003
+
+    @pytest.mark.asyncio
+    async def test_spectrum_rejects_cross_origin(self):
+        req = MagicMock()
+        req.headers = {"Origin": "http://evil.com"}
+        req.host = "localhost:8080"
+        req.app = {"plugin": MagicMock()}
+        with patch("aiohttp.web.WebSocketResponse") as MockWS:
+            mock_ws = AsyncMock()
+            MockWS.return_value = mock_ws
+            await websocket_spectrum(req)
+            mock_ws.prepare.assert_awaited_once_with(req)
+            mock_ws.close.assert_awaited_once()
+            assert mock_ws.close.call_args[1]["code"] == 4003

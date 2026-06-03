@@ -230,6 +230,13 @@ class CommandDriver(SensorDriver):
             import shlex
 
             self._command_argv = shlex.split(self._command_str)
+            import logging
+
+            logging.getLogger(__name__).info(
+                "Sensor '%s': CommandDriver will execute: %s",
+                sensor_config.get("name", "?"),
+                self._command_argv[0],
+            )
 
     def read(self) -> dict[str, Any]:
         if not self._command_argv:

@@ -378,6 +378,8 @@ reticulumpi:
     #  reconnect_delay: 10             # Seconds between reconnect attempts
     #  max_reconnect_attempts: 10      # 0 = unlimited
     #  serial_retry_interval: 30       # Seconds between serial open retries (faster than probe)
+    #  device_probe_startup_delay: 20  # Seconds to wait before first serial open (nRF52 boot time)
+    #  reboot_device_on_stop: false    # Set true to reboot device on shutdown (flushes flash state)
     #  send_queue_size: 10             # Max rate-limited messages to queue (0=drop immediately)
     #  send_queue_ttl: 60              # Seconds before queued messages expire
     #  pending_lxmf_size: 20           # Max deferred LXMF messages awaiting path resolution

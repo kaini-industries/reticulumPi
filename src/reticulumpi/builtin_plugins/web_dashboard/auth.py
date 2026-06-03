@@ -105,6 +105,8 @@ def verify_password(password: str, stored_hash: str) -> bool:
             # Current v2 format: scrypt:<salt>:<n>:<r>:<p>:<hash>
             salt = bytes.fromhex(parts[1])
             n, r, p = int(parts[2]), int(parts[3]), int(parts[4])
+            if n > 2**15 or r > 8 or p > 5:
+                return False
             expected = bytes.fromhex(parts[5])
         else:
             return False
@@ -138,8 +140,11 @@ class RateLimiter:
         now = time.monotonic()
         self._cleanup(ip, now)
         if ip not in self._attempts and len(self._attempts) >= self.MAX_TRACKED_IPS:
-            log.warning("Rate limiter at IP cap (%d), new IPs bypassing", self.MAX_TRACKED_IPS)
-            return
+            oldest_ip = min(
+                self._attempts,
+                key=lambda k: self._attempts[k][-1] if self._attempts[k] else 0,
+            )
+            del self._attempts[oldest_ip]
         self._attempts.setdefault(ip, []).append(now)
 
     def retry_after(self, ip: str) -> int:

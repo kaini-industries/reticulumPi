@@ -229,7 +229,7 @@ class WeatherAlert(SignalPluginBase):
             self._status = "unavailable"
             self._last_error = f"Missing: {', '.join(missing)}"
             self.log.warning(self._last_error)
-            return
+            raise RuntimeError(self._last_error)
 
         rtl_cmd = [
             rtl_fm,

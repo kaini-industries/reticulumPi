@@ -674,8 +674,9 @@ class MessageStore:
         sub_transport: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search messages by text content (case-insensitive)."""
-        clauses = ["search_text LIKE ?"]
-        params: list[Any] = [f"%{query.lower()}%"]
+        escaped = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clauses = ["search_text LIKE ? ESCAPE '\\'"]
+        params: list[Any] = [f"%{escaped}%"]
         if transport:
             clauses.append("transport = ?")
             params.append(transport)

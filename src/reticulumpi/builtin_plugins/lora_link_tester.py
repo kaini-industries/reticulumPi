@@ -319,22 +319,22 @@ class LoraLinkTester(PluginBase):
 
     def _probe_loop(self, target: str, count: int) -> None:
         seq = 0
-        while self._active and not self._test_stop_event.is_set():
-            if count > 0 and seq >= count:
-                break
-            try:
-                self._send_probe(target, seq)
-            except Exception as exc:
-                self.log.warning("Probe send failed: %s", exc)
-                with self._lock:
-                    if not self._connected:
-                        break
-            seq += 1
-            # Interruptible sleep between probes
-            self._test_stop_event.wait(timeout=self._probe_interval)
-
-        with self._lock:
-            self._test_running = False
+        try:
+            while self._active and not self._test_stop_event.is_set():
+                if count > 0 and seq >= count:
+                    break
+                try:
+                    self._send_probe(target, seq)
+                except Exception as exc:
+                    self.log.warning("Probe send failed: %s", exc)
+                    with self._lock:
+                        if not self._connected:
+                            break
+                seq += 1
+                self._test_stop_event.wait(timeout=self._probe_interval)
+        finally:
+            with self._lock:
+                self._test_running = False
         stats = self._compute_stats()
         self.event_bus.publish(events.LINK_TEST_STOPPED, stats)
         self.log.info("Probe loop finished (%d sent)", seq)

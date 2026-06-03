@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 from reticulumpi.builtin_plugins.web_dashboard.api import (
     handle_offgrid_get,
     handle_offgrid_set,
+    handle_services_restart,
+    handle_spectrum_switch_preset,
 )
 from reticulumpi.builtin_plugins.web_dashboard.api_interfaces import (
     _validate_interface_config,
@@ -32,9 +34,23 @@ from reticulumpi.rns_config import InterfaceEntry
 # ── Test helpers ───────────────────────────────────────────────────────
 
 
-def _make_request(body=None, query_string="", plugin_mock=None, match_info=None):
-    """Create a mock aiohttp.web.Request."""
+def _make_request(
+    body=None, query_string="", plugin_mock=None, match_info=None, token="valid-test-token"
+):
+    """Create a mock aiohttp.web.Request.
+
+    Uses a real dict for item access so ``request.get("token")`` returns a
+    realistic value instead of an always-truthy MagicMock.
+    """
     request = MagicMock()
+
+    _store: dict = {}
+    if token is not None:
+        _store["token"] = token
+    request.__getitem__ = lambda _self, key: _store[key]
+    request.__setitem__ = lambda _self, key, val: _store.__setitem__(key, val)
+    request.__contains__ = lambda _self, key: key in _store
+    request.get = lambda key, default=None: _store.get(key, default)
 
     # Parse query string
     query = {}
@@ -1103,3 +1119,46 @@ class TestOffgridEndpoints:
         data = _parse_response(resp)
         assert data["ok"] is False
         assert "required" in data["error"]
+
+
+# ── Auth gate negative tests ──────────────────────────────────────────────
+
+
+class TestAuthGateNegative:
+    """Verify that write endpoints reject requests without a valid token.
+
+    The _make_request helper now uses a real dict for item access, so
+    token=None genuinely produces a falsy ``request.get("token")``.
+    """
+
+    def test_services_restart_requires_token(self):
+        request = _make_request(token=None)
+        resp = asyncio.run(handle_services_restart(request))
+        data = _parse_response(resp)
+        assert resp.status == 401
+        assert data["ok"] is False
+        assert "Authentication required" in data["error"]
+
+    def test_spectrum_switch_preset_requires_token(self):
+        request = _make_request(body={"preset": "aviation"}, token=None)
+        resp = asyncio.run(handle_spectrum_switch_preset(request))
+        data = _parse_response(resp)
+        assert resp.status == 401
+        assert data["ok"] is False
+        assert "Authentication required" in data["error"]
+
+    def test_send_message_requires_token_by_default(self):
+        """handle_send_message rejects unauthenticated callers unless
+        allow_localhost_send is explicitly enabled."""
+        plugin = MagicMock()
+        plugin.app.get_plugin.return_value = MagicMock()
+        plugin.config = {"allow_localhost_send": False}
+        request = _make_request(
+            body={"transport": "lxmf", "text": "hi", "destination": "abc123"},
+            plugin_mock=plugin,
+            token=None,
+        )
+        resp = asyncio.run(handle_send_message(request))
+        data = _parse_response(resp)
+        assert resp.status == 401
+        assert data["ok"] is False
