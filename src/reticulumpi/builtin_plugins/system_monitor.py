@@ -1,5 +1,7 @@
 """System Monitor plugin - collects system metrics for other plugins to query."""
 
+from __future__ import annotations
+
 import time
 from typing import Any
 

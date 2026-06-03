@@ -1,5 +1,7 @@
 """Heartbeat Announce plugin - periodically announces node presence on the network."""
 
+from __future__ import annotations
+
 import socket
 
 import RNS

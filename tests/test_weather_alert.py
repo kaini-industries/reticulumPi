@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import time
 from collections import deque
-from typing import Any
 from unittest.mock import MagicMock
 
 from reticulumpi import events
