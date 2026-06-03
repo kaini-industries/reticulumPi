@@ -428,6 +428,7 @@ async def handle_plugin_detail(request: aiohttp.web.Request) -> aiohttp.web.Resp
 
 _last_restart_time: float = 0.0
 _RESTART_COOLDOWN = 60.0
+_offgrid_last_toggle: float = 0.0
 
 
 async def handle_services_restart(
@@ -549,6 +550,10 @@ async def handle_offgrid_get(request: aiohttp.web.Request) -> aiohttp.web.Respon
 
 async def handle_offgrid_set(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """POST /api/offgrid — toggle off-grid mode."""
+    global _offgrid_last_toggle
+    now = time.monotonic()
+    if now - _offgrid_last_toggle < 2.0:
+        return _error("Rate limited, try again shortly")
     plugin = _get_plugin(request)
     try:
         body = await request.json()
@@ -559,5 +564,6 @@ async def handle_offgrid_set(request: aiohttp.web.Request) -> aiohttp.web.Respon
         return _error("'enabled' field required")
     if not isinstance(enabled, bool):
         return _error("'enabled' must be a boolean")
+    _offgrid_last_toggle = now
     result = await _run_sync(plugin.app.set_offgrid_mode, enabled)
     return _ok(result)

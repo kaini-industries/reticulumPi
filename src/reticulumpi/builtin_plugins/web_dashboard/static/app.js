@@ -1155,6 +1155,7 @@
 
   var _offgridActive = false;
   var _lastOnlineState = null;
+  var _offgridReenableTimer = null;
 
   function updateOffgridState(enabled) {
     _offgridActive = !!enabled;
@@ -1187,15 +1188,21 @@
     sw.addEventListener('change', function() {
       var enabled = sw.checked;
       sw.disabled = true;
-      var reenableTimer = setTimeout(function() { sw.disabled = false; }, 5000);
-      function onResponse() {
-        clearTimeout(reenableTimer);
+      if (_offgridReenableTimer) clearTimeout(_offgridReenableTimer);
+      _offgridReenableTimer = setTimeout(function() {
         sw.disabled = false;
-      }
+        sw.checked = _offgridActive;
+        _offgridReenableTimer = null;
+      }, 5000);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({action: 'set_offgrid_mode', enabled: enabled}));
       } else {
-        api('/api/offgrid', {method: 'POST', body: {enabled: enabled}}).then(onResponse);
+        api('/api/offgrid', {method: 'POST', body: {enabled: enabled}}).then(function(r) {
+          if (_offgridReenableTimer) clearTimeout(_offgridReenableTimer);
+          _offgridReenableTimer = null;
+          sw.disabled = false;
+          if (!r || !r.ok) sw.checked = _offgridActive;
+        });
       }
     });
   }
@@ -1607,8 +1614,18 @@
         }
         if (msg.type === 'offgrid_mode_set') {
           updateOffgridState(msg.enabled);
+          if (msg.persisted === false) {
+            showToast('Off-grid mode will not persist after reboot (read-only storage)', 'warning');
+          }
           var _sw = document.getElementById('offgrid-switch');
           if (_sw) _sw.disabled = false;
+          if (_offgridReenableTimer) { clearTimeout(_offgridReenableTimer); _offgridReenableTimer = null; }
+          return;
+        }
+        if (msg.type === 'offgrid_error') {
+          var _sw2 = document.getElementById('offgrid-switch');
+          if (_sw2) { _sw2.checked = _offgridActive; _sw2.disabled = false; }
+          if (_offgridReenableTimer) { clearTimeout(_offgridReenableTimer); _offgridReenableTimer = null; }
           return;
         }
         if (msg.type === 'update' && msg.data) {

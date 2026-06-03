@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from reticulumpi.builtin_plugins.web_dashboard import websocket_handler as wsh_module
+import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as _ws_mod
 from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _broadcast_metrics,
     _check_ws_origin,
@@ -2508,9 +2509,12 @@ class TestWarmCacheSummaryLog:
 
 
 class TestOffgridWsCommand:
+    def setup_method(self):
+        _ws_mod._offgrid_last_toggle = 0.0
+
     def test_set_offgrid_mode(self):
         plugin = MagicMock()
-        plugin.app.set_offgrid_mode.return_value = {"enabled": True}
+        plugin.app.set_offgrid_mode.return_value = {"enabled": True, "persisted": True}
         result = _handle_ws_command(
             {"action": "set_offgrid_mode", "enabled": True},
             plugin,
@@ -2518,11 +2522,12 @@ class TestOffgridWsCommand:
         assert result is not None
         assert result["type"] == "offgrid_mode_set"
         assert result["enabled"] is True
+        assert result["persisted"] is True
         plugin.app.set_offgrid_mode.assert_called_once_with(True)
 
     def test_set_offgrid_mode_false(self):
         plugin = MagicMock()
-        plugin.app.set_offgrid_mode.return_value = {"enabled": False}
+        plugin.app.set_offgrid_mode.return_value = {"enabled": False, "persisted": True}
         result = _handle_ws_command(
             {"action": "set_offgrid_mode", "enabled": False},
             plugin,

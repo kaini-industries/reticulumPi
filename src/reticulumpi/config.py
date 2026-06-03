@@ -154,15 +154,20 @@ class AppConfig:
         inet = self._data.get("internet", {})
         return bool(inet.get("force_offline", False))
 
-    def set_internet_force_offline(self, value: bool) -> None:
-        """Update the internet.force_offline flag in memory and persist to disk."""
+    def set_internet_force_offline(self, value: bool) -> bool:
+        """Update the internet.force_offline flag in memory and persist to disk.
+
+        Returns True if persisted to disk, False if in-memory only.
+        """
         with self._lock:
             inet = self._data.setdefault("internet", dict(DEFAULT_CONFIG["internet"]))
             inet["force_offline"] = value
             try:
                 self._persist()
+                return True
             except OSError:
                 log.warning("Could not persist offgrid state (read-only filesystem)")
+                return False
 
     def _persist(self) -> None:
         """Atomically write current config back to the YAML file."""

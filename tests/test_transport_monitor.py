@@ -1467,7 +1467,7 @@ class TestTcpAutoManage:
         plugin.stop()
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
-    def test_enable_reverts_config_on_blocked_restart(
+    def test_enable_defers_restart_on_cooldown(
         self,
         mock_subprocess,
         mock_app,
@@ -1507,7 +1507,118 @@ class TestTcpAutoManage:
 
         plugin._enable_tcp_interfaces()
 
+        # No event published yet — deferred restart pending
         assert len(published) == 0
-        assert "enabled = no" in config_file.read_text()
+        # Config stays enabled (not reverted) awaiting deferred restart
+        assert "enabled = yes" in config_file.read_text()
+        # State file still present until deferred restart succeeds
         assert state_path.exists()
+        # Deferred timer was scheduled
+        assert plugin._deferred_enable_timer is not None
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_deferred_enable_restart_succeeds(
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+
+        import json
+
+        (tmp_path / "state.json").write_text(
+            json.dumps({"disabled_interfaces": ["Primary Hub"]}),
+        )
+
+        plugin._deferred_enable_restart()
+
+        # State file should be cleared on success
+        assert not (tmp_path / "state.json").exists()
+        assert plugin._tam_disabled_names == []
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    def test_deferred_enable_restart_fails(
+        self,
+        mock_subprocess,
+        mock_app,
+        tam_config,
+        tmp_path,
+    ):
+        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+
+        import json
+
+        state_path = tmp_path / "state.json"
+        state_path.write_text(
+            json.dumps({"disabled_interfaces": ["Primary Hub"]}),
+        )
+
+        # Put in cooldown so _restart_rnsd returns False
+        plugin._last_rnsd_restart = time.monotonic()
+
+        plugin._deferred_enable_restart()
+
+        # State file should NOT be cleared when restart fails
+        assert state_path.exists()
+        plugin.stop()
+
+    def test_deferred_enable_restart_inactive(self, mock_app, tam_config):
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._active = False
+
+        with patch.object(plugin, "_restart_rnsd") as mock_restart:
+            plugin._deferred_enable_restart()
+            mock_restart.assert_not_called()
+
+        # Re-activate for clean stop
+        plugin._active = True
+        plugin.stop()
+
+    def test_stop_cancels_deferred_timer(self, mock_app, tam_config):
+        plugin = _start_plugin(mock_app, tam_config)
+
+        mock_timer = MagicMock()
+        plugin._deferred_enable_timer = mock_timer
+
+        plugin.stop()
+
+        mock_timer.cancel.assert_called_once()
+
+    def test_config_lock_held_during_disable(
+        self,
+        mock_app,
+        tam_config,
+        tmp_path,
+    ):
+        plugin = _start_plugin(mock_app, tam_config)
+        plugin._tam_state_path = str(tmp_path / "state.json")
+        plugin._internet_available = False
+
+        config_file = tmp_path / "config"
+        config_file.write_text(
+            "[interfaces]\n"
+            "  [[Primary Hub]]\n"
+            "    type = TCPClientInterface\n"
+            "    enabled = true\n"
+            "    target_host = 1.2.3.4\n"
+            "    target_port = 4242\n"
+        )
+        plugin.app._reticulum_config_dir = str(tmp_path)
+
+        mock_lock = MagicMock()
+        plugin._config_lock = mock_lock
+
+        with patch("reticulumpi.builtin_plugins.transport_monitor.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0)
+            plugin._disable_tcp_interfaces()
+
+        mock_lock.__enter__.assert_called()
         plugin.stop()

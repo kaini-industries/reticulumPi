@@ -101,6 +101,14 @@ class ReticulumPiApp:
                 del self.plugins[name]
 
         self.plugins = {n: self.plugins[n] for n in start_order if n in self.plugins}
+
+        if self.internet_probe is not None and not self.internet_probe.is_online:
+            for name, plugin in self.plugins.items():
+                try:
+                    plugin.on_internet_lost()
+                except Exception:
+                    log.warning("Plugin %s: initial offline delivery failed", name, exc_info=True)
+
         self._print_startup_report()
         self._install_signal_handlers()
         log.info("ReticulumPi is running. Press Ctrl+C to stop.")
@@ -243,13 +251,13 @@ class ReticulumPiApp:
         """Toggle off-grid mode: force internet probe offline and persist."""
         was_enabled = self.offgrid_mode
         if enabled == was_enabled:
-            return {"enabled": enabled}
-        self.config.set_internet_force_offline(enabled)
-        self.event_bus.publish(events.OFFGRID_MODE_CHANGED, {"enabled": enabled})
+            return {"enabled": enabled, "persisted": True}
+        persisted = self.config.set_internet_force_offline(enabled)
         if self.internet_probe is not None:
             self.internet_probe.set_force_offline(enabled)
+        self.event_bus.publish(events.OFFGRID_MODE_CHANGED, {"enabled": enabled})
         log.info("Off-grid mode %s", "enabled" if enabled else "disabled")
-        return {"enabled": enabled}
+        return {"enabled": enabled, "persisted": persisted}
 
     def get_plugin(self, name: str) -> PluginBase | None:
         """Get a running plugin by name, for inter-plugin communication."""

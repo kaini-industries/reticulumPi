@@ -138,6 +138,7 @@ class TransportMonitorPlugin(PluginBase):
     def start(self) -> None:
         self._active = True
         self._lock = threading.Lock()
+        self._config_lock = threading.Lock()
         self._broadcast_cache: tuple[float, dict] | None = None
         self._broadcast_cache_ttl = 5.0
         self._check_interval = self.config.get("check_interval", 15)
@@ -201,6 +202,7 @@ class TransportMonitorPlugin(PluginBase):
         self._tam_state_path = self._resolve_tcp_state_path()
         self._tam_disabled_names: list[str] = []
         self._last_rnsd_restart: float = 0.0
+        self._deferred_enable_timer: threading.Timer | None = None
 
         if self._tam_enabled:
             self._startup_tcp_recovery()
@@ -217,6 +219,8 @@ class TransportMonitorPlugin(PluginBase):
     def stop(self) -> None:
         self._active = False
         self._cancel_tcp_disable()
+        if self._deferred_enable_timer is not None:
+            self._deferred_enable_timer.cancel()
         self._teardown_hub_exchange()
         self._deactivate_fallbacks()
         self._teardown_auto_interfaces()
@@ -495,108 +499,128 @@ class TransportMonitorPlugin(PluginBase):
             self.log.exception("Failed to auto-disable TCP interfaces")
 
     def _disable_tcp_interfaces(self) -> None:
-        from reticulumpi.rns_config import (
-            parse_rns_config,
-            set_interface_enabled,
-            write_rns_config,
-        )
-
-        config_path = self._get_rns_config_path()
-        lines, interfaces = parse_rns_config(config_path)
-
-        to_disable = [e for e in interfaces if e.iface_type == "TCPClientInterface" and e.enabled]
-        if not to_disable:
-            self.log.info("No enabled TCPClientInterface entries to disable")
-            return
-
-        disabled_names = [e.name for e in to_disable]
-
-        for entry in to_disable:
-            lines = set_interface_enabled(lines, entry, False)
-        write_rns_config(config_path, lines)
-
-        if not self._restart_rnsd("tcp_auto_disable"):
-            self.log.warning(
-                "rnsd restart blocked — reverting config for %d interface(s)",
-                len(disabled_names),
+        with self._config_lock:
+            from reticulumpi.rns_config import (
+                parse_rns_config,
+                set_interface_enabled,
+                write_rns_config,
             )
+
+            config_path = self._get_rns_config_path()
             lines, interfaces = parse_rns_config(config_path)
+
+            to_disable = [
+                e for e in interfaces if e.iface_type == "TCPClientInterface" and e.enabled
+            ]
+            if not to_disable:
+                self.log.info("No enabled TCPClientInterface entries to disable")
+                return
+
+            disabled_names = [e.name for e in to_disable]
+
+            for entry in to_disable:
+                lines = set_interface_enabled(lines, entry, False)
+            write_rns_config(config_path, lines)
+
+            if not self._restart_rnsd("tcp_auto_disable"):
+                self.log.warning(
+                    "rnsd restart blocked — reverting config for %d interface(s)",
+                    len(disabled_names),
+                )
+                lines, interfaces = parse_rns_config(config_path)
+                by_name = {e.name: e for e in interfaces}
+                for name in disabled_names:
+                    entry = by_name.get(name)
+                    if entry and not entry.enabled:
+                        lines = set_interface_enabled(lines, entry, True)
+                write_rns_config(config_path, lines)
+                return
+
+            self._persist_tcp_state(disabled_names)
+            self.log.warning(
+                "Auto-disabled %d TCP interface(s): %s",
+                len(disabled_names),
+                ", ".join(disabled_names),
+            )
+            self.event_bus.publish(
+                events.TCP_INTERFACES_AUTO_DISABLED,
+                {
+                    "interfaces": disabled_names,
+                },
+            )
+
+    def _enable_tcp_interfaces(self) -> None:
+        with self._config_lock:
+            from reticulumpi.rns_config import (
+                parse_rns_config,
+                set_interface_enabled,
+                write_rns_config,
+            )
+
+            state = self._load_tcp_state()
+            disabled_names = state.get("disabled_interfaces", [])
+            if not disabled_names:
+                return
+
+            config_path = self._get_rns_config_path()
+            lines, interfaces = parse_rns_config(config_path)
+
             by_name = {e.name: e for e in interfaces}
+            re_enabled = []
             for name in disabled_names:
                 entry = by_name.get(name)
                 if entry and not entry.enabled:
                     lines = set_interface_enabled(lines, entry, True)
+                    re_enabled.append(name)
+
+            if not re_enabled:
+                self._clear_tcp_state()
+                return
+
             write_rns_config(config_path, lines)
-            return
 
-        self._persist_tcp_state(disabled_names)
-        self.log.warning(
-            "Auto-disabled %d TCP interface(s): %s",
-            len(disabled_names),
-            ", ".join(disabled_names),
-        )
-        self.event_bus.publish(
-            events.TCP_INTERFACES_AUTO_DISABLED,
-            {
-                "interfaces": disabled_names,
-            },
-        )
+            if not self._restart_rnsd("tcp_auto_enable"):
+                remaining = _RNSD_RESTART_COOLDOWN - (
+                    time.monotonic() - self._last_rnsd_restart
+                )
+                delay = max(remaining + 1.0, 1.0)
+                self.log.info(
+                    "rnsd restart deferred %.0fs (cooldown) for %d interface(s)",
+                    delay,
+                    len(re_enabled),
+                )
+                t = threading.Timer(delay, self._deferred_enable_restart)
+                t.daemon = True
+                t.start()
+                with self._lock:
+                    self._deferred_enable_timer = t
+                return
 
-    def _enable_tcp_interfaces(self) -> None:
-        from reticulumpi.rns_config import (
-            parse_rns_config,
-            set_interface_enabled,
-            write_rns_config,
-        )
-
-        state = self._load_tcp_state()
-        disabled_names = state.get("disabled_interfaces", [])
-        if not disabled_names:
-            return
-
-        config_path = self._get_rns_config_path()
-        lines, interfaces = parse_rns_config(config_path)
-
-        by_name = {e.name: e for e in interfaces}
-        re_enabled = []
-        for name in disabled_names:
-            entry = by_name.get(name)
-            if entry and not entry.enabled:
-                lines = set_interface_enabled(lines, entry, True)
-                re_enabled.append(name)
-
-        if not re_enabled:
             self._clear_tcp_state()
-            return
-
-        write_rns_config(config_path, lines)
-
-        if not self._restart_rnsd("tcp_auto_enable"):
-            self.log.warning(
-                "rnsd restart blocked — reverting config for %d interface(s)",
+            self.log.info(
+                "Re-enabled %d TCP interface(s): %s",
                 len(re_enabled),
+                ", ".join(re_enabled),
             )
-            lines, interfaces = parse_rns_config(config_path)
-            by_name = {e.name: e for e in interfaces}
-            for name in re_enabled:
-                entry = by_name.get(name)
-                if entry and entry.enabled:
-                    lines = set_interface_enabled(lines, entry, False)
-            write_rns_config(config_path, lines)
-            return
+            self.event_bus.publish(
+                events.TCP_INTERFACES_AUTO_ENABLED,
+                {
+                    "interfaces": re_enabled,
+                },
+            )
 
-        self._clear_tcp_state()
-        self.log.info(
-            "Re-enabled %d TCP interface(s): %s",
-            len(re_enabled),
-            ", ".join(re_enabled),
-        )
-        self.event_bus.publish(
-            events.TCP_INTERFACES_AUTO_ENABLED,
-            {
-                "interfaces": re_enabled,
-            },
-        )
+    def _deferred_enable_restart(self) -> None:
+        """Retry rnsd restart after cooldown expires for TCP re-enable."""
+        if not self._active:
+            return
+        with self._config_lock:
+            if self._restart_rnsd("tcp_auto_enable_deferred"):
+                self._clear_tcp_state()
+                self.log.info("Deferred rnsd restart succeeded, TCP interfaces re-enabled")
+            else:
+                self.log.error(
+                    "Deferred rnsd restart failed — interfaces may need manual recovery"
+                )
 
     def _restart_rnsd(self, reason: str) -> bool:
         now = time.monotonic()

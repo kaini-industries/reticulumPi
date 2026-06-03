@@ -89,7 +89,8 @@ def test_set_internet_force_offline_persists(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("reticulumpi:\n  log_level: 4\n")
     config = AppConfig(str(cfg))
-    config.set_internet_force_offline(True)
+    result = config.set_internet_force_offline(True)
+    assert result is True
     assert config.offgrid_mode is True
     with open(str(cfg), "r") as f:
         raw = yaml.safe_load(f)
@@ -101,14 +102,28 @@ def test_persist_skips_on_corrupt_yaml(tmp_path):
     cfg.write_text("reticulumpi:\n  log_level: 4\n")
     config = AppConfig(str(cfg))
     cfg.write_text("{{{invalid yaml")
-    config.set_internet_force_offline(True)
+    result = config.set_internet_force_offline(True)
+    assert result is True  # corrupt YAML skips persist but no OSError raised
     assert cfg.read_text() == "{{{invalid yaml"
 
 
 def test_persist_no_config_path():
     config = AppConfig()
-    config.set_internet_force_offline(True)
+    result = config.set_internet_force_offline(True)
+    assert result is True  # no config path means _persist is a no-op (no OSError)
     assert config.offgrid_mode is True
+
+
+def test_set_internet_force_offline_returns_false_on_oserror(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    config = AppConfig(str(cfg))
+    from unittest.mock import patch
+
+    with patch.object(config, "_persist", side_effect=OSError("read-only filesystem")):
+        result = config.set_internet_force_offline(True)
+    assert result is False
+    assert config.offgrid_mode is True  # in-memory state still updated
 
 
 def test_set_internet_force_offline_thread_safe(tmp_path):

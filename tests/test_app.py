@@ -319,6 +319,62 @@ def test_list_plugins_prints_discovered(tmp_path, plugin_dir, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Off-grid mode
+# ---------------------------------------------------------------------------
+
+
+class TestSetOffgridMode:
+    def test_returns_persisted_true_on_success(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("reticulumpi:\n  log_level: 4\n")
+        app = ReticulumPiApp(config_path=str(config_file))
+        app.internet_probe = MagicMock()
+        app.internet_probe.force_offline = False
+        result = app.set_offgrid_mode(True)
+        assert result == {"enabled": True, "persisted": True}
+        app.internet_probe.set_force_offline.assert_called_once_with(True)
+
+    def test_returns_persisted_false_on_oserror(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("reticulumpi:\n  log_level: 4\n")
+        app = ReticulumPiApp(config_path=str(config_file))
+        app.internet_probe = MagicMock()
+        app.internet_probe.force_offline = False
+        with patch.object(app.config, "set_internet_force_offline", return_value=False):
+            result = app.set_offgrid_mode(True)
+        assert result == {"enabled": True, "persisted": False}
+
+    def test_no_change_returns_early(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("reticulumpi:\n  log_level: 4\n")
+        app = ReticulumPiApp(config_path=str(config_file))
+        app.internet_probe = MagicMock()
+        app.internet_probe.force_offline = True
+        result = app.set_offgrid_mode(True)
+        assert result == {"enabled": True, "persisted": True}
+        app.internet_probe.set_force_offline.assert_not_called()
+
+    def test_probe_updated_before_event_published(self, tmp_path):
+        """internet_probe.set_force_offline is called BEFORE event_bus.publish."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("reticulumpi:\n  log_level: 4\n")
+        app = ReticulumPiApp(config_path=str(config_file))
+        app.internet_probe = MagicMock()
+        app.internet_probe.force_offline = False
+        call_order = []
+        app.internet_probe.set_force_offline.side_effect = (
+            lambda v: call_order.append("probe")
+        )
+        original_publish = app.event_bus.publish
+        app.event_bus.publish = lambda evt, data: (
+            call_order.append("event"),
+            original_publish(evt, data),
+        )
+        app.set_offgrid_mode(True)
+        assert call_order == ["probe", "event"]
+
+
+# ---------------------------------------------------------------------------
 # Hot-reload: enable_plugin / disable_plugin at runtime
 # ---------------------------------------------------------------------------
 

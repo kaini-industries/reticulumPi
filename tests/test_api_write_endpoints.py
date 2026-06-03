@@ -11,6 +11,7 @@ import asyncio
 import json
 from unittest.mock import MagicMock, patch
 
+import reticulumpi.builtin_plugins.web_dashboard.api as _api_mod
 from reticulumpi.builtin_plugins.web_dashboard.api import (
     handle_offgrid_get,
     handle_offgrid_set,
@@ -1085,6 +1086,9 @@ class TestHandleSendMessage:
 
 
 class TestOffgridEndpoints:
+    def setup_method(self):
+        _api_mod._offgrid_last_toggle = 0.0
+
     def test_offgrid_get(self):
         plugin = MagicMock()
         plugin.app.offgrid_mode = False
@@ -1096,12 +1100,13 @@ class TestOffgridEndpoints:
 
     def test_offgrid_set_valid(self):
         plugin = MagicMock()
-        plugin.app.set_offgrid_mode.return_value = {"enabled": True}
+        plugin.app.set_offgrid_mode.return_value = {"enabled": True, "persisted": True}
         request = _make_request(body={"enabled": True}, plugin_mock=plugin)
         resp = asyncio.run(handle_offgrid_set(request))
         data = _parse_response(resp)
         assert data["ok"] is True
         assert data["data"]["enabled"] is True
+        assert data["data"]["persisted"] is True
 
     def test_offgrid_set_non_boolean(self):
         plugin = MagicMock()

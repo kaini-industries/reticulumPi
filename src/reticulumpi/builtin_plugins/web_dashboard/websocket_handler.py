@@ -55,6 +55,10 @@ _ws_preset_rate: dict[int, collections.deque] = {}
 _WS_PRESET_MAX = 3
 _WS_PRESET_WINDOW = 30.0
 
+# ── Off-grid toggle rate limiting ─────────────────────────────────
+_offgrid_last_toggle: float = 0.0
+_OFFGRID_RATE_LIMIT: float = 2.0
+
 
 def _ws_preset_rate_ok(ws_id: int) -> bool:
     now = time.monotonic()
@@ -1149,41 +1153,44 @@ def _lookup_message_row(msg_id: Any) -> dict | None:
 
 def _on_message_event(event_type: str, data: dict) -> None:
     """Event-bus callback (runs in any thread). Push to WS asynchronously."""
-    if _ws_loop is None or not _ws_clients:
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
         return
     try:
-        _ws_loop.call_soon_threadsafe(
+        loop.call_soon_threadsafe(
             _schedule_enriched_push,
             "message",
             event_type,
             data,
         )
-    except RuntimeError:
+    except (RuntimeError, AttributeError):
         pass
 
 
 def _on_status_event(event_type: str, data: dict) -> None:
     """Event-bus callback for MESSAGE_STATUS_CHANGED — same pattern."""
-    if _ws_loop is None or not _ws_clients:
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
         return
     try:
-        _ws_loop.call_soon_threadsafe(
+        loop.call_soon_threadsafe(
             _schedule_enriched_push,
             "message_status",
             event_type,
             data,
         )
-    except RuntimeError:
+    except (RuntimeError, AttributeError):
         pass
 
 
 def _on_reaction_event(event_type: str, data: dict) -> None:
     """Event-bus callback for MESSAGE_REACTION_RECEIVED — push to WS clients."""
-    if _ws_loop is None or not _ws_clients:
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
         return
     try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "reaction", data)
-    except RuntimeError:
+        loop.call_soon_threadsafe(_schedule_push, "reaction", data)
+    except (RuntimeError, AttributeError):
         pass
 
 
@@ -1325,32 +1332,40 @@ def _handle_ws_command(raw: dict | str, plugin: Any, ws: Any = None) -> dict | N
             result = fm.stop_recording()
             return {"type": "radio_record_stopped", **result}
     elif action == "set_offgrid_mode":
+        global _offgrid_last_toggle
+        now = time.monotonic()
+        if now - _offgrid_last_toggle < _OFFGRID_RATE_LIMIT:
+            return {"type": "offgrid_error", "error": "Rate limited, try again shortly"}
         enabled = cmd.get("enabled")
         if enabled is None:
             return {"type": "offgrid_error", "error": "'enabled' field required"}
         if not isinstance(enabled, bool):
             return {"type": "offgrid_error", "error": "'enabled' must be a boolean"}
+        _offgrid_last_toggle = now
         result = plugin.app.set_offgrid_mode(enabled)
         return {"type": "offgrid_mode_set", **result}
 
 
 def _on_alert_event(event_type: str, data: dict) -> None:
     """Event-bus callback for ALERT_TRIGGERED — push to WS clients."""
-    if _ws_loop is None or not _ws_clients:
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
         return
     try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "alert", data)
-    except RuntimeError:
+        loop.call_soon_threadsafe(_schedule_push, "alert", data)
+    except (RuntimeError, AttributeError):
         pass
 
 
 def _on_internet_event(event_type: str, data: dict) -> None:
     """Event-bus callback for INTERNET_ONLINE/OFFLINE — push to WS clients."""
-    if _ws_loop is None or not _ws_clients:
+    loop = _ws_loop
+    plugin = _ws_plugin
+    if loop is None or not _ws_clients:
         return
     force_offline = False
-    if _ws_plugin is not None:
-        probe = getattr(_ws_plugin.app, "internet_probe", None)
+    if plugin is not None:
+        probe = getattr(plugin.app, "internet_probe", None)
         if probe is not None:
             force_offline = probe.force_offline
     payload = {
@@ -1360,14 +1375,15 @@ def _on_internet_event(event_type: str, data: dict) -> None:
         "force_offline": force_offline,
     }
     try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "internet_status", payload)
-    except RuntimeError:
+        loop.call_soon_threadsafe(_schedule_push, "internet_status", payload)
+    except (RuntimeError, AttributeError):
         pass
 
 
 def _on_firmware_event(event_type: str, data: dict) -> None:
     """Event-bus callback for MESHTASTIC_FIRMWARE_HANG/RECOVERED."""
-    if _ws_loop is None or not _ws_clients:
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
         return
     from reticulumpi import events as _ev
 
@@ -1381,22 +1397,23 @@ def _on_firmware_event(event_type: str, data: dict) -> None:
         "duration_seconds": data.get("duration_seconds"),
     }
     try:
-        _ws_loop.call_soon_threadsafe(_schedule_push, "firmware_status", payload)
-    except RuntimeError:
+        loop.call_soon_threadsafe(_schedule_push, "firmware_status", payload)
+    except (RuntimeError, AttributeError):
         pass
 
 
 def _on_offgrid_event(event_type: str, data: dict) -> None:
     """Event-bus callback for OFFGRID_MODE_CHANGED — push to WS clients."""
-    if _ws_loop is None or not _ws_clients:
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
         return
     try:
-        _ws_loop.call_soon_threadsafe(
+        loop.call_soon_threadsafe(
             _schedule_push,
             "offgrid_mode_changed",
             {"enabled": data.get("enabled", False)},
         )
-    except RuntimeError:
+    except (RuntimeError, AttributeError):
         pass
 
 
