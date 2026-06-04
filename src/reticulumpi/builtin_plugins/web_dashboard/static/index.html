@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=49">
+  <link rel="stylesheet" href="/static/style.css?v=50">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
 </head>
 <body>
@@ -50,6 +50,14 @@
           <div class="pod-badges">
             <span class="uptime" id="uptime"></span>
             <span class="conn-status conn-wait" id="conn-status" title="Connection status"><span class="conn-dot"></span><span class="conn-label">waiting…</span></span>
+          </div>
+        </div>
+        <div class="header-pod pod-time">
+          <span class="pod-label">Time</span>
+          <div class="pod-badges">
+            <span class="time-clock" id="header-clock">--:--:-- UTC</span>
+            <span class="time-clock time-local" id="header-clock-local"></span>
+            <span class="badge badge-ntp-sync" id="header-ntp-sync" title="NTP sync status">--</span>
           </div>
         </div>
       </div>
@@ -1236,7 +1244,7 @@
     </div>
   </div>
 
-  <script defer src="/static/app.js?v=37"></script>
+  <script defer src="/static/app.js?v=39"></script>
   <script defer src="/static/messages_panel.js?v=8"></script>
   <script defer src="/static/messages_lxmf.js?v=1"></script>
   <script defer src="/static/mqtt_feed.js?v=1"></script>

@@ -188,6 +188,7 @@ body {
 .pod-identity { border-left: 3px solid var(--accent); }
 .pod-network  { border-left: 3px solid var(--cyan); }
 .pod-status   { border-left: 3px solid var(--green); }
+.pod-time     { border-left: 3px solid var(--purple); }
 
 .header-pod::before {
   content: '';
@@ -202,6 +203,7 @@ body {
 .pod-identity::before { border-color: var(--accent); }
 .pod-network::before  { border-color: var(--cyan); }
 .pod-status::before   { border-color: var(--green); }
+.pod-time::before     { border-color: var(--purple); }
 
 .pod-label {
   font-size: 0.55rem;
@@ -213,6 +215,7 @@ body {
 .pod-identity .pod-label { color: var(--accent); }
 .pod-network .pod-label  { color: var(--cyan); }
 .pod-status .pod-label   { color: var(--green); }
+.pod-time .pod-label     { color: var(--purple); }
 
 .pod-badges {
   display: flex;
@@ -245,6 +248,47 @@ body {
   color: var(--accent);
   opacity: 0.5;
   margin-right: 0.15rem;
+}
+
+.time-clock {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--text-bright);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.time-local {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.time-local:empty {
+  display: none;
+}
+.badge-ntp-sync {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.badge-ntp-sync.ntp-synced {
+  background: rgba(0, 255, 159, 0.12);
+  color: var(--green);
+  border: 1px solid rgba(0, 255, 159, 0.25);
+}
+.badge-ntp-sync.ntp-gps {
+  background: rgba(0, 229, 255, 0.12);
+  color: var(--cyan);
+  border: 1px solid rgba(0, 229, 255, 0.25);
+}
+.badge-ntp-sync.ntp-unsynced {
+  background: rgba(255, 23, 68, 0.1);
+  color: var(--red);
+  border: 1px solid rgba(255, 23, 68, 0.2);
+}
+.badge-ntp-sync.ntp-unknown {
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
 }
 
 .header .uptime {
@@ -2920,7 +2964,7 @@ body {
 /* ========== Responsive — Header pods (tablet) ========== */
 @media (max-width: 700px) {
   .pod-network { flex: 1 1 100%; }
-  .pod-identity, .pod-status { flex: 1; }
+  .pod-identity, .pod-status, .pod-time { flex: 1; }
 }
 
 /* ========== Responsive — Phone ========== */

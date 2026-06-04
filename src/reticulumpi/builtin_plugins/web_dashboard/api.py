@@ -356,6 +356,7 @@ async def handle_node(request: aiohttp.web.Request) -> aiohttp.web.Response:
         "identity_hash": identity_hash,
         "version": app._get_version(),
         "uptime": time.time() - plugin._start_time if plugin._active else 0,
+        "server_time": time.time(),
     }
     return _ok(data)
 

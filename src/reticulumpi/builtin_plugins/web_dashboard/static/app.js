@@ -1335,6 +1335,69 @@
     $('uptime').textContent = 'uptime: ' + formatUptime(elapsed);
   }
 
+  // --- Server clock ---
+
+  var _clockTimer = null;
+  var _serverOffset = 0;
+  var _browserTzAbbr = '';
+  var _browserIsUtc = true;
+  try {
+    _browserIsUtc = new Date().getTimezoneOffset() === 0;
+    if (!_browserIsUtc) {
+      var _tzParts = new Intl.DateTimeFormat('en-US', {timeZoneName: 'short'}).formatToParts(new Date());
+      _browserTzAbbr = (_tzParts.find(function(p) { return p.type === 'timeZoneName'; }) || {}).value || '';
+    }
+  } catch(e) {}
+
+  function startClockTicker() {
+    if (_clockTimer) clearInterval(_clockTimer);
+    function tick() {
+      var el = $('header-clock');
+      if (!el) return;
+      var now = new Date((Date.now() / 1000 + _serverOffset) * 1000);
+      var hh = String(now.getUTCHours()).padStart(2, '0');
+      var mm = String(now.getUTCMinutes()).padStart(2, '0');
+      var ss = String(now.getUTCSeconds()).padStart(2, '0');
+      el.textContent = hh + ':' + mm + ':' + ss + ' UTC';
+      var localEl = $('header-clock-local');
+      if (localEl && !_browserIsUtc) {
+        var lh = String(now.getHours()).padStart(2, '0');
+        var lm = String(now.getMinutes()).padStart(2, '0');
+        var ls = String(now.getSeconds()).padStart(2, '0');
+        localEl.textContent = lh + ':' + lm + ':' + ls + ' ' + _browserTzAbbr;
+      }
+    }
+    tick();
+    _clockTimer = setInterval(tick, 1000);
+  }
+
+  function updateHeaderNtpSync(d) {
+    if (!d) return;
+    var el = $('header-ntp-sync');
+    if (!el) return;
+    var state = d.sync_state || 'unknown';
+
+    var cls = 'badge badge-ntp-sync ';
+    if (state === 'synced') cls += 'ntp-synced';
+    else if (state === 'gps_disciplined') cls += 'ntp-gps';
+    else if (state === 'unsynced') cls += 'ntp-unsynced';
+    else cls += 'ntp-unknown';
+    el.className = cls;
+
+    var text;
+    if (state === 'gps_disciplined') text = 'GPS';
+    else if (state === 'synced') text = 'NTP';
+    else if (state === 'unsynced') text = 'UNSYNC';
+    else text = '--';
+    el.textContent = text;
+
+    var parts = [state];
+    if (d.stratum != null) parts.push('stratum ' + d.stratum);
+    if (d.offset_ms != null) parts.push('offset ' + Number(d.offset_ms).toFixed(3) + 'ms');
+    if (d.ref_id) parts.push('ref: ' + d.ref_id);
+    el.title = parts.join(' | ');
+  }
+
   // --- Data fetching ---
 
   var _nodeLoaded = false;
@@ -1349,6 +1412,10 @@
       $('identity-hash').textContent = d.identity_hash || '';
       uptimeStart = Date.now() / 1000 - (d.uptime || 0);
       startUptimeCounter();
+      if (d.server_time) {
+        _serverOffset = d.server_time - Date.now() / 1000;
+      }
+      startClockTicker();
     });
   }
 
@@ -1525,6 +1592,7 @@
     if (d.gps && d.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(d.gps.last_fix);
     if (d.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(d.adsb);
     if (d.ntp && RPI.updateNtp) RPI.updateNtp(d.ntp);
+    if (d.ntp) updateHeaderNtpSync(d.ntp);
     if (d.hotspot) {
       _stash.hotspot = d.hotspot;
       if (RPI.updateHotspot) RPI.updateHotspot(d.hotspot, _stash.captive_portal || null);
