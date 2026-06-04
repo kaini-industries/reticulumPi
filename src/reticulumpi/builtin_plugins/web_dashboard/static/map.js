@@ -15,6 +15,10 @@
   var _loraNeighborIds = {}; // {id: true} for Meshtastic LoRa neighbor filter
   var _initialFit = false;   // whether we've done the first fitBounds
   var _gpsPos = null;        // [lat, lng] from attached GPS unit
+  var _gpsMarker = null;     // L.circleMarker for local GPS position
+  var _gpsAccuracy = null;   // L.circle accuracy ring
+  var _gpsFix = null;        // full fix object {lat, lon, hdop, alt_m}
+  var _gpsLive = false;      // true after first live GPS fix (not cached)
   var _hasLiveData = false;  // true after first WS/API data arrives
   var _idbSaveTimer = null;  // debounce timer for IndexedDB writes
 
@@ -84,6 +88,103 @@
         });
       }
     });
+  }
+
+  // -- GPS position localStorage cache -------------------------------------
+
+  var GPS_CACHE_KEY = 'rpi-gps-pos';
+
+  function _saveGpsCache(fix) {
+    try {
+      localStorage.setItem(GPS_CACHE_KEY, JSON.stringify({
+        lat: fix.lat, lon: fix.lon, hdop: fix.hdop || null
+      }));
+    } catch (e) {}
+  }
+
+  function _loadGpsCache() {
+    try {
+      var raw = localStorage.getItem(GPS_CACHE_KEY);
+      if (!raw) return;
+      var cached = JSON.parse(raw);
+      if (cached && cached.lat != null && cached.lon != null) {
+        _gpsPos = [cached.lat, cached.lon];
+        _gpsFix = cached;
+      }
+    } catch (e) {}
+  }
+
+  function _ensureGpsMarker(latlng, opacity) {
+    if (!_map) return;
+    if (!_gpsMarker) {
+      _gpsMarker = L.circleMarker(latlng, {
+        radius: 8,
+        color: '#4285f4',
+        fillColor: '#4285f4',
+        fillOpacity: 0.9 * opacity,
+        weight: 2,
+        opacity: opacity
+      }).addTo(_map);
+      _gpsMarker.bindPopup('', { maxWidth: 240 });
+    } else {
+      _gpsMarker.setLatLng(latlng);
+      _gpsMarker.setStyle({
+        fillOpacity: 0.9 * opacity,
+        opacity: opacity
+      });
+    }
+    _updateGpsPopup();
+  }
+
+  function _ensureGpsAccuracy(latlng, hdop, opacity) {
+    if (!_map) return;
+    var radiusM = (hdop || 10) * 5;
+    if (!_gpsAccuracy) {
+      _gpsAccuracy = L.circle(latlng, {
+        radius: radiusM,
+        color: '#4285f4',
+        weight: 1,
+        opacity: 0.3 * opacity,
+        fillColor: '#4285f4',
+        fillOpacity: 0.08 * opacity,
+        interactive: false
+      }).addTo(_map);
+    } else {
+      _gpsAccuracy.setLatLng(latlng);
+      _gpsAccuracy.setRadius(radiusM);
+      _gpsAccuracy.setStyle({
+        opacity: 0.3 * opacity,
+        fillOpacity: 0.08 * opacity
+      });
+    }
+  }
+
+  function _updateGpsPopup() {
+    if (!_gpsMarker || !_gpsFix) return;
+    var h = '<div class="map-popup">';
+    h += '<div class="map-popup-name">My Location';
+    if (!_gpsLive) h += ' <span class="map-source-tag">Cached</span>';
+    h += '</div><div class="map-popup-grid">';
+    h += _popupRow('Position',
+      Number(_gpsFix.lat).toFixed(5) + ', ' + Number(_gpsFix.lon).toFixed(5));
+    if (_gpsFix.alt_m != null) {
+      h += _popupRow('Altitude', Number(_gpsFix.alt_m).toFixed(1) + ' m');
+    }
+    if (_gpsFix.hdop != null) {
+      h += _popupRow('HDOP', Number(_gpsFix.hdop).toFixed(1));
+    }
+    h += '</div></div>';
+    _gpsMarker.setPopupContent(h);
+  }
+
+  function _updateGpsButton(hasFix) {
+    var btn = $('map-center-gps');
+    if (!btn) return;
+    if (hasFix) {
+      btn.classList.add('gps-has-fix');
+    } else {
+      btn.classList.remove('gps-has-fix');
+    }
   }
 
   // -- Custom marker icons -------------------------------------------------
@@ -386,18 +487,24 @@
       }
     }
 
-    if (!_initialFit && !_gpsPos && _markerGroup.getLayers().length > 0) {
-      var selfNode = null;
-      for (var s = 0; s < withPos.length; s++) {
-        if (withPos[s].is_self) { selfNode = withPos[s]; break; }
+    if (!_initialFit) {
+      if (_gpsPos) {
+        _map.setView(_gpsPos, 13);
+        _initialFit = true;
+        setTimeout(function () { if (_map) _map.invalidateSize(); }, 100);
+      } else if (_markerGroup.getLayers().length > 0) {
+        var selfNode = null;
+        for (var s = 0; s < withPos.length; s++) {
+          if (withPos[s].is_self) { selfNode = withPos[s]; break; }
+        }
+        if (selfNode) {
+          _map.setView([selfNode.latitude, selfNode.longitude], 13);
+        } else {
+          _map.fitBounds(_markerGroup.getBounds().pad(0.1));
+        }
+        _initialFit = true;
+        setTimeout(function () { if (_map) _map.invalidateSize(); }, 100);
       }
-      if (selfNode) {
-        _map.setView([selfNode.latitude, selfNode.longitude], 13);
-      } else {
-        _map.fitBounds(_markerGroup.getBounds().pad(0.1));
-      }
-      _initialFit = true;
-      setTimeout(function () { if (_map) _map.invalidateSize(); }, 100);
     }
   }
 
@@ -448,15 +555,32 @@
     if (!fix || fix.lat == null || fix.lon == null) return;
     if (!_map) _initMap();
     if (R.markUpdated) R.markUpdated('map-section');
+
     var latlng = [fix.lat, fix.lon];
-    if (!_gpsPos) {
-      _gpsPos = latlng;
-      _map.setView(latlng, 13);
+    var wasLive = _gpsLive;
+    var oldPos = _gpsPos;
+
+    _gpsFix = fix;
+    _gpsPos = latlng;
+    _gpsLive = true;
+    _saveGpsCache(fix);
+    _updateGpsButton(true);
+
+    _ensureGpsMarker(latlng, 1.0);
+    _ensureGpsAccuracy(latlng, fix.hdop, 1.0);
+
+    if (!oldPos) {
+      if (_initialFit) {
+        _map.flyTo(latlng, 13, { duration: 1.2 });
+      } else {
+        _map.setView(latlng, 13);
+      }
       _initialFit = true;
+    } else if (!wasLive) {
+      _map.flyTo(latlng, 13, { duration: 1.2 });
     } else {
-      var dLat = _gpsPos[0] - fix.lat, dLon = _gpsPos[1] - fix.lon;
+      var dLat = oldPos[0] - fix.lat, dLon = oldPos[1] - fix.lon;
       if (dLat * dLat + dLon * dLon > 0.0001) {
-        _gpsPos = latlng;
         _map.panTo(latlng, { animate: true });
       }
     }
@@ -509,11 +633,25 @@
     }
     if (gpsBtn) {
       gpsBtn.addEventListener('click', function () {
-        if (_gpsPos && _map) _map.setView(_gpsPos, 13);
+        if (_gpsPos && _map) {
+          _map.flyTo(_gpsPos, 13, { duration: 0.8 });
+        } else {
+          gpsBtn.classList.remove('gps-no-fix');
+          void gpsBtn.offsetWidth;
+          gpsBtn.classList.add('gps-no-fix');
+        }
       });
     }
   }
   _wireFilterTabs();
+  _loadGpsCache();
+  if (_gpsPos && !_gpsLive) {
+    _initMap();
+    if (_map) {
+      _ensureGpsMarker(_gpsPos, 0.5);
+      if (_gpsFix) _ensureGpsAccuracy(_gpsPos, _gpsFix.hdop, 0.5);
+    }
+  }
   _loadPositions();
 
   R.refreshMapTrackedFilter = function () {

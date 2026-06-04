@@ -1144,6 +1144,20 @@ body {
   border-color: var(--accent);
   background: rgba(255, 45, 123, 0.08);
 }
+#map-center-gps.gps-has-fix {
+  color: #4285f4;
+  border-color: #4285f4;
+}
+#map-center-gps.gps-has-fix:hover {
+  background: rgba(66, 133, 244, 0.1);
+}
+#map-center-gps.gps-no-fix {
+  animation: gps-no-fix-flash 0.6s ease-out;
+}
+@keyframes gps-no-fix-flash {
+  0% { border-color: var(--red, #f44); color: var(--red, #f44); }
+  100% { border-color: var(--border); color: var(--text-muted); }
+}
 .mesh-search-input {
   margin-left: auto;
   padding: 0.25rem 0.5rem;
