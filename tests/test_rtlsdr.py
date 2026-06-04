@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from reticulumpi.rtlsdr import enumerate_devices, release_device, reset_cache, resolve_device
+from reticulumpi.rtlsdr import (
+    enumerate_devices,
+    invalidate_cache,
+    release_device,
+    reset_cache,
+    resolve_device,
+)
 
 _RTL_TEST_OUTPUT = """\
 Found 3 device(s):
@@ -141,3 +147,59 @@ class TestResolveDevice:
             release_device("00000001", caller="other_plugin")
             with pytest.raises(RuntimeError, match="already claimed"):
                 resolve_device("00000001", caller="spectrum_scanner")
+
+
+# ---------------------------------------------------------------------------
+# Cache TTL
+# ---------------------------------------------------------------------------
+
+
+class TestCacheTTL:
+    def test_cache_expires_after_ttl(self):
+        import reticulumpi.rtlsdr as mod
+
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            devices1 = enumerate_devices()
+            assert len(devices1) > 0
+
+        alt_output = "Found 1 device(s):\n  0:  Test, Test, SN: 99999999\n"
+        orig_ttl = mod._CACHE_TTL
+        try:
+            mod._CACHE_TTL = 0.0
+            patches2 = _mock_rtl_test(output=alt_output)
+            with patches2[0], patches2[1]:
+                devices2 = enumerate_devices()
+            assert any(s == "99999999" for _, s in devices2)
+        finally:
+            mod._CACHE_TTL = orig_ttl
+
+    def test_cache_valid_within_ttl(self):
+        import reticulumpi.rtlsdr as mod
+
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            devices1 = enumerate_devices()
+
+        alt_output = "Found 1 device(s):\n  0:  Test, Test, SN: 99999999\n"
+        orig_ttl = mod._CACHE_TTL
+        try:
+            mod._CACHE_TTL = 9999.0
+            patches2 = _mock_rtl_test(output=alt_output)
+            with patches2[0], patches2[1]:
+                devices2 = enumerate_devices()
+            assert devices1 == devices2
+        finally:
+            mod._CACHE_TTL = orig_ttl
+
+    def test_invalidate_resets_cache_time(self):
+        import reticulumpi.rtlsdr as mod
+
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            enumerate_devices()
+        assert mod._cache_time > 0
+
+        invalidate_cache()
+        assert mod._cache is None
+        assert mod._cache_time == 0.0

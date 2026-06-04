@@ -29,6 +29,7 @@ Requirements:
 
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import subprocess
@@ -42,6 +43,7 @@ from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
 
 _EMERGENCY_SQUAWKS = frozenset({"7500", "7600", "7700"})
+_RECONNECT_FLAG_DIR = "/run/reticulumpi"
 
 
 @dataclass
@@ -115,6 +117,7 @@ class AdsbRadarPlugin(PluginBase):
         self._max_aircraft = int(cfg.get("max_aircraft", 500))
         self._wedge_timeout = float(cfg.get("wedge_timeout", 120))
         self._wedge_grace = float(cfg.get("wedge_grace", 30))
+        self._patience_interval = float(cfg.get("patience_interval", 300))
 
         self._receiver_lat: float | None = None
         self._receiver_lon: float | None = None
@@ -136,6 +139,9 @@ class AdsbRadarPlugin(PluginBase):
         self._dump1090_path: str | None = None
         self._rtl_biast_path: str | None = None
         self._bias_tee_active = False
+        self._log_reader_thread: threading.Thread | None = None
+        self._patience_active = False
+        self._launch_time: float | None = None
 
         self._aircraft: dict[str, AircraftState] = {}
         self._total_messages = 0
@@ -212,6 +218,9 @@ class AdsbRadarPlugin(PluginBase):
                 "aircraft_count": len(self._aircraft),
                 "total_messages": self._total_messages,
                 "aircraft_seen_total": self._aircraft_seen_total,
+                "restart_count": self._restart_count,
+                "patience_active": self._patience_active,
+                "bias_tee_active": self._bias_tee_active,
                 "error": self._last_error,
             }
 
@@ -240,6 +249,14 @@ class AdsbRadarPlugin(PluginBase):
                     "max_distance_nm": self._max_distance_nm,
                     "msg_rate_history": list(self._msg_rate_history),
                     "emergency_history": list(self._emergency_history),
+                    "restart_count": self._restart_count,
+                    "patience_active": self._patience_active,
+                    "bias_tee_active": self._bias_tee_active,
+                    "dongle_uptime": (
+                        time.monotonic() - self._launch_time
+                        if self._launch_time is not None
+                        else None
+                    ),
                 },
             }
 
@@ -283,15 +300,10 @@ class AdsbRadarPlugin(PluginBase):
                     return
                 self._restart_count += 1
                 if self._restart_count > self._max_restarts:
-                    self._set_status(
-                        "error",
-                        f"dump1090 exceeded max_restarts ({self._max_restarts})",
-                    )
-                    self.log.error(
-                        "dump1090 exceeded max_restarts (%d); giving up",
-                        self._max_restarts,
-                    )
-                    break
+                    self._enter_patience_mode(invalidate_cache)
+                    if not self._active:
+                        break
+                    continue
                 backoff = min(60.0, 2.0**self._restart_count)
                 self._set_status("restarting", f"device not found, backoff {backoff:.0f}s")
                 self.log.warning(
@@ -304,6 +316,8 @@ class AdsbRadarPlugin(PluginBase):
                 self._sleep_while_active(backoff)
                 continue
 
+            self._patience_active = False
+
             try:
                 self._launch_dump1090()
             except Exception as exc:
@@ -313,15 +327,19 @@ class AdsbRadarPlugin(PluginBase):
 
             parser = self._start_thread(self._parser_loop, name="adsb-parser")
 
-            launch_time = time.monotonic()
+            self._launch_time = time.monotonic()
             last_msg_count = self._total_messages
-            last_msg_time = launch_time
+            last_msg_time = self._launch_time
             restart_count_reset = False
 
             while self._active and self._process is not None:
                 rc = self._process.poll()
                 if rc is not None:
                     self.log.warning("dump1090 exited (code %s)", rc)
+                    break
+
+                if not parser.is_alive():
+                    self.log.warning("Parser thread exited unexpectedly")
                     break
 
                 now = time.monotonic()
@@ -332,19 +350,19 @@ class AdsbRadarPlugin(PluginBase):
                     if (
                         not restart_count_reset
                         and self._restart_count > 0
-                        and now - launch_time > 600.0
+                        and now - self._launch_time > 600.0
                     ):
                         self.log.info(
                             "dump1090 stable for %.0fs; resetting restart "
                             "counter (was %d)",
-                            now - launch_time,
+                            now - self._launch_time,
                             self._restart_count,
                         )
                         self._restart_count = 0
                         restart_count_reset = True
                 elif (
                     self._wedge_timeout > 0
-                    and now - launch_time > self._wedge_grace
+                    and now - self._launch_time > self._wedge_grace
                     and now - last_msg_time > self._wedge_timeout
                 ):
                     self.log.warning(
@@ -353,6 +371,10 @@ class AdsbRadarPlugin(PluginBase):
                         now - last_msg_time,
                         self._pid,
                     )
+                    self._publish(events.ADSB_WEDGE_DETECTED, {
+                        "pid": self._pid,
+                        "silence_seconds": now - last_msg_time,
+                    })
                     self._terminate_process()
                     break
 
@@ -360,7 +382,12 @@ class AdsbRadarPlugin(PluginBase):
 
             parser.join(timeout=3.0)
             self._remove_thread(parser)
+            if self._log_reader_thread is not None:
+                self._log_reader_thread.join(timeout=2.0)
+                self._remove_thread(self._log_reader_thread)
+                self._log_reader_thread = None
             self._terminate_process()
+            self._launch_time = None
 
             if not self._active:
                 break
@@ -369,15 +396,10 @@ class AdsbRadarPlugin(PluginBase):
 
             self._restart_count += 1
             if self._restart_count > self._max_restarts:
-                self._set_status(
-                    "error",
-                    f"dump1090 exceeded max_restarts ({self._max_restarts})",
-                )
-                self.log.error(
-                    "dump1090 exceeded max_restarts (%d); giving up",
-                    self._max_restarts,
-                )
-                break
+                self._enter_patience_mode(invalidate_cache)
+                if not self._active:
+                    break
+                continue
 
             backoff = min(60.0, 2.0**self._restart_count)
             self._set_status("restarting", f"backoff {backoff:.0f}s")
@@ -400,7 +422,7 @@ class AdsbRadarPlugin(PluginBase):
             stderr=subprocess.STDOUT,
         )
         self._pid = self._process.pid
-        self._start_log_reader(self._process, prefix="dump1090")
+        self._log_reader_thread = self._start_log_reader(self._process, prefix="dump1090")
         self._set_status("running")
         self.log.info("Started dump1090 (PID %d)", self._pid)
 
@@ -448,29 +470,112 @@ class AdsbRadarPlugin(PluginBase):
                     proc.stdout.close()
                 except Exception:
                     pass
+            time.sleep(1.0)
 
     def _set_bias_tee(self, on: bool) -> None:
         if self._rtl_biast_path is None:
             return
         idx = self._resolved_index if self._resolved_index is not None else 0
         flag = "1" if on else "0"
-        try:
-            result = subprocess.run(
-                [self._rtl_biast_path, "-d", str(idx), "-b", flag],
-                capture_output=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                self._bias_tee_active = on
-                self.log.info("Bias-tee %s (device %d)", "enabled" if on else "disabled", idx)
-            else:
-                self.log.warning(
-                    "rtl_biast exited %d: %s",
-                    result.returncode,
-                    result.stderr.decode(errors="replace").strip(),
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = subprocess.run(
+                    [self._rtl_biast_path, "-d", str(idx), "-b", flag],
+                    capture_output=True,
+                    timeout=10,
                 )
-        except Exception:
-            self.log.warning("Failed to %s bias-tee", "enable" if on else "disable", exc_info=True)
+                if result.returncode == 0:
+                    self._bias_tee_active = on
+                    self.log.info("Bias-tee %s (device %d)", "enabled" if on else "disabled", idx)
+                    return
+                stderr = result.stderr.decode(errors="replace").strip()
+                if attempt < max_attempts:
+                    self.log.debug(
+                        "rtl_biast attempt %d/%d failed (code %d): %s",
+                        attempt, max_attempts, result.returncode, stderr,
+                    )
+                    time.sleep(1.0)
+                else:
+                    self.log.warning(
+                        "rtl_biast failed after %d attempts (code %d): %s",
+                        max_attempts, result.returncode, stderr,
+                    )
+            except Exception:
+                if attempt < max_attempts:
+                    self.log.debug(
+                        "rtl_biast attempt %d/%d error", attempt, max_attempts, exc_info=True,
+                    )
+                    time.sleep(1.0)
+                else:
+                    self.log.warning(
+                        "Failed to %s bias-tee after %d attempts",
+                        "enable" if on else "disable", max_attempts, exc_info=True,
+                    )
+
+    # ── patience mode ──────────────────────────────────────────────────
+
+    def _enter_patience_mode(self, invalidate_cache_fn: Any) -> None:
+        """After max_restarts exhausted, probe slowly until the dongle returns."""
+        self._patience_active = True
+        self._set_status(
+            "exhausted",
+            f"max_restarts ({self._max_restarts}) exceeded; probing every "
+            f"{self._patience_interval:.0f}s",
+        )
+        self._publish(events.ADSB_EXHAUSTED, {
+            "max_restarts": self._max_restarts,
+            "patience_interval": self._patience_interval,
+        })
+        self.log.warning(
+            "Entering patience mode — probing for dongle every %.0fs",
+            self._patience_interval,
+        )
+
+        from reticulumpi.rtlsdr import resolve_device
+
+        while self._active:
+            if self._patience_sleep(self._patience_interval):
+                break
+            invalidate_cache_fn()
+            try:
+                self._resolved_index = resolve_device(
+                    self._device_id, caller=self.plugin_name
+                )
+            except RuntimeError:
+                self.log.debug("Patience probe: dongle still absent")
+                continue
+
+            self.log.info(
+                "Dongle found during patience probe (index %d); resuming",
+                self._resolved_index,
+            )
+            self._restart_count = 0
+            self._patience_active = False
+            self._publish(events.ADSB_RECOVERED, {
+                "device_index": self._resolved_index,
+            })
+            return
+
+    def _patience_sleep(self, total: float) -> bool:
+        """Sleep in 2-second increments, checking for a udev reconnect flag.
+
+        Returns True if a reconnect flag was found (caller should retry
+        immediately), False if the full sleep elapsed.
+        """
+        flag_path = os.path.join(_RECONNECT_FLAG_DIR, f"usb-reconnect-{self._device_id}")
+        elapsed = 0.0
+        while elapsed < total and self._active:
+            self._sleep_while_active(min(2.0, total - elapsed))
+            elapsed += 2.0
+            if os.path.exists(flag_path):
+                try:
+                    os.unlink(flag_path)
+                except OSError:
+                    pass
+                self.log.info("USB reconnect flag detected; waking from patience sleep")
+                return True
+        return False
 
     # ── SBS parser (TCP to dump1090 port 30003) ──────────────────────
 

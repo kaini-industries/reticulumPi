@@ -155,6 +155,11 @@ ADSB_AIRCRAFT_DETECTED = "adsb.aircraft_detected"
 ADSB_AIRCRAFT_LOST = "adsb.aircraft_lost"
 ADSB_EMERGENCY_SQUAWK = "adsb.emergency_squawk"
 ADSB_STATUS = "adsb.status"
+ADSB_WEDGE_DETECTED = "adsb.wedge_detected"
+ADSB_EXHAUSTED = "adsb.exhausted"
+ADSB_RECOVERED = "adsb.recovered"
+ADSB_DEGRADED = "adsb.degraded"
+ADSB_HEALTHY = "adsb.healthy"
 
 # LoRa link tester — dedicated-radio probe/ACK measurements
 LINK_TEST_STARTED = "link_test.started"

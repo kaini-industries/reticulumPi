@@ -8,6 +8,8 @@ or spawning dump1090.
 
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 import time
 from collections import deque
@@ -51,6 +53,9 @@ def _make_plugin(config: dict | None = None) -> AdsbRadarPlugin:
     plugin._resolved_index = None
     plugin._rtl_biast_path = None
     plugin._bias_tee_active = False
+    plugin._log_reader_thread = None
+    plugin._patience_active = False
+    plugin._launch_time = None
     plugin._msg_rate_history = deque(maxlen=60)
     plugin._msg_rate_window_start = time.time()
     plugin._msg_rate_window_count = 0
@@ -1007,3 +1012,317 @@ class TestAircraftState:
             "message_count",
             "distance_nm",
         }
+
+
+# ---------------------------------------------------------------------------
+# Patience mode (infinite recovery after max_restarts exhaustion)
+# ---------------------------------------------------------------------------
+
+
+class TestPatienceMode:
+    def test_patience_mode_entered_after_max_restarts(self):
+        p = _make_plugin({"max_restarts": 1})
+        p._active = True
+        p._restart_count = 1
+        p._dump1090_path = "/usr/bin/dump1090"
+
+        def fake_resolve(*_a, **_kw):
+            raise RuntimeError("not found")
+
+        patience_entered = threading.Event()
+
+        def mock_enter(self_, invalidate_fn):
+            patience_entered.set()
+            self_._active = False
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/dump1090"),
+            patch("reticulumpi.rtlsdr.resolve_device", side_effect=fake_resolve),
+            patch("reticulumpi.rtlsdr.invalidate_cache"),
+            patch.object(AdsbRadarPlugin, "_enter_patience_mode", mock_enter),
+            patch.object(AdsbRadarPlugin, "_sleep_while_active"),
+        ):
+            p._supervisor_loop()
+
+        assert patience_entered.is_set()
+
+    def test_patience_recovers_on_dongle_return(self):
+        p = _make_plugin({"max_restarts": 1, "patience_interval": 0.1})
+        p._active = True
+        p._dump1090_path = "/usr/bin/dump1090"
+
+        probe_count = [0]
+
+        def fake_resolve(*_a, **_kw):
+            probe_count[0] += 1
+            if probe_count[0] <= 2:
+                raise RuntimeError("not found")
+            return 2
+
+        with (
+            patch("reticulumpi.rtlsdr.resolve_device", side_effect=fake_resolve),
+            patch("reticulumpi.rtlsdr.invalidate_cache"),
+            patch.object(p, "_patience_sleep", return_value=False),
+            patch.object(p, "_publish"),
+        ):
+            p._enter_patience_mode(lambda: None)
+
+        assert p._restart_count == 0
+        assert p._patience_active is False
+        assert p._resolved_index == 2
+
+    def test_patience_interval_configurable(self):
+        p = _make_plugin({"patience_interval": 42})
+        assert p._patience_interval == 42.0
+
+    def test_udev_flag_file_cuts_patience_short(self):
+        p = _make_plugin()
+        p._active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flag_path = os.path.join(tmpdir, f"usb-reconnect-{p._device_id}")
+            os.makedirs(os.path.dirname(flag_path), exist_ok=True)
+
+            with open(flag_path, "w") as f:
+                f.write("")
+
+            with patch(
+                "reticulumpi.builtin_plugins.adsb_radar._RECONNECT_FLAG_DIR", tmpdir
+            ):
+                result = p._patience_sleep(10.0)
+
+            assert result is True
+            assert not os.path.exists(flag_path)
+
+    def test_patience_sleep_returns_false_on_timeout(self):
+        p = _make_plugin()
+        p._active = True
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar._RECONNECT_FLAG_DIR", tmpdir
+            ),
+            patch.object(p, "_sleep_while_active"),
+        ):
+            result = p._patience_sleep(0.01)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Log reader thread leak fix
+# ---------------------------------------------------------------------------
+
+
+class TestLogReaderThreadLeak:
+    def test_log_reader_saved_on_launch(self):
+        p = _make_plugin()
+        p._process = None
+        mock_thread = MagicMock()
+        with (
+            patch.object(p, "_set_bias_tee"),
+            patch("subprocess.Popen") as mock_popen,
+            patch.object(p, "_start_log_reader", return_value=mock_thread),
+            patch.object(p, "_set_status"),
+        ):
+            mock_popen.return_value = MagicMock(pid=12345)
+            p._launch_dump1090()
+        assert p._log_reader_thread is mock_thread
+
+    def test_log_reader_joined_on_cleanup(self):
+        """The supervisor cleanup path joins the log reader thread."""
+        p = _make_plugin({"max_restarts": 0})
+        p._active = True
+        p._dump1090_path = "/usr/bin/dump1090"
+        mock_log_thread = MagicMock()
+
+        def fake_launch():
+            p._process = MagicMock()
+            p._process.poll.return_value = 1
+            p._pid = 999
+            p._log_reader_thread = mock_log_thread
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/dump1090"),
+            patch("reticulumpi.rtlsdr.resolve_device", return_value=0),
+            patch("reticulumpi.rtlsdr.invalidate_cache"),
+            patch.object(p, "_launch_dump1090", side_effect=fake_launch),
+            patch.object(p, "_start_thread", return_value=MagicMock()),
+            patch.object(p, "_remove_thread"),
+            patch.object(p, "_terminate_process"),
+            patch.object(p, "_enter_patience_mode", side_effect=lambda _: setattr(p, "_active", False)),
+            patch.object(p, "_set_status"),
+            patch.object(p, "_publish"),
+        ):
+            p._supervisor_loop()
+
+        mock_log_thread.join.assert_called_once_with(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Bias-tee retry
+# ---------------------------------------------------------------------------
+
+
+class TestBiasTeeRetry:
+    def test_retries_on_failure(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._rtl_biast_path = "/usr/bin/rtl_biast"
+        p._resolved_index = 2
+        results = [
+            MagicMock(returncode=6, stderr=b"error -6"),
+            MagicMock(returncode=0, stderr=b""),
+        ]
+        with patch("subprocess.run", side_effect=results) as mock_run:
+            p._set_bias_tee(True)
+        assert mock_run.call_count == 2
+        assert p._bias_tee_active is True
+
+    def test_gives_up_after_max_retries(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._rtl_biast_path = "/usr/bin/rtl_biast"
+        p._resolved_index = 2
+        fail = MagicMock(returncode=6, stderr=b"error -6")
+        with patch("subprocess.run", return_value=fail) as mock_run:
+            p._set_bias_tee(True)
+        assert mock_run.call_count == 3
+        assert p._bias_tee_active is False
+
+    def test_success_on_first_try(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._rtl_biast_path = "/usr/bin/rtl_biast"
+        p._resolved_index = 0
+        ok = MagicMock(returncode=0, stderr=b"")
+        with patch("subprocess.run", return_value=ok) as mock_run:
+            p._set_bias_tee(True)
+        assert mock_run.call_count == 1
+        assert p._bias_tee_active is True
+
+
+# ---------------------------------------------------------------------------
+# Parser thread liveness check
+# ---------------------------------------------------------------------------
+
+
+class TestParserLivenessCheck:
+    def test_dead_parser_breaks_supervisor_loop(self):
+        p = _make_plugin({"max_restarts": 0})
+        p._active = True
+        p._dump1090_path = "/usr/bin/dump1090"
+
+        dead_parser = MagicMock()
+        dead_parser.is_alive.return_value = False
+
+        def fake_launch():
+            p._process = MagicMock()
+            p._process.poll.return_value = None
+            p._pid = 999
+            p._log_reader_thread = MagicMock()
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/dump1090"),
+            patch("reticulumpi.rtlsdr.resolve_device", return_value=0),
+            patch("reticulumpi.rtlsdr.invalidate_cache"),
+            patch.object(p, "_launch_dump1090", side_effect=fake_launch),
+            patch.object(p, "_start_thread", return_value=dead_parser),
+            patch.object(p, "_remove_thread"),
+            patch.object(p, "_terminate_process"),
+            patch.object(p, "_enter_patience_mode", side_effect=lambda _: setattr(p, "_active", False)),
+            patch.object(p, "_set_status"),
+            patch.object(p, "_publish"),
+            patch.object(p, "_sleep_while_active"),
+        ):
+            p._supervisor_loop()
+
+        dead_parser.join.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# USB settle delay after terminate
+# ---------------------------------------------------------------------------
+
+
+class TestUsbSettleDelay:
+    def test_terminate_includes_settle_delay(self):
+        p = _make_plugin()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0
+        mock_proc.stdout = None
+        p._process = mock_proc
+        with patch("time.sleep") as mock_sleep:
+            p._terminate_process()
+        mock_sleep.assert_called_once_with(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot includes new recovery fields
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotRecoveryFields:
+    def test_status_includes_recovery_fields(self):
+        p = _make_plugin()
+        p._restart_count = 3
+        p._patience_active = True
+        p._bias_tee_active = True
+        status = p.get_status()
+        assert status["restart_count"] == 3
+        assert status["patience_active"] is True
+        assert status["bias_tee_active"] is True
+
+    def test_snapshot_includes_dongle_uptime(self):
+        p = _make_plugin()
+        p._launch_time = time.monotonic() - 120
+        snap = p.get_snapshot()
+        assert snap["stats"]["dongle_uptime"] >= 119
+        assert snap["stats"]["restart_count"] == 0
+        assert snap["stats"]["patience_active"] is False
+
+    def test_snapshot_dongle_uptime_none_when_not_running(self):
+        p = _make_plugin()
+        p._launch_time = None
+        snap = p.get_snapshot()
+        assert snap["stats"]["dongle_uptime"] is None
+
+
+# ---------------------------------------------------------------------------
+# Wedge event publishing
+# ---------------------------------------------------------------------------
+
+
+class TestWedgeEvent:
+    def test_wedge_publishes_event(self):
+        p = _make_plugin({"wedge_timeout": 5, "wedge_grace": 0})
+        p._active = True
+        p._total_messages = 0
+        p._launch_time = time.monotonic() - 100
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        p._process = mock_proc
+
+        published = []
+
+        def capture_publish(event, data):
+            published.append((event, data))
+            if event == "adsb.wedge_detected":
+                p._active = False
+
+        with (
+            patch.object(p, "_publish", side_effect=capture_publish),
+            patch.object(p, "_terminate_process"),
+            patch.object(p, "_sleep_while_active"),
+        ):
+            parser = MagicMock()
+            parser.is_alive.return_value = True
+
+            p._launch_time = time.monotonic() - 100
+
+            from reticulumpi import events
+
+            p._publish(events.ADSB_WEDGE_DETECTED, {
+                "pid": 123,
+                "silence_seconds": 10.0,
+            })
+
+        wedge_events = [e for e in published if e[0] == "adsb.wedge_detected"]
+        assert len(wedge_events) == 1
+        assert "silence_seconds" in wedge_events[0][1]

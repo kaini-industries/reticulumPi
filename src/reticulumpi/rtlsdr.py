@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import re
 import shutil
 import subprocess
 import threading
+import time
 
 log = logging.getLogger("reticulumpi.rtlsdr")
 
@@ -14,9 +16,19 @@ _DEVICE_RE = re.compile(r"^\s*(\d+):\s+.*SN:\s*(\S+)")
 _FOUND_RE = re.compile(r"^Found\s+(\d+)\s+device")
 
 _cache: list[tuple[int, str]] | None = None
+_cache_time: float = 0.0
+_CACHE_TTL: float = 300.0
 _cache_lock = threading.Lock()
 _claim_lock = threading.Lock()
 _claimed: dict[str, str] = {}
+
+
+def _cleanup_claims() -> None:
+    with _claim_lock:
+        _claimed.clear()
+
+
+atexit.register(_cleanup_claims)
 
 
 def _run_rtl_test(rtl_test_path: str) -> list[tuple[int, str]]:
@@ -61,19 +73,19 @@ def _run_rtl_test(rtl_test_path: str) -> list[tuple[int, str]]:
 def enumerate_devices() -> list[tuple[int, str]]:
     """Run ``rtl_test`` and return ``[(index, serial), ...]``.
 
-    Results are cached for the lifetime of the process (USB devices
-    don't change at runtime on this embedded system).  Returns an empty
-    list if ``rtl_test`` is not installed or fails.
+    Results are cached for up to ``_CACHE_TTL`` seconds (default 5 min).
+    Returns an empty list if ``rtl_test`` is not installed or fails.
     """
-    global _cache
+    global _cache, _cache_time
     with _cache_lock:
-        if _cache is not None:
+        if _cache is not None and (time.monotonic() - _cache_time) < _CACHE_TTL:
             return list(_cache)
 
         rtl_test_path = shutil.which("rtl_test")
         if not rtl_test_path:
             log.warning("rtl_test not found; serial-based device resolution unavailable")
             _cache = []
+            _cache_time = time.monotonic()
             return []
 
         try:
@@ -81,9 +93,11 @@ def enumerate_devices() -> list[tuple[int, str]]:
         except Exception as exc:
             log.warning("rtl_test failed: %s", exc)
             _cache = []
+            _cache_time = time.monotonic()
             return []
 
         _cache = list(devices)
+        _cache_time = time.monotonic()
         return devices
 
 
@@ -158,15 +172,17 @@ def invalidate_cache() -> None:
     dongle may have dropped off USB and re-enumerated at a different
     index.
     """
-    global _cache
+    global _cache, _cache_time
     with _cache_lock:
         _cache = None
+        _cache_time = 0.0
 
 
 def reset_cache() -> None:
     """Clear cached enumeration and claims (for testing)."""
-    global _cache
+    global _cache, _cache_time
     with _cache_lock:
         _cache = None
+        _cache_time = 0.0
     with _claim_lock:
         _claimed.clear()

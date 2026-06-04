@@ -377,6 +377,54 @@
     }
   }
 
+  // -- Health badge & sparkline ---------------------------------------------
+  function _healthBadge(data) {
+    var s = data.stats || {};
+    var status = data.status || 'unknown';
+    var cls = 'adsb-badge ';
+    var label = status;
+    if (status === 'running') { cls += 'adsb-badge-ok'; label = 'Healthy'; }
+    else if (status === 'exhausted') { cls += 'adsb-badge-err adsb-pulse'; label = 'Exhausted'; }
+    else if (status === 'restarting') { cls += 'adsb-badge-warn'; label = 'Restarting'; }
+    else if (status === 'error') { cls += 'adsb-badge-err'; label = 'Error'; }
+    else { cls += 'adsb-badge-off'; }
+
+    var rates = s.msg_rate_history || [];
+    var rate = rates.length ? rates[rates.length - 1] : 0;
+
+    var parts = [];
+    parts.push('<span class="' + cls + '">' + esc(label) + '</span>');
+    parts.push('<span class="adsb-stat">' + rate.toFixed(1) + ' msg/s</span>');
+    if (s.restart_count > 0) {
+      parts.push('<span class="adsb-stat adsb-stat-warn">restarts: ' + s.restart_count + '</span>');
+    }
+    if (s.dongle_uptime != null) {
+      var m = Math.floor(s.dongle_uptime / 60);
+      parts.push('<span class="adsb-stat">up ' + (m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + 'm') + '</span>');
+    }
+    parts.push(_sparkline(rates));
+    return parts.join(' ');
+  }
+
+  function _sparkline(values) {
+    if (!values || values.length < 2) return '';
+    var w = 120, h = 28, pad = 2;
+    var max = 0;
+    for (var i = 0; i < values.length; i++) { if (values[i] > max) max = values[i]; }
+    if (max === 0) max = 1;
+    var pts = [];
+    for (var j = 0; j < values.length; j++) {
+      var x = pad + (j / (values.length - 1)) * (w - 2 * pad);
+      var y = h - pad - ((values[j] / max) * (h - 2 * pad));
+      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    var last = values[values.length - 1];
+    var color = last > 5 ? '#4caf50' : last > 1 ? '#ff9800' : '#e53935';
+    return '<svg class="adsb-sparkline" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">'
+      + '<polyline fill="none" stroke="' + color + '" stroke-width="1.5" points="' + pts.join(' ') + '"/>'
+      + '</svg>';
+  }
+
   // -- Public API -----------------------------------------------------------
   function update(data) {
     _lastData = data;
@@ -399,6 +447,10 @@
     var aircraft = data.aircraft || [];
     if (_countEl) {
       _countEl.textContent = aircraft.length + ' aircraft';
+    }
+
+    if (_statsEl) {
+      _statsEl.innerHTML = _healthBadge(data);
     }
 
     if (_body && _body.classList.contains('hidden')) return;

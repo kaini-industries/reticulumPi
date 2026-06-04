@@ -666,6 +666,16 @@ class SpectrumScanner(PluginBase):
             if not self._active:
                 break
 
+            try:
+                from reticulumpi.rtlsdr import invalidate_cache, resolve_device
+
+                invalidate_cache()
+                self._resolved_index = resolve_device(
+                    self._device_id, caller=self.plugin_name
+                )
+            except Exception:
+                pass
+
             # Backoff + restart.
             self._restart_count += 1
             if self._restart_count > self._max_restarts:

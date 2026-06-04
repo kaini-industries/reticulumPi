@@ -4443,6 +4443,17 @@ body {
   gap: 4px 0;
 }
 .adsb-stats strong { color: var(--text-bright); }
+.adsb-stats { align-items: center; gap: 8px; }
+.adsb-badge { padding: 2px 8px; border-radius: 10px; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.adsb-badge-ok { background: #1b5e20; color: #a5d6a7; }
+.adsb-badge-warn { background: #e65100; color: #ffcc80; }
+.adsb-badge-err { background: #b71c1c; color: #ef9a9a; }
+.adsb-badge-off { background: var(--bg-alt); color: var(--text-muted); }
+.adsb-pulse { animation: adsb-pulse 1.5s infinite; }
+@keyframes adsb-pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+.adsb-stat { color: var(--text-muted); font-size: 0.78rem; }
+.adsb-stat-warn { color: #ff9800; }
+.adsb-sparkline { vertical-align: middle; }
 .adsb-map {
   border-radius: var(--radius);
   border: 1px solid var(--border);
