@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 EventCallback = Callable[[str, dict[str, Any]], None]
 
 _OFFLOAD_MAX_PENDING = 64
-_OFFLOAD_ACQUIRE_TIMEOUT = 0.1
+_OFFLOAD_ACQUIRE_TIMEOUT = 1.0
 
 
 def _safe_offload(
@@ -48,12 +48,13 @@ class EventBus:
         self._subscribers: dict[str, list[EventCallback]] = {}
         self._offload_map: dict[EventCallback, EventCallback] = {}
         self._offload_executor = ThreadPoolExecutor(
-            max_workers=4,
+            max_workers=8,
             thread_name_prefix="eventbus",
         )
         self._offload_semaphore = threading.BoundedSemaphore(
             value=_OFFLOAD_MAX_PENDING,
         )
+        self._is_shutdown = False
 
     def subscribe(self, event_type: str, callback: EventCallback) -> None:
         """Register *callback* to be called whenever *event_type* is published."""
@@ -80,7 +81,10 @@ class EventBus:
                             getattr(callback, "__qualname__", callback),
                         )
                         return
-                    executor.submit(_safe_offload, callback, evt, data, sem)
+                    try:
+                        executor.submit(_safe_offload, callback, evt, data, sem)
+                    except RuntimeError:
+                        sem.release()
 
                 self._offload_map[callback] = _wrapper
                 wrapper = _wrapper
@@ -89,7 +93,7 @@ class EventBus:
     def unsubscribe(self, event_type: str, callback: EventCallback) -> bool:
         """Remove a previously registered callback.  Returns True if removed."""
         with self._lock:
-            actual = self._offload_map.get(callback, callback)
+            actual = self._offload_map.pop(callback, callback)
             listeners = self._subscribers.get(event_type)
             if listeners:
                 try:
@@ -105,6 +109,8 @@ class EventBus:
         Each callback receives ``(event_type, data)``.  If a callback raises
         an exception it is logged and remaining subscribers still execute.
         """
+        if self._is_shutdown:
+            return
         with self._lock:
             listeners = list(self._subscribers.get(event_type, []))
         if not listeners:
@@ -123,6 +129,7 @@ class EventBus:
 
     def shutdown(self) -> None:
         """Shut down the offload executor. Call during process exit."""
+        self._is_shutdown = True
         self._offload_executor.shutdown(wait=True, cancel_futures=True)
 
     def unsubscribe_all(self, callback: EventCallback) -> int:

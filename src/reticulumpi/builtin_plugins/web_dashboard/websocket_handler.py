@@ -1494,7 +1494,8 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
                 "type": push_type,
                 "data": payload,
                 "timestamp": time.time(),
-            }
+            },
+            default=str,
         )
         clients = list(_ws_clients)
 
@@ -1502,10 +1503,13 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
             *(_send_with_timeout(ws, message) for ws in clients),
             return_exceptions=False,
         )
+        now = time.time()
         for ws, ok in zip(clients, results):
             if not ok:
                 _ws_clients.discard(ws)
                 _ws_last_activity.pop(ws, None)
+            else:
+                _ws_last_activity[ws] = now
     finally:
         if sem is not None:
             sem.release()

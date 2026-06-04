@@ -431,7 +431,7 @@ class _MeshtasticMQTTClient:
                 pub.sendMessage("meshtastic.receive.text", packet=fake_packet, interface=self)
             except Exception:
                 if self._logger:
-                    self._logger.debug("Error dispatching text via pubsub", exc_info=True)
+                    self._logger.error("Error dispatching text via pubsub", exc_info=True)
 
         # Dispatch PRIVATE_APP packets (read receipts, etc.)
         if data.portnum == PortNum.PRIVATE_APP:
@@ -456,7 +456,7 @@ class _MeshtasticMQTTClient:
                 )
             except Exception:
                 if self._logger:
-                    self._logger.debug("Error dispatching PRIVATE_APP via pubsub", exc_info=True)
+                    self._logger.error("Error dispatching PRIVATE_APP via pubsub", exc_info=True)
 
     def _decrypt_packet(self, encrypted: bytes, from_num: int, packet_id: int) -> Any:
         """Decrypt a MeshPacket payload using AES-CTR."""

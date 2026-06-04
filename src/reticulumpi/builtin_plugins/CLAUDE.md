@@ -5,9 +5,10 @@
 Two base classes in the parent directory:
 - **PluginBase** (`plugin_base.py`): direct inheritance for non-SDR plugins
 - **SignalPluginBase** (`signal_plugin_base.py`): for RTL-SDR plugins -- adds dongle scheduling,
-  subprocess lifecycle, snapshot caching. Used by: adsb_radar, ais_receiver, acars_decoder,
-  noaa_apt_decoder, radiosonde_tracker, weather_alert, ism_decoder, spectrum_scanner,
-  lora_scanner, fm_receiver
+  subprocess lifecycle, snapshot caching. Used by: ais_receiver, acars_decoder,
+  noaa_apt_decoder, radiosonde_tracker, weather_alert, ism_decoder
+- **PluginBase (direct SDR)**: adsb_radar, spectrum_scanner, lora_scanner, fm_receiver inherit
+  from PluginBase directly and manage their own RTL-SDR dongles outside the scheduler
 
 ## Dashboard Integration
 

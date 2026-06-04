@@ -105,11 +105,17 @@ class MessageStore:
         )
         self._read_conn.execute("PRAGMA query_only=ON")
         self._read_conn.row_factory = sqlite3.Row
+        self._read_lock = threading.Lock()
         # Wall-clock timestamps can jump backwards (NTP correction, manual
         # clock changes). Track the highest timestamp we've written so we
         # can keep the stored message order monotonic even across a jump.
         self._last_ts: float = 0.0
         self._create_tables()
+        # Seed from DB so a post-restart clock regression doesn't bury new
+        # messages below the pre-restart high-water mark.
+        row = self._conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()
+        if row and row[0] is not None:
+            self._last_ts = row[0]
 
     def _create_tables(self) -> None:
         with self._lock:
@@ -445,20 +451,22 @@ class MessageStore:
 
     def find_sent_by_packet_id(self, packet_id: int) -> int | None:
         """Find the msg_id of a sent Meshtastic message by its packet_id."""
-        row = self._read_conn.execute(
-            "SELECT id FROM messages "
-            "WHERE json_extract(metadata, '$.packet_id') = ? "
-            "AND direction = 'sent' AND transport = 'meshtastic' "
-            "ORDER BY timestamp DESC LIMIT 1",
-            (packet_id,),
-        ).fetchone()
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT id FROM messages "
+                "WHERE json_extract(metadata, '$.packet_id') = ? "
+                "AND direction = 'sent' AND transport = 'meshtastic' "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (packet_id,),
+            ).fetchone()
         return row[0] if row else None
 
     def get_status(self, msg_id: int) -> str | None:
         """Return the current delivery status for *msg_id*, or None."""
-        row = self._read_conn.execute(
-            "SELECT status FROM messages WHERE id = ?", (msg_id,)
-        ).fetchone()
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT status FROM messages WHERE id = ?", (msg_id,)
+            ).fetchone()
         return row[0] if row else None
 
     def prune(self, max_messages: int) -> int:
@@ -496,7 +504,7 @@ class MessageStore:
                     "DELETE FROM messages WHERE id IN ("
                     "  SELECT id FROM messages "
                     "  WHERE transport = ? AND COALESCE(sub_transport, '') = ? "
-                    "  ORDER BY timestamp ASC LIMIT ?"
+                    "  ORDER BY read DESC, timestamp ASC LIMIT ?"
                     ")",
                     (tr, sub, excess),
                 )
@@ -534,12 +542,16 @@ class MessageStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT * FROM messages{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        rows = self._read_conn.execute(sql, params).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_message(self, msg_id: int) -> dict[str, Any] | None:
         """Retrieve a single message by ID."""
-        row = self._read_conn.execute("SELECT * FROM messages WHERE id = ?", (msg_id,)).fetchone()
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT * FROM messages WHERE id = ?", (msg_id,)
+            ).fetchone()
         return self._row_to_dict(row) if row else None
 
     def get_queued_sent(self, max_age_s: float | None = None) -> list[dict[str, Any]]:
@@ -551,16 +563,18 @@ class MessageStore:
             params.append(time.time() - max_age_s)
         where = " WHERE " + " AND ".join(clauses)
         sql = f"SELECT * FROM messages{where} ORDER BY timestamp ASC"
-        rows = self._read_conn.execute(sql, params).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_stats(self) -> dict[str, Any]:
         """Return aggregate counts by transport and direction."""
-        rows = self._read_conn.execute(
-            "SELECT transport, direction, COUNT(*) as cnt "
-            "FROM messages GROUP BY transport, direction"
-        ).fetchall()
-        total = self._read_conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        with self._read_lock:
+            rows = self._read_conn.execute(
+                "SELECT transport, direction, COUNT(*) as cnt "
+                "FROM messages GROUP BY transport, direction"
+            ).fetchall()
+            total = self._read_conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         by_transport: dict[str, int] = {}
         by_direction: dict[str, int] = {}
         for r in rows:
@@ -630,7 +644,8 @@ class MessageStore:
             ORDER BY last_ts DESC
         """
         all_params = params + params if params else []
-        rows = self._read_conn.execute(sql, all_params).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql, all_params).fetchall()
         return [
             {
                 "contact_id": r["contact_id"],
@@ -663,7 +678,8 @@ class MessageStore:
             f"WHERE contact_id = ?{time_clause} "
             "ORDER BY timestamp DESC LIMIT ?"
         )
-        rows = self._read_conn.execute(sql, params).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def search_messages(
@@ -686,7 +702,8 @@ class MessageStore:
         where = " AND ".join(clauses)
         params.append(limit)
         sql = f"SELECT * FROM messages WHERE {where} ORDER BY timestamp DESC LIMIT ?"
-        rows = self._read_conn.execute(sql, params).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def mark_read(self, contact_id: str) -> int:
@@ -729,7 +746,8 @@ class MessageStore:
             params.append(sub_transport)
         where = " AND ".join(clauses)
         sql = f"SELECT contact_id, COUNT(*) AS cnt FROM messages WHERE {where} GROUP BY contact_id"
-        rows = self._read_conn.execute(sql, params).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql, params).fetchall()
         return {r["contact_id"]: r["cnt"] for r in rows}
 
     def get_unread_counts_grouped(self) -> dict[str, dict[str, int]]:
@@ -745,7 +763,8 @@ class MessageStore:
             "WHERE direction = 'received' AND read = 0 "
             "GROUP BY transport, sub, contact_id"
         )
-        rows = self._read_conn.execute(sql).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql).fetchall()
         grouped: dict[str, dict[str, int]] = {}
         for r in rows:
             key = f"{r['transport']}:{r['sub']}" if r["sub"] else r["transport"]
@@ -769,7 +788,8 @@ class MessageStore:
             "WHERE transport = ? AND msg_type = 'direct'"
         )
         out: dict[str, set[str]] = {}
-        rows = self._read_conn.execute(sql, (transport,)).fetchall()
+        with self._read_lock:
+            rows = self._read_conn.execute(sql, (transport,)).fetchall()
         for r in rows:
             peer = r["peer_id"]
             if not peer or peer == "self":
@@ -779,7 +799,8 @@ class MessageStore:
 
     def close(self) -> None:
         """Close the database connections."""
-        self._read_conn.close()
+        with self._read_lock:
+            self._read_conn.close()
         self._conn.close()
 
     # ── Helpers ────────────────────────────────────────────────────
@@ -847,8 +868,18 @@ class LXMFAdapter(TransportAdapter):
         # Identity management — same pattern as message_echo.py lines 42-49
         identity_path = os.path.join(storage_path, "identity")
         if os.path.isfile(identity_path):
-            self._identity = RNS.Identity.from_file(identity_path)
-            self._hub.log.debug("Loaded messaging LXMF identity from %s", identity_path)
+            loaded = RNS.Identity.from_file(identity_path)
+            if loaded is None:
+                self._hub.log.error(
+                    "Corrupt LXMF identity file at %s — removing and creating fresh identity",
+                    identity_path,
+                )
+                os.remove(identity_path)
+                self._identity = RNS.Identity()
+                self._identity.to_file(identity_path)
+            else:
+                self._identity = loaded
+                self._hub.log.debug("Loaded messaging LXMF identity from %s", identity_path)
         else:
             self._identity = RNS.Identity()
             self._identity.to_file(identity_path)
@@ -1060,6 +1091,9 @@ class LXMFAdapter(TransportAdapter):
             sender_hash = message.source_hash.hex()
             sender_pretty = RNS.prettyhexrep(message.source_hash)
             content = message.content_as_string()
+            if content is None:
+                self._hub.log.warning("LXMF message from %s has non-UTF-8 content", sender_pretty)
+                content = "[binary content]"
             self._hub.log.info("LXMF message from %s: %s", sender_pretty, content[:80])
             self._hub_callback(
                 {
@@ -1561,7 +1595,9 @@ class MeshCoreAdapter(TransportAdapter):
             return dict(self._pending_delivery)
 
     def start(self) -> None:
-        self._hub.event_bus.subscribe(events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event)
+        self._hub.event_bus.subscribe_offloaded(
+            events.MESHCORE_MESSAGE_RECEIVED, self._on_meshcore_event
+        )
         self._hub.event_bus.subscribe(events.MESHCORE_MESSAGE_ACKED, self._on_meshcore_ack)
 
     def stop(self) -> None:
@@ -1805,9 +1841,10 @@ class MessagingHubPlugin(PluginBase):
 
     def _on_adapter_message(self, msg: dict[str, Any]) -> None:
         """Callback from adapters when a message is received."""
+        msg_type = msg.get("msg_type", "direct")
+        sub_transport = msg.get("sub_transport", "")
+        msg_id = None
         try:
-            msg_type = msg.get("msg_type", "direct")
-            sub_transport = msg.get("sub_transport", "")
             msg_id = self._store.store(
                 transport=msg["transport"],
                 direction="received",
@@ -1823,9 +1860,9 @@ class MessagingHubPlugin(PluginBase):
                 channel=msg.get("channel"),
             )
             self._maybe_prune()
-            # Include contact_id + sub_transport so the WS skeleton-fallback
-            # path (when the stored row isn't yet readable) still carries
-            # the fields panels use to route events to the right tab.
+        except Exception:
+            self.log.exception("Error storing inbound message (still notifying dashboard)")
+        try:
             contact_id = MessageStore._compute_contact_id(
                 "received",
                 msg_type,
@@ -1852,7 +1889,7 @@ class MessagingHubPlugin(PluginBase):
                 },
             )
         except Exception:
-            self.log.exception("Error storing inbound message")
+            self.log.exception("Error publishing inbound message event")
 
     # ── Reactions ──────────────────────────────────────────────────
 
@@ -2437,6 +2474,7 @@ class MessagingHubPlugin(PluginBase):
                 "transport": transport,
                 "status": status,
                 "timestamp": time.time(),
+                "sub_transport": "",
             }
             if row:
                 payload["contact_id"] = row.get("contact_id")
