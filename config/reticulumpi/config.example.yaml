@@ -71,9 +71,13 @@ reticulumpi:
     #  config_dir: ~/.nomadnet
     #  node_name: MyNode  # Defaults to top-level node_name
     #  enable_propagation: false
-    #  health_check_interval: 10
     #  auto_restart: true
     #  max_restarts: 5
+    #  nice_level: 10          # Added to current nice (0-19, higher = lower priority)
+    #  cpu_limit_percent: 85   # Per-core CPU% threshold for runaway detection
+    #  cpu_check_interval: 5   # Seconds between CPU samples
+    #  cpu_grace_period: 30    # Seconds after launch before CPU checks begin
+    #  cpu_violation_count: 3  # Consecutive violations before kill
 
     # MeshChat web UI — web-based chat over Reticulum/LXMF.
     # Requires: --with-meshchat during bootstrap, or manual install.

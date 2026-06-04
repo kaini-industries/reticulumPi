@@ -5,9 +5,12 @@ from __future__ import annotations
 import glob
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
+import threading
+import time
 from typing import Any
 
 from reticulumpi import events
@@ -68,13 +71,29 @@ class NomadNetServer(PluginBase):
                 raise ValueError("NomadNet binary not found. Install it with: pip install nomadnet")
         self._nomadnet_bin = nomadnet_bin
 
-        interval = self.config.get("health_check_interval", 10)
-        if not isinstance(interval, (int, float)) or interval < 5:
-            raise ValueError("health_check_interval must be a number >= 5")
-
         max_restarts = self.config.get("max_restarts", 5)
         if not isinstance(max_restarts, int) or max_restarts < 0:
             raise ValueError("max_restarts must be a non-negative integer")
+
+        nice = self.config.get("nice_level", 10)
+        if not isinstance(nice, int) or not (0 <= nice <= 19):
+            raise ValueError("nice_level must be an integer between 0 and 19")
+
+        cpu_limit = self.config.get("cpu_limit_percent", 85)
+        if not isinstance(cpu_limit, int) or not (10 <= cpu_limit <= 100):
+            raise ValueError("cpu_limit_percent must be an integer between 10 and 100")
+
+        cpu_interval = self.config.get("cpu_check_interval", 5)
+        if not isinstance(cpu_interval, (int, float)) or cpu_interval < 2:
+            raise ValueError("cpu_check_interval must be a number >= 2")
+
+        cpu_grace = self.config.get("cpu_grace_period", 30)
+        if not isinstance(cpu_grace, (int, float)) or cpu_grace < 0:
+            raise ValueError("cpu_grace_period must be a non-negative number")
+
+        violation_count = self.config.get("cpu_violation_count", 3)
+        if not isinstance(violation_count, int) or violation_count < 2:
+            raise ValueError("cpu_violation_count must be an integer >= 2")
 
         auth = self.config.get("auth")
         if auth:
@@ -87,9 +106,16 @@ class NomadNetServer(PluginBase):
 
     def start(self) -> None:
         self._active = True
+        self._proc_lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
         self._pid: int | None = None
+        self._pgid: int | None = None
         self._restart_count = 0
+        self._nice_level: int = self.config.get("nice_level", 10)
+        self._launch_time: float | None = None
+        self._cpu_violations: int = 0
+        self._last_cpu_ticks: int | None = None
+        self._last_cpu_sample_time: float | None = None
 
         self._config_dir = os.path.expanduser(self.config.get("config_dir", "~/.nomadnet"))
         self._pages_dir = os.path.join(self._config_dir, "storage", "pages")
@@ -130,9 +156,11 @@ class NomadNetServer(PluginBase):
         status: dict[str, Any] = {
             "active": self._active,
             "pid": self._pid,
+            "pgid": getattr(self, "_pgid", None),
             "running": running,
             "config_dir": getattr(self, "_config_dir", None),
             "restart_count": self._restart_count,
+            "cpu_violations": getattr(self, "_cpu_violations", 0),
         }
         if self.config.get("auth"):
             status["auth"] = {
@@ -142,41 +170,79 @@ class NomadNetServer(PluginBase):
         return status
 
     def _launch_process(self, cmd: list[str]) -> None:
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        self._pid = self._process.pid
-        self._log_thread = self._start_log_reader(self._process, prefix="nomadnet")
+        nice_level = self._nice_level
+
+        def _preexec() -> None:
+            os.setsid()
+            try:
+                os.nice(nice_level)
+            except OSError:
+                pass
+
+        with self._proc_lock:
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                preexec_fn=_preexec,
+            )
+            self._pid = self._process.pid
+            self._pgid = self._pid
+            self._launch_time = time.monotonic()
+            self._cpu_violations = 0
+            self._last_cpu_ticks = None
+            self._last_cpu_sample_time = None
+            self._log_thread = self._start_log_reader(self._process, prefix="nomadnet")
 
     def _terminate_process(self) -> None:
-        if self._process is None:
-            return
-        try:
-            self._process.terminate()
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.log.warning("NomadNet did not stop gracefully, sending SIGKILL")
-            self._process.kill()
+        with self._proc_lock:
+            if self._process is None:
+                return
+            pgid = self._pgid
             try:
-                self._process.wait(timeout=2)
+                if pgid is not None:
+                    try:
+                        os.killpg(pgid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        self._process.terminate()
+                else:
+                    self._process.terminate()
+                self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.log.warning("NomadNet process did not exit after SIGKILL")
-        except Exception:
-            self.log.exception("Error stopping NomadNet process")
-        finally:
-            if self._process and self._process.stdout:
+                self.log.warning("NomadNet did not stop gracefully, sending SIGKILL")
+                if pgid is not None:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        self._process.kill()
+                else:
+                    self._process.kill()
                 try:
-                    self._process.stdout.close()
-                except Exception:
-                    pass
-            self._process = None
+                    self._process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.log.warning("NomadNet process did not exit after SIGKILL")
+            except Exception:
+                self.log.exception("Error stopping NomadNet process")
+            finally:
+                if self._process and self._process.stdout:
+                    try:
+                        self._process.stdout.close()
+                    except Exception:
+                        pass
+                self._process = None
+                self._pgid = None
 
     def _health_monitor(self) -> None:
-        interval = self.config.get("health_check_interval", 10)
+        interval = self.config.get("cpu_check_interval", 5)
         max_restarts = self.config.get("max_restarts", 5)
         auto_restart = self.config.get("auto_restart", True)
+        cpu_limit = self.config.get("cpu_limit_percent", 85)
+        cpu_grace = self.config.get("cpu_grace_period", 30)
+        violation_threshold = self.config.get("cpu_violation_count", 3)
+        cpu_count = os.cpu_count() or 1
+        max_cpu_percent = cpu_limit * cpu_count
+        stability_reset = 600.0
+        counter_was_reset = False
 
         while self._active:
             self._sleep_while_active(interval)
@@ -186,26 +252,164 @@ class NomadNetServer(PluginBase):
             if self._process is not None and self._process.poll() is not None:
                 exit_code = self._process.returncode
                 self.log.warning("NomadNet process exited unexpectedly (code: %s)", exit_code)
+                self._cpu_violations = 0
 
                 if auto_restart and self._restart_count < max_restarts:
                     self._restart_count += 1
+                    backoff = min(300.0, 30.0 * (2 ** (self._restart_count - 1)))
                     self.log.info(
-                        "Restarting NomadNet (attempt %d/%d)",
+                        "Restarting NomadNet in %.0fs (attempt %d/%d)",
+                        backoff,
                         self._restart_count,
                         max_restarts,
                     )
+                    self._sleep_while_active(backoff)
+                    if not self._active:
+                        break
                     try:
                         old_log = getattr(self, "_log_thread", None)
                         if old_log is not None:
                             self._remove_thread(old_log)
                         self._launch_process(self._cmd)
                         self.log.info("NomadNet restarted (PID: %d)", self._pid)
+                        counter_was_reset = False
                     except Exception:
                         self.log.exception("Failed to restart NomadNet")
                         self._active = False
                 else:
                     self.log.error("NomadNet exceeded max restarts (%d), giving up", max_restarts)
                     self._active = False
+                continue
+
+            # Reset restart counter after sustained stability
+            launch_time = self._launch_time
+            if (
+                launch_time is not None
+                and not counter_was_reset
+                and self._restart_count > 0
+                and time.monotonic() - launch_time > stability_reset
+            ):
+                self.log.info(
+                    "NomadNet stable for %.0fs; resetting restart counter (was %d)",
+                    time.monotonic() - launch_time,
+                    self._restart_count,
+                )
+                self._restart_count = 0
+                counter_was_reset = True
+
+            # CPU runaway detection
+            if self._process is None or self._process.poll() is not None:
+                continue
+            if launch_time is not None and time.monotonic() - launch_time < cpu_grace:
+                continue
+
+            ticks = self._get_group_cpu_ticks()
+            if ticks is None:
+                continue
+            now = time.monotonic()
+            cpu_pct = self._compute_cpu_percent(ticks, now)
+            if cpu_pct is None:
+                continue
+
+            if cpu_pct > max_cpu_percent:
+                self._cpu_violations += 1
+                self.log.warning(
+                    "NomadNet CPU runaway: %.0f%% > %.0f%% threshold "
+                    "(violation %d/%d)",
+                    cpu_pct,
+                    max_cpu_percent,
+                    self._cpu_violations,
+                    violation_threshold,
+                )
+                if self._cpu_violations >= violation_threshold:
+                    self.log.error(
+                        "NomadNet CPU runaway sustained for %d checks; "
+                        "killing process group (PGID %s)",
+                        self._cpu_violations,
+                        self._pgid,
+                    )
+                    self.event_bus.publish(
+                        events.NOMADNET_CPU_RUNAWAY,
+                        {"pid": self._pid, "pgid": self._pgid, "cpu_percent": cpu_pct},
+                    )
+                    self._terminate_process()
+                    self._cpu_violations = 0
+
+                    if auto_restart and self._restart_count < max_restarts:
+                        self._restart_count += 1
+                        backoff = min(300.0, 30.0 * (2 ** (self._restart_count - 1)))
+                        self.log.info(
+                            "Restarting NomadNet in %.0fs after CPU kill (attempt %d/%d)",
+                            backoff,
+                            self._restart_count,
+                            max_restarts,
+                        )
+                        self._sleep_while_active(backoff)
+                        if not self._active:
+                            break
+                        try:
+                            old_log = getattr(self, "_log_thread", None)
+                            if old_log is not None:
+                                self._remove_thread(old_log)
+                            self._launch_process(self._cmd)
+                            self.log.info("NomadNet restarted (PID: %d)", self._pid)
+                            counter_was_reset = False
+                        except Exception:
+                            self.log.exception("Failed to restart NomadNet")
+                            self._active = False
+                    else:
+                        self.log.error(
+                            "NomadNet exceeded max restarts (%d), giving up",
+                            max_restarts,
+                        )
+                        self._active = False
+                    continue
+            else:
+                if self._cpu_violations > 0:
+                    self.log.info("NomadNet CPU usage back to normal (%.0f%%)", cpu_pct)
+                self._cpu_violations = 0
+
+    def _get_group_cpu_ticks(self) -> int | None:
+        pgid = self._pgid
+        if pgid is None:
+            return None
+        total_ticks = 0
+        found = False
+        for path in glob.glob("/proc/[0-9]*/stat"):
+            try:
+                with open(path) as f:
+                    data = f.read()
+            except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+                continue
+            close_paren = data.rfind(")")
+            if close_paren < 0:
+                continue
+            fields = data[close_paren + 2 :].split()
+            if len(fields) < 13:
+                continue
+            try:
+                if int(fields[2]) != pgid:
+                    continue
+                total_ticks += int(fields[11]) + int(fields[12])
+                found = True
+            except (ValueError, IndexError):
+                continue
+        return total_ticks if found else None
+
+    def _compute_cpu_percent(self, current_ticks: int, current_time: float) -> float | None:
+        if self._last_cpu_ticks is None or self._last_cpu_sample_time is None:
+            self._last_cpu_ticks = current_ticks
+            self._last_cpu_sample_time = current_time
+            return None
+        dt = current_time - self._last_cpu_sample_time
+        if dt <= 0:
+            return None
+        dticks = current_ticks - self._last_cpu_ticks
+        ticks_per_sec = os.sysconf("SC_CLK_TCK")
+        cpu_percent = (dticks / ticks_per_sec / dt) * 100.0
+        self._last_cpu_ticks = current_ticks
+        self._last_cpu_sample_time = current_time
+        return cpu_percent
 
     # --- Page authentication ---
 

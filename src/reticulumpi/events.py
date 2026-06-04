@@ -214,3 +214,6 @@ ISM_STATUS = "ism.status"
 # Captive portal
 CAPTIVE_PORTAL_ACTIVATED = "captive_portal.activated"
 CAPTIVE_PORTAL_DEACTIVATED = "captive_portal.deactivated"
+
+# NomadNet subprocess health
+NOMADNET_CPU_RUNAWAY = "nomadnet.cpu_runaway"

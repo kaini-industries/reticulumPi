@@ -338,7 +338,6 @@ if [ "$WITH_NOMADNET" = true ]; then
 s/^    #nomadnet_server:/    nomadnet_server:/
 s/^    #  enabled: false/      enabled: true/
 s/^    #  config_dir:/      config_dir:/
-s/^    #  health_check_interval:/      health_check_interval:/
 s/^    #  auto_restart:/      auto_restart:/
 s/^    #  max_restarts:/      max_restarts:/
 }' "$CONFIG_DIR/config.yaml"

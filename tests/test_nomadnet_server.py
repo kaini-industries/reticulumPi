@@ -1,10 +1,14 @@
 """Tests for the NomadNet Server plugin."""
 
 import os
+import signal
 import subprocess
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from reticulumpi import events
 
 
 @pytest.fixture
@@ -13,7 +17,6 @@ def nomadnet_config(tmp_path):
     return {
         "enabled": True,
         "config_dir": str(tmp_path / "nomadnet"),
-        "health_check_interval": 10,
         "auto_restart": True,
         "max_restarts": 3,
     }
@@ -66,11 +69,6 @@ class TestValidateConfig:
 
             plugin = NomadNetServer(mock_app, nomadnet_config)
             assert plugin._nomadnet_bin == str(nomadnet_path)
-
-    def test_raises_on_invalid_health_check_interval(self, mock_app, nomadnet_config):
-        nomadnet_config["health_check_interval"] = 2
-        with pytest.raises(ValueError, match="health_check_interval"):
-            _make_plugin(mock_app, nomadnet_config)
 
     def test_raises_on_negative_max_restarts(self, mock_app, nomadnet_config):
         nomadnet_config["max_restarts"] = -1
@@ -178,7 +176,7 @@ class TestStart:
 
 
 class TestStop:
-    def test_terminates_process(self, mock_app, nomadnet_config):
+    def test_terminates_process_group(self, mock_app, nomadnet_config):
         mock_app._reticulum_config_dir = None
         plugin = _make_plugin(mock_app, nomadnet_config)
 
@@ -189,12 +187,14 @@ class TestStop:
         with patch("subprocess.Popen", return_value=mock_proc):
             plugin.start()
 
-        plugin.stop()
+        with patch("os.killpg") as mock_killpg:
+            plugin.stop()
 
-        mock_proc.terminate.assert_called_once()
+        mock_killpg.assert_any_call(100, signal.SIGTERM)
         assert plugin._active is False
+        assert plugin._pgid is None
 
-    def test_kills_if_terminate_fails(self, mock_app, nomadnet_config):
+    def test_kills_group_if_terminate_times_out(self, mock_app, nomadnet_config):
         from subprocess import TimeoutExpired
 
         mock_app._reticulum_config_dir = None
@@ -208,10 +208,29 @@ class TestStop:
         with patch("subprocess.Popen", return_value=mock_proc):
             plugin.start()
 
-        plugin.stop()
+        with patch("os.killpg") as mock_killpg:
+            plugin.stop()
+
+        calls = [c.args for c in mock_killpg.call_args_list]
+        assert (200, signal.SIGTERM) in calls
+        assert (200, signal.SIGKILL) in calls
+
+    def test_falls_back_to_process_kill_when_group_gone(self, mock_app, nomadnet_config):
+        mock_app._reticulum_config_dir = None
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 300
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            plugin.start()
+
+        with patch("os.killpg", side_effect=ProcessLookupError):
+            plugin.stop()
 
         mock_proc.terminate.assert_called_once()
-        mock_proc.kill.assert_called_once()
+        assert plugin._pgid is None
 
 
 class TestGetStatus:
@@ -235,15 +254,36 @@ class TestGetStatus:
         plugin._active = False
         plugin._join_threads()
 
+    def test_status_includes_pgid_and_cpu_violations(self, mock_app, nomadnet_config):
+        mock_app._reticulum_config_dir = None
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 42
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            plugin.start()
+
+        status = plugin.get_status()
+        assert status["pgid"] == 42
+        assert status["cpu_violations"] == 0
+
+        plugin._active = False
+        plugin._join_threads()
+
     def test_status_when_exited(self, mock_app, nomadnet_config):
         plugin = _make_plugin(mock_app, nomadnet_config)
         plugin._process = None
         plugin._pid = None
+        plugin._pgid = None
         plugin._restart_count = 0
+        plugin._cpu_violations = 0
         plugin._config_dir = "/tmp/test"
 
         status = plugin.get_status()
         assert status["running"] is False
+        assert status["pgid"] is None
 
 
 class TestHealthMonitor:
@@ -252,7 +292,6 @@ class TestHealthMonitor:
         nomadnet_config["max_restarts"] = 2
         plugin = _make_plugin(mock_app, nomadnet_config)
 
-        # Process that exits immediately, then stays alive on restart
         crash_proc = MagicMock()
         crash_proc.pid = 1
         crash_proc.poll.return_value = 1
@@ -263,17 +302,23 @@ class TestHealthMonitor:
         alive_proc.poll.return_value = None
 
         plugin._active = True
+        plugin._proc_lock = __import__("threading").Lock()
         plugin._process = crash_proc
         plugin._pid = 1
+        plugin._pgid = 1
         plugin._restart_count = 0
+        plugin._cpu_violations = 0
+        plugin._nice_level = 10
         plugin._cmd = ["nomadnet", "--daemon"]
         plugin._config_dir = nomadnet_config["config_dir"]
+        plugin._launch_time = time.monotonic()
+        plugin._last_cpu_ticks = None
+        plugin._last_cpu_sample_time = None
 
         with patch(
             "reticulumpi.builtin_plugins.nomadnet_server.subprocess.Popen",
             return_value=alive_proc,
         ):
-            # Simulate one health check: process is dead, should restart
             if plugin._process.poll() is not None:
                 plugin._restart_count += 1
                 plugin._launch_process(plugin._cmd)
@@ -294,11 +339,11 @@ class TestHealthMonitor:
         plugin._active = True
         plugin._process = crash_proc
         plugin._pid = 1
-        plugin._restart_count = 1  # Already at max
+        plugin._pgid = 1
+        plugin._restart_count = 1
         plugin._cmd = ["nomadnet", "--daemon"]
         plugin._config_dir = nomadnet_config["config_dir"]
 
-        # Simulate: process dead, at max restarts, should deactivate
         max_restarts = plugin.config.get("max_restarts", 5)
         if plugin._process.poll() is not None and plugin._restart_count >= max_restarts:
             plugin._active = False
@@ -387,7 +432,6 @@ class TestAuth:
         config = {
             "enabled": True,
             "config_dir": str(tmp_path / "nomadnet"),
-            "health_check_interval": 10,
             "max_restarts": 3,
         }
         if auth_config:
@@ -688,3 +732,410 @@ class TestExamplePages:
         # Should not have overwritten
         with open(existing) as f:
             assert f.read() == "my custom page"
+
+
+# ── Process group isolation tests ──────────────────────────────────────
+
+
+class TestProcessGroupIsolation:
+    def test_launch_uses_preexec_fn_with_setsid_and_nice(self, mock_app, nomadnet_config):
+        mock_app._reticulum_config_dir = None
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 500
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            plugin.start()
+
+        kw = mock_popen.call_args.kwargs
+        assert "preexec_fn" in kw
+        assert kw["preexec_fn"] is not None
+
+        with patch("os.setsid") as m_setsid, patch("os.nice") as m_nice:
+            kw["preexec_fn"]()
+            m_setsid.assert_called_once()
+            m_nice.assert_called_once_with(10)
+
+        plugin._active = False
+        plugin._join_threads()
+
+    def test_launch_sets_pgid_and_launch_time(self, mock_app, nomadnet_config):
+        mock_app._reticulum_config_dir = None
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 600
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            plugin.start()
+
+        assert plugin._pgid == 600
+        assert plugin._launch_time is not None
+        assert plugin._cpu_violations == 0
+
+        plugin._active = False
+        plugin._join_threads()
+
+    def test_custom_nice_level(self, mock_app, nomadnet_config):
+        nomadnet_config["nice_level"] = 15
+        mock_app._reticulum_config_dir = None
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 700
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            plugin.start()
+
+        with patch("os.setsid"), patch("os.nice") as m_nice:
+            mock_popen.call_args.kwargs["preexec_fn"]()
+            m_nice.assert_called_once_with(15)
+
+        plugin._active = False
+        plugin._join_threads()
+
+    def test_relaunch_resets_cpu_state(self, mock_app, nomadnet_config):
+        mock_app._reticulum_config_dir = None
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 800
+        mock_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            plugin.start()
+
+        plugin._cpu_violations = 5
+        plugin._last_cpu_ticks = 99999
+
+        mock_proc2 = MagicMock()
+        mock_proc2.pid = 801
+        mock_proc2.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc2):
+            plugin._launch_process(plugin._cmd)
+
+        assert plugin._cpu_violations == 0
+        assert plugin._last_cpu_ticks is None
+        assert plugin._pgid == 801
+
+        plugin._active = False
+        plugin._join_threads()
+
+
+# ── CPU monitoring tests ───────────────────────────────────────────────
+
+
+def _make_stat_line(pid, pgid, utime, stime):
+    """Build a realistic /proc/<pid>/stat line."""
+    fields_after = ["S", "1", str(pgid), "0", "0", "0", "0",
+                    "0", "0", "0", "0", str(utime), str(stime)]
+    while len(fields_after) < 30:
+        fields_after.append("0")
+    return f"{pid} (nomadnet) " + " ".join(fields_after)
+
+
+class TestGetGroupCpuTicks:
+    def test_sums_matching_pgid(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._pgid = 500
+
+        stat_lines = {
+            "/proc/500/stat": _make_stat_line(500, 500, 100, 50),
+            "/proc/501/stat": _make_stat_line(501, 500, 200, 30),
+            "/proc/502/stat": _make_stat_line(502, 500, 80, 20),
+        }
+
+        with (
+            patch("glob.glob", return_value=list(stat_lines.keys())),
+            patch("builtins.open", side_effect=lambda p, **kw: _mock_open(stat_lines[p])),
+        ):
+            ticks = plugin._get_group_cpu_ticks()
+
+        assert ticks == (100 + 50) + (200 + 30) + (80 + 20)
+
+    def test_ignores_other_pgids(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._pgid = 500
+
+        stat_lines = {
+            "/proc/500/stat": _make_stat_line(500, 500, 100, 50),
+            "/proc/999/stat": _make_stat_line(999, 1, 9000, 9000),
+        }
+
+        with (
+            patch("glob.glob", return_value=list(stat_lines.keys())),
+            patch("builtins.open", side_effect=lambda p, **kw: _mock_open(stat_lines[p])),
+        ):
+            ticks = plugin._get_group_cpu_ticks()
+
+        assert ticks == 150
+
+    def test_returns_none_when_no_pgid(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._pgid = None
+        assert plugin._get_group_cpu_ticks() is None
+
+    def test_handles_permission_error(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._pgid = 500
+
+        stat_lines = {
+            "/proc/500/stat": _make_stat_line(500, 500, 100, 50),
+            "/proc/501/stat": None,  # will raise
+        }
+
+        def _open_or_raise(path, **kw):
+            if stat_lines[path] is None:
+                raise PermissionError("denied")
+            return _mock_open(stat_lines[path])
+
+        with (
+            patch("glob.glob", return_value=list(stat_lines.keys())),
+            patch("builtins.open", side_effect=_open_or_raise),
+        ):
+            ticks = plugin._get_group_cpu_ticks()
+
+        assert ticks == 150
+
+    def test_returns_none_when_no_matching_processes(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._pgid = 500
+
+        stat_lines = {
+            "/proc/999/stat": _make_stat_line(999, 1, 100, 100),
+        }
+
+        with (
+            patch("glob.glob", return_value=list(stat_lines.keys())),
+            patch("builtins.open", side_effect=lambda p, **kw: _mock_open(stat_lines[p])),
+        ):
+            ticks = plugin._get_group_cpu_ticks()
+
+        assert ticks is None
+
+
+def _mock_open(content):
+    """Return a context-manager-compatible mock for open()."""
+    m = MagicMock()
+    m.__enter__ = MagicMock(return_value=m)
+    m.__exit__ = MagicMock(return_value=False)
+    m.read.return_value = content
+    return m
+
+
+class TestComputeCpuPercent:
+    def test_first_sample_returns_none(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._last_cpu_ticks = None
+        plugin._last_cpu_sample_time = None
+
+        result = plugin._compute_cpu_percent(1000, 100.0)
+        assert result is None
+        assert plugin._last_cpu_ticks == 1000
+        assert plugin._last_cpu_sample_time == 100.0
+
+    def test_second_sample_computes_percentage(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._last_cpu_ticks = 1000
+        plugin._last_cpu_sample_time = 100.0
+
+        with patch("os.sysconf", return_value=100):
+            result = plugin._compute_cpu_percent(1500, 105.0)
+
+        assert result == pytest.approx(100.0)
+
+    def test_high_cpu_computation(self, mock_app, nomadnet_config):
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._last_cpu_ticks = 1000
+        plugin._last_cpu_sample_time = 100.0
+
+        with patch("os.sysconf", return_value=100):
+            result = plugin._compute_cpu_percent(3000, 105.0)
+
+        assert result == pytest.approx(400.0)
+
+
+# ── CPU runaway detection tests ────────────────────────────────────────
+
+
+class TestCpuRunawayDetection:
+    def _setup_plugin(self, mock_app, nomadnet_config, **overrides):
+        for k, v in overrides.items():
+            nomadnet_config[k] = v
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._active = True
+        plugin._proc_lock = __import__("threading").Lock()
+        plugin._process = MagicMock()
+        plugin._process.poll.return_value = None
+        plugin._pid = 500
+        plugin._pgid = 500
+        plugin._restart_count = 0
+        plugin._cpu_violations = 0
+        plugin._launch_time = time.monotonic() - 60
+        plugin._last_cpu_ticks = 1000
+        plugin._last_cpu_sample_time = time.monotonic() - 5
+        plugin._cmd = ["nomadnet", "--daemon"]
+        plugin._config_dir = nomadnet_config["config_dir"]
+        return plugin
+
+    def test_violations_increment_on_high_cpu(self, mock_app, nomadnet_config):
+        plugin = self._setup_plugin(mock_app, nomadnet_config)
+
+        with patch("os.sysconf", return_value=100):
+            plugin._compute_cpu_percent(3000, time.monotonic())
+
+        high_ticks = 5000
+        with (
+            patch.object(plugin, "_get_group_cpu_ticks", return_value=high_ticks),
+            patch("os.sysconf", return_value=100),
+            patch("os.cpu_count", return_value=4),
+        ):
+            cpu_pct = plugin._compute_cpu_percent(high_ticks, time.monotonic())
+
+        if cpu_pct is not None and cpu_pct > 85 * 4:
+            plugin._cpu_violations += 1
+
+        assert plugin._cpu_violations >= 1
+
+    def test_violations_reset_on_normal_cpu(self, mock_app, nomadnet_config):
+        plugin = self._setup_plugin(mock_app, nomadnet_config)
+        plugin._cpu_violations = 2
+
+        plugin._last_cpu_ticks = 1000
+        plugin._last_cpu_sample_time = time.monotonic() - 5
+
+        with patch("os.sysconf", return_value=100):
+            cpu_pct = plugin._compute_cpu_percent(1050, time.monotonic())
+
+        if cpu_pct is not None and cpu_pct <= 85 * 4:
+            plugin._cpu_violations = 0
+
+        assert plugin._cpu_violations == 0
+
+    def test_terminate_triggered_after_threshold(self, mock_app, nomadnet_config):
+        plugin = self._setup_plugin(
+            mock_app, nomadnet_config, cpu_violation_count=2
+        )
+        plugin._cpu_violations = 2
+
+        with patch.object(plugin, "_terminate_process") as mock_term:
+            if plugin._cpu_violations >= 2:
+                plugin._terminate_process()
+                plugin._cpu_violations = 0
+
+        mock_term.assert_called_once()
+        assert plugin._cpu_violations == 0
+
+    def test_grace_period_skips_checks(self, mock_app, nomadnet_config):
+        plugin = self._setup_plugin(
+            mock_app, nomadnet_config, cpu_grace_period=60
+        )
+        plugin._launch_time = time.monotonic() - 10
+
+        within_grace = time.monotonic() - plugin._launch_time < 60
+        assert within_grace is True
+
+    def test_restart_counter_resets_after_stability(self, mock_app, nomadnet_config):
+        plugin = self._setup_plugin(mock_app, nomadnet_config)
+        plugin._restart_count = 3
+        plugin._launch_time = time.monotonic() - 601
+
+        if (
+            plugin._restart_count > 0
+            and time.monotonic() - plugin._launch_time > 600
+        ):
+            plugin._restart_count = 0
+
+        assert plugin._restart_count == 0
+
+    def test_exponential_backoff_formula(self, mock_app, nomadnet_config):
+        expected = [30.0, 60.0, 120.0, 240.0, 300.0]
+        for i, want in enumerate(expected):
+            backoff = min(300.0, 30.0 * (2 ** i))
+            assert backoff == want
+
+
+# ── Config validation tests for new knobs ──────────────────────────────
+
+
+class TestNewConfigValidation:
+    def test_raises_on_invalid_nice_level(self, mock_app, nomadnet_config):
+        nomadnet_config["nice_level"] = 20
+        with pytest.raises(ValueError, match="nice_level"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_raises_on_negative_nice_level(self, mock_app, nomadnet_config):
+        nomadnet_config["nice_level"] = -1
+        with pytest.raises(ValueError, match="nice_level"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_raises_on_non_int_nice_level(self, mock_app, nomadnet_config):
+        nomadnet_config["nice_level"] = 5.5
+        with pytest.raises(ValueError, match="nice_level"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_raises_on_invalid_cpu_limit_percent(self, mock_app, nomadnet_config):
+        nomadnet_config["cpu_limit_percent"] = 5
+        with pytest.raises(ValueError, match="cpu_limit_percent"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_raises_on_cpu_limit_over_100(self, mock_app, nomadnet_config):
+        nomadnet_config["cpu_limit_percent"] = 101
+        with pytest.raises(ValueError, match="cpu_limit_percent"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_raises_on_invalid_cpu_check_interval(self, mock_app, nomadnet_config):
+        nomadnet_config["cpu_check_interval"] = 1
+        with pytest.raises(ValueError, match="cpu_check_interval"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_raises_on_negative_cpu_grace_period(self, mock_app, nomadnet_config):
+        nomadnet_config["cpu_grace_period"] = -1
+        with pytest.raises(ValueError, match="cpu_grace_period"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_raises_on_invalid_cpu_violation_count(self, mock_app, nomadnet_config):
+        nomadnet_config["cpu_violation_count"] = 1
+        with pytest.raises(ValueError, match="cpu_violation_count"):
+            _make_plugin(mock_app, nomadnet_config)
+
+    def test_valid_new_knobs_succeed(self, mock_app, nomadnet_config):
+        nomadnet_config["nice_level"] = 15
+        nomadnet_config["cpu_limit_percent"] = 90
+        nomadnet_config["cpu_check_interval"] = 3
+        nomadnet_config["cpu_grace_period"] = 60
+        nomadnet_config["cpu_violation_count"] = 5
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        assert plugin.config["nice_level"] == 15
+
+
+# ── CPU runaway event emission test ─────────────────────────────────────
+
+
+class TestCpuRunawayEvent:
+    def test_publishes_nomadnet_cpu_runaway_event(self, mock_app, nomadnet_config):
+        nomadnet_config["cpu_violation_count"] = 2
+        plugin = _make_plugin(mock_app, nomadnet_config)
+        plugin._active = True
+        plugin._process = MagicMock()
+        plugin._process.poll.return_value = None
+        plugin._pid = 500
+        plugin._pgid = 500
+        plugin._cpu_violations = 2
+        plugin._launch_time = time.monotonic() - 60
+
+        with patch.object(plugin, "_terminate_process"):
+            plugin.event_bus.publish(
+                events.NOMADNET_CPU_RUNAWAY,
+                {"pid": plugin._pid, "pgid": plugin._pgid, "cpu_percent": 400.0},
+            )
+
+        mock_app.event_bus.publish.assert_called_with(
+            events.NOMADNET_CPU_RUNAWAY,
+            {"pid": 500, "pgid": 500, "cpu_percent": 400.0},
+        )

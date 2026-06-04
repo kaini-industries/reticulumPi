@@ -70,7 +70,6 @@ Manages a [NomadNet](https://github.com/markqvist/NomadNet) daemon as a subproce
 | `config_dir` | ~/.nomadnet | NomadNet config and storage directory |
 | `node_name` | \<node_name\> | NomadNet node name |
 | `enable_propagation` | false | Run as an LXMF propagation node |
-| `health_check_interval` | 10 | Seconds between process health checks |
 | `auto_restart` | true | Restart NomadNet if it crashes |
 | `max_restarts` | 5 | Maximum restart attempts |
 
