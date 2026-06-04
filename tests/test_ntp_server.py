@@ -217,6 +217,7 @@ class TestGpsRefclock:
     def test_configure_writes_and_restarts(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         p = _make_plugin({"gps_refclock": {"enabled": True}})
+        p._conf_path = "/tmp/nonexistent-reticulumpi-gps.conf"
         p._configure_gps_refclock()
         assert mock_run.call_count == 2
         assert p._gps_refclock_configured is True

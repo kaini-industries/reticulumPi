@@ -457,6 +457,15 @@ else
     sudo rm -f /etc/sudoers.d/reticulumpi-captive-portal
 fi
 
+echo "  Installing sudoers rule for chrony/NTP management..."
+sudo install -m 0440 "$INSTALL_DIR/config/sudoers.d/reticulumpi-chrony" /etc/sudoers.d/reticulumpi-chrony
+if sudo visudo -cf /etc/sudoers.d/reticulumpi-chrony >/dev/null 2>&1; then
+    echo "  Sudoers rule installed and validated"
+else
+    echo "  WARNING: sudoers syntax check failed — removing to prevent lockout"
+    sudo rm -f /etc/sudoers.d/reticulumpi-chrony
+fi
+
 echo ""
 echo "=== Bootstrap complete ==="
 echo ""

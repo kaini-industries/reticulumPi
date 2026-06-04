@@ -401,6 +401,18 @@ class NtpServerPlugin(PluginBase):
             lines.append(f"refclock PPS {pps_device} refid PPS precision {pps_precision} lock GPS")
         content = "\n".join(lines) + "\n"
 
+        # Skip write if content already matches
+        try:
+            with open(self._conf_path) as f:
+                if f.read() == content:
+                    self.log.debug("GPS refclock config already up to date")
+                    with self._lock:
+                        self._gps_refclock_configured = True
+                        self._gps_refclock_active = True
+                    return
+        except OSError:
+            pass
+
         # Write config snippet
         try:
             if self._use_sudo:

@@ -165,14 +165,9 @@ class NetworkMapPlugin(PluginBase):
             mesh["node_count"] = self.get_node_count()
         if hasattr(self, "get_recent_announces"):
             ra_age = now - self._recent_announces_time
-            if (
-                self._announces_dirty.is_set()
-                or ra_age >= self._recent_announces_ttl
-                or self._recent_announces_cache is None
-            ):
+            if ra_age >= self._recent_announces_ttl or self._recent_announces_cache is None:
                 self._recent_announces_cache = self.get_recent_announces()
                 self._recent_announces_time = now
-                self._announces_dirty.clear()
             mesh["recent_announces"] = self._recent_announces_cache
         has_summary = False
         if want_summary and hasattr(self, "get_mesh_summary"):

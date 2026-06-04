@@ -144,7 +144,7 @@ if [ -d "$OPT_SCRIPTS" ]; then
 fi
 
 # 3c. Sync sudoers rules if they changed
-for rule in reticulumpi-services reticulumpi-offline reticulumpi-captive-portal; do
+for rule in reticulumpi-services reticulumpi-offline reticulumpi-captive-portal reticulumpi-chrony; do
     src="$INSTALL_DIR/config/sudoers.d/$rule"
     dest="/etc/sudoers.d/$rule"
     [ -f "$src" ] || continue

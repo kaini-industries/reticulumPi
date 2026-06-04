@@ -236,11 +236,12 @@ class PathWarmerPlugin(PluginBase):
 
         warmed = 0
         failed = 0
+        failed_hashes: list[str] = []
         now = time.time()
         interval = self.config.get("warm_interval", _DEFAULT_WARM_INTERVAL)
 
         # Prune stale rate-limit and backoff entries
-        stale_cutoff = now - interval * 2
+        stale_cutoff = now - max_backoff
         self._last_warm_attempt = {
             k: v for k, v in self._last_warm_attempt.items() if v > stale_cutoff
         }
@@ -272,17 +273,22 @@ class PathWarmerPlugin(PluginBase):
             else:
                 self._failure_count[hex_hash] = failures + 1
                 failed += 1
+                failed_hashes.append(hex_hash[:8])
 
         with self._lock:
             self._last_cycle_warmed = warmed
             self._last_cycle_time = time.time()
 
         if warmed or failed:
+            suffix = ""
+            if failed_hashes:
+                suffix = " — failed: " + ", ".join(failed_hashes[:3])
             self.log.info(
-                "Warming cycle: %d warmed, %d failed (of %d candidates)",
+                "Warming cycle: %d warmed, %d failed (of %d candidates)%s",
                 warmed,
                 failed,
                 len(candidates),
+                suffix,
             )
 
         self.event_bus.publish(
@@ -389,7 +395,7 @@ class PathWarmerPlugin(PluginBase):
                         age = path_data.get(clean, {}).get("age_s")
                         node["_path_age"] = age if age is not None else float("inf")
 
-                    recent.sort(key=lambda n: n["_path_age"], reverse=True)
+                    recent.sort(key=lambda n: n["_path_age"])
 
                     for node in recent:
                         h = node.get("destination_hash", "")
