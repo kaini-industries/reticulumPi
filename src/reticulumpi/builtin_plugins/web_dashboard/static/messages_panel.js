@@ -85,6 +85,8 @@
     var _activeMsgType = null;
     var _threadMessages = [];
     var _unreadCounts = {};
+    var _readGrace = {};
+    var _deletePending = null;
     var _contacts = [];
     var _channels = [];
     var _newComposeOpen = false;
@@ -409,11 +411,27 @@
     // bursts so a 20-message flurry triggers one fetch, not twenty.
     var _unreadReconcileTimer = null;
     function _scheduleUnreadReconcile() {
-      if (_unreadReconcileTimer) return;
+      if (_unreadReconcileTimer) clearTimeout(_unreadReconcileTimer);
       _unreadReconcileTimer = setTimeout(function () {
         _unreadReconcileTimer = null;
         _fetchUnread();
       }, 400);
+    }
+
+    var READ_GRACE_MS = 10000;
+    function _addReadGrace(cid) {
+      _readGrace[cid] = Date.now() + READ_GRACE_MS;
+    }
+    function _applyReadGrace(obj) {
+      if (!obj) return;
+      var now = Date.now();
+      for (var k in _readGrace) {
+        if (_readGrace[k] < now) {
+          delete _readGrace[k];
+        } else if (obj[k] !== undefined) {
+          delete obj[k];
+        }
+      }
     }
 
     function _fetchChannels() {
@@ -1137,6 +1155,7 @@
         if (convIdx >= 0) _conversations[convIdx].unread_count = 0;
         if (wasUnread) {
           anyCleared = true;
+          _addReadGrace(cid);
           api('/api/messages/read', {
             method: 'POST',
             body: {contact_id: cid},
@@ -1165,8 +1184,10 @@
         return;
       }
       var cid = _activeContactId;
+      _deletePending = cid;
       api('/api/messages/conversation/' + encodeURIComponent(cid), {method: 'DELETE'})
         .then(function (r) {
+          _deletePending = null;
           if (!r || !r.ok) {
             _setFeedback((r && r.error) || 'Delete failed', 'error');
             return;
@@ -1183,9 +1204,14 @@
               ' from &ldquo;' + esc(name) + '&rdquo;</div>';
           }
           if (_unreadCounts[cid]) {
+            _addReadGrace(cid);
             delete _unreadCounts[cid];
             _updateUnreadUI();
           }
+          _conversations = _conversations.filter(function (c) {
+            return c.contact_id !== cid;
+          });
+          _renderConversations();
           _activeContactId = null;
           _activeMsgType = null;
           if (_dom.threadName) _dom.threadName.textContent = 'Select a conversation';
@@ -1194,7 +1220,7 @@
           _goBack();
           _fetchConversations();
           _fetchUnread();
-        });
+        }).catch(function () { _deletePending = null; });
     }
 
     function _toggleNewCompose() {
@@ -1453,17 +1479,23 @@
       // pick the bucket for this panel so sibling panels don't contaminate
       // our badge totals.
       if (wsPayload.unread) {
+        if (_unreadReconcileTimer) {
+          clearTimeout(_unreadReconcileTimer);
+          _unreadReconcileTimer = null;
+        }
         var bucketKey = cfg.subTransport
           ? cfg.transport + ':' + cfg.subTransport
           : cfg.transport;
         var bucket = wsPayload.unread[bucketKey];
         if (bucket && typeof bucket === 'object') {
+          _applyReadGrace(bucket);
           _unreadCounts = bucket;
         } else if (
           !wsPayload.unread.hasOwnProperty(bucketKey)
           && _isFlatUnreadMap(wsPayload.unread)
         ) {
           // Backwards compat: older server sends a flat {cid: count}.
+          _applyReadGrace(wsPayload.unread);
           _unreadCounts = wsPayload.unread;
         } else {
           _unreadCounts = {};
@@ -1482,6 +1514,13 @@
           return true;
         });
         if (mine.length > 0 || _conversations.length === 0) {
+          var graceNow = Date.now();
+          for (var mi = 0; mi < mine.length; mi++) {
+            var gc = mine[mi].contact_id;
+            if (_readGrace[gc] && _readGrace[gc] >= graceNow) {
+              mine[mi].unread_count = 0;
+            }
+          }
           _conversations = mine;
           _hasFreshData = true;
           _renderConversations();
@@ -1507,6 +1546,7 @@
 
     function _upsertConversation(row) {
       if (!row || !row.contact_id) return;
+      if (_deletePending && row.contact_id === _deletePending) return;
       var cid = row.contact_id;
       var idx = -1;
       for (var i = 0; i < _conversations.length; i++) {
@@ -1550,6 +1590,7 @@
     function _onMessage(row) {
       if (!_matchesPanel(row)) return;
       if (_markSeen(row.id)) return;
+      if (_deletePending && row.contact_id === _deletePending) return;
       if (!_resolveDom()) return;
 
       var isReceived = row.direction === 'received';
@@ -1574,8 +1615,15 @@
           // conversation flashes a stale badge on the next tick.
           if (_unreadCounts[row.contact_id]) {
             delete _unreadCounts[row.contact_id];
+            for (var ci = 0; ci < _conversations.length; ci++) {
+              if (_conversations[ci].contact_id === row.contact_id) {
+                _conversations[ci].unread_count = 0;
+                break;
+              }
+            }
             _updateUnreadUI();
           }
+          _addReadGrace(row.contact_id);
           api('/api/messages/read', {
             method: 'POST',
             body: {contact_id: row.contact_id},
