@@ -32,15 +32,8 @@
   // LoRa ISM bands.  Base, spacing (kHz), count define the channel grid
   // rendered as overlay ticks.  Only the six commonly observed regions;
   // unknown configured values fall back to US.
-  var REGIONS = {
-    US:     { lo: 902.0, hi: 928.0,   base: 902.8625, spacing: 250, count: 108, label: 'US 902–928' },
-    EU_868: { lo: 863.0, hi: 870.0,   base: 864.125,  spacing: 250, count: 24,  label: 'EU 868' },
-    EU_433: { lo: 433.0, hi: 434.7,   base: 433.175,  spacing: 250, count: 6,   label: 'EU 433' },
-    CN:     { lo: 470.0, hi: 510.0,   base: 470.125,  spacing: 250, count: 160, label: 'CN 470–510' },
-    JP:     { lo: 920.8, hi: 927.8,   base: 921.875,  spacing: 500, count: 15,  label: 'JP 920–928' },
-    ANZ:    { lo: 915.0, hi: 928.0,   base: 916.375,  spacing: 250, count: 52,  label: 'ANZ 915–928' },
-  };
-  var REGION_ORDER = ['US', 'EU_868', 'EU_433', 'CN', 'JP', 'ANZ'];
+  var REGIONS = SC.LORA_REGIONS;
+  var REGION_ORDER = SC.LORA_REGION_ORDER;
   var LS_KEY = 'rpi_lora_region';
 
   // -- Constants ----------------------------------------------------------
@@ -110,7 +103,7 @@
   var _channelPowerHistory = null;
 
   // -- Stats panel state ----------------------------------------------------
-  var _statsPanelEl = null, _nfTrendEl = null, _chUtilEl = null, _chTimelineEl = null;
+  var _statsPanelEl = null, _nfTrendEl = null, _chUtilEl = null, _chRecsEl = null, _chTimelineEl = null;
   var _nfTrendSig = '', _chUtilSig = '', _chTimelineSig = '';
 
   // -- CSS custom property cache (read once in _resolveDom) -----------------
@@ -190,6 +183,7 @@
     _statsPanelEl = $('lora-stats-panel');
     _nfTrendEl = $('lora-nf-trend');
     _chUtilEl = $('lora-ch-util');
+    _chRecsEl = $('lora-ch-recs');
     _chTimelineEl = $('lora-ch-timeline');
 
     // Cache CSS custom properties once for use in SVG renderers
@@ -1672,6 +1666,26 @@
   }
 
   // -- Render stats panel (calls sub-renderers) -----------------------------
+  function _renderChRecs(ca) {
+    if (!_chRecsEl) return;
+    var recs = ca && ca.channel_recommendations;
+    if (!recs || !recs.length) { _chRecsEl.innerHTML = ''; return; }
+    var top = recs.slice(0, 5);
+    var html = '<div class="lora-stats-label">Best Channels</div>';
+    html += '<table class="lora-recs-table">';
+    html += '<tr><th>Ch</th><th>MHz</th><th>Score</th><th>Duty</th></tr>';
+    for (var i = 0; i < top.length; i++) {
+      var r = top[i];
+      var dir = r.dir === 'dn' ? ' DN' : '';
+      html += '<tr><td>' + esc(String(r.idx)) + dir + '</td>'
+            + '<td>' + esc(r.center_mhz.toFixed(2)) + '</td>'
+            + '<td>' + esc(r.score.toFixed(0)) + '</td>'
+            + '<td>' + esc(r.duty_pct.toFixed(1)) + '%</td></tr>';
+    }
+    html += '</table>';
+    _chRecsEl.innerHTML = html;
+  }
+
   function _renderStatsPanel(data) {
     if (!_statsPanelEl) return;
     var spec = data.spectrum || {};
@@ -1683,6 +1697,7 @@
     _statsPanelEl.style.display = '';
     _renderNfTrend(ca);
     _renderChUtil(ca);
+    _renderChRecs(ca);
     if (_selectedChannel != null) _renderChTimeline(_selectedChannel);
   }
 

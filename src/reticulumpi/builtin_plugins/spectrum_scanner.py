@@ -194,6 +194,7 @@ class SpectrumScanner(PluginBase):
         self._snapshot_cache: tuple[int, dict[str, Any]] | None = None
         self._snapshot_bins_version = -1
         self._bins_version = 0
+        self._session_id = 0
 
         # --- Preset system ---
         self._presets: dict[str, dict[str, Any]] = dict(_BUILTIN_PRESETS)
@@ -213,6 +214,8 @@ class SpectrumScanner(PluginBase):
         self._switching = False
         self._last_preset_switch: float = 0.0
         self._analyzer: LoraChannelAnalyzer | None = None
+        self._supervisor_lock = threading.Lock()
+        self._supervisor_alive = False
 
     # --- presets -------------------------------------------------------------
 
@@ -266,32 +269,34 @@ class SpectrumScanner(PluginBase):
             available = list(self._presets.keys())
             raise ValueError(f"Unknown preset '{name}'. Available: {available}")
 
-        self._last_preset_switch = now
-        preset = self._presets[name]
-        self._switching = True
-        self._set_status("switching", f"switching to {name}")
-        try:
-            self.event_bus.publish(events.SPECTRUM_PRESET_SWITCHING, {"preset": name})
-        except Exception:
-            self.log.debug("event_bus publish failed", exc_info=True)
-        try:
-            self._terminate_process()
+        with self._supervisor_lock:
+            self._last_preset_switch = now
+            preset = self._presets[name]
+            self._switching = True
+            self._set_status("switching", f"switching to {name}")
+            try:
+                self.event_bus.publish(events.SPECTRUM_PRESET_SWITCHING, {"preset": name})
+            except Exception:
+                self.log.debug("event_bus publish failed", exc_info=True)
+            try:
+                self._terminate_process()
 
-            self._analyzer = None
-            self._apply_preset_values(preset)
-            self._reset_sweep_state()
-            self._activate_analyzer_for_preset(preset)
+                self._analyzer = None
+                self._apply_preset_values(preset)
+                self._reset_sweep_state()
+                self._activate_analyzer_for_preset(preset)
 
-            self._active_preset = name
-            self._restart_count = 0
-        except Exception:
-            self._set_status("error", f"preset switch failed: {name}")
-            raise
-        finally:
-            self._switching = False
+                self._active_preset = name
+                self._restart_count = 0
+                self._preset_list_cache = None
+            except Exception:
+                self._set_status("error", f"preset switch failed: {name}")
+                raise
+            finally:
+                self._switching = False
 
-        if not self._supervisor_alive:
-            self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
+            if not self._supervisor_alive:
+                self._start_thread(self._supervisor_loop, name="spectrum-supervisor")
 
         try:
             self.event_bus.publish(
@@ -325,6 +330,7 @@ class SpectrumScanner(PluginBase):
         with self._state_lock:
             self._bins_hz = []
             self._bins_version += 1
+            self._session_id += 1
             self._latest_powers_db = []
             self._waterfall.clear()
             self._sweep_count = 0
@@ -358,6 +364,7 @@ class SpectrumScanner(PluginBase):
 
     def start(self) -> None:
         self._state_lock = threading.Lock()
+        self._supervisor_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._pid: int | None = None
         self._restart_count = 0
@@ -493,8 +500,10 @@ class SpectrumScanner(PluginBase):
             if cached is not None and cached[0] == self._sweep_count:
                 return cached[1]
 
-            tail = list(self._waterfall)[-self._SNAPSHOT_TAIL_ROWS :]
+            start = max(0, len(self._waterfall) - self._SNAPSHOT_TAIL_ROWS)
+            tail = [self._waterfall[i] for i in range(start, len(self._waterfall))]
             snap: dict[str, Any] = {
+                "session_id": self._session_id,
                 "status": self._status,
                 "error": self._last_error,
                 "freq_start_hz": int(self._freq_start_mhz * 1_000_000),
@@ -530,15 +539,17 @@ class SpectrumScanner(PluginBase):
             snap["active_preset"] = self._active_preset
             snap["switching"] = self._switching
             if self._presets:
-                snap["available_presets"] = [
-                    {
-                        "name": n,
-                        "freq_start_mhz": p.get("freq_start_mhz"),
-                        "freq_stop_mhz": p.get("freq_stop_mhz"),
-                        "has_analysis": bool(p.get("analysis")),
-                    }
-                    for n, p in self._presets.items()
-                ]
+                if not hasattr(self, "_preset_list_cache") or self._preset_list_cache is None:
+                    self._preset_list_cache = [
+                        {
+                            "name": n,
+                            "freq_start_mhz": p.get("freq_start_mhz"),
+                            "freq_stop_mhz": p.get("freq_stop_mhz"),
+                            "has_analysis": bool(p.get("analysis")),
+                        }
+                        for n, p in self._presets.items()
+                    ]
+                snap["available_presets"] = self._preset_list_cache
 
             # LoRa channel analysis (when active preset has analysis and bins populated)
             if self._analyzer is not None and self._bins_hz:
@@ -567,51 +578,57 @@ class SpectrumScanner(PluginBase):
         """
         with self._state_lock:
             n_bins = len(self._bins_hz) if self._bins_hz else 0
-            downsample = n_bins > self._DOWNSAMPLE_BIN_THRESHOLD
-
-            if n_bins > 0:
-                bytes_full = n_bins * 7
-                if downsample:
-                    bytes_half = bytes_full // 2
-                    avg_bytes = int(0.25 * bytes_full + 0.75 * bytes_half)
-                else:
-                    avg_bytes = bytes_full
-                max_rows = max(16, self._HISTORY_MAX_JSON_BYTES // avg_bytes)
-            else:
-                max_rows = self._waterfall_rows
-
+            bins_hz = list(self._bins_hz) if self._bins_hz else []
+            bins_version = self._bins_version
+            sweep_count = self._sweep_count
+            waterfall_rows = self._waterfall_rows
             wf = list(self._waterfall)
-            if len(wf) > max_rows:
-                wf = wf[-max_rows:]
+            analyzer = self._analyzer
 
-            full_res_start = max(0, len(wf) - len(wf) // 4) if downsample else 0
+        downsample = n_bins > self._DOWNSAMPLE_BIN_THRESHOLD
 
-            rows_out = []
-            for i, (_, powers) in enumerate(wf):
-                if downsample and i < full_res_start:
-                    rows_out.append(list(powers[::2]))
-                else:
-                    rows_out.append(list(powers))
+        if n_bins > 0:
+            bytes_full = n_bins * 7
+            if downsample:
+                bytes_half = bytes_full // 2
+                avg_bytes = int(0.25 * bytes_full + 0.75 * bytes_half)
+            else:
+                avg_bytes = bytes_full
+            max_rows = max(16, self._HISTORY_MAX_JSON_BYTES // avg_bytes)
+        else:
+            max_rows = waterfall_rows
 
-            hist: dict[str, Any] = {
-                "available": True,
-                "sweep_count": self._sweep_count,
-                "bins_version": self._bins_version,
-                "waterfall_rows": self._waterfall_rows,
-                "rows": rows_out,
-                "row_timestamps": [round(ts, 3) for ts, _ in wf],
-            }
+        if len(wf) > max_rows:
+            wf = wf[-max_rows:]
+
+        full_res_start = max(0, len(wf) - len(wf) // 4) if downsample else 0
+
+        rows_out = []
+        for i, (_, powers) in enumerate(wf):
+            if downsample and i < full_res_start:
+                rows_out.append(powers[::2])
+            else:
+                rows_out.append(powers)
+
+        hist: dict[str, Any] = {
+            "available": True,
+            "sweep_count": sweep_count,
+            "bins_version": bins_version,
+            "waterfall_rows": waterfall_rows,
+            "rows": rows_out,
+            "row_timestamps": [round(ts, 3) for ts, _ in wf],
+        }
+        if downsample and full_res_start > 0:
+            hist["downsample_factor"] = 2
+            hist["full_res_start_idx"] = full_res_start
+        if bins_hz:
+            hist["bin_count"] = len(bins_hz)
+            hist["bins_hz"] = bins_hz
             if downsample and full_res_start > 0:
-                hist["downsample_factor"] = 2
-                hist["full_res_start_idx"] = full_res_start
-            if self._bins_hz:
-                hist["bin_count"] = len(self._bins_hz)
-                hist["bins_hz"] = list(self._bins_hz)
-                if downsample and full_res_start > 0:
-                    hist["bins_hz_half"] = list(self._bins_hz[::2])
-            if self._analyzer is not None:
-                hist["channel_power_history"] = self._analyzer.get_channel_power_history()
-            return hist
+                hist["bins_hz_half"] = bins_hz[::2]
+        if analyzer is not None:
+            hist["channel_power_history"] = analyzer.get_channel_power_history()
+        return hist
 
     # --- supervisor ----------------------------------------------------------
 
@@ -797,7 +814,10 @@ class SpectrumScanner(PluginBase):
                 )
                 if not line or line.startswith("#"):
                     continue
-                self._handle_csv_line(line)
+                try:
+                    self._handle_csv_line(line)
+                except Exception:
+                    self.log.debug("CSV parse error: %s", line[:80], exc_info=True)
         except (ValueError, OSError):
             pass
         except Exception:
@@ -914,7 +934,7 @@ class SpectrumScanner(PluginBase):
                 self._bins_hz = freqs
                 self._bins_version += 1
             self._latest_powers_db = powers
-            self._waterfall.append((now, list(powers)))
+            self._waterfall.append((now, powers))
             self._sweep_count += 1
             self._last_sweep_at = now
             self._snapshot_cache = None
@@ -925,8 +945,9 @@ class SpectrumScanner(PluginBase):
             self._last_sweep_mono = now_mono
 
         # Feed LoRa channel analyzer if active
-        if self._analyzer is not None:
-            triggers = self._analyzer.on_sweep(
+        analyzer = self._analyzer
+        if analyzer is not None:
+            triggers = analyzer.on_sweep(
                 freqs,
                 powers,
                 timestamp=now,

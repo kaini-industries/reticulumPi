@@ -46,6 +46,9 @@ def _run_rtl_test(rtl_test_path: str) -> list[tuple[int, str]]:
         stderr=subprocess.PIPE,
         text=True,
     )
+    watchdog = threading.Timer(5.0, lambda: proc.kill())
+    watchdog.daemon = True
+    watchdog.start()
     try:
         devices: list[tuple[int, str]] = []
         expected = -1
@@ -66,6 +69,7 @@ def _run_rtl_test(rtl_test_path: str) -> list[tuple[int, str]]:
                 break
         return devices
     finally:
+        watchdog.cancel()
         proc.kill()
         proc.wait(timeout=5)
 

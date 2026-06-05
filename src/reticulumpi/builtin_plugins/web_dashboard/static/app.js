@@ -5,6 +5,19 @@
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' })
       .catch(function () {});
+    navigator.serviceWorker.addEventListener('message', function (ev) {
+      if (ev.data && ev.data.type === 'sw-updated') {
+        var banner = document.getElementById('sw-update-banner');
+        if (!banner) {
+          banner = document.createElement('div');
+          banner.id = 'sw-update-banner';
+          banner.className = 'sw-update-banner';
+          banner.innerHTML = 'A new version is available. <a href="#" onclick="location.reload();return false">Reload</a>';
+          document.body.appendChild(banner);
+        }
+        banner.style.display = '';
+      }
+    });
   }
 
   /* ── Shared namespace ─────────────────────────────────────────────── */

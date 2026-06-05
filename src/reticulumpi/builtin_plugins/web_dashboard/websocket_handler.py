@@ -41,11 +41,25 @@ def _check_ws_origin(request: aiohttp.web.Request) -> bool:
     return origin_host == request.host
 
 
+_SWEEP_COUNT_KEYS = frozenset({"spectrum", "lora_scanner", "link_tester"})
+
+
 def _diff_payload(data: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any]:
     """Return only keys whose value changed since last broadcast."""
     result = {}
     for key, value in data.items():
-        if value != prev.get(key):
+        if key in _SWEEP_COUNT_KEYS:
+            prev_val = prev.get(key)
+            if (
+                isinstance(value, dict)
+                and isinstance(prev_val, dict)
+                and value.get("sweep_count") == prev_val.get("sweep_count")
+                and value.get("bins_version") == prev_val.get("bins_version")
+                and value.get("status") == prev_val.get("status")
+            ):
+                continue
+            result[key] = value
+        elif value != prev.get(key):
             result[key] = value
     return result
 
@@ -509,7 +523,7 @@ def _collect_spectrum_data(plugin: Any) -> dict[str, Any]:
 
 async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
     plugin = app["plugin"]
-    interval = plugin.config.get("metrics_interval", 5)
+    interval = plugin.config.get("spectrum_broadcast_interval", 2)
     resync_every = int(plugin.config.get("spectrum_resync_cycles", 12))
     prev_data: dict[str, Any] = {}
     cycle_count = 0

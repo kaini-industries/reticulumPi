@@ -200,9 +200,14 @@ async def _serve_sw(request: aiohttp.web.Request) -> aiohttp.web.Response:
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     with open(os.path.join(static_dir, "sw.js")) as f:
         content = f.read()
+    from reticulumpi import __version__
+
     content = content.replace(
         "var MAX_ENTRIES = 5000;",
         f"var MAX_ENTRIES = {max_entries};",
+    ).replace(
+        "var SHELL_CACHE = 'rpi-shell-v1';",
+        f"var SHELL_CACHE = 'rpi-shell-v{__version__}';",
     )
     return aiohttp.web.Response(
         text=content,

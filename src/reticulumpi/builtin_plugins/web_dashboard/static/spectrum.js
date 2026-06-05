@@ -33,8 +33,8 @@
                                  // so the two can't drift relative to each
                                  // other after a bin-count reset).
   var _lastData = null;      // most recent snapshot (for redraw on resize/expand)
+  var _scale = { minDb: -90, maxDb: -30, initialized: false };
   var _minDb = -90, _maxDb = -30;  // running auto-scale for colour + line plot
-  var _scaleInitialized = false;   // true once a real sweep has seeded _min/_maxDb
   var _lastBandSignature = '';     // "<start>|<stop>" of last band-strip render
   var _legendBuilt = false;        // one-time flag for legend DOM construction
   var _legendExpanded = false;
@@ -113,26 +113,8 @@
       _renderLine(_lastData, clip);
       _renderBands(_lastData, clip);
       _renderScale(_lastData, clip);
-      _repaintWaterfallFromHistory(clip);
+      _bulkPaintFromStore(clip);
     }
-  }
-
-  function _repaintWaterfallFromHistory(clip) {
-    if (!_wfCtx || !SC.historyStore) return;
-    var rows = SC.historyStore.rows;
-    if (!rows.length) return;
-    var chron = new Array(rows.length);
-    for (var i = 0; i < rows.length; i++) {
-      chron[rows.length - 1 - i] = rows[i];
-    }
-    if (clip && clip.zoomed) {
-      for (var k = 0; k < chron.length; k++) {
-        if (chron[k]) chron[k] = chron[k].slice(clip.loIdx, clip.hiIdx + 1);
-      }
-    }
-    SC.paintHistoryToCanvas(_wfCtx, _wfCanvas, chron, WF_COLS, WF_ROWS,
-                            _minDb, _maxDb);
-    _lastSweepCount = SC.historyStore.sweepCount;
   }
 
   // -- DOM setup -----------------------------------------------------------
@@ -227,7 +209,7 @@
         var zp = JSON.parse(zs);
         if (Array.isArray(zp) && zp.length === 2
             && typeof zp[0] === 'number' && typeof zp[1] === 'number'
-            && zp[1] > zp[0]) {
+            && isFinite(zp[0]) && isFinite(zp[1]) && zp[1] > zp[0]) {
           _zoom = zp;
           if (_zoomResetEl) _zoomResetEl.style.display = '';
         }
@@ -378,17 +360,9 @@
       if (v > mx) mx = v;
     }
     if (!isFinite(mn) || !isFinite(mx)) return;
-    var tgtMin = Math.floor(mn - 3);
-    var tgtMax = Math.ceil(mx + 3);
-    if (!_scaleInitialized) {
-      _minDb = tgtMin;
-      _maxDb = tgtMax;
-      _scaleInitialized = true;
-    } else {
-      _minDb = _minDb * 0.7 + tgtMin * 0.3;
-      _maxDb = _maxDb * 0.7 + tgtMax * 0.3;
-    }
-    if (_maxDb - _minDb < 10) _maxDb = _minDb + 10;
+    SC.emaAutoScale(_scale, mn, mx);
+    _minDb = _scale.minDb;
+    _maxDb = _scale.maxDb;
 
     var vbW = 800, vbH = 160;
     var pts = new Array(n);
@@ -631,48 +605,6 @@
     }
   }
 
-  function _paintRowToCanvas(powers, clip) {
-    if (!_wfCtx || !powers || !powers.length) return;
-    var row = (clip && clip.zoomed) ? powers.slice(clip.loIdx, clip.hiIdx + 1) : powers;
-    var n = row.length;
-    if (!n) return;
-    _wfCtx.drawImage(
-      _wfCanvas,
-      0, 0, WF_COLS, WF_ROWS - 1,
-      0, 1, WF_COLS, WF_ROWS - 1
-    );
-    var img = _wfCtx.createImageData(WF_COLS, 1);
-    var data = img.data;
-    var lo = _minDb, hi = _maxDb;
-    var range = hi - lo;
-    if (range < 1) range = 1;
-    for (var x = 0; x < WF_COLS; x++) {
-      var srcF = (n > 1) ? (x * (n - 1)) / (WF_COLS - 1) : 0;
-      var srcLo = Math.floor(srcF);
-      var srcHi = Math.min(srcLo + 1, n - 1);
-      var frac = srcF - srcLo;
-      var pLo = row[srcLo], pHi = row[srcHi];
-      var p;
-      if (pLo == null || !isFinite(pLo)) p = pHi;
-      else if (pHi == null || !isFinite(pHi)) p = pLo;
-      else p = pLo + (pHi - pLo) * frac;
-      var norm;
-      if (p == null || !isFinite(p)) {
-        norm = 0;
-      } else {
-        norm = (p - lo) / range;
-        if (norm < 0) norm = 0; else if (norm > 1) norm = 1;
-      }
-      var rgb = SC.colorForNorm(norm);
-      var off = x * 4;
-      data[off] = rgb[0];
-      data[off + 1] = rgb[1];
-      data[off + 2] = rgb[2];
-      data[off + 3] = 255;
-    }
-    _wfCtx.putImageData(img, 0, 0);
-  }
-
   // Bulk-paint the shared historyStore ring onto the waterfall canvas.
   // Called whenever the store's generation cursor changes (WS hello, or
   // bin-grid reset).  Uses the shared helper so we do a single
@@ -703,7 +635,8 @@
     if (!tail.length) { _lastSweepCount = sc; return; }
     var toDraw = Math.min(delta, tail.length);
     for (var i = tail.length - toDraw; i < tail.length; i++) {
-      _paintRowToCanvas(tail[i], clip);
+      var row = (clip && clip.zoomed) ? tail[i].slice(clip.loIdx, clip.hiIdx + 1) : tail[i];
+      SC.paintRowToCanvas(_wfCtx, _wfCanvas, row, WF_COLS, WF_ROWS, _minDb, _maxDb);
     }
     _lastSweepCount = sc;
   }
@@ -847,7 +780,7 @@
       _lastStoreGen = gen;
       _lastSweepCount = 0;
       _lastRenderedSweep = 0;
-      _scaleInitialized = false;
+      _scale.initialized = false;
       _lastBandSignature = '';
       _needsBulkPaint = true;
       if (_dragState) {
@@ -1050,6 +983,13 @@
       _presetBtns[k].className = (k === data.preset) ? 'active' : '';
     });
   }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && _lastData && _wfCtx) {
+      var clip = _clip(_lastData, _zoom);
+      _bulkPaintFromStore(clip);
+    }
+  });
 
   R.spectrum = { update: update, handlePresetError: handlePresetError, handlePresetSwitched: handlePresetSwitched };
 })();

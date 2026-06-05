@@ -139,7 +139,16 @@ function _shellFetch(request) {
   return caches.open(SHELL_CACHE).then(function (cache) {
     return cache.match(request).then(function (cached) {
       var networkFetch = fetch(request).then(function (resp) {
-        if (resp.ok) cache.put(request, resp.clone());
+        if (resp.ok) {
+          cache.put(request, resp.clone());
+          if (cached) {
+            self.clients.matchAll().then(function (clients) {
+              clients.forEach(function (c) {
+                c.postMessage({ type: 'sw-updated' });
+              });
+            });
+          }
+        }
         return resp;
       }).catch(function () {});
       return cached || networkFetch;

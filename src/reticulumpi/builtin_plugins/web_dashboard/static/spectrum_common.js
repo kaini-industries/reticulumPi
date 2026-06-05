@@ -354,6 +354,7 @@
       sweepCount: 0,
       binCount: 0,
       binsHz: null,
+      sessionId: null,
       generation: 0,
 
       loadHistory: function (payload) {
@@ -363,17 +364,21 @@
         this.binCount = 0;
         if (payload && payload.available && Array.isArray(payload.rows) && payload.rows.length) {
           var times = payload.row_timestamps || [];
+          var tmpRows = [], tmpTimes = [];
           for (var i = 0; i < payload.rows.length; i++) {
             var row = payload.rows[i];
             if (!row || !row.length) continue;
-            this.rows.unshift(row.slice());
-            var ts = (i < times.length) ? times[i] : null;
-            this.rowTimestamps.unshift((ts != null) ? ts : null);
+            tmpRows.push(row.slice());
+            tmpTimes.push((i < times.length && times[i] != null) ? times[i] : null);
           }
-          if (this.rows.length > MAX_HIST_ROWS) this.rows.length = MAX_HIST_ROWS;
-          if (this.rowTimestamps.length > MAX_HIST_ROWS) {
-            this.rowTimestamps.length = MAX_HIST_ROWS;
+          tmpRows.reverse();
+          tmpTimes.reverse();
+          if (tmpRows.length > MAX_HIST_ROWS) {
+            tmpRows.length = MAX_HIST_ROWS;
+            tmpTimes.length = MAX_HIST_ROWS;
           }
+          this.rows = tmpRows;
+          this.rowTimestamps = tmpTimes;
           this.sweepCount = payload.sweep_count || 0;
           this.binCount = payload.bin_count
             || (this.rows[0] ? this.rows[0].length : 0);
@@ -381,11 +386,22 @@
         if (payload && payload.bins_hz && payload.bins_hz.length) {
           this.binsHz = payload.bins_hz;
         }
+        if (payload && payload.session_id != null) {
+          this.sessionId = payload.session_id;
+        }
         this.generation += 1;
       },
 
       ingestTick: function (spec) {
         if (!spec) return;
+        var sid = spec.session_id;
+        if (sid != null && sid !== this.sessionId) {
+          this.rows = [];
+          this.rowTimestamps = [];
+          this.sweepCount = 0;
+          this.sessionId = sid;
+          this.generation += 1;
+        }
         var binCount = spec.bins_hz ? spec.bins_hz.length : 0;
         if (binCount > 0 && binCount !== this.binCount) {
           this.rows = [];

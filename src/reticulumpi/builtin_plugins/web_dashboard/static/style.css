@@ -1,4 +1,21 @@
 /* ReticulumPi Dashboard — Cyberpunk Neon-Noir Theme */
+.sw-update-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  background: #1a237e;
+  color: #e0e0ff;
+  padding: 6px 12px;
+  text-align: center;
+  font-size: 0.8rem;
+}
+.sw-update-banner a {
+  color: #82b1ff;
+  font-weight: 600;
+  margin-left: 6px;
+}
 @property --pct {
   syntax: '<number>';
   inherits: false;
@@ -3503,6 +3520,7 @@ body {
   width: 100%;
   height: 320px;
   cursor: crosshair;
+  image-rendering: pixelated;
 }
 .spectrum-hover {
   position: absolute;
@@ -3767,6 +3785,7 @@ body {
   width: 100%;
   height: 320px;
   cursor: crosshair;
+  image-rendering: pixelated;
 }
 .lora-spectrum-overlay {
   position: absolute;
@@ -4169,6 +4188,24 @@ body {
   color: #5a6785;
   margin-bottom: 2px;
   letter-spacing: 0.03em;
+}
+.lora-recs-table {
+  font-size: 0.65rem;
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 2px;
+}
+.lora-recs-table th {
+  color: #5a6785;
+  font-weight: 500;
+  text-align: left;
+  padding: 1px 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.lora-recs-table td {
+  color: var(--fg, #d0d5e0);
+  padding: 1px 4px;
+  font-variant-numeric: tabular-nums;
 }
 .lora-ch-timeline {
   margin-top: 0.4rem;

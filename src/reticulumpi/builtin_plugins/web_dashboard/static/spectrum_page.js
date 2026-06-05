@@ -29,68 +29,77 @@
     };
 
     specWs.onmessage = function(ev) {
-      try {
-        var msg = JSON.parse(ev.data);
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch(e) { return; }
 
-        if (msg.type === 'pong') return;
+      if (msg.type === 'pong') return;
 
-        if (msg.type === 'spectrum_history' && msg.data) {
-          if (R.spectrumCommon && R.spectrumCommon.historyStore) {
-            R.spectrumCommon.historyStore.loadHistory(msg.data);
-          }
-          return;
+      if (msg.type === 'spectrum_history' && msg.data) {
+        if (R.spectrumCommon && R.spectrumCommon.historyStore) {
+          R.spectrumCommon.historyStore.loadHistory(msg.data);
         }
-        if (msg.type === 'lora_scanner_history' && msg.data) {
-          if (R.spectrumCommon && R.spectrumCommon.loraHistoryStore) {
-            R.spectrumCommon.loraHistoryStore.loadHistory(msg.data);
-          }
-          if (msg.data.channel_power_history && R.loraSpectrum && R.loraSpectrum.loadChannelHistory) {
-            R.loraSpectrum.loadChannelHistory(msg.data.channel_power_history);
-          }
-          return;
+        return;
+      }
+      if (msg.type === 'lora_scanner_history' && msg.data) {
+        if (R.spectrumCommon && R.spectrumCommon.loraHistoryStore) {
+          R.spectrumCommon.loraHistoryStore.loadHistory(msg.data);
         }
-        if (msg.type === 'link_tester_history' && msg.data) {
-          if (R.linkTesterHistoryLoad) R.linkTesterHistoryLoad(msg.data);
-          return;
+        if (msg.data.channel_power_history && R.loraSpectrum && R.loraSpectrum.loadChannelHistory) {
+          R.loraSpectrum.loadChannelHistory(msg.data.channel_power_history);
         }
-        if (msg.type === 'spectrum_preset_switched') {
-          if (R.spectrum && R.spectrum.handlePresetSwitched) {
-            R.spectrum.handlePresetSwitched(msg);
-          }
-          return;
+        return;
+      }
+      if (msg.type === 'link_tester_history' && msg.data) {
+        if (R.linkTesterHistoryLoad) R.linkTesterHistoryLoad(msg.data);
+        return;
+      }
+      if (msg.type === 'spectrum_preset_switched') {
+        if (R.spectrum && R.spectrum.handlePresetSwitched) {
+          R.spectrum.handlePresetSwitched(msg);
         }
-        if (msg.type === 'spectrum_preset_error') {
-          if (R.spectrum && R.spectrum.handlePresetError) {
-            R.spectrum.handlePresetError(msg.error || 'Preset switch failed');
-          }
-          return;
+        return;
+      }
+      if (msg.type === 'spectrum_preset_error') {
+        if (R.spectrum && R.spectrum.handlePresetError) {
+          R.spectrum.handlePresetError(msg.error || 'Preset switch failed');
         }
+        return;
+      }
 
-        if (msg.type === 'update' && msg.data) {
-          var d = msg.data;
-          if (d.spectrum && R.spectrumCommon && R.spectrumCommon.historyStore) {
-            R.spectrumCommon.historyStore.ingestTick(d.spectrum);
-          }
-          if (d.lora_scanner && R.spectrumCommon && R.spectrumCommon.loraHistoryStore) {
-            R.spectrumCommon.loraHistoryStore.ingestTick(d.lora_scanner);
-          }
-          requestAnimationFrame(function() {
-            if (d.spectrum && R.spectrum && R.spectrum.update) R.spectrum.update(d.spectrum);
-            if ((d.spectrum || d.lora_scanner) && R.loraSpectrum && R.loraSpectrum.update) R.loraSpectrum.update(d);
-            if (d.link_tester && R.updateLinkTester) R.updateLinkTester(d.link_tester);
-          });
+      if (msg.type === 'update' && msg.data) {
+        var d = msg.data;
+        if (d.spectrum && R.spectrumCommon && R.spectrumCommon.historyStore) {
+          R.spectrumCommon.historyStore.ingestTick(d.spectrum);
         }
-      } catch(e) { /* ignore parse errors */ }
+        if (d.lora_scanner && R.spectrumCommon && R.spectrumCommon.loraHistoryStore) {
+          R.spectrumCommon.loraHistoryStore.ingestTick(d.lora_scanner);
+        }
+        requestAnimationFrame(function() {
+          if (d.spectrum && R.spectrum && R.spectrum.update) R.spectrum.update(d.spectrum);
+          if ((d.spectrum || d.lora_scanner) && R.loraSpectrum && R.loraSpectrum.update) R.loraSpectrum.update(d);
+          if (d.link_tester && R.updateLinkTester) R.updateLinkTester(d.link_tester);
+        });
+      }
     };
 
-    specWs.onclose = function() {
+    specWs.onclose = function(ev) {
       R.spectrumWs = null;
       if (_closing) return;
+      if (ev.code === 4001) {
+        setStatus('err', 'auth expired');
+        window.location.href = '/login.html';
+        return;
+      }
+      if (ev.code === 4002) {
+        setStatus('err', 'max clients');
+        return;
+      }
       setStatus('wait', 'reconnecting…');
+      var jitter = reconnectDelay * (0.5 + Math.random() * 0.5);
       setTimeout(function() {
         reconnectDelay = Math.min(reconnectDelay * 2, maxReconnect);
         connect();
-      }, reconnectDelay);
+      }, jitter);
     };
   }
 
