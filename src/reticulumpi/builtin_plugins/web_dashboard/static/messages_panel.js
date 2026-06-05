@@ -87,6 +87,7 @@
     var _unreadCounts = {};
     var _readGrace = {};
     var _deletePending = null;
+    var _sending = false;
     var _contacts = [];
     var _channels = [];
     var _newComposeOpen = false;
@@ -717,6 +718,13 @@
       var snr = !isSent ? _snrLabel(m) : '';
       var snrHtml = snr
         ? '<span class="msg-snr">' + esc(snr) + '</span>' : '';
+      var chBadge = '';
+      if (cfg.supportsChannels && m.msg_type !== 'broadcast'
+          && m.metadata && m.metadata.channel !== undefined
+          && m.metadata.channel !== null) {
+        chBadge = '<span class="msg-channel-tag">'
+               + esc(_channelName(m.metadata.channel)) + '</span>';
+      }
       var idAttr = (m.id !== null && m.id !== undefined)
         ? ' data-msg-id="' + esc(String(m.id)) + '"' : '';
       var tsAttr = m.timestamp ? ' data-ts="' + m.timestamp + '"' : '';
@@ -724,7 +732,7 @@
            + idAttr + tsAttr + '>'
            + '<div class="msg-meta"><span>' + esc(sender) + '</span>'
            + '<span>' + esc(time) + '</span>'
-           + hopsHtml + snrHtml
+           + hopsHtml + snrHtml + chBadge
            + '<span class="msg-status">' + statusHtml + '</span>'
            + '</div>'
            + '<div class="msg-text">' + esc(m.text || '') + '</div>'
@@ -1117,7 +1125,20 @@
       var layout = _dom.body && _dom.body.querySelector('.msg-layout');
       if (layout) layout.classList.add('thread-active');
 
-      _fetchThread(contactId);
+      _fetchThread(contactId).then(function () {
+        if (cfg.supportsChannels && _dom.chSelect
+            && !_dom.chSelect.disabled && _threadMessages.length > 0) {
+          var lastCh = null;
+          for (var ti = 0; ti < _threadMessages.length; ti++) {
+            var md = _threadMessages[ti].metadata;
+            if (md && md.channel !== undefined && md.channel !== null) {
+              lastCh = md.channel;
+              break;
+            }
+          }
+          if (lastCh !== null) _dom.chSelect.value = String(lastCh);
+        }
+      });
 
       // Collect every cid whose unread feeds this row. Broadcast rows
       // merge aliased channel slots (same name + PSK), so clicking the
@@ -1185,26 +1206,22 @@
       }
       var cid = _activeContactId;
       _deletePending = cid;
+      _addReadGrace(cid);
       api('/api/messages/conversation/' + encodeURIComponent(cid), {method: 'DELETE'})
         .then(function (r) {
-          _deletePending = null;
           if (!r || !r.ok) {
+            _deletePending = null;
             _setFeedback((r && r.error) || 'Delete failed', 'error');
             return;
           }
           var deleted = (r.data && r.data.deleted) || 0;
-          // Clear local thread state and drop the conversation from the list
           _threadMessages = [];
           if (_dom.chat) {
-            // Visible success banner in the chat pane — the feedback span
-            // lives inside compose (hidden next line), so use the chat area
-            // so the user sees confirmation that the delete succeeded.
             _dom.chat.innerHTML = '<div class="msg-deleted-notice">Deleted ' +
               deleted + ' message' + (deleted === 1 ? '' : 's') +
               ' from &ldquo;' + esc(name) + '&rdquo;</div>';
           }
           if (_unreadCounts[cid]) {
-            _addReadGrace(cid);
             delete _unreadCounts[cid];
             _updateUnreadUI();
           }
@@ -1218,8 +1235,9 @@
           if (_dom.compose) _dom.compose.classList.add('hidden');
           if (_dom.deleteBtn) _dom.deleteBtn.classList.add('hidden');
           _goBack();
-          _fetchConversations();
-          _fetchUnread();
+          Promise.all([_fetchConversations(), _fetchUnread()])
+            .then(function () { _deletePending = null; })
+            .catch(function () { _deletePending = null; });
         }).catch(function () { _deletePending = null; });
     }
 
@@ -1277,12 +1295,25 @@
     }
 
     function _onSend() {
+      if (_sending) return;
       var target = _resolveSendTarget();
       if (!_dom.text) return;
       var text = _dom.text.value.trim();
       if (!text || !target) return;
+      _sending = true;
       if (_dom.sendBtn) _dom.sendBtn.disabled = true;
       _setFeedback('Sending…', '');
+
+      if (_maxBytes && new TextEncoder().encode(text).length > _maxBytes) {
+        if (!window.confirm(
+          'Message exceeds ' + _maxBytes + ' bytes and will be truncated. Send anyway?'
+        )) {
+          _sending = false;
+          if (_dom.sendBtn) _dom.sendBtn.disabled = false;
+          _setFeedback('', '');
+          return;
+        }
+      }
 
       var body = {
         transport: cfg.transport,
@@ -1292,9 +1323,6 @@
       if (target.msgType === 'broadcast') body.msg_type = 'broadcast';
       if (cfg.subTransport) body.sub_transport = cfg.subTransport;
       if (cfg.supportsChannels) {
-        // Broadcast threads carry channel in their contact_id; that
-        // wins over the standalone selector (which is disabled while
-        // such a thread is active).  DMs still use the selector.
         var chFromThread = null;
         if (_newComposeOpen && _destSelection
             && _destSelection.channel !== undefined
@@ -1305,8 +1333,7 @@
         }
         if (chFromThread !== null) {
           body.channel = chFromThread;
-        } else if (_dom.chSelect
-                   && _canonicalize(_channels).canonical.length > 1) {
+        } else if (_dom.chSelect) {
           body.channel = parseInt(_dom.chSelect.value, 10);
         }
       }
@@ -1323,9 +1350,6 @@
           _autoGrow(_dom.text);
           _updateByteCount();
           _setFeedback(r.data.truncated ? 'Sent (truncated)' : 'Sent', 'ok');
-          // No refetch here: the backend's MESSAGE_SENT event will
-          // arrive via WS and _onMessage will append the bubble +
-          // upsert the conversation row without an HTTP round-trip.
           if (_newComposeOpen) {
             _newComposeOpen = false;
             if (_dom.newCompose) _dom.newCompose.classList.add('hidden');
@@ -1333,6 +1357,7 @@
           }
         })
         .finally(function () {
+          _sending = false;
           if (_dom.sendBtn) _dom.sendBtn.disabled = false;
         });
     }
@@ -1384,7 +1409,7 @@
       } else {
         _dom.byteCount.textContent = '';
       }
-      if (_dom.sendBtn) _dom.sendBtn.disabled = !text.trim();
+      if (_dom.sendBtn && !_sending) _dom.sendBtn.disabled = !text.trim();
     }
 
     function _autoGrow(el) {
@@ -1489,6 +1514,9 @@
         var bucket = wsPayload.unread[bucketKey];
         if (bucket && typeof bucket === 'object') {
           _applyReadGrace(bucket);
+          if (_deletePending && bucket[_deletePending] !== undefined) {
+            delete bucket[_deletePending];
+          }
           _unreadCounts = bucket;
         } else if (
           !wsPayload.unread.hasOwnProperty(bucketKey)
@@ -1513,6 +1541,11 @@
           }
           return true;
         });
+        if (_deletePending) {
+          mine = mine.filter(function (c) {
+            return c.contact_id !== _deletePending;
+          });
+        }
         if (mine.length > 0 || _conversations.length === 0) {
           var graceNow = Date.now();
           for (var mi = 0; mi < mine.length; mi++) {
@@ -1647,6 +1680,7 @@
 
     function _onStatus(row) {
       if (!_matchesPanel(row)) return;
+      if (_deletePending && row.contact_id === _deletePending) return;
       if (!_resolveDom()) return;
       if (row.id === null || row.id === undefined) return;
       var changed = false;
@@ -1662,6 +1696,7 @@
 
     function _onReaction(data) {
       if (!_matchesPanel(data)) return;
+      if (_deletePending && data.contact_id === _deletePending) return;
       if (!_resolveDom()) return;
       if (data.id === null || data.id === undefined) return;
       for (var i = 0; i < _threadMessages.length; i++) {
@@ -1738,12 +1773,41 @@
 
     _init();
 
+    function _onConversationDeleted(data) {
+      if (!data || !data.contact_id) return;
+      var cid = data.contact_id;
+      var had = false;
+      _conversations = _conversations.filter(function (c) {
+        if (c.contact_id === cid) { had = true; return false; }
+        return true;
+      });
+      if (!had) return;
+      if (_unreadCounts[cid]) {
+        delete _unreadCounts[cid];
+        _updateUnreadUI();
+      }
+      if (_activeContactId === cid) {
+        _activeContactId = null;
+        _activeMsgType = null;
+        _threadMessages = [];
+        if (_dom.chat) {
+          _dom.chat.innerHTML = '<div class="msg-deleted-notice">'
+            + 'Conversation deleted</div>';
+        }
+        if (_dom.compose) _dom.compose.classList.add('hidden');
+        if (_dom.deleteBtn) _dom.deleteBtn.classList.add('hidden');
+        _goBack();
+      }
+      _renderConversations();
+    }
+
     // Public surface
     var panelApi = {
       update: update,
       onMessage: _onMessage,
       onStatus: _onStatus,
       onReaction: _onReaction,
+      onConversationDeleted: _onConversationDeleted,
       resetFreshness: _resetFreshness,
     };
     _allPanels.push(panelApi);
@@ -1768,6 +1832,11 @@
   R.onMessagingReaction = function (data) {
     for (var i = 0; i < _allPanels.length; i++) {
       try { _allPanels[i].onReaction(data); } catch (e) { /* keep other panels alive */ }
+    }
+  };
+  R.onConversationDeleted = function (data) {
+    for (var i = 0; i < _allPanels.length; i++) {
+      try { _allPanels[i].onConversationDeleted(data); } catch (e) { /* keep other panels alive */ }
     }
   };
   // Called from app.js on ws.onclose so that the next _refresh() on
@@ -1830,7 +1899,10 @@
     if (fb) { fb.textContent = ''; fb.className = 'msg-feedback'; }
   }
 
+  var _channelOpPending = false;
+
   function _joinChannel() {
+    if (_channelOpPending) return;
     var url = ($('channel-join-url') || {}).value || '';
     var name = ($('channel-join-name') || {}).value || '';
     var psk = ($('channel-join-psk') || {}).value || '';
@@ -1840,10 +1912,12 @@
       if (fb) { fb.textContent = 'Enter URL or name + PSK'; fb.className = 'msg-feedback error'; }
       return;
     }
+    _channelOpPending = true;
     var body = url ? {url: url} : {name: name, psk: psk || 'default'};
     if (fb) { fb.textContent = 'Joining…'; fb.className = 'msg-feedback'; }
     api('/api/meshtastic/channels/join', {method: 'POST', body: body}).then(
       function (r) {
+        _channelOpPending = false;
         if (!r || !r.ok) {
           if (fb) {
             fb.textContent = (r && r.error) || 'Join failed';
@@ -1852,20 +1926,31 @@
           return;
         }
         if (fb) { fb.textContent = 'Joined!'; fb.className = 'msg-feedback ok'; }
-        _notifyChannelChange();   // invalidates cache before refresh
+        _notifyChannelChange();
         _refreshChannelList();
       },
-    );
+    ).catch(function () { _channelOpPending = false; });
   }
 
   function _deleteChannel(idx) {
+    if (_channelOpPending) return;
+    if (!window.confirm('Leave this channel? The PSK may not be recoverable.')) return;
+    _channelOpPending = true;
+    var fb = $('channel-join-feedback');
     api('/api/meshtastic/channels/' + idx, {method: 'DELETE'}).then(
       function (r) {
-        if (!r || !r.ok) return;
-        _notifyChannelChange();   // invalidates cache before refresh
+        _channelOpPending = false;
+        if (!r || !r.ok) {
+          if (fb) {
+            fb.textContent = (r && r.error) || 'Delete failed';
+            fb.className = 'msg-feedback error';
+          }
+          return;
+        }
+        _notifyChannelChange();
         _refreshChannelList();
       },
-    );
+    ).catch(function () { _channelOpPending = false; });
   }
 
   function _notifyChannelChange() {

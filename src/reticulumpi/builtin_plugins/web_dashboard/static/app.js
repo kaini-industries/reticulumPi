@@ -1681,6 +1681,10 @@
           if (RPI.onMessagingReaction) RPI.onMessagingReaction(msg.data);
           return;
         }
+        if (msg.type === 'conversation_deleted' && msg.data) {
+          if (RPI.onConversationDeleted) RPI.onConversationDeleted(msg.data);
+          return;
+        }
         if (msg.type === 'internet_status' && msg.data) {
           updateInternetStatus(msg.data);
           return;

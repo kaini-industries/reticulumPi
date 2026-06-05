@@ -1064,6 +1064,9 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.MESSAGE_SENT, _on_message_event)
         event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
         event_bus.subscribe(_events.MESSAGE_REACTION_RECEIVED, _on_reaction_event)
+        event_bus.subscribe(
+            _events.CONVERSATION_DELETED, _on_conversation_deleted_event
+        )
         event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
         event_bus.subscribe(_events.INTERNET_ONLINE, _on_internet_event)
         event_bus.subscribe(_events.INTERNET_OFFLINE, _on_internet_event)
@@ -1204,6 +1207,19 @@ def _on_reaction_event(event_type: str, data: dict) -> None:
         return
     try:
         loop.call_soon_threadsafe(_schedule_push, "reaction", data)
+    except (RuntimeError, AttributeError):
+        pass
+
+
+def _on_conversation_deleted_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for CONVERSATION_DELETED — push to WS clients."""
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
+        return
+    try:
+        loop.call_soon_threadsafe(
+            _schedule_push, "conversation_deleted", data
+        )
     except (RuntimeError, AttributeError):
         pass
 

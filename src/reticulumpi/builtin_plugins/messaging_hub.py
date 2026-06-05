@@ -2684,7 +2684,15 @@ class MessagingHubPlugin(PluginBase):
 
     def delete_conversation(self, contact_id: str) -> int:
         """Delete all stored messages for a conversation."""
-        return self._store.delete_conversation(contact_id)
+        from reticulumpi import events
+
+        deleted = self._store.delete_conversation(contact_id)
+        if deleted > 0:
+            self.app.event_bus.publish(
+                events.CONVERSATION_DELETED,
+                {"contact_id": contact_id, "deleted": deleted},
+            )
+        return deleted
 
     def get_unread_counts(self, **kwargs: Any) -> dict[str, int]:
         """Return unread counts per contact."""

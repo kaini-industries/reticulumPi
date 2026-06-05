@@ -106,6 +106,7 @@ SHUTDOWN_STARTING = "shutdown.starting"
 MESSAGE_RECEIVED = "messaging.message_received"
 MESSAGE_SENT = "messaging.message_sent"
 MESSAGE_STATUS_CHANGED = "messaging.message_status_changed"
+CONVERSATION_DELETED = "messaging.conversation_deleted"
 
 # Meshtastic firmware watchdog
 MESHTASTIC_FIRMWARE_HANG = "meshtastic.firmware_hang"

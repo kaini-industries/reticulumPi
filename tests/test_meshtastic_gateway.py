@@ -794,7 +794,7 @@ class TestNodeDataCache:
                 "short_name": "CN",
                 "hw_model": "RAK4631",
                 "snr": 4.0,
-                "last_heard": 1700000000,
+                "last_heard": int(time.time()) - 3600,
                 "latitude": 30.0,
                 "longitude": -97.0,
                 "via_mqtt": True,

@@ -368,6 +368,8 @@ async def handle_meshtastic_channel_join(
             index = int(index)
         except (TypeError, ValueError):
             return _error("index must be an integer 1-7", 400)
+        if not 1 <= index <= 7:
+            return _error("index must be an integer 1-7", 400)
 
     if not hasattr(gw, "join_channel"):
         return _error("Channel join not supported", 501)
@@ -395,6 +397,8 @@ async def handle_meshtastic_channel_delete(
         index = int(request.match_info["index"])
     except (KeyError, ValueError):
         return _error("Invalid channel index", 400)
+    if not 1 <= index <= 7:
+        return _error("Channel index must be 1-7", 400)
 
     result = await _run_sync(gw.delete_channel, index)
     if result.get("ok"):
@@ -623,14 +627,19 @@ async def handle_send_message(
 
     kwargs: dict = {}
     if body.get("msg_type"):
+        if body["msg_type"] not in ("direct", "broadcast"):
+            return _error("msg_type must be 'direct' or 'broadcast'", 400)
         kwargs["msg_type"] = body["msg_type"]
     if body.get("sub_transport"):
         kwargs["sub_transport"] = body["sub_transport"]
     if body.get("channel") is not None:
         try:
-            kwargs["channel"] = int(body["channel"])
+            ch = int(body["channel"])
         except (TypeError, ValueError):
             return _error("channel must be an integer 0-7", 400)
+        if not 0 <= ch <= 7:
+            return _error("channel must be an integer 0-7", 400)
+        kwargs["channel"] = ch
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None,

@@ -1027,6 +1027,7 @@ class MeshtasticGateway(PluginBase):
         self._node_data_cache_path = os.path.join(storage_path, "node_data_cache.json")
         self._persisted_nodes: dict[str, dict[str, Any]] = {}
         self._node_data_save_counter: int = 0
+        self._mqtt_node_ttl: float = float(self.config.get("mqtt_node_ttl_seconds", 86400))
         self._load_node_data_cache()
 
         identity_path = os.path.join(storage_path, "identity")
@@ -3149,7 +3150,13 @@ class MeshtasticGateway(PluginBase):
             except Exception:
                 pass
 
-        seen: dict[str, dict[str, Any]] = dict(self._persisted_nodes)
+        now_ts = time.time()
+        persist_cutoff = now_ts - self._mqtt_node_ttl
+        seen: dict[str, dict[str, Any]] = {
+            nid: entry
+            for nid, entry in self._persisted_nodes.items()
+            if (entry.get("last_heard") or 0) > persist_cutoff
+        }
 
         for node_id, node_data in raw_mqtt.items():
             user = node_data.get("user", {})
@@ -3397,6 +3404,12 @@ class MeshtasticGateway(PluginBase):
             ``{"ok": True, "index": N}`` on success,
             ``{"ok": False, "reason": str}`` on failure.
         """
+        if len(name) > 11:
+            return {
+                "ok": False,
+                "reason": "Channel name must be 11 characters or fewer",
+            }
+
         node = self._get_serial_node()
         if node is None:
             return {"ok": False, "reason": "Not connected in serial mode"}
@@ -3487,6 +3500,15 @@ class MeshtasticGateway(PluginBase):
             ``{"ok": True}`` on success,
             ``{"ok": False, "reason": str}`` on failure.
         """
+        if not url.startswith(
+            ("https://meshtastic.org/e/#", "http://meshtastic.org/e/#")
+        ):
+            return {
+                "ok": False,
+                "reason": "URL must be a Meshtastic channel URL"
+                " (https://meshtastic.org/e/#...)",
+            }
+
         node = self._get_serial_node()
         if node is None:
             return {"ok": False, "reason": "Not connected in serial mode"}
@@ -3495,7 +3517,7 @@ class MeshtasticGateway(PluginBase):
             node.setURL(url, addOnly=True)
         except Exception as exc:
             self.log.exception("Error applying channel URL")
-            return {"ok": False, "reason": str(exc)}
+            return {"ok": False, "reason": f"Channel URL failed: {exc}"}
 
         self.log.info("Applied channel URL: %s", url[:60])
         return {"ok": True}
