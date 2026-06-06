@@ -303,7 +303,7 @@ def _run_mesh_bridge_cli(action: str, config_path: str | None) -> None:
             port = int(wd.get("port", port))
             if (wd.get("ssl") or {}).get("enabled"):
                 scheme = "https"
-        except Exception:
+        except (OSError, ValueError, KeyError):
             pass
 
     base = f"{scheme}://127.0.0.1:{port}"

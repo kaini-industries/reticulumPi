@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
 from typing import Any
 
 from reticulumpi._paths import find_repo_asset
@@ -22,6 +24,7 @@ class MeshChatServer(PluginBase):
     plugin_version = "1.0.0"
 
     def validate_config(self) -> None:
+        self._proc_lock = threading.Lock()
         install_dir = self.config.get("install_dir")
         if install_dir is None:
             # Default: <project_root>/meshchat (sibling to src/)
@@ -92,9 +95,15 @@ class MeshChatServer(PluginBase):
 
     def start(self) -> None:
         self._active = True
+        self._proc_lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
         self._pid: int | None = None
         self._restart_count = 0
+        self._consecutive_failures = 0
+        self._last_start_time: float = 0.0
+        self._backoff_base = self.config.get("backoff_base_delay", 2.0)
+        self._backoff_max = self.config.get("backoff_max_delay", 120.0)
+        self._stability_threshold = self.config.get("stability_seconds", 60.0)
 
         self._host = self.config.get("host", "0.0.0.0")
         self._port = self.config.get("port", 8000)
@@ -157,37 +166,40 @@ class MeshChatServer(PluginBase):
         }
 
     def _launch_process(self, cmd: list[str], env: dict[str, str] | None = None) -> None:
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-        self._pid = self._process.pid
+        with self._proc_lock:
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+            )
+            self._pid = self._process.pid
+            self._last_start_time = time.time()
         self._log_thread = self._start_log_reader(self._process, prefix="meshchat")
 
     def _terminate_process(self) -> None:
-        if self._process is None:
-            return
-        try:
-            self._process.terminate()
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.log.warning("MeshChat did not stop gracefully, sending SIGKILL")
-            self._process.kill()
+        with self._proc_lock:
+            if self._process is None:
+                return
             try:
-                self._process.wait(timeout=2)
+                self._process.terminate()
+                self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.log.warning("MeshChat process did not exit after SIGKILL")
-        except Exception:
-            self.log.exception("Error stopping MeshChat process")
-        finally:
-            if self._process and self._process.stdout:
+                self.log.warning("MeshChat did not stop gracefully, sending SIGKILL")
+                self._process.kill()
                 try:
-                    self._process.stdout.close()
-                except Exception:
-                    pass
-            self._process = None
+                    self._process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.log.warning("MeshChat process did not exit after SIGKILL")
+            except Exception:
+                self.log.exception("Error stopping MeshChat process")
+            finally:
+                if self._process and self._process.stdout:
+                    try:
+                        self._process.stdout.close()
+                    except OSError:
+                        pass
+                self._process = None
 
     def _health_monitor(self) -> None:
         interval = self.config.get("health_check_interval", 10)
@@ -199,17 +211,39 @@ class MeshChatServer(PluginBase):
             if not self._active:
                 break
 
-            if self._process is not None and self._process.poll() is not None:
-                exit_code = self._process.returncode
+            with self._proc_lock:
+                proc = self._process
+                exited = proc is not None and proc.poll() is not None
+                exit_code = proc.returncode if exited else None
+
+            if exited:
                 self.log.warning("MeshChat process exited unexpectedly (code: %s)", exit_code)
+
+                # Reset failure counter if the process ran stably
+                uptime = time.time() - self._last_start_time
+                if uptime >= self._stability_threshold:
+                    self._consecutive_failures = 0
 
                 if auto_restart and self._restart_count < max_restarts:
                     self._restart_count += 1
+                    self._consecutive_failures += 1
+
+                    # Exponential backoff between restarts
+                    delay = min(
+                        self._backoff_base * (2 ** (self._consecutive_failures - 1)),
+                        self._backoff_max,
+                    )
                     self.log.info(
-                        "Restarting MeshChat (attempt %d/%d)",
+                        "Restarting MeshChat in %.1fs (attempt %d/%d, consecutive failures: %d)",
+                        delay,
                         self._restart_count,
                         max_restarts,
+                        self._consecutive_failures,
                     )
+                    self._sleep_while_active(delay)
+                    if not self._active:
+                        break
+
                     try:
                         old_log = getattr(self, "_log_thread", None)
                         if old_log is not None:

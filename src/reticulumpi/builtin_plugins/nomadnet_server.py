@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import shlex
 import signal
 import shutil
 import stat
@@ -227,7 +228,7 @@ class NomadNetServer(PluginBase):
                 if self._process and self._process.stdout:
                     try:
                         self._process.stdout.close()
-                    except Exception:
+                    except OSError:
                         pass
                 self._process = None
                 self._pgid = None
@@ -314,8 +315,7 @@ class NomadNetServer(PluginBase):
             if cpu_pct > max_cpu_percent:
                 self._cpu_violations += 1
                 self.log.warning(
-                    "NomadNet CPU runaway: %.0f%% > %.0f%% threshold "
-                    "(violation %d/%d)",
+                    "NomadNet CPU runaway: %.0f%% > %.0f%% threshold (violation %d/%d)",
                     cpu_pct,
                     max_cpu_percent,
                     self._cpu_violations,
@@ -504,7 +504,7 @@ class NomadNetServer(PluginBase):
         protected = set(self._get_protected_pages())
         allow_list_path = self._get_allow_list_path()
 
-        shim_content = f"#!/bin/sh\ncat {allow_list_path} 2>/dev/null\n"
+        shim_content = f"#!/bin/sh\ncat {shlex.quote(allow_list_path)} 2>/dev/null\n"
 
         for mu_file in os.listdir(pages_dir):
             if not mu_file.endswith(".mu"):

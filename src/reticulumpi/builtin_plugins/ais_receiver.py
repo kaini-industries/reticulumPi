@@ -194,7 +194,7 @@ class AISReceiver(SignalPluginBase):
                 try:
                     self.event_bus.publish(events.AIS_VESSEL_DETECTED, {"mmsi": mmsi})
                 except Exception:
-                    pass
+                    self.log.debug("event publish failed", exc_info=True)
 
             vessel["last_seen"] = now
             vessel["message_count"] += 1
@@ -280,7 +280,7 @@ class AISReceiver(SignalPluginBase):
                 try:
                     self.event_bus.publish(events.AIS_VESSEL_LOST, {"mmsi": mmsi})
                 except Exception:
-                    pass
+                    self.log.debug("event publish failed", exc_info=True)
             if expired:
                 self._snapshot_dirty = True
 

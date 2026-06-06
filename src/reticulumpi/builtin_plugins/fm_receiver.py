@@ -424,7 +424,7 @@ class FMReceiver(PluginBase):
 
                 release_device(self._device_id, caller=self.plugin_name)
             except Exception:
-                pass
+                self.log.debug("SDR device release failed", exc_info=True)
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -625,8 +625,10 @@ class FMReceiver(PluginBase):
         tmp = path + ".tmp"
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            with self._state_lock:
+                data = list(self._favorites)
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._favorites, f)
+                json.dump(data, f)
             os.replace(tmp, path)
         except Exception:
             self.log.debug("Failed to save favorites", exc_info=True)
@@ -636,7 +638,8 @@ class FMReceiver(PluginBase):
                 pass
 
     def get_favorites(self) -> list[dict[str, Any]]:
-        return list(self._favorites)
+        with self._state_lock:
+            return list(self._favorites)
 
     def add_favorite(
         self,
@@ -645,9 +648,6 @@ class FMReceiver(PluginBase):
         mode: str,
         gain_db: float | None = None,
     ) -> dict[str, Any]:
-        max_fav = int(self.config.get("max_favorites", _MAX_FAVORITES_DEFAULT))
-        if len(self._favorites) >= max_fav:
-            raise ValueError(f"Maximum favorites ({max_fav}) reached")
         mode = mode.lower()
         if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode '{mode}'")
@@ -661,47 +661,62 @@ class FMReceiver(PluginBase):
             "created_at": time.time(),
             "last_used_at": None,
         }
-        self._favorites.append(fav)
+        with self._state_lock:
+            max_fav = int(self.config.get("max_favorites", _MAX_FAVORITES_DEFAULT))
+            if len(self._favorites) >= max_fav:
+                raise ValueError(f"Maximum favorites ({max_fav}) reached")
+            self._favorites.append(fav)
         self._save_favorites()
         return fav
 
     def remove_favorite(self, favorite_id: str) -> bool:
-        for i, fav in enumerate(self._favorites):
-            if fav.get("id") == favorite_id:
-                self._favorites.pop(i)
-                self._save_favorites()
-                return True
-        return False
+        with self._state_lock:
+            for i, fav in enumerate(self._favorites):
+                if fav.get("id") == favorite_id:
+                    self._favorites.pop(i)
+                    break
+            else:
+                return False
+        self._save_favorites()
+        return True
 
     def update_favorite(self, favorite_id: str, **kwargs: Any) -> dict[str, Any] | None:
-        for fav in self._favorites:
-            if fav.get("id") != favorite_id:
-                continue
-            if "label" in kwargs:
-                fav["label"] = str(kwargs["label"])
-            if "frequency_mhz" in kwargs:
-                freq = float(kwargs["frequency_mhz"])
-                self._validate_frequency(freq)
-                fav["frequency_mhz"] = round(freq, 6)
-            if "mode" in kwargs:
-                mode = str(kwargs["mode"]).lower()
-                if mode not in _VALID_MODES:
-                    raise ValueError(f"Invalid mode '{mode}'")
-                fav["mode"] = mode
-            if "gain_db" in kwargs:
-                fav["gain_db"] = kwargs["gain_db"]
-            self._save_favorites()
-            return fav
-        return None
+        with self._state_lock:
+            for fav in self._favorites:
+                if fav.get("id") != favorite_id:
+                    continue
+                if "label" in kwargs:
+                    fav["label"] = str(kwargs["label"])
+                if "frequency_mhz" in kwargs:
+                    freq = float(kwargs["frequency_mhz"])
+                    self._validate_frequency(freq)
+                    fav["frequency_mhz"] = round(freq, 6)
+                if "mode" in kwargs:
+                    mode = str(kwargs["mode"]).lower()
+                    if mode not in _VALID_MODES:
+                        raise ValueError(f"Invalid mode '{mode}'")
+                    fav["mode"] = mode
+                if "gain_db" in kwargs:
+                    fav["gain_db"] = kwargs["gain_db"]
+                result = fav
+                break
+            else:
+                return None
+        self._save_favorites()
+        return result
 
     def tune_favorite(self, favorite_id: str) -> dict[str, Any]:
-        for fav in self._favorites:
-            if fav.get("id") == favorite_id:
-                fav["last_used_at"] = time.time()
-                self._save_favorites()
-                freq_hz = int(fav["frequency_mhz"] * 1_000_000)
-                return self.tune(freq_hz, mode=fav.get("mode"))
-        raise ValueError(f"Favorite '{favorite_id}' not found")
+        with self._state_lock:
+            for fav in self._favorites:
+                if fav.get("id") == favorite_id:
+                    fav["last_used_at"] = time.time()
+                    freq_hz = int(fav["frequency_mhz"] * 1_000_000)
+                    matched_fav = fav
+                    break
+            else:
+                raise ValueError(f"Favorite '{favorite_id}' not found")
+        self._save_favorites()
+        return self.tune(freq_hz, mode=matched_fav.get("mode"))
 
     # ── recording ────────────────────────────────────────────────────
 
@@ -743,7 +758,7 @@ class FMReceiver(PluginBase):
         except OSError as exc:
             try:
                 f.close()
-            except Exception:
+            except OSError:
                 pass
             return {"recording": False, "error": str(exc)}
 
@@ -959,7 +974,10 @@ class FMReceiver(PluginBase):
             raise ValueError("Invalid filename")
         if not filename.endswith(".wav"):
             raise ValueError("Invalid filename")
-        path = os.path.join(self._recordings_dir(), filename)
+        rec_dir = os.path.realpath(self._recordings_dir())
+        path = os.path.realpath(os.path.join(rec_dir, filename))
+        if not path.startswith(rec_dir + os.sep) and path != rec_dir:
+            raise ValueError("Invalid filename")
         try:
             os.unlink(path)
             return True
@@ -1040,6 +1058,11 @@ class FMReceiver(PluginBase):
         freq_mhz = self._frequency_hz / 1_000_000
         with self._stream_lock:
             client_count = len(self._stream_queues)
+        with self._state_lock:
+            signal_rms = self._signal_rms
+            signal_db = self._signal_db
+            squelch_break_count = self._squelch_break_count
+            signal_history = list(self._signal_history)[-30:]
         snap: dict[str, Any] = {
             "status": self._status,
             "playing": self._playing,
@@ -1049,8 +1072,8 @@ class FMReceiver(PluginBase):
             "gain_db": self._gain_db,
             "squelch_level": self._squelch_level,
             "volume": round(self._volume, 2),
-            "signal_rms": round(self._signal_rms, 1),
-            "signal_db": round(self._signal_db, 1),
+            "signal_rms": round(signal_rms, 1),
+            "signal_db": round(signal_db, 1),
             "output_rate_hz": self._output_rate_hz,
             "freq_min_mhz": self._freq_min_mhz,
             "freq_max_mhz": self._freq_max_mhz,
@@ -1065,8 +1088,8 @@ class FMReceiver(PluginBase):
             snap["preempted_by"] = self._preempted_by
             snap["preempted_by_label"] = self._preempted_by_label
             snap["preempted_until_ts"] = self._preempted_until_ts
-        snap["squelch_break_count"] = self._squelch_break_count
-        snap["signal_history"] = list(self._signal_history)[-30:]
+        snap["squelch_break_count"] = squelch_break_count
+        snap["signal_history"] = signal_history
         if self._recording:
             snap["recording"] = {
                 "active": True,
@@ -1170,8 +1193,9 @@ class FMReceiver(PluginBase):
             stderr=subprocess.PIPE,
         )
         self._pid = self._process.pid
-        self._signal_rms = 0.0
-        self._signal_db = -90.0
+        with self._state_lock:
+            self._signal_rms = 0.0
+            self._signal_db = -90.0
         self._set_status("playing")
         self._start_stderr_reader(self._process, prefix="rtl_fm")
         self.log.info(
@@ -1255,20 +1279,24 @@ class FMReceiver(PluginBase):
             return
         sum_sq = sum(s * s for s in samples)
         rms = math.sqrt(sum_sq / n_samples)
-        self._signal_rms = rms
-        self._signal_db = 20.0 * math.log10(max(rms, 1.0)) - 90.0
+        db = 20.0 * math.log10(max(rms, 1.0)) - 90.0
 
-        # Signal history at ~1 sample/sec
         now = time.time()
-        if now - self._last_signal_history_ts >= 1.0:
-            self._signal_history.append(rms)
-            self._last_signal_history_ts = now
-
-        # Squelch break detection (RMS crosses above 500)
         squelch_open = rms > 500
-        if squelch_open and not self._squelch_was_open:
-            self._squelch_break_count += 1
-        self._squelch_was_open = squelch_open
+
+        with self._state_lock:
+            self._signal_rms = rms
+            self._signal_db = db
+
+            # Signal history at ~1 sample/sec
+            if now - self._last_signal_history_ts >= 1.0:
+                self._signal_history.append(rms)
+                self._last_signal_history_ts = now
+
+            # Squelch break detection (RMS crosses above 500)
+            if squelch_open and not self._squelch_was_open:
+                self._squelch_break_count += 1
+            self._squelch_was_open = squelch_open
 
     # ── process management ───────────────────────────────────────────
 
@@ -1296,7 +1324,7 @@ class FMReceiver(PluginBase):
                 if f:
                     try:
                         f.close()
-                    except Exception:
+                    except OSError:
                         pass
 
     def _set_status(self, status: str, error: str | None = None) -> None:

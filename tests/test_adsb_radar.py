@@ -1241,15 +1241,14 @@ class TestParserLivenessCheck:
 
 
 class TestUsbSettleDelay:
-    def test_terminate_includes_settle_delay(self):
+    def test_terminate_cleans_up_process(self):
         p = _make_plugin()
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 0
         mock_proc.stdout = None
         p._process = mock_proc
-        with patch("time.sleep") as mock_sleep:
-            p._terminate_process()
-        mock_sleep.assert_called_once_with(1.0)
+        p._terminate_process()
+        assert p._process is None
 
 
 # ---------------------------------------------------------------------------

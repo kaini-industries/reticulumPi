@@ -375,12 +375,13 @@ class MeshBridge(PluginBase):
                 )
             return
 
-        # 2. Dedup cache
+        # 2. Dedup cache — atomic check-and-record prevents TOCTOU races
+        # where two threads both pass the check before either records.
         from_id_norm = (msg.get("from_id") or "").lower()
         text_hash = hash(text)
         key = (origin, from_id_norm, text_hash)
         now = time.monotonic()
-        if self._dedup_hit(key, now):
+        if self._dedup_check_and_record(key, now):
             self._inc_stat("msgs_dropped_dedup")
             return
 
@@ -439,7 +440,14 @@ class MeshBridge(PluginBase):
         mtu = self._mesh_mtu if target_transport == "meshtastic" else self._core_mtu
         attributed = truncate_for_mtu(header, body, mtu)
 
-        # 7. Dispatch
+        # 7. Dispatch — use the TARGET channel from the pair, not the source
+        target_channel = msg.get("channel")
+        if msg_type == "broadcast" and pair is not None:
+            if origin == "mesh":
+                target_channel = pair.get("meshcore", target_channel)
+            else:
+                target_channel = pair.get("meshtastic", target_channel)
+
         bridge_origin = {
             "transport": "meshtastic" if origin == "mesh" else "meshcore",
             "from_id": msg.get("from_id"),
@@ -451,7 +459,7 @@ class MeshBridge(PluginBase):
             target_transport,
             attributed,
             target,
-            msg.get("channel"),
+            target_channel,
             msg_type,
             bridge_origin,
         )
@@ -577,11 +585,34 @@ class MeshBridge(PluginBase):
 
     # ── Dedup cache ──────────────────────────────────────────────
 
-    def _dedup_hit(
+    def _dedup_check_and_record(
         self,
         key: tuple[str, str, int],
         now: float,
     ) -> bool:
+        """Atomically check if *key* is a duplicate and record it if not.
+
+        Returns True if this is a duplicate (already seen within TTL).
+        The check and record happen under the same lock acquisition so
+        concurrent relay threads cannot both pass the check.
+        """
+        with self._lock:
+            ts = self._dedup_cache.get(key)
+            if ts is not None and now - ts <= self._dedup_ttl:
+                return True
+            # Not a dup (or expired) — record it
+            self._dedup_cache[key] = now
+            if len(self._dedup_cache) > self._dedup_max:
+                cutoff = now - self._dedup_ttl
+                self._dedup_cache = {k: v for k, v in self._dedup_cache.items() if v > cutoff}
+                if len(self._dedup_cache) > self._dedup_max:
+                    excess = len(self._dedup_cache) - self._dedup_max
+                    for k in list(self._dedup_cache)[:excess]:
+                        del self._dedup_cache[k]
+            return False
+
+    # Keep old names as thin wrappers for any callers
+    def _dedup_hit(self, key: tuple[str, str, int], now: float) -> bool:
         with self._lock:
             ts = self._dedup_cache.get(key)
             if ts is None:

@@ -145,7 +145,7 @@ class GpsTelemetry(PluginBase):
             if self._serial is not None:
                 try:
                     self._serial.close()
-                except Exception:
+                except OSError:
                     pass
                 self._serial = None
         self._join_threads(timeout=5)
@@ -255,7 +255,7 @@ class GpsTelemetry(PluginBase):
                     self._connected = False
                     try:
                         ser.close()
-                    except Exception:
+                    except OSError:
                         pass
                     self._serial = None
                 self.event_bus.publish(
@@ -483,7 +483,7 @@ class GpsTelemetry(PluginBase):
                 if sock:
                     try:
                         sock.close()
-                    except Exception:
+                    except OSError:
                         pass
                 if self._max_reconnect_attempts > 0 and attempt >= self._max_reconnect_attempts:
                     self.log.error(
@@ -530,7 +530,7 @@ class GpsTelemetry(PluginBase):
                         reader.close()
                     if sock:
                         sock.close()
-                except Exception:
+                except OSError:
                     pass
                 self.event_bus.publish(
                     events.GPS_DEVICE_DISCONNECTED,

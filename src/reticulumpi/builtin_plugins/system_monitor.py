@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 from reticulumpi.plugin_base import PluginBase
+
+_log = logging.getLogger(__name__)
 
 
 class SystemMonitor(PluginBase):
@@ -89,5 +92,5 @@ class SystemMonitor(PluginBase):
                 if entries:
                     return entries[0].current
         except Exception:
-            pass
+            _log.debug("CPU temperature read failed", exc_info=True)
         return None

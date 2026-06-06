@@ -201,7 +201,7 @@ class AdsbRadarPlugin(PluginBase):
 
             release_device(self._device_id, caller=self.plugin_name)
         except Exception:
-            pass
+            self.log.debug("SDR device release failed", exc_info=True)
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -226,11 +226,13 @@ class AdsbRadarPlugin(PluginBase):
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict[str, Any] | None:
         now = time.monotonic()
-        cached = self._broadcast_cache
-        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
-            return cached[1]
+        with self._state_lock:
+            cached = self._broadcast_cache
+            if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
+                return cached[1]
         result = self.get_snapshot()
-        self._broadcast_cache = (now, result)
+        with self._state_lock:
+            self._broadcast_cache = (now, result)
         return result
 
     def get_snapshot(self) -> dict[str, Any]:
@@ -290,9 +292,7 @@ class AdsbRadarPlugin(PluginBase):
             # been invalidated so we re-enumerate USB in case the dongle
             # dropped off and came back at a different index.
             try:
-                self._resolved_index = resolve_device(
-                    self._device_id, caller=self.plugin_name
-                )
+                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
             except RuntimeError as exc:
                 if self._restart_count == 0:
                     self._set_status("error", str(exc))
@@ -353,8 +353,7 @@ class AdsbRadarPlugin(PluginBase):
                         and now - self._launch_time > 600.0
                     ):
                         self.log.info(
-                            "dump1090 stable for %.0fs; resetting restart "
-                            "counter (was %d)",
+                            "dump1090 stable for %.0fs; resetting restart counter (was %d)",
                             now - self._launch_time,
                             self._restart_count,
                         )
@@ -371,10 +370,13 @@ class AdsbRadarPlugin(PluginBase):
                         now - last_msg_time,
                         self._pid,
                     )
-                    self._publish(events.ADSB_WEDGE_DETECTED, {
-                        "pid": self._pid,
-                        "silence_seconds": now - last_msg_time,
-                    })
+                    self._publish(
+                        events.ADSB_WEDGE_DETECTED,
+                        {
+                            "pid": self._pid,
+                            "silence_seconds": now - last_msg_time,
+                        },
+                    )
                     self._terminate_process()
                     break
 
@@ -468,9 +470,8 @@ class AdsbRadarPlugin(PluginBase):
             if proc.stdout:
                 try:
                     proc.stdout.close()
-                except Exception:
+                except OSError:
                     pass
-            time.sleep(1.0)
 
     def _set_bias_tee(self, on: bool) -> None:
         if self._rtl_biast_path is None:
@@ -493,24 +494,34 @@ class AdsbRadarPlugin(PluginBase):
                 if attempt < max_attempts:
                     self.log.debug(
                         "rtl_biast attempt %d/%d failed (code %d): %s",
-                        attempt, max_attempts, result.returncode, stderr,
+                        attempt,
+                        max_attempts,
+                        result.returncode,
+                        stderr,
                     )
                     time.sleep(1.0)
                 else:
                     self.log.warning(
                         "rtl_biast failed after %d attempts (code %d): %s",
-                        max_attempts, result.returncode, stderr,
+                        max_attempts,
+                        result.returncode,
+                        stderr,
                     )
             except Exception:
                 if attempt < max_attempts:
                     self.log.debug(
-                        "rtl_biast attempt %d/%d error", attempt, max_attempts, exc_info=True,
+                        "rtl_biast attempt %d/%d error",
+                        attempt,
+                        max_attempts,
+                        exc_info=True,
                     )
                     time.sleep(1.0)
                 else:
                     self.log.warning(
                         "Failed to %s bias-tee after %d attempts",
-                        "enable" if on else "disable", max_attempts, exc_info=True,
+                        "enable" if on else "disable",
+                        max_attempts,
+                        exc_info=True,
                     )
 
     # ── patience mode ──────────────────────────────────────────────────
@@ -523,10 +534,13 @@ class AdsbRadarPlugin(PluginBase):
             f"max_restarts ({self._max_restarts}) exceeded; probing every "
             f"{self._patience_interval:.0f}s",
         )
-        self._publish(events.ADSB_EXHAUSTED, {
-            "max_restarts": self._max_restarts,
-            "patience_interval": self._patience_interval,
-        })
+        self._publish(
+            events.ADSB_EXHAUSTED,
+            {
+                "max_restarts": self._max_restarts,
+                "patience_interval": self._patience_interval,
+            },
+        )
         self.log.warning(
             "Entering patience mode — probing for dongle every %.0fs",
             self._patience_interval,
@@ -539,9 +553,7 @@ class AdsbRadarPlugin(PluginBase):
                 break
             invalidate_cache_fn()
             try:
-                self._resolved_index = resolve_device(
-                    self._device_id, caller=self.plugin_name
-                )
+                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
             except RuntimeError:
                 self.log.debug("Patience probe: dongle still absent")
                 continue
@@ -552,9 +564,12 @@ class AdsbRadarPlugin(PluginBase):
             )
             self._restart_count = 0
             self._patience_active = False
-            self._publish(events.ADSB_RECOVERED, {
-                "device_index": self._resolved_index,
-            })
+            self._publish(
+                events.ADSB_RECOVERED,
+                {
+                    "device_index": self._resolved_index,
+                },
+            )
             return
 
     def _patience_sleep(self, total: float) -> bool:
@@ -617,7 +632,7 @@ class AdsbRadarPlugin(PluginBase):
                 if sock:
                     try:
                         sock.close()
-                    except Exception:
+                    except OSError:
                         pass
             if self._active:
                 self._sleep_while_active(2.0)
@@ -765,7 +780,8 @@ class AdsbRadarPlugin(PluginBase):
                 "distance_nm": ac.distance_nm,
                 "timestamp": now,
             }
-            self._emergency_history.append(emerg_record)
+            with self._state_lock:
+                self._emergency_history.append(emerg_record)
 
             self._publish(
                 events.ADSB_EMERGENCY_SQUAWK,
@@ -804,10 +820,10 @@ class AdsbRadarPlugin(PluginBase):
                 had_position = self._receiver_lat is not None
                 self._receiver_lat = float(lat)
                 self._receiver_lon = float(lon)
+                new_lat = self._receiver_lat
+                new_lon = self._receiver_lon
             if not had_position:
-                self.log.info(
-                    "Receiver position from GPS: %.4f, %.4f", self._receiver_lat, self._receiver_lon
-                )
+                self.log.info("Receiver position from GPS: %.4f, %.4f", new_lat, new_lon)
 
     # ── helpers ───────────────────────────────────────────────────────
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import collections
+import functools
 import logging
+import re
 import threading
 import time
 from typing import Any
@@ -12,6 +14,25 @@ import RNS
 import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi.plugin_base import PluginBase
+
+_PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _auth_required(handler):
+    """Decorator enforcing _check_auth on every request handler.
+
+    This ensures no handler can accidentally omit the authorization check.
+    """
+
+    @functools.wraps(handler)
+    def wrapper(self, path, data, request_id, link_id, remote_identity, *a, **kw):
+        denied = self._check_auth(remote_identity)
+        if denied:
+            return denied
+        return handler(self, path, data, request_id, link_id, remote_identity, *a, **kw)
+
+    return wrapper
+
 
 _SENSITIVE_KEYS = frozenset(
     {
@@ -30,10 +51,7 @@ _SENSITIVE_KEYS = frozenset(
 def _scrub_sensitive(obj: Any) -> Any:
     """Recursively replace values whose key is in _SENSITIVE_KEYS with '***'."""
     if isinstance(obj, dict):
-        return {
-            k: "***" if k in _SENSITIVE_KEYS else _scrub_sensitive(v)
-            for k, v in obj.items()
-        }
+        return {k: "***" if k in _SENSITIVE_KEYS else _scrub_sensitive(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_scrub_sensitive(item) for item in obj]
     return obj
@@ -121,7 +139,11 @@ class RemoteControlPlugin(PluginBase):
         # Accept incoming links
         self.destination.set_link_established_callback(self._link_established)
 
-        # Register request handlers
+        # Register request handlers.
+        # NOTE: ALLOW_ALL at the RNS level is a conscious trade-off for
+        # discoverability — requests are queued promptly so the link stays
+        # responsive, but the @_auth_required decorator enforces our own
+        # allowlist before any handler processes data.
         self.destination.register_request_handler(
             "/ping", self._handle_ping, allow=RNS.Destination.ALLOW_ALL
         )
@@ -169,12 +191,12 @@ class RemoteControlPlugin(PluginBase):
             try:
                 link.teardown()
             except Exception:
-                pass
+                self.log.debug("Link teardown failed", exc_info=True)
         # Remove log handler
         try:
             logging.getLogger("reticulumpi").removeHandler(self._log_buffer)
         except Exception:
-            pass
+            self.log.debug("Log handler removal failed", exc_info=True)
         self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
@@ -244,10 +266,10 @@ class RemoteControlPlugin(PluginBase):
     # --- Request handlers ---
     # Each receives (path, data, request_id, link_id, remote_identity, requested_at)
     # and returns a response that gets sent back over the link.
-    # Every handler checks auth first — ALLOW_ALL is used at the RNS level so
-    # requests are queued promptly, but we enforce our own allowlist before
-    # processing any data.
+    # Auth is enforced by the @_auth_required decorator — individual handlers
+    # cannot accidentally forget the check.
 
+    @_auth_required
     def _handle_ping(
         self,
         path: str,
@@ -257,11 +279,9 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         return umsgpack.packb({"ok": True, "time": time.time(), "node": self.app.node_name})
 
+    @_auth_required
     def _handle_status(
         self,
         path: str,
@@ -271,9 +291,6 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         status = self.app.get_status()
         status["node_name"] = self.app.node_name
         status["identity_hash"] = (
@@ -282,6 +299,7 @@ class RemoteControlPlugin(PluginBase):
         status["uptime"] = time.time() - self._start_time
         return umsgpack.packb({"ok": True, "data": status})
 
+    @_auth_required
     def _handle_metrics(
         self,
         path: str,
@@ -291,14 +309,12 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         monitor = self.app.get_plugin("system_monitor")
         if monitor and hasattr(monitor, "latest_metrics"):
             return umsgpack.packb({"ok": True, "data": monitor.latest_metrics})
         return umsgpack.packb({"ok": False, "error": "system_monitor not available"})
 
+    @_auth_required
     def _handle_plugins(
         self,
         path: str,
@@ -308,9 +324,6 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         plugins = {}
         for name, plugin in self.app.plugins.items():
             try:
@@ -323,6 +336,7 @@ class RemoteControlPlugin(PluginBase):
                 plugins[name] = {"error": "status collection failed"}
         return umsgpack.packb({"ok": True, "data": plugins})
 
+    @_auth_required
     def _handle_interfaces(
         self,
         path: str,
@@ -332,9 +346,6 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         interfaces = []
         try:
             for iface in RNS.Transport.interfaces:
@@ -349,9 +360,10 @@ class RemoteControlPlugin(PluginBase):
                         info[attr] = val
                 interfaces.append(info)
         except Exception:
-            pass
+            self.log.debug("Interface stats collection failed", exc_info=True)
         return umsgpack.packb({"ok": True, "data": interfaces})
 
+    @_auth_required
     def _handle_config(
         self,
         path: str,
@@ -361,14 +373,12 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         import copy
 
         config_data = _scrub_sensitive(copy.deepcopy(self.app.config._data))
         return umsgpack.packb({"ok": True, "data": config_data})
 
+    @_auth_required
     def _handle_logs(
         self,
         path: str,
@@ -378,20 +388,18 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         count = 100
         if isinstance(data, bytes):
             try:
                 req = umsgpack.unpackb(data)
                 if isinstance(req, dict):
                     count = min(req.get("count", 100), 1000)
-            except Exception:
+            except (ValueError, TypeError):
                 pass
         lines = self._log_buffer.get_lines(count)
         return umsgpack.packb({"ok": True, "data": lines})
 
+    @_auth_required
     def _handle_plugin_enable(
         self,
         path: str,
@@ -401,9 +409,6 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         if not isinstance(data, bytes):
             return umsgpack.packb({"ok": False, "error": "missing plugin name"})
         try:
@@ -412,12 +417,16 @@ class RemoteControlPlugin(PluginBase):
         except Exception:
             return umsgpack.packb({"ok": False, "error": "invalid request"})
 
+        if not _PLUGIN_NAME_RE.match(name):
+            return umsgpack.packb({"ok": False, "error": "invalid plugin name"})
+
         try:
             self.app.enable_plugin(name)
             return umsgpack.packb({"ok": True, "message": f"Plugin '{name}' enabled"})
         except Exception as e:
             return umsgpack.packb({"ok": False, "error": str(e)})
 
+    @_auth_required
     def _handle_plugin_disable(
         self,
         path: str,
@@ -427,9 +436,6 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         if not isinstance(data, bytes):
             return umsgpack.packb({"ok": False, "error": "missing plugin name"})
         try:
@@ -438,12 +444,16 @@ class RemoteControlPlugin(PluginBase):
         except Exception:
             return umsgpack.packb({"ok": False, "error": "invalid request"})
 
+        if not _PLUGIN_NAME_RE.match(name):
+            return umsgpack.packb({"ok": False, "error": "invalid plugin name"})
+
         try:
             self.app.disable_plugin(name)
             return umsgpack.packb({"ok": True, "message": f"Plugin '{name}' disabled"})
         except Exception as e:
             return umsgpack.packb({"ok": False, "error": str(e)})
 
+    @_auth_required
     def _handle_announce(
         self,
         path: str,
@@ -454,9 +464,6 @@ class RemoteControlPlugin(PluginBase):
         requested_at: Any,
     ) -> Any:
         """Trigger an immediate announce from heartbeat_announce."""
-        denied = self._check_auth(remote_identity)
-        if denied:
-            return denied
         heartbeat = self.app.get_plugin("heartbeat_announce")
         if heartbeat and hasattr(heartbeat, "destination"):
             try:

@@ -51,6 +51,7 @@ class RadiosondeTracker(SignalPluginBase):
         self._max_restarts = int(self.config.get("max_restarts", 5))
 
     def _on_start(self) -> None:
+        self._rtl_process: Any = None
         self._active_sonde: dict[str, Any] | None = None
         self._altitude_profile: deque[dict[str, Any]] = deque(
             maxlen=self._max_profile_points,
@@ -197,14 +198,14 @@ class RadiosondeTracker(SignalPluginBase):
                     except subprocess.TimeoutExpired:
                         rtl.kill()
                         rtl.wait(timeout=2)
-            except Exception:
-                pass
+            except (OSError, ProcessLookupError):
+                self.log.debug("rtl subprocess cleanup failed", exc_info=True)
             finally:
                 for f in (rtl.stdout, rtl.stderr):
                     if f:
                         try:
                             f.close()
-                        except Exception:
+                        except OSError:
                             pass
 
     def _parser_loop(self) -> None:
@@ -275,7 +276,7 @@ class RadiosondeTracker(SignalPluginBase):
                     },
                 )
             except Exception:
-                pass
+                self.log.debug("event publish failed", exc_info=True)
 
         sonde = self._active_sonde
         sonde["frame_count"] += 1
@@ -309,7 +310,7 @@ class RadiosondeTracker(SignalPluginBase):
                         },
                     )
                 except Exception:
-                    pass
+                    self.log.debug("event publish failed", exc_info=True)
         elif sonde.get("phase") == "burst" and vel_v < 0:
             sonde["phase"] = "descent"
 

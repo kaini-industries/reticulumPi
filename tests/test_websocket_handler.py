@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from reticulumpi.builtin_plugins.web_dashboard import websocket_handler as wsh_module
-import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as _ws_mod
 from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _broadcast_metrics,
     _check_ws_origin,
@@ -2510,7 +2509,9 @@ class TestWarmCacheSummaryLog:
 
 class TestOffgridWsCommand:
     def setup_method(self):
-        _ws_mod._offgrid_last_toggle = 0.0
+        from reticulumpi.builtin_plugins.web_dashboard.shared_state import offgrid_rate_limiter
+
+        offgrid_rate_limiter._last_toggle = 0.0
 
     def test_set_offgrid_mode(self):
         plugin = MagicMock()

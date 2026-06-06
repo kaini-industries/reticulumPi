@@ -113,7 +113,8 @@ def test_start_initializes_reticulum(mock_identity, mock_rns, tmp_path):
     app = ReticulumPiApp(config_path=str(config_file))
     # Run start in a way that won't block on _shutdown_event.wait()
     app._shutdown_event.set()
-    app.start()
+    with patch.object(app, "shutdown"):
+        app.start()
 
     mock_rns.assert_called_once()
     mock_identity.assert_called_once()
@@ -144,7 +145,8 @@ def test_start_loads_and_starts_plugins(mock_identity, mock_rns, tmp_path, plugi
 
     app = ReticulumPiApp(config_path=str(config_file))
     app._shutdown_event.set()
-    app.start()
+    with patch.object(app, "shutdown"):
+        app.start()
 
     assert "sample" in app.plugins
     assert app.plugins["sample"]._active is True
@@ -577,9 +579,8 @@ class TestHotReload:
         app = _make_hot_reload_app(tmp_path, str(tmp_path))
         app.enable_plugin("base_plugin")
         app.enable_plugin("dep")
-        with caplog.at_level("WARNING"):
+        with pytest.raises(RuntimeError, match="dependents still running"):
             app.disable_plugin("base_plugin")
-        assert "dependency of running plugin 'dep'" in caplog.text
 
 
 # ---------------------------------------------------------------------------

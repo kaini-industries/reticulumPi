@@ -12,7 +12,12 @@
           banner = document.createElement('div');
           banner.id = 'sw-update-banner';
           banner.className = 'sw-update-banner';
-          banner.innerHTML = 'A new version is available. <a href="#" onclick="location.reload();return false">Reload</a>';
+          banner.textContent = 'A new version is available. ';
+          var reloadLink = document.createElement('a');
+          reloadLink.href = '#';
+          reloadLink.textContent = 'Reload';
+          reloadLink.addEventListener('click', function(e) { e.preventDefault(); location.reload(); });
+          banner.appendChild(reloadLink);
           document.body.appendChild(banner);
         }
         banner.style.display = '';
@@ -23,10 +28,11 @@
   /* ── Shared namespace ─────────────────────────────────────────────── */
   var RPI = window.RPI = {};
 
-  var token = '';
   var ws = null;
   var reconnectDelay = 1000;
   var maxReconnect = 30000;
+  var reconnectAttempts = 0;
+  var maxReconnectAttempts = 50;
   var pollTimer = null;
   var uptimeStart = 0;
   var uptimeTimer = null;
@@ -44,7 +50,6 @@
     var headers = opts.headers || {};
     headers['Accept'] = 'application/json';
     headers['X-Requested-With'] = 'XMLHttpRequest';
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     if (opts.body) headers['Content-Type'] = 'application/json';
     var timeoutMs = opts.timeout || 10000;
     var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
@@ -124,7 +129,7 @@
     if (!body.classList.contains('hidden')) return true;
     var secId = bodyId.replace(/-body$/, '-section');
     var sec = document.getElementById(secId);
-    return sec ? sec.style.display === 'none' : false;
+    return sec ? sec.style.display !== 'none' : false;
   }
   RPI.isPanelVisible = isPanelVisible;
 
@@ -1635,6 +1640,7 @@
 
     ws.onopen = function() {
       reconnectDelay = 1000;
+      reconnectAttempts = 0;
       setConnStatus('live');
       _hideStaleBanner();
       _tabHiddenSince = 0;
@@ -1733,7 +1739,7 @@
             });
           }
         }
-      } catch(e) { /* ignore parse errors */ }
+      } catch(e) { console.warn('WS message parse error:', e); }
     };
 
     ws.onclose = function() {
@@ -1755,6 +1761,12 @@
 
   function scheduleReconnect() {
     startPolling();
+    reconnectAttempts++;
+    if (reconnectAttempts > maxReconnectAttempts) {
+      console.warn('WS max reconnect attempts (' + maxReconnectAttempts + ') reached, using polling only');
+      setConnStatus('poll');
+      return;
+    }
     setTimeout(function() {
       reconnectDelay = Math.min(reconnectDelay * 2, maxReconnect);
       connectWS();

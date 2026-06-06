@@ -140,7 +140,7 @@ class NetworkMapPlugin(PluginBase):
         if read_conn:
             try:
                 read_conn.close()
-            except Exception:
+            except OSError:
                 pass
 
     def get_status(self) -> dict[str, Any]:
@@ -536,7 +536,7 @@ class NetworkMapPlugin(PluginBase):
         try:
             hops = RNS.Transport.hops_to(destination_hash)
         except Exception:
-            pass
+            self.log.debug("hops_to lookup failed", exc_info=True)
 
         app_data_str = ""
         if app_data:
@@ -564,7 +564,7 @@ class NetworkMapPlugin(PluginBase):
                         app_data_str = dn
                 elif isinstance(unpacked, str):
                     app_data_str = unpacked
-            except Exception:
+            except (ValueError, TypeError):
                 pass
             # Fall back to plain UTF-8 if msgpack didn't produce a name
             if not app_data_str:
@@ -830,35 +830,6 @@ class NetworkMapPlugin(PluginBase):
                 self.log.info("Reclassified %d nodes from app_data heuristics", reclassified)
         except Exception:
             self.log.exception("Error reclassifying nodes")
-
-    def _upsert_node(self, dest_hash: bytes, info: dict[str, Any]) -> None:
-        """Write a single node to the database.
-
-        NOTE: Announce processing now uses ``_flush_pending_upserts`` for
-        batched writes.  This method is retained for one-off writes from
-        maintenance tasks and tests.
-        """
-        try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO known_nodes
-                    (destination_hash, app_name, aspects, hops, last_seen, first_seen, announce_count, app_data_str)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        dest_hash.hex(),
-                        info.get("app_name", ""),
-                        info.get("aspects", ""),
-                        info.get("hops"),
-                        info.get("last_seen"),
-                        info.get("first_seen"),
-                        info.get("announce_count", 1),
-                        info.get("app_data_str", ""),
-                    ),
-                )
-        except Exception:
-            self.log.debug("Error upserting node to database", exc_info=True)
 
     def _save_interface_stats(self) -> None:
         stats = self.get_interface_stats()

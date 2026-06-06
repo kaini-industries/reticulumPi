@@ -199,6 +199,6 @@ def _detect_position(plugin: WebDashboardPlugin) -> tuple[float | None, float | 
                     log.info("Tile prefetch: using Meshtastic self-node position")
                     return n["latitude"], n["longitude"]
         except Exception:
-            pass
+            log.debug("Meshtastic position lookup failed", exc_info=True)
 
     return None, None

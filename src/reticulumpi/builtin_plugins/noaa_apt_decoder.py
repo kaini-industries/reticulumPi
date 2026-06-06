@@ -173,11 +173,7 @@ class NOAAAPTDecoder(SignalPluginBase):
 
         if current is None:
             self._status = "idle"
-            sched = getattr(self.app, "sdr_scheduler", None)
-            if sched and self._dongle_serial:
-                sched.dongle_released(self._dongle_serial, self.plugin_name)
-            self._dongle_active = False
-            return
+            raise RuntimeError("no current pass")
 
         rtl_fm = shutil.which("rtl_fm")
         sox = shutil.which("sox")
@@ -277,7 +273,7 @@ class NOAAAPTDecoder(SignalPluginBase):
                 },
             )
         except Exception:
-            pass
+            self.log.debug("event publish failed", exc_info=True)
 
         self.log.info(
             "Recording %s at %.3f MHz (PID %d, file %s)",
@@ -300,14 +296,14 @@ class NOAAAPTDecoder(SignalPluginBase):
                     except subprocess.TimeoutExpired:
                         rtl.kill()
                         rtl.wait(timeout=2)
-            except Exception:
-                pass
+            except (OSError, ProcessLookupError):
+                self.log.debug("rtl subprocess cleanup failed", exc_info=True)
             finally:
                 for f in (rtl.stdout, rtl.stderr):
                     if f:
                         try:
                             f.close()
-                        except Exception:
+                        except OSError:
                             pass
 
     def _monitor_pass(self) -> None:
@@ -347,7 +343,7 @@ class NOAAAPTDecoder(SignalPluginBase):
                 },
             )
         except Exception:
-            pass
+            self.log.debug("event publish failed", exc_info=True)
 
         self._decode_recording(cp)
 
@@ -453,7 +449,7 @@ class NOAAAPTDecoder(SignalPluginBase):
                 try:
                     self.event_bus.publish(events.NOAA_APT_DECODE_COMPLETE, image_meta)
                 except Exception:
-                    pass
+                    self.log.debug("event publish failed", exc_info=True)
         except subprocess.TimeoutExpired:
             self.log.warning("Decode timed out for %s", wav_path)
         except Exception:

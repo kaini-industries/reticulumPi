@@ -45,6 +45,7 @@ class ReticulumPiApp:
         self._plugins_lock = threading.Lock()
         self._failed_plugins: list[tuple[str, str]] = []
         self._shutdown_event = threading.Event()
+        self._shutting_down = threading.Event()
         self._plugin_loader = PluginLoader()
         self.event_bus = EventBus()
         self.announce_dispatcher = AnnounceDispatcher()
@@ -98,9 +99,11 @@ class ReticulumPiApp:
                     plugin.stop()
                 except Exception:
                     log.debug("Cleanup after failed start of %s also failed", name)
-                del self.plugins[name]
+                with self._plugins_lock:
+                    del self.plugins[name]
 
-        self.plugins = {n: self.plugins[n] for n in start_order if n in self.plugins}
+        with self._plugins_lock:
+            self.plugins = {n: self.plugins[n] for n in start_order if n in self.plugins}
 
         if self.internet_probe is not None and not self.internet_probe.is_online:
             for name, plugin in self.plugins.items():
@@ -113,6 +116,7 @@ class ReticulumPiApp:
         self._install_signal_handlers()
         log.info("ReticulumPi is running. Press Ctrl+C to stop.")
         self._shutdown_event.wait()
+        self.shutdown()
 
     # Leave 15s headroom under systemd's TimeoutStopSec=60
     SHUTDOWN_TIMEOUT: float = 45.0
@@ -147,6 +151,9 @@ class ReticulumPiApp:
 
     def shutdown(self) -> None:
         """Gracefully stop all plugins and signal the run loop to exit."""
+        if self._shutting_down.is_set():
+            return
+        self._shutting_down.set()
         deadline = time.monotonic() + self.SHUTDOWN_TIMEOUT
         log.info("Shutting down ReticulumPi (%.0fs budget)...", self.SHUTDOWN_TIMEOUT)
 
@@ -159,7 +166,9 @@ class ReticulumPiApp:
         self._pre_stop_signal_subprocesses()
 
         # Stop plugins in reverse order with per-plugin timeout
-        for name, plugin in reversed(list(self.plugins.items())):
+        with self._plugins_lock:
+            shutdown_order = list(reversed(list(self.plugins.items())))
+        for name, plugin in shutdown_order:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 log.warning("Shutdown deadline reached — skipping remaining plugins")
@@ -285,6 +294,9 @@ class ReticulumPiApp:
         Raises KeyError if the plugin is not discoverable, RuntimeError if
         it is already running, or propagates any exception from instantiation
         or start().
+
+        The lock is released before calling start() so a slow plugin
+        start does not block status queries or other plugin operations.
         """
         with self._plugins_lock:
             if name in self.plugins:
@@ -297,14 +309,25 @@ class ReticulumPiApp:
             plugin_config = self.config.plugins.get(name, {})
             plugin_cls = available[name]
             instance = plugin_cls(self, plugin_config)
+
+        # Call start() outside the lock so slow plugins don't block
+        try:
+            instance.start()
+        except Exception:
             try:
-                instance.start()
+                instance.stop()
             except Exception:
+                log.debug("Cleanup after failed hot-load of %s also failed", name)
+            raise
+
+        with self._plugins_lock:
+            # Re-check after releasing and reacquiring the lock
+            if name in self.plugins:
                 try:
                     instance.stop()
                 except Exception:
-                    pass
-                raise
+                    log.debug("Cleanup of duplicate hot-load %s failed", name)
+                raise RuntimeError(f"Plugin '{name}' was loaded concurrently")
             self.plugins[name] = instance
 
         log.info("Hot-loaded plugin: %s", name)
@@ -317,13 +340,13 @@ class ReticulumPiApp:
         """
         self.event_bus.publish(events.PLUGIN_STOPPING, {"name": name})
         with self._plugins_lock:
-            for other_name, other_plugin in self.plugins.items():
-                if name in getattr(other_plugin, "plugin_dependencies", []):
-                    log.warning(
-                        "Disabling '%s' which is a dependency of running plugin '%s'",
-                        name,
-                        other_name,
-                    )
+            dep_names = [
+                other_name
+                for other_name, other_plugin in self.plugins.items()
+                if name in getattr(other_plugin, "plugin_dependencies", [])
+            ]
+            if dep_names:
+                raise RuntimeError(f"cannot disable {name}: dependents still running: {dep_names}")
             plugin = self.plugins.pop(name, None)
             if plugin is None:
                 raise KeyError(f"Plugin '{name}' is not running")
@@ -383,19 +406,28 @@ class ReticulumPiApp:
     def _topo_sort_plugins(self) -> list[str]:
         """Return plugin names in dependency order (dependees first).
 
-        Falls back to current dict order if there are cycles.
+        Raises RuntimeError if a dependency cycle is detected.
         """
         remaining = set(self.plugins)
         order: list[str] = []
         visited: set[str] = set()
+        visiting: set[str] = set()
 
         def visit(name: str) -> None:
-            if name in visited or name not in remaining:
+            if name not in remaining:
                 return
-            visited.add(name)
+            if name in visiting:
+                cycle_members = sorted(visiting)
+                log.error("dependency cycle detected: %s", cycle_members)
+                raise RuntimeError(f"dependency cycle detected: {cycle_members}")
+            if name in visited:
+                return
+            visiting.add(name)
             for dep in getattr(self.plugins[name], "plugin_dependencies", []):
                 if dep in remaining:
                     visit(dep)
+            visiting.discard(name)
+            visited.add(name)
             order.append(name)
 
         for name in list(self.plugins):
@@ -497,8 +529,8 @@ class ReticulumPiApp:
 
     def _install_signal_handlers(self) -> None:
         def _handle_signal(signum: int, frame: Any) -> None:
-            log.info("Received signal %d", signum)
-            self.shutdown()
+            log.info("Received signal %d — requesting shutdown", signum)
+            self._shutdown_event.set()
 
         signal.signal(signal.SIGTERM, _handle_signal)
         signal.signal(signal.SIGINT, _handle_signal)

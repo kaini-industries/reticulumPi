@@ -64,7 +64,7 @@ class SignalPluginBase(PluginBase):
             self.event_bus.subscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
             self.event_bus.subscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
         except Exception:
-            pass
+            self.log.debug("GPS event subscription failed", exc_info=True)
 
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is not None and self._dongle_serial:
@@ -93,7 +93,7 @@ class SignalPluginBase(PluginBase):
             self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
             self.event_bus.unsubscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
         except Exception:
-            pass
+            self.log.debug("GPS event unsubscription failed", exc_info=True)
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is not None and self._dongle_serial:
             sched.unregister(self._dongle_serial, self.plugin_name)
@@ -170,7 +170,7 @@ class SignalPluginBase(PluginBase):
                 if f:
                     try:
                         f.close()
-                    except Exception:
+                    except OSError:
                         pass
 
     # ── snapshot ─────────────────────────────────────────────────────

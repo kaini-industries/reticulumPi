@@ -68,16 +68,20 @@ def generate_self_signed_cert(
         .sign(key, hashes.SHA256())
     )
 
-    # Write private key
-    with open(key_path, "wb") as f:
-        f.write(
+    # Write private key — set restrictive permissions BEFORE writing
+    # so the key material is never world-readable, even briefly.
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(
+            fd,
             key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
                 encryption_algorithm=serialization.NoEncryption(),
-            )
+            ),
         )
-    os.chmod(key_path, 0o600)
+    finally:
+        os.close(fd)
 
     # Write certificate
     with open(cert_path, "wb") as f:

@@ -84,7 +84,7 @@ class AnnounceDispatcher:
             try:
                 RNS.Transport.deregister_announce_handler(self._rns_handler)
             except Exception:
-                pass
+                log.debug("Failed to deregister announce handler", exc_info=True)
             self._rns_handler = None
         if self._worker is not None:
             self._worker.join(timeout=5.0)
@@ -199,6 +199,7 @@ class AnnounceDispatcher:
             )
             return destination_hash == expected
         except Exception:
+            log.debug("Aspect hash match failed", exc_info=True)
             return False
 
 

@@ -48,6 +48,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
+    """Recursively merge *override* into *base*, mutating *base* in place.
+
+    For each key in *override*: if both ``base[key]`` and ``override[key]``
+    are dicts, recurse; otherwise set ``base[key] = override[key]``.
+    """
+    for key, value in override.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
 class ConfigError(Exception):
     """Raised when config is invalid."""
 
@@ -89,7 +102,7 @@ class AppConfig:
                 return
             app_section = raw["reticulumpi"]
             if app_section and isinstance(app_section, dict):
-                self._data.update(app_section)
+                _deep_merge(self._data, app_section)
             log.info("Loaded config from %s", path)
 
     def _validate(self) -> None:
@@ -193,7 +206,7 @@ class AppConfig:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 yaml.safe_dump(raw, fh, default_flow_style=False, sort_keys=False)
             os.replace(tmp, path)
-        except Exception:
+        except BaseException:
             try:
                 os.unlink(tmp)
             except OSError:

@@ -13,6 +13,7 @@ import importlib.resources
 import json
 import os
 import random
+import re
 import socket
 import subprocess
 import threading
@@ -262,7 +263,7 @@ class TransportMonitorPlugin(PluginBase):
                         "txb": getattr(iface, "txb", 0),
                     }
         except Exception:
-            pass
+            self.log.debug("Failed to read interface stats", exc_info=True)
 
         with self._lock:
             primaries = []
@@ -580,9 +581,7 @@ class TransportMonitorPlugin(PluginBase):
             write_rns_config(config_path, lines)
 
             if not self._restart_rnsd("tcp_auto_enable"):
-                remaining = _RNSD_RESTART_COOLDOWN - (
-                    time.monotonic() - self._last_rnsd_restart
-                )
+                remaining = _RNSD_RESTART_COOLDOWN - (time.monotonic() - self._last_rnsd_restart)
                 delay = max(remaining + 1.0, 1.0)
                 self.log.info(
                     "rnsd restart deferred %.0fs (cooldown) for %d interface(s)",
@@ -618,9 +617,7 @@ class TransportMonitorPlugin(PluginBase):
                 self._clear_tcp_state()
                 self.log.info("Deferred rnsd restart succeeded, TCP interfaces re-enabled")
             else:
-                self.log.error(
-                    "Deferred rnsd restart failed — interfaces may need manual recovery"
-                )
+                self.log.error("Deferred rnsd restart failed — interfaces may need manual recovery")
 
     def _restart_rnsd(self, reason: str) -> bool:
         now = time.monotonic()
@@ -657,8 +654,8 @@ class TransportMonitorPlugin(PluginBase):
                 )
                 if result.returncode == 0:
                     return True
-            except Exception:
-                pass
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.log.debug("rnstatus probe failed: %s", exc)
             time.sleep(1)
         self.log.warning("rnsd did not become responsive within %ds", timeout)
         return False
@@ -1286,7 +1283,7 @@ class TransportMonitorPlugin(PluginBase):
                 try:
                     self._exchange_destination.announce()
                 except Exception:
-                    pass
+                    self.log.debug("Hub exchange re-announce failed", exc_info=True)
 
             self._jittered_sleep(self._exchange_interval)
 
@@ -1364,7 +1361,7 @@ class TransportMonitorPlugin(PluginBase):
             if link.status == RNS.Link.ACTIVE:
                 link.teardown()
         except Exception:
-            pass
+            self.log.debug("Link teardown failed", exc_info=True)
 
         if result["data"] is None:
             self.log.debug("Hub exchange: no response from <%s>", dest_hex)
@@ -1432,6 +1429,9 @@ class TransportMonitorPlugin(PluginBase):
                 len(self._hub_pool),
             )
 
+    # Hostname pattern: DNS labels or IPv4 — rejects shell-unsafe chars
+    _HOST_RE = re.compile(r"^[a-zA-Z0-9._-]{1,253}$")
+
     def _merge_exchanged_hubs(self, received: list[dict]) -> int:
         """Merge hubs received from a peer into our pool. Returns count of new hubs."""
         added = 0
@@ -1439,23 +1439,27 @@ class TransportMonitorPlugin(PluginBase):
             existing_keys = {f"{h['target_host']}:{h['target_port']}" for h in self._hub_pool}
             pinned = set(self._pinned_hubs)
 
-        for entry in received:
-            host = entry.get("h", "")
-            port = entry.get("p", 0)
-            if not host or not port:
-                continue
-            key = f"{host}:{port}"
-            if key in existing_keys or key in pinned:
-                continue
-            new_hub = {
-                "target_host": host,
-                "target_port": int(port),
-                "name": entry.get("n", key),
-                "region": entry.get("r", "unknown"),
-                "source": "exchange",
-                "last_seen": time.monotonic(),
-            }
-            with self._lock:
+            for entry in received:
+                host = entry.get("h", "")
+                port = entry.get("p", 0)
+                if not host or not port:
+                    continue
+                # Validate host:port before adding to pool
+                if not isinstance(port, int) or not 1 <= port <= 65535:
+                    continue
+                if not isinstance(host, str) or not self._HOST_RE.match(host):
+                    continue
+                key = f"{host}:{port}"
+                if key in existing_keys or key in pinned:
+                    continue
+                new_hub = {
+                    "target_host": host,
+                    "target_port": int(port),
+                    "name": entry.get("n", key),
+                    "region": entry.get("r", "unknown"),
+                    "source": "exchange",
+                    "last_seen": time.monotonic(),
+                }
                 if len(self._hub_pool) >= self._MAX_HUB_POOL_SIZE:
                     self.log.debug(
                         "Hub pool cap reached (%d), ignoring remaining exchanged hubs",
@@ -1463,8 +1467,8 @@ class TransportMonitorPlugin(PluginBase):
                     )
                     break
                 self._hub_pool.append(new_hub)
-            existing_keys.add(key)
-            added += 1
+                existing_keys.add(key)
+                added += 1
 
         return added
 

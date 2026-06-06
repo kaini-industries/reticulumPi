@@ -181,6 +181,9 @@ class InternetProbe:
     def _run_check(self) -> None:
         reachable = self.probe_once()
 
+        # Hold lock through the entire state-transition decision so
+        # concurrent set_force_offline() calls cannot slip between
+        # reading was_online and deciding to transition.
         with self._lock:
             was_online = self._is_online
             force = self._force_offline
@@ -191,17 +194,20 @@ class InternetProbe:
                 self._consecutive_failures += 1
                 consecutive = self._consecutive_failures
 
-        if reachable and not force:
-            if not was_online:
-                self._set_state(True)
-                log.info("Internet connectivity restored")
-        elif not reachable:
-            if was_online and consecutive >= self._offline_threshold:
-                self._set_state(False)
-                log.warning(
-                    "Internet connectivity lost (%d consecutive failures)",
-                    consecutive,
-                )
+            should_go_online = reachable and not force and not was_online
+            should_go_offline = (
+                not reachable and was_online and consecutive >= self._offline_threshold
+            )
+
+        if should_go_online:
+            self._set_state(True)
+            log.info("Internet connectivity restored")
+        elif should_go_offline:
+            self._set_state(False)
+            log.warning(
+                "Internet connectivity lost (%d consecutive failures)",
+                consecutive,
+            )
 
     def _set_state(self, online: bool) -> None:
         lan_ip = self._detect_lan_ip()

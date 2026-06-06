@@ -20,6 +20,9 @@ import aiohttp.web
 from reticulumpi.builtin_plugins.web_dashboard.broadcast_registry import (
     BroadcastRegistry,
 )
+from reticulumpi.builtin_plugins.web_dashboard.shared_state import (
+    offgrid_rate_limiter as _offgrid_rl,
+)
 
 if TYPE_CHECKING:
     pass
@@ -69,9 +72,10 @@ _ws_preset_rate: dict[int, collections.deque] = {}
 _WS_PRESET_MAX = 3
 _WS_PRESET_WINDOW = 30.0
 
-# ── Off-grid toggle rate limiting ─────────────────────────────────
-_offgrid_last_toggle: float = 0.0
-_OFFGRID_RATE_LIMIT: float = 2.0
+# ── Off-grid toggle rate limiting (shared with api.py via shared_state) ──
+
+
+_WS_PRESET_RATE_CAP = 200  # max tracked WS connections
 
 
 def _ws_preset_rate_ok(ws_id: int) -> bool:
@@ -83,6 +87,11 @@ def _ws_preset_rate_ok(ws_id: int) -> bool:
     if len(times) >= _WS_PRESET_MAX:
         return False
     times.append(now)
+    # Cap dict size to prevent memory growth from leaked WS ids
+    if len(_ws_preset_rate) > _WS_PRESET_RATE_CAP:
+        stale = [k for k, v in _ws_preset_rate.items() if not v or v[-1] < cutoff]
+        for k in stale:
+            del _ws_preset_rate[k]
     return True
 
 
@@ -461,7 +470,7 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
                 if snap is not None:
                     snap_data[key] = snap
             except Exception:
-                pass
+                log.debug("Snapshot collection failed for %s", key, exc_info=True)
     if snap_data:
         if not await _send_with_timeout(ws, json.dumps({"type": "update", "data": snap_data})):
             log.debug("Failed to send initial snapshot")
@@ -510,14 +519,14 @@ def _collect_spectrum_data(plugin: Any) -> dict[str, Any]:
                 if snap is not None:
                     data[key] = snap
             except Exception:
-                pass
+                log.debug("Snapshot collection failed for %s", key, exc_info=True)
         elif p and hasattr(p, "broadcast_snapshot"):
             try:
                 snap = p.broadcast_snapshot(cycle_count=0)
                 if snap is not None:
                     data[key] = snap
             except Exception:
-                pass
+                log.debug("Broadcast snapshot failed for %s", key, exc_info=True)
     return data
 
 
@@ -796,7 +805,7 @@ def _collect_broadcast_data(
         try:
             _enrich_transport_traffic(data["transport"], interfaces)
         except Exception:
-            pass
+            log.debug("Transport traffic enrichment failed", exc_info=True)
 
     mesh = data.get("mesh") or {}
     mesh_peers = data.pop("mesh_peers", None)
@@ -987,7 +996,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
                             code=aiohttp.WSCloseCode.GOING_AWAY,
                             message=b"Connection stale",
                         )
-                    except Exception:
+                    except (OSError, ConnectionError):
                         pass
                 if stale:
                     log.info("Reaped %d stale WebSocket client(s)", len(stale))
@@ -1064,17 +1073,13 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.MESSAGE_SENT, _on_message_event)
         event_bus.subscribe(_events.MESSAGE_STATUS_CHANGED, _on_status_event)
         event_bus.subscribe(_events.MESSAGE_REACTION_RECEIVED, _on_reaction_event)
-        event_bus.subscribe(
-            _events.CONVERSATION_DELETED, _on_conversation_deleted_event
-        )
+        event_bus.subscribe(_events.CONVERSATION_DELETED, _on_conversation_deleted_event)
         event_bus.subscribe(_events.ALERT_TRIGGERED, _on_alert_event)
         event_bus.subscribe(_events.INTERNET_ONLINE, _on_internet_event)
         event_bus.subscribe(_events.INTERNET_OFFLINE, _on_internet_event)
         event_bus.subscribe(_events.OFFGRID_MODE_CHANGED, _on_offgrid_event)
         event_bus.subscribe(_events.MESHTASTIC_FIRMWARE_HANG, _on_firmware_event)
-        event_bus.subscribe(
-            _events.MESHTASTIC_FIRMWARE_RECOVERED, _on_firmware_event
-        )
+        event_bus.subscribe(_events.MESHTASTIC_FIRMWARE_RECOVERED, _on_firmware_event)
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -1217,9 +1222,7 @@ def _on_conversation_deleted_event(event_type: str, data: dict) -> None:
     if loop is None or not _ws_clients:
         return
     try:
-        loop.call_soon_threadsafe(
-            _schedule_push, "conversation_deleted", data
-        )
+        loop.call_soon_threadsafe(_schedule_push, "conversation_deleted", data)
     except (RuntimeError, AttributeError):
         pass
 
@@ -1362,16 +1365,13 @@ def _handle_ws_command(raw: dict | str, plugin: Any, ws: Any = None) -> dict | N
             result = fm.stop_recording()
             return {"type": "radio_record_stopped", **result}
     elif action == "set_offgrid_mode":
-        global _offgrid_last_toggle
-        now = time.monotonic()
-        if now - _offgrid_last_toggle < _OFFGRID_RATE_LIMIT:
-            return {"type": "offgrid_error", "error": "Rate limited, try again shortly"}
         enabled = cmd.get("enabled")
         if enabled is None:
             return {"type": "offgrid_error", "error": "'enabled' field required"}
         if not isinstance(enabled, bool):
             return {"type": "offgrid_error", "error": "'enabled' must be a boolean"}
-        _offgrid_last_toggle = now
+        if not _offgrid_rl.check_and_record():
+            return {"type": "offgrid_error", "error": "Rate limited, try again shortly"}
         result = plugin.app.set_offgrid_mode(enabled)
         return {"type": "offgrid_mode_set", **result}
 
@@ -1480,7 +1480,7 @@ async def _enrich_and_push(
         try:
             row = await loop.run_in_executor(None, _lookup_message_row, msg_id)
         except Exception:
-            pass
+            log.debug("Message row lookup failed for msg_id=%s", msg_id, exc_info=True)
 
     if push_type == "message":
         payload = row if row else {"event": event_type, **data}

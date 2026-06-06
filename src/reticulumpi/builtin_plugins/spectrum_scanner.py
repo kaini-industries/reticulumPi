@@ -459,7 +459,7 @@ class SpectrumScanner(PluginBase):
 
             release_device(self._device_id, caller=self.plugin_name)
         except Exception:
-            pass
+            self.log.debug("SDR device release failed", exc_info=True)
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -687,11 +687,9 @@ class SpectrumScanner(PluginBase):
                 from reticulumpi.rtlsdr import invalidate_cache, resolve_device
 
                 invalidate_cache()
-                self._resolved_index = resolve_device(
-                    self._device_id, caller=self.plugin_name
-                )
+                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
             except Exception:
-                pass
+                self.log.debug("SDR device re-resolve failed", exc_info=True)
 
             # Backoff + restart.
             self._restart_count += 1
@@ -788,7 +786,7 @@ class SpectrumScanner(PluginBase):
             if proc.stdout:
                 try:
                     proc.stdout.close()
-                except Exception:
+                except OSError:
                     pass
 
     # --- parser --------------------------------------------------------------
@@ -962,21 +960,26 @@ class SpectrumScanner(PluginBase):
         # Fire-and-forget event bus notification for any subscribers
         # (the dashboard pulls via get_snapshot() so it doesn't rely on
         # this — but external plugins could tap in).
-        try:
-            self.event_bus.publish(
-                self._event_sweep_topic,
-                {
-                    "timestamp": now,
-                    "sweep_count": self._sweep_count,
-                    "bin_count": len(freqs),
-                    "freq_start_hz": freqs[0],
-                    "freq_stop_hz": freqs[-1],
-                    "bins_hz": tuple(freqs),
-                    "powers_db": tuple(powers),
-                },
-            )
-        except Exception:
-            self.log.debug("event_bus publish failed", exc_info=True)
+        # Throttle full bins publish to at most once per second to avoid
+        # flooding the event bus on fast sweep rates.
+        last_full = getattr(self, "_last_full_publish", 0.0)
+        if now_mono - last_full >= 1.0:
+            self._last_full_publish = now_mono
+            try:
+                self.event_bus.publish(
+                    self._event_sweep_topic,
+                    {
+                        "timestamp": now,
+                        "sweep_count": self._sweep_count,
+                        "bin_count": len(freqs),
+                        "freq_start_hz": freqs[0],
+                        "freq_stop_hz": freqs[-1],
+                        "bins_hz": tuple(freqs),
+                        "powers_db": tuple(powers),
+                    },
+                )
+            except Exception:
+                self.log.debug("event_bus publish failed", exc_info=True)
 
     # --- status helper -------------------------------------------------------
 

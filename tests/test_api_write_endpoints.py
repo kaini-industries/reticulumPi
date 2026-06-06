@@ -11,7 +11,6 @@ import asyncio
 import json
 from unittest.mock import MagicMock, patch
 
-import reticulumpi.builtin_plugins.web_dashboard.api as _api_mod
 from reticulumpi.builtin_plugins.web_dashboard.api import (
     handle_offgrid_get,
     handle_offgrid_set,
@@ -1087,7 +1086,9 @@ class TestHandleSendMessage:
 
 class TestOffgridEndpoints:
     def setup_method(self):
-        _api_mod._offgrid_last_toggle = 0.0
+        from reticulumpi.builtin_plugins.web_dashboard.shared_state import offgrid_rate_limiter
+
+        offgrid_rate_limiter._last_toggle = 0.0
 
     def test_offgrid_get(self):
         plugin = MagicMock()

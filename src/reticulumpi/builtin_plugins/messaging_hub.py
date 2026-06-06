@@ -30,6 +30,11 @@ log = logging.getLogger(__name__)
 
 # Default limits
 _DEFAULT_HISTORY_LIMIT = 500
+
+# Module-level lock for the signal.signal monkey-patch used during
+# LXMRouter init — prevents concurrent adapter starts from clobbering
+# the save/restore cycle.
+_signal_patch_lock = threading.Lock()
 _DEFAULT_DB_PATH = "~/.local/share/reticulumpi/messaging_hub.db"
 _DEFAULT_LXMF_STORAGE = "~/.local/share/reticulumpi/messaging_hub_lxmf"
 
@@ -485,18 +490,14 @@ class MessageStore:
             return 0
         with self._lock:
             over_quota = self._conn.execute(
-                "SELECT transport, COALESCE(sub_transport, '') FROM messages "
+                "SELECT transport, COALESCE(sub_transport, ''), COUNT(*) "
+                "FROM messages "
                 "GROUP BY transport, COALESCE(sub_transport, '') "
                 "HAVING COUNT(*) > ?",
                 (max_messages,),
             ).fetchall()
             total_deleted = 0
-            for tr, sub in over_quota:
-                count = self._conn.execute(
-                    "SELECT COUNT(*) FROM messages "
-                    "WHERE transport = ? AND COALESCE(sub_transport, '') = ?",
-                    (tr, sub),
-                ).fetchone()[0]
+            for tr, sub, count in over_quota:
                 excess = count - max_messages
                 if excess <= 0:
                     continue
@@ -801,7 +802,8 @@ class MessageStore:
         """Close the database connections."""
         with self._read_lock:
             self._read_conn.close()
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     # ── Helpers ────────────────────────────────────────────────────
 
@@ -856,7 +858,9 @@ class LXMFAdapter(TransportAdapter):
         self._pending_delivery: dict[str, dict[str, Any]] = {}
         self._pending_lock = threading.Lock()
         # Identity recall cache: dest_hash_hex -> (identity, timestamp)
+        # Uses its own lock to avoid contention with _pending_lock.
         self._identity_cache: dict[str, tuple[Any, float]] = {}
+        self._identity_cache_lock = threading.Lock()
 
     def start(self) -> None:
         import LXMF
@@ -889,16 +893,18 @@ class LXMFAdapter(TransportAdapter):
         # on the main thread.  When plugin startup runs in a worker thread
         # (for timeout enforcement), this raises ValueError.  Suppress it
         # by patching the module-level attribute that LXMRouter reads.
+        # The module-level _signal_patch_lock prevents concurrent adapter
+        # starts from clobbering the save/restore cycle.
         import signal
-        import threading
 
         if threading.current_thread() is not threading.main_thread():
-            _orig_signal = signal.signal
-            signal.signal = lambda *_a, **_kw: None
-            try:
-                self._router = LXMF.LXMRouter(storagepath=storage_path)
-            finally:
-                signal.signal = _orig_signal
+            with _signal_patch_lock:
+                _orig_signal = signal.signal
+                signal.signal = lambda *_a, **_kw: None
+                try:
+                    self._router = LXMF.LXMRouter(storagepath=storage_path)
+                finally:
+                    signal.signal = _orig_signal
         else:
             self._router = LXMF.LXMRouter(storagepath=storage_path)
         display_name = cfg.get("display_name") or f"{self._hub.app.node_name} Messages"
@@ -943,7 +949,7 @@ class LXMFAdapter(TransportAdapter):
             try:
                 warmer.ensure_path(dest_hash, interactive=True)
             except Exception:
-                pass
+                self._hub.log.debug("path_warmer.ensure_path failed", exc_info=True)
 
         dest_identity = self._recall_identity(dest_hash)
         if dest_identity is None:
@@ -972,18 +978,41 @@ class LXMFAdapter(TransportAdapter):
                 "destination": RNS.prettyhexrep(dest_hash),
                 "lxm_hash": msg.hash.hex() if msg.hash else None,
             }
-        except Exception as exc:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
             return {"sent": False, "reason": str(exc)}
+        except Exception as exc:
+            self._hub.log.warning("Unexpected error sending LXMF message: %s", exc, exc_info=True)
+            return {"sent": False, "reason": str(exc)}
+
+    _PENDING_DELIVERY_CAP = 500
 
     def track_pending(self, msg_id: int, lxm_hash: str | None) -> None:
         """Register an outbound message for delivery tracking."""
         if not lxm_hash:
             return
+        evicted_entry: dict[str, Any] | None = None
+        evicted_transport: str = ""
         with self._pending_lock:
+            # Enforce hard cap to prevent unbounded growth on failed deliveries
+            if len(self._pending_delivery) >= self._PENDING_DELIVERY_CAP:
+                oldest_key = min(
+                    self._pending_delivery,
+                    key=lambda k: self._pending_delivery[k].get("timestamp", 0),
+                )
+                evicted_entry = self._pending_delivery.pop(oldest_key)
+                evicted_transport = self.transport_name
             self._pending_delivery[lxm_hash] = {
                 "msg_id": msg_id,
                 "timestamp": time.time(),
             }
+        if evicted_entry is not None:
+            evicted_msg_id = evicted_entry.get("msg_id")
+            if evicted_msg_id is not None:
+                self._hub._on_delivery_status_update(
+                    evicted_msg_id,
+                    evicted_transport,
+                    "timeout",
+                )
 
     def get_pending_delivery(self) -> dict[str, dict[str, Any]]:
         """Return a copy of the pending delivery tracker."""
@@ -1048,10 +1077,10 @@ class LXMFAdapter(TransportAdapter):
             # Invalidate identity cache for this destination
             try:
                 if hasattr(message, "destination_hash") and message.destination_hash:
-                    with self._pending_lock:
+                    with self._identity_cache_lock:
                         self._identity_cache.pop(message.destination_hash.hex(), None)
             except Exception:
-                pass
+                self._hub.log.debug("identity cache invalidation failed", exc_info=True)
 
             # Check if propagation node needs failover
             self._check_propagation_failover()
@@ -1080,7 +1109,7 @@ class LXMFAdapter(TransportAdapter):
             if nm and hasattr(nm, "get_node_name"):
                 return nm.get_node_name(dest_hash_hex)
         except Exception:
-            pass
+            self._hub.log.debug("Node name lookup failed", exc_info=True)
         return None
 
     def _on_lxmf_message(self, message: Any) -> None:
@@ -1159,8 +1188,13 @@ class LXMFAdapter(TransportAdapter):
 
                 best = self._select_best_prop_node()
 
-            if best and best != self._current_prop_node:
-                self._current_prop_node = best
+                if best and best != self._current_prop_node:
+                    self._current_prop_node = best
+                    changed = True
+                else:
+                    changed = False
+
+            if changed:
                 self._router.set_outbound_propagation_node(best)
                 self._hub.log.info(
                     "Selected propagation node %s (%d hops, %d candidates)",
@@ -1206,8 +1240,12 @@ class LXMFAdapter(TransportAdapter):
                     entry["failures"] += 1
                     break
             new_best = self._select_best_prop_node()
-        if new_best and new_best != self._current_prop_node:
-            self._current_prop_node = new_best
+            if new_best and new_best != self._current_prop_node:
+                self._current_prop_node = new_best
+                changed = True
+            else:
+                changed = False
+        if changed:
             self._router.set_outbound_propagation_node(new_best)
             self._hub.log.warning(
                 "Propagation node failover to %s",
@@ -1218,7 +1256,7 @@ class LXMFAdapter(TransportAdapter):
         """Recall an identity, using a short-lived cache to avoid redundant lookups."""
         dest_hex = dest_hash.hex()
         now = time.time()
-        with self._pending_lock:
+        with self._identity_cache_lock:
             cached = self._identity_cache.get(dest_hex)
             if cached is not None:
                 identity, cached_at = cached
@@ -1229,7 +1267,7 @@ class LXMFAdapter(TransportAdapter):
         identity = RNS.Identity.recall(dest_hash)
 
         if identity is not None:
-            with self._pending_lock:
+            with self._identity_cache_lock:
                 self._identity_cache[dest_hex] = (identity, now)
                 # Lazy prune when cache grows large
                 if len(self._identity_cache) > 500:
@@ -1439,7 +1477,7 @@ class MeshtasticAdapter(TransportAdapter):
                 if n.get("id") == node_id:
                     return n.get("long_name") or n.get("short_name") or None
         except Exception:
-            pass
+            self._hub.log.debug("Meshtastic node name lookup failed", exc_info=True)
         return None
 
     def send(self, text: str, destination: str, **kwargs: Any) -> dict[str, Any]:
@@ -1505,7 +1543,7 @@ class MeshtasticAdapter(TransportAdapter):
                     if ch.get("active") and ch.get("name") == channel:
                         tx_channel = int(ch["index"])
                         break
-            except Exception:
+            except (ValueError, KeyError, TypeError):
                 tx_channel = None
             if tx_channel is None:
                 return {
@@ -1552,6 +1590,7 @@ class MeshtasticAdapter(TransportAdapter):
                 return True
             return status.get("serial_available", False)
         except Exception:
+            self._hub.log.debug("Meshtastic connectivity check failed", exc_info=True)
             return False
 
 
@@ -1663,7 +1702,7 @@ class MeshCoreAdapter(TransportAdapter):
                 if n.get("id") == public_key:
                     return n.get("name") or None
         except Exception:
-            pass
+            self._hub.log.debug("MeshCore node name lookup failed", exc_info=True)
         return None
 
     def send(self, text: str, destination: str, **kwargs: Any) -> dict[str, Any]:
@@ -1696,6 +1735,7 @@ class MeshCoreAdapter(TransportAdapter):
         try:
             return gw.get_status().get("connected", False)
         except Exception:
+            self._hub.log.debug("MeshCore connectivity check failed", exc_info=True)
             return False
 
 
@@ -1818,6 +1858,21 @@ class MessagingHubPlugin(PluginBase):
                         adapter.prune_stale_propagation()
                     except Exception:
                         self.log.debug("Error pruning adapter state", exc_info=True)
+                # Prune stale read-receipt timestamps to prevent unbounded growth
+                if isinstance(adapter, MeshtasticAdapter):
+                    try:
+                        self._prune_read_receipt_timestamps(adapter)
+                    except Exception:
+                        self.log.debug("Error pruning read receipt timestamps", exc_info=True)
+
+    @staticmethod
+    def _prune_read_receipt_timestamps(adapter: "MeshtasticAdapter") -> None:
+        """Remove _last_read_receipt_sent entries older than 2x the cooldown."""
+        now = time.time()
+        cutoff = now - (adapter._read_receipt_cooldown * 2)
+        stale = [k for k, ts in adapter._last_read_receipt_sent.items() if ts < cutoff]
+        for k in stale:
+            del adapter._last_read_receipt_sent[k]
 
     # ── Adapter registry ───────────────────────────────────────────
 
@@ -1861,7 +1916,8 @@ class MessagingHubPlugin(PluginBase):
             )
             self._maybe_prune()
         except Exception:
-            self.log.exception("Error storing inbound message (still notifying dashboard)")
+            self.log.exception("Error storing inbound message — skipping event publish")
+            return
         try:
             contact_id = MessageStore._compute_contact_id(
                 "received",
@@ -1957,6 +2013,19 @@ class MessagingHubPlugin(PluginBase):
         if not adapter:
             return {"sent": False, "reason": f"Transport '{transport}' not registered"}
 
+        # Check message size against adapter limit
+        max_bytes = getattr(adapter, "max_message_bytes", None)
+        if isinstance(max_bytes, int):
+            text_bytes = len(text.encode("utf-8"))
+            if text_bytes > max_bytes:
+                return {
+                    "sent": False,
+                    "reason": (
+                        f"Message too long: {text_bytes} bytes exceeds "
+                        f"{adapter.display_name} limit of {adapter.max_message_bytes} bytes"
+                    ),
+                }
+
         # If the transport is down, queue for retry rather than failing.
         if not adapter.is_available():
             return self._queue_outbound(transport, text, destination, kwargs)
@@ -2000,6 +2069,7 @@ class MessagingHubPlugin(PluginBase):
                 try:
                     to_name = nm.get_node_name(destination)
                 except Exception:
+                    self.log.debug("Node name lookup failed", exc_info=True)
                     to_name = None
 
         # Broadcast without an explicit channel lands on 0 (Primary),
@@ -2507,19 +2577,25 @@ class MessagingHubPlugin(PluginBase):
                         msg_id = int(key)
                     except (ValueError, TypeError):
                         continue
-                # Remove from adapter's pending tracker
+                # Remove from adapter's pending tracker.  An ACK callback
+                # can pop the same key between our snapshot and this pop, so
+                # only fire the status update if pop() actually returned a
+                # value (TOCTOU guard).
+                actually_removed = False
                 if hasattr(adapter, "_pending_lock"):
                     with adapter._pending_lock:
                         if isinstance(adapter, MeshtasticAdapter):
-                            adapter._pending_delivery.pop(msg_id, None)
+                            val = adapter._pending_delivery.pop(msg_id, None)
                         else:
-                            adapter._pending_delivery.pop(key, None)
-                self._on_delivery_status_update(
-                    msg_id,
-                    adapter.transport_name,
-                    "timeout",
-                )
-                expired += 1
+                            val = adapter._pending_delivery.pop(key, None)
+                        actually_removed = val is not None
+                if actually_removed:
+                    self._on_delivery_status_update(
+                        msg_id,
+                        adapter.transport_name,
+                        "timeout",
+                    )
+                    expired += 1
         if expired:
             self.log.debug("Expired %d stale pending delivery entries", expired)
         return expired
@@ -2684,8 +2760,6 @@ class MessagingHubPlugin(PluginBase):
 
     def delete_conversation(self, contact_id: str) -> int:
         """Delete all stored messages for a conversation."""
-        from reticulumpi import events
-
         deleted = self._store.delete_conversation(contact_id)
         if deleted > 0:
             self.app.event_bus.publish(
@@ -2726,13 +2800,11 @@ class MessagingHubPlugin(PluginBase):
         cached = self._broadcast_cache
         if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
             return cached[1]
-        result = {}
-        if hasattr(self, "get_transports"):
-            result["transports"] = self.get_transports()
-        if hasattr(self, "get_unread_counts_grouped"):
-            result["unread"] = self.get_unread_counts_grouped()
-        if hasattr(self, "get_conversations"):
-            result["conversations"] = self.get_conversations()
+        result = {
+            "transports": self.get_transports(),
+            "unread": self.get_unread_counts_grouped(),
+            "conversations": self.get_conversations(),
+        }
         snapshot = result or None
         self._broadcast_cache = (now, snapshot)
         return snapshot

@@ -1,10 +1,12 @@
 /* Service worker — cache-first tiles + stale-while-revalidate app shell */
+importScripts('./version.js');
 var TILE_CACHE = 'rpi-tiles-v1';
-var SHELL_CACHE = 'rpi-shell-v1';
+var SHELL_CACHE = 'rpi-shell-' + APP_VERSION;
 var MAX_ENTRIES = 5000;
 var TILE_RE = /\.tile\.openstreetmap\.org\/|\/tiles\//;
 
 var SHELL_ASSETS = [
+  '/index.html',
   '/login.html',
   '/static/style.css',
   '/static/vendor/leaflet.css',
@@ -42,7 +44,8 @@ var SHELL_ASSETS = [
   '/static/radiosonde.js',
   '/static/noaa.js',
   '/static/mqtt_feed.js',
-  '/static/login.js'
+  '/static/login.js',
+  '/static/version.js'
 ];
 
 var KEEP_CACHES = [TILE_CACHE, SHELL_CACHE];
@@ -112,11 +115,11 @@ function _tileFetch(request) {
 
 function _trimCache(cache) {
   cache.keys().then(function (keys) {
-    if (keys.length > MAX_ENTRIES) {
-      cache.delete(keys[0]).then(function () {
-        if (keys.length - 1 > MAX_ENTRIES) _trimCache(cache);
-      });
-    }
+    var excess = keys.length - MAX_ENTRIES;
+    if (excess <= 0) return;
+    // Delete oldest entries in a single pass (no recursion)
+    var toDelete = keys.slice(0, excess);
+    return Promise.all(toDelete.map(function (k) { return cache.delete(k); }));
   });
 }
 
@@ -150,7 +153,15 @@ function _shellFetch(request) {
           }
         }
         return resp;
-      }).catch(function () {});
+      }).catch(function () {
+        // Network failed and no cache — return an offline response
+        if (!cached) {
+          return new Response('Offline — cached version not available', {
+            status: 503,
+            headers: { 'Content-Type': 'text/plain' }
+          });
+        }
+      });
       return cached || networkFetch;
     });
   });

@@ -70,7 +70,7 @@ class MessageEcho(PluginBase):
             try:
                 warmer.ensure_path(message.source_hash)
             except Exception:
-                pass
+                self.log.debug("path_warmer.ensure_path failed", exc_info=True)
 
         with self._lock:
             if not self._active:

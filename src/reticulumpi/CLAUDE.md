@@ -23,7 +23,7 @@ cli.py -> app.py -> config.py
 
 **event_bus.py** -- two subscription modes:
 - `subscribe()`: synchronous, runs in publisher's thread (fast handlers only)
-- `subscribe_offloaded()`: background via ThreadPoolExecutor (4 workers, 64-pending backpressure)
+- `subscribe_offloaded()`: background via ThreadPoolExecutor (8 workers, 64-pending backpressure)
 
 **sdr_scheduler.py** -- priority-based RTL-SDR dongle time-sharing:
 - P0 (CRITICAL): weather alerts -- preempts everything

@@ -275,7 +275,7 @@ async def handle_interface_add(
 
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return _error("Invalid JSON body", 400)
 
     iface_name = body.get("name", "").strip()

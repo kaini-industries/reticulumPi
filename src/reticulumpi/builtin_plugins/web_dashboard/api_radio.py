@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import struct
 
 import aiohttp.web
@@ -374,8 +375,10 @@ async def handle_radio_favorites_update(request: aiohttp.web.Request) -> aiohttp
         body = await request.json()
     except Exception:
         return _error("Invalid JSON body", 400)
+    allowed = {"label", "frequency_mhz", "mode", "gain_db"}
+    filtered = {k: v for k, v in body.items() if k in allowed}
     try:
-        updated = fm.update_favorite(fav_id, **body)
+        updated = fm.update_favorite(fav_id, **filtered)
     except ValueError as exc:
         return _error(str(exc), 400)
     if updated is None:
@@ -457,10 +460,11 @@ async def handle_radio_recording_download(request: aiohttp.web.Request) -> aioht
     path = fm.get_recording_path(filename)
     if path is None:
         return _error("Recording not found", 404)
+    safe_filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
     return aiohttp.web.FileResponse(
         path,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
             "Content-Type": "audio/wav",
         },
     )

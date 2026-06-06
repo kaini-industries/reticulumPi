@@ -68,6 +68,7 @@ class EmergencyBroadcastPlugin(PluginBase):
         self._max_stored = self.config.get("max_stored_messages", 100)
         self._max_ttl = self.config.get("max_ttl", 5)
         self._rebroadcast_delay = self.config.get("rebroadcast_delay", 5)
+        self._counter_lock = threading.Lock()
         self._messages_sent = 0
         self._messages_received = 0
         self._messages_rebroadcast = 0
@@ -102,11 +103,15 @@ class EmergencyBroadcastPlugin(PluginBase):
         self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
+        with self._counter_lock:
+            sent = self._messages_sent
+            received = self._messages_received
+            rebroadcast = self._messages_rebroadcast
         return {
             "active": self._active,
-            "messages_sent": self._messages_sent,
-            "messages_received": self._messages_received,
-            "messages_rebroadcast": self._messages_rebroadcast,
+            "messages_sent": sent,
+            "messages_received": received,
+            "messages_rebroadcast": rebroadcast,
             "stored_messages": len(self._messages),
         }
 
@@ -151,7 +156,8 @@ class EmergencyBroadcastPlugin(PluginBase):
 
         # Broadcast
         self._broadcast_message(msg)
-        self._messages_sent += 1
+        with self._counter_lock:
+            self._messages_sent += 1
 
         self.log.warning(
             "EMERGENCY BROADCAST [%s]: %s (TTL=%d)",
@@ -200,10 +206,12 @@ class EmergencyBroadcastPlugin(PluginBase):
 
             now = time.time()
             self._seen_ids[msg_id] = now
-            self._messages_received += 1
 
             # Prune expired entries and enforce hard cap
             self._prune_seen_ids(now)
+
+        with self._counter_lock:
+            self._messages_received += 1
 
         priority = msg.get("priority", PRIORITY_INFO)
         self.log.warning(
@@ -244,14 +252,16 @@ class EmergencyBroadcastPlugin(PluginBase):
                 )
             else:
                 self._broadcast_message(rebroadcast_msg)
-                self._messages_rebroadcast += 1
+                with self._counter_lock:
+                    self._messages_rebroadcast += 1
 
     def _delayed_rebroadcast(self, msg: dict[str, Any]) -> None:
         """Wait, then re-broadcast to avoid collision with other nodes."""
         self._sleep_while_active(self._rebroadcast_delay)
         if self._active:
             self._broadcast_message(msg)
-            self._messages_rebroadcast += 1
+            with self._counter_lock:
+                self._messages_rebroadcast += 1
             self.log.debug(
                 "Re-broadcast emergency %s (TTL=%d)",
                 msg.get("id", "")[:16],

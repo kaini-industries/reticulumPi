@@ -240,7 +240,7 @@ class SdrScheduler:
                 },
             )
         except Exception:
-            pass
+            log.debug("event publish failed", exc_info=True)
 
     def remove_windows(self, serial: str, caller: str) -> None:
         with self._condition:
@@ -375,6 +375,10 @@ class SdrScheduler:
             if slot is not None:
                 return candidate
             bg.pop(idx)
+            # After removal, adjust index so we don't skip the element
+            # that slid into the vacated position.
+            if bg and idx < dongle.bg_index:
+                dongle.bg_index -= 1
 
         return None
 
@@ -480,7 +484,7 @@ class SdrScheduler:
             try:
                 release_device(serial, caller=caller)
             except Exception:
-                pass
+                log.debug("SDR device release failed for %s", caller, exc_info=True)
 
             try:
                 self._event_bus.publish(
@@ -492,7 +496,7 @@ class SdrScheduler:
                     },
                 )
             except Exception:
-                pass
+                log.debug("event publish failed", exc_info=True)
         finally:
             self._condition.acquire()
 
@@ -537,7 +541,7 @@ class SdrScheduler:
                 try:
                     release_device(serial, caller=caller)
                 except Exception:
-                    pass
+                    log.debug("SDR device release failed for %s", caller, exc_info=True)
         finally:
             self._condition.acquire()
 
@@ -552,7 +556,7 @@ class SdrScheduler:
                 try:
                     release_device(serial, caller=caller)
                 except Exception:
-                    pass
+                    log.debug("SDR device release failed for %s", caller, exc_info=True)
             finally:
                 self._condition.acquire()
             return
@@ -568,7 +572,7 @@ class SdrScheduler:
                 try:
                     release_device(serial, caller=caller)
                 except Exception:
-                    pass
+                    log.debug("SDR device release failed for %s", caller, exc_info=True)
             finally:
                 self._condition.acquire()
             return
@@ -599,7 +603,7 @@ class SdrScheduler:
                     },
                 )
             except Exception:
-                pass
+                log.debug("event publish failed", exc_info=True)
         finally:
             self._condition.acquire()
 

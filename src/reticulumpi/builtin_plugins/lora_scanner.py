@@ -56,7 +56,6 @@ class LoraScanner(SpectrumScanner):
         )
         self._event_sweep_topic = events.LORA_SCANNER_SWEEP
         self._event_status_topic = events.LORA_SCANNER_STATUS
-        self._lora_snapshot_cache: tuple[int, dict[str, Any]] | None = None
 
         self._analyzer = LoraChannelAnalyzer(
             region=self._lora_region,

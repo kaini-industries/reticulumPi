@@ -118,7 +118,7 @@ _FIPS_STATES: dict[str, str] = {
 
 def _parse_fips_codes(raw: str) -> list[str]:
     parts = re.split(r"[+\-]", raw)
-    return [p for p in parts if p and len(p) == 6]
+    return [p for p in parts if p and len(p) == 6 and p.isdigit()]
 
 
 def _fips_label(code: str) -> str:
@@ -191,6 +191,7 @@ class WeatherAlert(SignalPluginBase):
         )
 
     def _on_start(self) -> None:
+        self._rtl_process: Any = None
         self._alert_history: deque[dict[str, Any]] = deque(maxlen=self._max_history)
         self._active_alert: dict[str, Any] | None = None
         self._stats = {
@@ -295,14 +296,14 @@ class WeatherAlert(SignalPluginBase):
                     except subprocess.TimeoutExpired:
                         rtl.kill()
                         rtl.wait(timeout=2)
-            except Exception:
-                pass
+            except (OSError, ProcessLookupError):
+                self.log.debug("rtl subprocess cleanup failed", exc_info=True)
             finally:
                 for f in (rtl.stdout, rtl.stderr):
                     if f:
                         try:
                             f.close()
-                        except Exception:
+                        except OSError:
                             pass
 
     def _parser_loop(self) -> None:
@@ -361,6 +362,10 @@ class WeatherAlert(SignalPluginBase):
             retransmission = True
             self._retransmissions += 1
         self._seen_headers[raw_header] = now
+        # Cap _seen_headers to prevent unbounded growth
+        if len(self._seen_headers) > 500:
+            cutoff = now - 300
+            self._seen_headers = {k: v for k, v in self._seen_headers.items() if v > cutoff}
 
         alert = {
             "event_code": event_code,
@@ -409,13 +414,13 @@ class WeatherAlert(SignalPluginBase):
         try:
             self.event_bus.publish(events.WEATHER_ALERT_RECEIVED, alert)
         except Exception:
-            pass
+            self.log.debug("event publish failed", exc_info=True)
 
         if severity in ("extreme", "severe"):
             try:
                 self.event_bus.publish(events.WEATHER_ALERT_SEVERE, alert)
             except Exception:
-                pass
+                self.log.debug("event publish failed", exc_info=True)
             if self._forward_to_alert_system:
                 try:
                     self.event_bus.publish(
@@ -428,7 +433,7 @@ class WeatherAlert(SignalPluginBase):
                         },
                     )
                 except Exception:
-                    pass
+                    self.log.debug("event publish failed", exc_info=True)
 
     def _check_expired(self) -> None:
         now = time.time()
@@ -445,7 +450,7 @@ class WeatherAlert(SignalPluginBase):
                         self._active_alert,
                     )
                 except Exception:
-                    pass
+                    self.log.debug("event publish failed", exc_info=True)
                 self._active_alert = None
                 self._promote_next_active()
 

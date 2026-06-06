@@ -177,13 +177,13 @@ class PathWarmerPlugin(PluginBase):
             RNS.prettyhexrep(dest_hash),
             timeout,
         )
-        t0 = time.time()
+        t0 = time.monotonic()
         RNS.Transport.request_path(dest_hash)
 
         deadline = t0 + timeout
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             if RNS.Transport.has_path(dest_hash):
-                self._record_rtt(dest_hash, time.time() - t0)
+                self._record_rtt(dest_hash, time.monotonic() - t0)
                 with self._lock:
                     self._paths_warmed += 1
                 self.event_bus.publish(
@@ -305,15 +305,15 @@ class PathWarmerPlugin(PluginBase):
             return False  # already reachable, not counted as "warmed"
 
         self.log.debug("Warming path for %s", RNS.prettyhexrep(dest_hash))
-        t0 = time.time()
+        t0 = time.monotonic()
         RNS.Transport.request_path(dest_hash)
 
         deadline = t0 + timeout
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             if not self._active:
                 return False
             if RNS.Transport.has_path(dest_hash):
-                self._record_rtt(dest_hash, time.time() - t0)
+                self._record_rtt(dest_hash, time.monotonic() - t0)
                 with self._lock:
                     self._paths_warmed += 1
                 self.event_bus.publish(
@@ -439,6 +439,7 @@ class PathWarmerPlugin(PluginBase):
             if not isinstance(hops, (int, float)) or hops < 0:
                 return
         except Exception:
+            self.log.debug("hops_to lookup failed", exc_info=True)
             return
         with self._lock:
             bucket = self._rtt_samples.get(hops)
@@ -456,6 +457,7 @@ class PathWarmerPlugin(PluginBase):
             if not isinstance(hops, (int, float)) or hops < 0:
                 return fallback
         except Exception:
+            self.log.debug("hops_to lookup failed", exc_info=True)
             return fallback
         with self._lock:
             bucket = self._rtt_samples.get(hops)

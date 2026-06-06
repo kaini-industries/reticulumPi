@@ -740,17 +740,9 @@
     _nextStartTime = _audioCtx.currentTime + 0.5;
     _abortCtrl = new AbortController();
 
-    var token = '';
-    var cookies = document.cookie.split(';');
-    for (var i = 0; i < cookies.length; i++) {
-      var c = cookies[i].trim();
-      if (c.indexOf('session=') === 0) { token = c.substring(8); break; }
-    }
-
     fetch('/api/radio/audio', {
       credentials: 'same-origin',
       signal: _abortCtrl.signal,
-      headers: token ? { 'Authorization': 'Bearer ' + token } : {},
     }).then(function (resp) {
       if (!resp.ok || !resp.body) { _stopAudio(); return; }
       var reader = resp.body.getReader();

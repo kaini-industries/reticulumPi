@@ -994,6 +994,9 @@ class MeshCoreObserver(PluginBase):
             raise RuntimeError("MeshCore device not connected")
 
         result = self._run_async(mc.commands.sign(data), timeout=20)
+        if result is None:
+            self.log.warning("Device signing returned None — device may have disconnected")
+            raise RuntimeError("Device signing returned no result")
         from meshcore.events import EventType
 
         if result.type == EventType.ERROR:

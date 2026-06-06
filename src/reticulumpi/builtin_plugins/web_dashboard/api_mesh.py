@@ -442,7 +442,7 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
                         try:
                             proc.kill()
                             await asyncio.wait_for(proc.wait(), timeout=2)
-                        except Exception:
+                        except (OSError, ProcessLookupError):
                             pass
                     # Serve stale data (up to STALE_TTL) instead of 504 —
                     # the UI stays responsive during transient rnpath stalls.

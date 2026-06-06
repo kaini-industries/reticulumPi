@@ -312,7 +312,7 @@ class LoraLinkTester(PluginBase):
         if iface is not None:
             try:
                 iface.close()
-            except Exception:
+            except OSError:
                 pass
 
     # ── Probe send/receive ─────────────────────────────────────────

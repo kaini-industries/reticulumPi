@@ -150,7 +150,7 @@ class FileTransferPlugin(PluginBase):
                 self.log.warning("Rejecting resource: insufficient disk space")
                 return False
         except Exception:
-            pass
+            self.log.debug("Disk space check failed", exc_info=True)
 
         auto_accept = self.config.get("auto_accept", True)
         if auto_accept:

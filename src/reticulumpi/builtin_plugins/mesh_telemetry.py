@@ -32,6 +32,7 @@ class MeshTelemetryPlugin(PluginBase):
 
     def start(self) -> None:
         self._active = True
+        self._start_time = time.time()
         self._peer_metrics: dict[bytes, dict[str, Any]] = {}
         self._peers_lock = threading.Lock()
         self._broadcast_cache: tuple[float, list] | None = None
@@ -79,7 +80,8 @@ class MeshTelemetryPlugin(PluginBase):
         cached = self._broadcast_cache
         if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
             return cached[1]
-        result = self.get_peer_metrics()
+        peers = self.get_peer_metrics()
+        result = {"peers": peers, "peer_count": len(peers)}
         self._broadcast_cache = (now, result)
         return result
 
@@ -123,7 +125,7 @@ class MeshTelemetryPlugin(PluginBase):
         try:
             hops = RNS.Transport.hops_to(destination_hash)
         except Exception:
-            pass
+            self.log.debug("hops_to lookup failed", exc_info=True)
         metrics["hops"] = hops
 
         with self._peers_lock:
@@ -145,6 +147,7 @@ class MeshTelemetryPlugin(PluginBase):
 
     def _announce_loop(self) -> None:
         interval = self.config.get("announce_interval", 300)
+        peer_ttl = self.config.get("peer_ttl_seconds", 3600)
         while self._active:
             try:
                 app_data = self._build_telemetry_payload()
@@ -152,7 +155,24 @@ class MeshTelemetryPlugin(PluginBase):
                 self.log.debug("Telemetry announced")
             except Exception:
                 self.log.exception("Error during telemetry announce")
+
+            # Evict stale peers whose last_seen exceeds the TTL
+            self._evict_stale_peers(peer_ttl)
+
             self._jittered_sleep(interval)
+
+    def _evict_stale_peers(self, ttl: float) -> None:
+        """Remove peer entries not seen within *ttl* seconds."""
+        now = time.time()
+        stale_keys: list[bytes] = []
+        with self._peers_lock:
+            for key, data in self._peer_metrics.items():
+                if now - data.get("last_seen", 0) > ttl:
+                    stale_keys.append(key)
+            for key in stale_keys:
+                del self._peer_metrics[key]
+        if stale_keys:
+            self.log.debug("Evicted %d stale peer(s) from telemetry", len(stale_keys))
 
     def _build_telemetry_payload(self) -> bytes:
         """Build a compact umsgpack payload with system metrics."""
@@ -190,15 +210,8 @@ class MeshTelemetryPlugin(PluginBase):
         return umsgpack.packb(payload)
 
     def _get_app_start_time(self) -> float:
-        """Approximate the app start time from uptime context."""
-        # Use the system_monitor's first metric timestamp as proxy
-        monitor = self.app.get_plugin("system_monitor")
-        if monitor and hasattr(monitor, "latest_metrics"):
-            ts = monitor.latest_metrics.get("timestamp")
-            if ts:
-                interval = monitor.config.get("collect_interval_seconds", 60)
-                return ts - interval
-        return time.time()
+        """Return the recorded start time of this plugin."""
+        return getattr(self, "_start_time", time.time())
 
 
 # Short key mapping to minimize announce payload size

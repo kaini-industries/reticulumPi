@@ -520,7 +520,7 @@ class YggdrasilTransportPlugin(PluginBase):
                 self._health["rns_interface_configured"] = found
 
         except Exception:
-            pass
+            self.log.debug("RNS interface check failed", exc_info=True)
 
     # ── Helpers ───────────────────────────────────────────────────────
 
@@ -530,4 +530,4 @@ class YggdrasilTransportPlugin(PluginBase):
             if hasattr(self, "event_bus") and self.event_bus:
                 self.event_bus.publish(event_type, data or {})
         except Exception:
-            pass
+            self.log.debug("event publish failed for %s", event_type, exc_info=True)

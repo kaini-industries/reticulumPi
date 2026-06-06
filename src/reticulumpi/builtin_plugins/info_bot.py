@@ -236,7 +236,7 @@ class InfoBot(PluginBase):
             try:
                 warmer.ensure_path(message.source_hash)
             except Exception:
-                pass
+                self.log.debug("path_warmer.ensure_path failed", exc_info=True)
 
         with self._lock:
             if not self._active:
@@ -590,6 +590,7 @@ class InfoBot(PluginBase):
                 return "News unavailable — node is offline."
             return "News unavailable — network error."
         except Exception:
+            self.log.debug("News feed parse error", exc_info=True)
             return "Could not parse news feed."
 
     def _cmd_iss(self, _args: str = "") -> str:
@@ -617,7 +618,7 @@ class InfoBot(PluginBase):
                 if iss_crew:
                     lines.append(f"  Crew aboard: {len(iss_crew)}")
             except Exception:
-                pass
+                self.log.debug("ISS crew fetch failed", exc_info=True)
 
             return "\n".join(lines)
 
@@ -712,6 +713,7 @@ class InfoBot(PluginBase):
             punchline = data.get("punchline", "")
             return f"{setup}\n\n{punchline}"
         except Exception:
+            self.log.debug("Joke API fetch failed", exc_info=True)
             setup, punchline = random.choice(_FALLBACK_JOKES)
             return f"{setup}\n\n{punchline}"
 
@@ -761,7 +763,7 @@ class InfoBot(PluginBase):
                 bz = flux_data.get("Bz", "N/A")
                 lines.append(f"  Solar wind Bt: {bt} nT, Bz: {bz} nT")
             except Exception:
-                pass
+                self.log.debug("Solar wind data fetch failed", exc_info=True)
 
             return "\n".join(lines)
 

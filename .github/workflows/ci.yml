@@ -35,7 +35,7 @@ jobs:
           pip install -e ".[dev,dashboard]"
       - name: Run tests with coverage
         run: |
-          pytest tests/ -v --cov=reticulumpi --cov-report=term-missing --cov-report=xml
+          pytest tests/ -v -n auto --cov=reticulumpi --cov-report=term-missing --cov-report=xml
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4

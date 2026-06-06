@@ -229,6 +229,8 @@ class CaptivePortalPlugin(PluginBase):
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
+                # GIL guarantees atomicity for single-word integer increments
+                # on CPython, so no explicit lock is needed here.
                 plugin._requests_served += 1
                 path = self.path.split("?")[0]
 

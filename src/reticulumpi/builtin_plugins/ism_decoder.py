@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any
 
@@ -30,6 +31,8 @@ class ISMDecoder(SignalPluginBase):
     signal_label = "ISM Band Decoder"
 
     def validate_config(self) -> None:
+        self._devices_lock = threading.Lock()
+        self._snapshot_dirty = True
         self._decoder_bin = str(self.config.get("decoder_bin", "rtl_433"))
         self._gain = self.config.get("gain", None)
         self._ppm = int(self.config.get("ppm", 0))
@@ -52,6 +55,7 @@ class ISMDecoder(SignalPluginBase):
         self._status = "idle"
         self._last_error: str | None = None
         self._restart_count = 0
+        self._snapshot_dirty = True
         self._start_thread(self._maintenance_loop, name="ism-maintenance")
 
     def _on_stop(self) -> None:
@@ -63,7 +67,7 @@ class ISMDecoder(SignalPluginBase):
             self._status = "unavailable"
             self._last_error = f"{self._decoder_bin} not found on PATH"
             self.log.warning(self._last_error)
-            return
+            raise RuntimeError(self._last_error)
 
         cmd = [
             decoder,
@@ -138,51 +142,54 @@ class ISMDecoder(SignalPluginBase):
         self._stats["messages_total"] += 1
         self._stats["last_message_at"] = now
 
-        is_new = key not in self._devices
-        if is_new and len(self._devices) >= self._max_devices:
-            return
+        publish_event = None
+        with self._devices_lock:
+            is_new = key not in self._devices
+            if is_new and len(self._devices) >= self._max_devices:
+                return
 
-        if is_new:
-            self._devices[key] = {
-                "key": key,
-                "model": model,
-                "id": dev_id,
-                "first_seen": now,
-                "message_count": 0,
-            }
-            self._stats["devices_total"] += 1
-            self.log.info("New ISM device: %s", key)
+            if is_new:
+                self._devices[key] = {
+                    "key": key,
+                    "model": model,
+                    "id": dev_id,
+                    "first_seen": now,
+                    "message_count": 0,
+                }
+                self._stats["devices_total"] += 1
+                self.log.info("New ISM device: %s", key)
+                publish_event = {
+                    "key": key,
+                    "model": model,
+                    "id": dev_id,
+                }
+
+            dev = self._devices[key]
+            dev["last_seen"] = now
+            dev["message_count"] += 1
+
+            dev["channel"] = msg.get("channel")
+            dev["battery_ok"] = msg.get("battery_ok")
+            dev["temperature_C"] = msg.get("temperature_C")
+            dev["humidity"] = msg.get("humidity")
+            dev["wind_avg_km_h"] = msg.get("wind_avg_km_h")
+            dev["wind_max_km_h"] = msg.get("wind_max_km_h")
+            dev["wind_dir_deg"] = msg.get("wind_dir_deg")
+            dev["rain_mm"] = msg.get("rain_mm")
+            dev["pressure_hPa"] = msg.get("pressure_hPa")
+            dev["rssi"] = msg.get("rssi")
+            dev["snr"] = msg.get("snr")
+            dev["noise"] = msg.get("noise")
+            dev["freq_mhz"] = msg.get("freq")
+            dev["protocol"] = msg.get("protocol")
+
+        if publish_event:
             try:
-                self.event_bus.publish(
-                    events.ISM_DEVICE_DETECTED,
-                    {
-                        "key": key,
-                        "model": model,
-                        "id": dev_id,
-                    },
-                )
+                self.event_bus.publish(events.ISM_DEVICE_DETECTED, publish_event)
             except Exception:
-                pass
+                self.log.debug("event publish failed", exc_info=True)
 
-        dev = self._devices[key]
-        dev["last_seen"] = now
-        dev["message_count"] += 1
-
-        dev["channel"] = msg.get("channel")
-        dev["battery_ok"] = msg.get("battery_ok")
-        dev["temperature_C"] = msg.get("temperature_C")
-        dev["humidity"] = msg.get("humidity")
-        dev["wind_avg_km_h"] = msg.get("wind_avg_km_h")
-        dev["wind_max_km_h"] = msg.get("wind_max_km_h")
-        dev["wind_dir_deg"] = msg.get("wind_dir_deg")
-        dev["rain_mm"] = msg.get("rain_mm")
-        dev["pressure_hPa"] = msg.get("pressure_hPa")
-        dev["rssi"] = msg.get("rssi")
-        dev["snr"] = msg.get("snr")
-        dev["noise"] = msg.get("noise")
-        dev["freq_mhz"] = msg.get("freq")
-        dev["protocol"] = msg.get("protocol")
-
+        self._snapshot_dirty = True
         self._update_snapshot_cache()
 
     def _maintenance_loop(self) -> None:
@@ -194,69 +201,82 @@ class ISMDecoder(SignalPluginBase):
 
     def _evict_stale(self) -> None:
         now = time.time()
-        stale_keys = [
-            k for k, v in self._devices.items() if now - v["last_seen"] > self._stale_timeout
-        ]
-        for key in stale_keys:
-            dev = self._devices.pop(key)
-            self.log.debug("ISM device lost: %s", key)
+        evicted: list[dict[str, Any]] = []
+        with self._devices_lock:
+            stale_keys = [
+                k for k, v in self._devices.items() if now - v["last_seen"] > self._stale_timeout
+            ]
+            for key in stale_keys:
+                dev = self._devices.pop(key)
+                evicted.append(dev)
+                self.log.debug("ISM device lost: %s", key)
+        for dev in evicted:
             try:
                 self.event_bus.publish(
                     events.ISM_DEVICE_LOST,
                     {
-                        "key": key,
+                        "key": dev.get("key"),
                         "model": dev.get("model"),
                         "id": dev.get("id"),
                         "last_seen": dev.get("last_seen"),
                     },
                 )
             except Exception:
-                pass
+                self.log.debug("event publish failed", exc_info=True)
+        if evicted:
+            self._snapshot_dirty = True
         self._update_snapshot_cache()
 
     def get_device_inventory(self) -> dict[str, Any]:
-        devices = []
-        for dev in sorted(
-            self._devices.values(),
-            key=lambda d: d.get("last_seen", 0),
-            reverse=True,
-        ):
-            d = dict(dev)
-            d.pop("first_seen", None)
-            devices.append(d)
-        return {
-            "devices": devices,
-            "stats": dict(self._stats),
-            "devices_active": len(self._devices),
-        }
+        with self._devices_lock:
+            devices = []
+            for dev in sorted(
+                self._devices.values(),
+                key=lambda d: d.get("last_seen", 0),
+                reverse=True,
+            ):
+                d = dict(dev)
+                d.pop("first_seen", None)
+                devices.append(d)
+            return {
+                "devices": devices,
+                "stats": dict(self._stats),
+                "devices_active": len(self._devices),
+            }
 
     def _update_snapshot_cache(self) -> None:
-        active = len(self._devices)
-        self._stats["devices_active"] = active
+        if not self._snapshot_dirty:
+            return
+        self._snapshot_dirty = False
+        with self._devices_lock:
+            active = len(self._devices)
+            self._stats["devices_active"] = active
+            snapshot_devices = [
+                {
+                    "key": d["key"],
+                    "model": d["model"],
+                    "id": d.get("id"),
+                    "channel": d.get("channel"),
+                    "battery_ok": d.get("battery_ok"),
+                    "temperature_C": d.get("temperature_C"),
+                    "humidity": d.get("humidity"),
+                    "last_seen": d.get("last_seen"),
+                    "message_count": d.get("message_count", 0),
+                }
+                for d in sorted(
+                    self._devices.values(),
+                    key=lambda x: x.get("last_seen", 0),
+                    reverse=True,
+                )[:20]
+            ]
+            stats = dict(self._stats)
         with self._cache_lock:
             self._snapshot_cache = {
                 "status": self._status,
                 "error": self._last_error,
                 "devices_active": active,
-                "devices": [
-                    {
-                        "key": d["key"],
-                        "model": d["model"],
-                        "id": d.get("id"),
-                        "channel": d.get("channel"),
-                        "battery_ok": d.get("battery_ok"),
-                        "temperature_C": d.get("temperature_C"),
-                        "humidity": d.get("humidity"),
-                        "last_seen": d.get("last_seen"),
-                        "message_count": d.get("message_count", 0),
-                    }
-                    for d in sorted(
-                        self._devices.values(),
-                        key=lambda x: x.get("last_seen", 0),
-                        reverse=True,
-                    )[:20]
-                ],
-                "stats": dict(self._stats),
+                "devices": snapshot_devices,
+                "stats": stats,
             }
 
     def get_status(self) -> dict[str, Any]:

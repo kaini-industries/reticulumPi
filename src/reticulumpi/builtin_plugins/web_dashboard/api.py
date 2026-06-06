@@ -10,10 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 import aiohttp.web
+
+from reticulumpi.builtin_plugins.web_dashboard.shared_state import (
+    offgrid_rate_limiter as _offgrid_rl,
+)
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -40,10 +47,7 @@ API_VERSION = "1.0"
 def _scrub_sensitive(obj: Any) -> Any:
     """Recursively replace values whose key is in SENSITIVE_KEYS with '***'."""
     if isinstance(obj, dict):
-        return {
-            k: "***" if k in SENSITIVE_KEYS else _scrub_sensitive(v)
-            for k, v in obj.items()
-        }
+        return {k: "***" if k in SENSITIVE_KEYS else _scrub_sensitive(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_scrub_sensitive(item) for item in obj]
     return obj
@@ -94,7 +98,7 @@ def _collect_local_services(app) -> list[dict]:
                 app_name = parts[0]
                 # Last segment is identity hex hash; middle segments are aspects
                 aspects = ".".join(parts[1:-1]) if len(parts) > 2 else parts[1]
-        except Exception:
+        except (ValueError, IndexError, TypeError):
             pass
 
         services.append(
@@ -136,7 +140,7 @@ def _build_traffic_map(plugin: Any) -> dict[str, dict]:
             if ip and port:
                 traffic_map[f"{ip}:{port}"] = traffic
     except Exception:
-        pass
+        log.debug("Interface traffic collection failed", exc_info=True)
     return traffic_map
 
 
@@ -255,9 +259,9 @@ async def handle_login(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
     resp = _ok({"token": token})
 
-    # Set session cookie
+    # Set session cookie — Secure flag when SSL or behind HTTPS proxy
     ssl_config = plugin.config.get("ssl", {})
-    secure = ssl_config.get("enabled", False)
+    secure = ssl_config.get("enabled", False) or request.scheme == "https"
     resp.set_cookie(
         "session",
         token,
@@ -298,7 +302,7 @@ async def handle_form_login(request: aiohttp.web.Request) -> aiohttp.web.Respons
         raise aiohttp.web.HTTPFound("/login.html?error=invalid")
 
     ssl_config = plugin.config.get("ssl", {})
-    secure = ssl_config.get("enabled", False)
+    secure = ssl_config.get("enabled", False) or request.scheme == "https"
 
     resp = aiohttp.web.HTTPFound("/")
     resp.set_cookie(
@@ -429,7 +433,6 @@ async def handle_plugin_detail(request: aiohttp.web.Request) -> aiohttp.web.Resp
 
 _last_restart_time: float = 0.0
 _RESTART_COOLDOWN = 60.0
-_offgrid_last_toggle: float = 0.0
 
 
 async def handle_services_restart(
@@ -551,10 +554,6 @@ async def handle_offgrid_get(request: aiohttp.web.Request) -> aiohttp.web.Respon
 
 async def handle_offgrid_set(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """POST /api/offgrid — toggle off-grid mode."""
-    global _offgrid_last_toggle
-    now = time.monotonic()
-    if now - _offgrid_last_toggle < 2.0:
-        return _error("Rate limited, try again shortly")
     plugin = _get_plugin(request)
     try:
         body = await request.json()
@@ -565,6 +564,7 @@ async def handle_offgrid_set(request: aiohttp.web.Request) -> aiohttp.web.Respon
         return _error("'enabled' field required")
     if not isinstance(enabled, bool):
         return _error("'enabled' must be a boolean")
-    _offgrid_last_toggle = now
+    if not _offgrid_rl.check_and_record():
+        return _error("Rate limited, try again shortly")
     result = await _run_sync(plugin.app.set_offgrid_mode, enabled)
     return _ok(result)

@@ -14,6 +14,8 @@ from typing import Any
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
 
+_log = logging.getLogger(__name__)
+
 # Default log path
 _DEFAULT_LOG_PATH = "~/.local/share/reticulumpi/connectivity.log"
 
@@ -153,7 +155,7 @@ class ConnectivityMonitorPlugin(PluginBase):
             for h in self._conn_log.handlers[:]:
                 try:
                     h.close()
-                except Exception:
+                except OSError:
                     pass
                 self._conn_log.removeHandler(h)
         self._join_threads()
@@ -288,7 +290,7 @@ class ConnectivityMonitorPlugin(PluginBase):
         for h in logger.handlers[:]:
             try:
                 h.close()
-            except Exception:
+            except OSError:
                 pass
             logger.removeHandler(h)
 
@@ -405,20 +407,20 @@ class ConnectivityMonitorPlugin(PluginBase):
                 self._health["rnsd_reachable"] = False
             return False
         except Exception:
+            self.log.debug("rnsd reachability check failed", exc_info=True)
             self._last_iface_stats = None
             with self._lock:
                 self._health["rnsd_reachable"] = False
             return False
 
     def _check_interfaces(self) -> list[str]:
-        """Check interface health via get_interface_stats()."""
+        """Check interface health via cached stats from _check_rnsd()."""
         issues: list[str] = []
         try:
-            rns_instance = self.app.reticulum
-            if not rns_instance or not hasattr(rns_instance, "get_interface_stats"):
+            stats = self._last_iface_stats
+            if not stats:
                 return issues
 
-            stats = rns_instance.get_interface_stats()
             interfaces = stats.get("interfaces", [])
 
             online_count = 0
@@ -613,7 +615,7 @@ class ConnectivityMonitorPlugin(PluginBase):
                         info[key] = conv(m.group(1))
 
         except Exception:
-            pass
+            _log.debug("I2P stats collection failed", exc_info=True)
 
         return info
 
@@ -875,7 +877,7 @@ class ConnectivityMonitorPlugin(PluginBase):
             if hasattr(self, "event_bus") and self.event_bus:
                 self.event_bus.publish(event_type, {})
         except Exception:
-            pass
+            self.log.debug("Event publish failed for %s", event_type, exc_info=True)
 
     @staticmethod
     def _probe_port(host: str, port: int, timeout: float = 3) -> bool:

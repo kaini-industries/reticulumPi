@@ -609,7 +609,8 @@ class SpaceTrackerPlugin(PluginBase):
             return
         now = time.time()
         for group in self._groups:
-            last = self._tle_last_fetch.get(group, 0.0)
+            with self._cache_lock:
+                last = self._tle_last_fetch.get(group, 0.0)
             if (now - last) < self._tle_refresh_s:
                 continue
             if not self._limiters["celestrak"].can_request():
@@ -627,7 +628,8 @@ class SpaceTrackerPlugin(PluginBase):
         if status == 0:
             return  # limiter blocked
         if status == 304:
-            self._tle_last_fetch[group] = time.time()
+            with self._cache_lock:
+                self._tle_last_fetch[group] = time.time()
             self.log.debug("TLE group %s not modified", group)
             return
         if status != 200 or body is None:
@@ -650,7 +652,7 @@ class SpaceTrackerPlugin(PluginBase):
 
         with self._cache_lock:
             self._tle_cache[group] = sats
-        self._tle_last_fetch[group] = time.time()
+            self._tle_last_fetch[group] = time.time()
         self._save_rate_state()
 
         self.event_bus.publish(

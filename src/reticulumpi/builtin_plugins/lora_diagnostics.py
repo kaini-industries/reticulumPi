@@ -303,9 +303,9 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 result = _sp.run(["rnstatus"], capture_output=True, timeout=5)
                 if result.returncode == 0:
                     return
-            except Exception:
-                pass
-            time.sleep(1)
+            except (OSError, _sp.SubprocessError) as exc:
+                self.log.debug("rnstatus probe failed: %s", exc)
+            self._sleep_while_active(1)
         self.log.warning("rnsd did not become responsive within %ds", timeout)
 
     def _detect_announce_mode(self) -> str:
@@ -330,7 +330,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
                         return "local_priority"
                     return "all"
         except Exception:
-            pass
+            self.log.debug("announce mode detection failed", exc_info=True)
         return "unknown"
 
     def _get_rns_config_path(self) -> str:
@@ -432,7 +432,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 try:
                     hops = RNS.Transport.hops_to(dest_hash)
                 except Exception:
-                    pass
+                    self.log.debug("hops_to lookup failed", exc_info=True)
 
             with self._lock:
                 info["has_path"] = has_path

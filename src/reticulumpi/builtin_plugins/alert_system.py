@@ -176,14 +176,17 @@ class AlertSystemPlugin(PluginBase):
         with self._lock:
             self._last_alert = {"message": message, "time": now}
 
-        self.event_bus.publish(
-            events.ALERT_TRIGGERED,
-            {
-                "message": message,
-                "rule_key": rule_key,
-                "time": now,
-            },
-        )
+        try:
+            self.event_bus.publish(
+                events.ALERT_TRIGGERED,
+                {
+                    "message": message,
+                    "rule_key": rule_key,
+                    "time": now,
+                },
+            )
+        except Exception:
+            self.log.debug("event_bus.publish failed for ALERT_TRIGGERED", exc_info=True)
 
         if not self._lxmf_router or not self._lxmf_destination:
             return
@@ -261,12 +264,21 @@ class AlertSystemPlugin(PluginBase):
     def _check_loop(self) -> None:
         """Periodically check metric thresholds."""
         check_interval = self.config.get("check_interval", 60)
+        cooldown = self.config.get("cooldown_seconds", 300)
         rules = self.config.get("rules", _DEFAULT_RULES)
 
         while self._active:
             self._sleep_while_active(check_interval)
             if not self._active:
                 break
+
+            now = time.time()
+
+            # Prune expired cooldown entries to prevent unbounded growth
+            with self._lock:
+                expired_keys = [k for k, t in self._cooldowns.items() if now - t >= cooldown]
+                for k in expired_keys:
+                    del self._cooldowns[k]
 
             monitor = self.app.get_plugin("system_monitor")
             if not monitor or not hasattr(monitor, "latest_metrics"):

@@ -105,7 +105,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
             # Current v2 format: scrypt:<salt>:<n>:<r>:<p>:<hash>
             salt = bytes.fromhex(parts[1])
             n, r, p = int(parts[2]), int(parts[3]), int(parts[4])
-            if n > 2**15 or r > 8 or p > 5:
+            if n > 2**14 or r > 8 or p > 2:
                 return False
             expected = bytes.fromhex(parts[5])
         else:
@@ -113,6 +113,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
         dk = hashlib.scrypt(password.encode(), salt=salt, n=n, r=r, p=p, dklen=32)
         return secrets.compare_digest(dk, expected)
     except Exception:
+        log.warning("verify_password failed", exc_info=True)
         return False
 
 
@@ -214,7 +215,12 @@ class SqliteSessionStore:
         )
         self._conn.commit()
 
+    def _is_closed(self) -> bool:
+        return self._conn is None
+
     def __getitem__(self, token: str) -> dict[str, Any]:
+        if self._is_closed():
+            raise KeyError(token)
         with self._lock:
             row = self._conn.execute(
                 "SELECT data FROM sessions WHERE token = ?", (token,)
@@ -224,6 +230,8 @@ class SqliteSessionStore:
         return json.loads(row[0])
 
     def __setitem__(self, token: str, value: dict[str, Any]) -> None:
+        if self._is_closed():
+            raise RuntimeError("session store closed")
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO sessions (token, data) VALUES (?, ?)",
@@ -232,6 +240,8 @@ class SqliteSessionStore:
             self._conn.commit()
 
     def __delitem__(self, token: str) -> None:
+        if self._is_closed():
+            raise RuntimeError("session store closed")
         with self._lock:
             cursor = self._conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             self._conn.commit()
@@ -239,6 +249,8 @@ class SqliteSessionStore:
             raise KeyError(token)
 
     def __contains__(self, token: object) -> bool:
+        if self._is_closed():
+            return False
         with self._lock:
             row = self._conn.execute("SELECT 1 FROM sessions WHERE token = ?", (token,)).fetchone()
         return row is not None
@@ -251,11 +263,15 @@ class SqliteSessionStore:
                 self._conn = None
 
     def __len__(self) -> int:
+        if self._is_closed():
+            return 0
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
         return row[0] if row else 0
 
     def __iter__(self):
+        if self._is_closed():
+            return iter([])
         with self._lock:
             rows = self._conn.execute("SELECT token FROM sessions").fetchall()
         return iter(r[0] for r in rows)
@@ -267,6 +283,10 @@ class SqliteSessionStore:
             return default
 
     def pop(self, token: str, *args: Any) -> Any:
+        if self._is_closed():
+            if args:
+                return args[0]
+            raise KeyError(token)
         with self._lock:
             row = self._conn.execute(
                 "SELECT data FROM sessions WHERE token = ?", (token,)
@@ -280,6 +300,8 @@ class SqliteSessionStore:
         return json.loads(row[0])
 
     def items(self):
+        if self._is_closed():
+            return []
         with self._lock:
             rows = self._conn.execute("SELECT token, data FROM sessions").fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]

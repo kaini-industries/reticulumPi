@@ -95,7 +95,7 @@ class ACARSDecoder(SignalPluginBase):
             self._status = "unavailable"
             self._last_error = f"{self._decoder_bin} not found on PATH"
             self.log.warning(self._last_error)
-            return
+            raise RuntimeError(self._last_error)
 
         cmd = [
             decoder,
@@ -236,7 +236,7 @@ class ACARSDecoder(SignalPluginBase):
                 },
             )
         except Exception:
-            pass
+            self.log.debug("event publish failed", exc_info=True)
 
         self._snapshot_dirty = True
 

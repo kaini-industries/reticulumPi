@@ -17,15 +17,32 @@ log = logging.getLogger(__name__)
 class PluginLoader:
     """Discovers and loads PluginBase subclasses from directories."""
 
+    def __init__(self) -> None:
+        self._cache: dict[str, type[PluginBase]] | None = None
+        self._cache_mtimes: dict[str, float] = {}
+
+    def _dirs_changed(self, plugin_dirs: list[str]) -> bool:
+        """Return True if any plugin directory mtime has changed since last cache."""
+        for d in plugin_dirs:
+            try:
+                mtime = os.path.getmtime(d)
+            except OSError:
+                mtime = 0.0
+            if self._cache_mtimes.get(d) != mtime:
+                return True
+        return set(self._cache_mtimes.keys()) != set(plugin_dirs)
+
     def discover(self, plugin_dirs: list[str]) -> dict[str, type[PluginBase]]:
         """Scan directories for .py files containing PluginBase subclasses.
 
         Returns a dict mapping plugin_name -> plugin class.
+        Uses a cached result when directory mtimes haven't changed.
         """
+        if self._cache is not None and not self._dirs_changed(plugin_dirs):
+            return dict(self._cache)
+
         found: dict[str, type[PluginBase]] = {}
-        builtin_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "builtin_plugins"
-        )
+        builtin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builtin_plugins")
         for directory in plugin_dirs:
             if not os.path.isdir(directory):
                 log.warning("Plugin directory does not exist: %s", directory)
@@ -64,6 +81,15 @@ class PluginLoader:
                         )
                     found[attr.plugin_name] = attr
                     log.info("Discovered plugin: %s (from %s)", attr.plugin_name, filepath)
+
+        # Cache the result with current mtimes
+        self._cache = dict(found)
+        self._cache_mtimes = {}
+        for d in plugin_dirs:
+            try:
+                self._cache_mtimes[d] = os.path.getmtime(d)
+            except OSError:
+                self._cache_mtimes[d] = 0.0
         return found
 
     def _load_module_from_path(self, filepath: str) -> Any:

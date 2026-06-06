@@ -147,7 +147,8 @@ class MeshCoreGateway(PluginBase):
         self._active = True
         self._start_thread(self._run_async_loop, "meshcore-loop")
         # Wait for the event loop to be ready before starting the connection thread
-        self._loop_ready.wait(timeout=10)
+        if not self._loop_ready.wait(timeout=10):
+            self.log.error("MeshCore event loop failed to start within 10s timeout")
         self._start_thread(self._connection_loop, "meshcore-connect")
 
         self.log.info(
@@ -323,8 +324,9 @@ class MeshCoreGateway(PluginBase):
 
         # Query device info
         result = self._run_async(mc.commands.send_device_query())
+        device_info = None
         if result and hasattr(result, "payload"):
-            self._device_info = dict(result.payload)
+            device_info = dict(result.payload)
 
         # Fetch contacts
         self._run_async(mc.commands.get_contacts())
@@ -371,6 +373,8 @@ class MeshCoreGateway(PluginBase):
             self._connected = True
             self._connect_count += 1
             self._subscriptions = subs
+            if device_info is not None:
+                self._device_info = device_info
 
         # Send initial advertisement so other MeshCore nodes can discover us
         try:
@@ -495,11 +499,6 @@ class MeshCoreGateway(PluginBase):
             with self._lock:
                 self._contact_cache[key] = dict(payload)
             self._save_contact_cache()
-            # Also update the library's contacts dict so get_contacts() sees it
-            with self._lock:
-                mc = self._mc
-            if mc is not None and hasattr(mc, "contacts"):
-                mc.contacts[key] = dict(payload)
             self.log.info("New MeshCore peer: %s (%s…)", name or "unnamed", key[:12])
         except Exception:
             self.log.debug("Error handling new contact event", exc_info=True)
@@ -804,6 +803,9 @@ class MeshCoreGateway(PluginBase):
                     mc.commands.send_chan_msg(ch, text),
                     timeout=10,
                 )
+        except (ConnectionError, TimeoutError, AttributeError):
+            self.log.warning("MeshCore device disconnected during send")
+            return {"sent": False, "reason": "device_disconnected_during_send"}
         except Exception as exc:
             self.log.exception("Error sending MeshCore message")
             return {"sent": False, "reason": str(exc)}
@@ -889,19 +891,16 @@ class MeshCoreGateway(PluginBase):
         cached = self._broadcast_cache
         if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
             return cached[1]
-        result = {}
-        if hasattr(self, "get_status"):
-            s = self.get_status()
-            if s:
-                result["meshcore_status"] = s
-        if hasattr(self, "get_device_info"):
-            d = self.get_device_info()
-            if d:
-                result["meshcore_device"] = d
-        if hasattr(self, "get_contacts"):
-            c = self.get_contacts()
-            if c is not None:
-                result["meshcore_contacts"] = c
+        result: dict[str, Any] = {}
+        s = self.get_status()
+        if s:
+            result["meshcore_status"] = s
+        d = self.get_device_info()
+        if d:
+            result["meshcore_device"] = d
+        c = self.get_contacts()
+        if c is not None:
+            result["meshcore_contacts"] = c
         if result:
             self._broadcast_cache = (now, result)
         return result or None

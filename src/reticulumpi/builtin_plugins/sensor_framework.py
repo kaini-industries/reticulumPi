@@ -160,7 +160,7 @@ class BME280Driver(SensorDriver):
         if self._bus is not None:
             try:
                 self._bus.close()
-            except Exception:
+            except OSError:
                 pass
             self._bus = None
 
@@ -389,14 +389,14 @@ class SensorFrameworkPlugin(PluginBase):
         for _, driver in self._drivers:
             try:
                 driver.close()
-            except Exception:
+            except OSError:
                 pass
         self._drivers.clear()
         # Close DB
         if self._db:
             try:
                 self._db.close()
-            except Exception:
+            except OSError:
                 pass
             self._db = None
 

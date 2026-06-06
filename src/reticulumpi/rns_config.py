@@ -222,13 +222,21 @@ def add_interface_section(
 
 
 def write_rns_config(path: str, lines: list[str]) -> None:
-    """Atomically write *lines* back to *path*."""
+    """Atomically write *lines* back to *path*, preserving original permissions."""
     dir_name = os.path.dirname(path) or "."
+    # Preserve original file permissions if the file exists
+    orig_mode = None
+    try:
+        orig_mode = os.stat(path).st_mode
+    except OSError:
+        pass
     fd, tmp = tempfile.mkstemp(dir=dir_name, prefix=".rns_config_", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.writelines(lines)
         os.replace(tmp, path)
+        if orig_mode is not None:
+            os.chmod(path, orig_mode)
     except BaseException:
         try:
             os.unlink(tmp)

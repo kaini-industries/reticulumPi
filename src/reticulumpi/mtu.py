@@ -48,8 +48,6 @@ def truncate_for_mtu(header: str, body: str, mtu: int) -> str:
     if target <= 0:
         return header + ellipsis
 
-    truncated = body
-    while len(truncated.encode("utf-8")) > target:
-        truncated = truncated[:-1]
+    truncated = body.encode("utf-8")[:target].decode("utf-8", errors="ignore")
 
     return header + truncated + ellipsis

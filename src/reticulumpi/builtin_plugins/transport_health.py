@@ -356,7 +356,7 @@ class TransportHealthPlugin(PluginBase):
                 if clean == hex_hash:
                     return node.get("app_data", "") or node.get("app_name", "")
         except Exception:
-            pass
+            self.log.debug("Node name lookup from network_map failed", exc_info=True)
         return ""
 
     # --- SQLite ---

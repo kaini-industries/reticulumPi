@@ -120,7 +120,7 @@ class TestRnsdCheck:
 class TestInterfaceCheck:
     def test_all_interfaces_online(self, plugin):
         plugin.start()
-        plugin.app.reticulum.get_interface_stats.return_value = {
+        stats = {
             "interfaces": [
                 {"name": "Auto", "type": "AutoInterface", "status": True, "rxb": 0, "txb": 0},
                 {
@@ -132,6 +132,8 @@ class TestInterfaceCheck:
                 },
             ]
         }
+        plugin.app.reticulum.get_interface_stats.return_value = stats
+        plugin._last_iface_stats = stats
         issues = plugin._check_interfaces()
         assert len(issues) == 0
         assert plugin._health["interfaces_online"] == 2
@@ -140,7 +142,7 @@ class TestInterfaceCheck:
 
     def test_interface_offline(self, plugin):
         plugin.start()
-        plugin.app.reticulum.get_interface_stats.return_value = {
+        stats = {
             "interfaces": [
                 {
                     "name": "TCP Hub",
@@ -151,6 +153,8 @@ class TestInterfaceCheck:
                 },
             ]
         }
+        plugin.app.reticulum.get_interface_stats.return_value = stats
+        plugin._last_iface_stats = stats
         issues = plugin._check_interfaces()
         assert any("OFFLINE" in i for i in issues)
         assert plugin._health["interfaces_online"] == 0
@@ -158,20 +162,22 @@ class TestInterfaceCheck:
 
     def test_skips_local_interfaces(self, plugin):
         plugin.start()
-        plugin.app.reticulum.get_interface_stats.return_value = {
+        stats = {
             "interfaces": [
                 {"name": "Local", "type": "LocalClientInterface", "status": True},
                 {"name": "Server", "type": "LocalServerInterface", "status": True},
                 {"name": "Auto", "type": "AutoInterface", "status": True, "rxb": 0, "txb": 0},
             ]
         }
+        plugin.app.reticulum.get_interface_stats.return_value = stats
+        plugin._last_iface_stats = stats
         plugin._check_interfaces()
         assert plugin._health["interfaces_total"] == 1  # Only AutoInterface
         plugin.stop()
 
     def test_i2p_tracks_traffic(self, plugin):
         plugin.start()
-        plugin.app.reticulum.get_interface_stats.return_value = {
+        stats = {
             "interfaces": [
                 {
                     "name": "I2P",
@@ -183,6 +189,8 @@ class TestInterfaceCheck:
                 },
             ]
         }
+        plugin.app.reticulum.get_interface_stats.return_value = stats
+        plugin._last_iface_stats = stats
         issues = plugin._check_interfaces()
         assert plugin._health["i2p_traffic"] == {"rxb": 100, "txb": 200}
         # 0 RNS peers over I2P is not an interface issue
@@ -204,6 +212,7 @@ class TestInterfaceCheck:
             ]
         }
         plugin.app.reticulum.get_interface_stats.return_value = stats
+        plugin._last_iface_stats = stats
 
         # First call seeds previous traffic — no warning possible
         issues = plugin._check_interfaces()

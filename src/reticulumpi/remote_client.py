@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any
 
 import RNS
 import RNS.vendor.umsgpack as umsgpack
+
+log = logging.getLogger(__name__)
 
 
 # Commands that don't require extra input
@@ -79,6 +82,12 @@ class RemoteClient:
 
         # Create the destination
         remote_identity = RNS.Identity.recall(dest_hash)
+        if remote_identity is None:
+            print(
+                f"Error: could not recall identity for {RNS.prettyhexrep(dest_hash)}. "
+                "The identity may not have been announced yet."
+            )
+            return False
         destination = RNS.Destination(
             remote_identity,
             RNS.Destination.OUT,
@@ -147,6 +156,7 @@ class RemoteClient:
         try:
             return umsgpack.unpackb(receipt.response)
         except Exception:
+            log.debug("Failed to unpack response", exc_info=True)
             return {"raw": receipt.response}
 
     def close(self) -> None:
@@ -155,7 +165,7 @@ class RemoteClient:
             try:
                 self._link.teardown()
             except Exception:
-                pass
+                log.debug("Link teardown failed", exc_info=True)
 
     def _link_established(self, link: Any) -> None:
         self._link_ready.set()

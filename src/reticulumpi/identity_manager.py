@@ -55,6 +55,7 @@ def load_or_create(identity_path: str) -> RNS.Identity:
         os.close(fd)
         identity.to_file(tmp_path)
         os.replace(tmp_path, identity_path)
+        os.chmod(identity_path, 0o600)
         log.info("Created new identity and saved to %s", identity_path)
     except OSError:
         # Clean up temp file if replace failed

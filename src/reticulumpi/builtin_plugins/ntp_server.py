@@ -123,7 +123,7 @@ class NtpServerPlugin(PluginBase):
             self.event_bus.unsubscribe(events.GPS_FIX_RECEIVED, self._on_gps_fix)
             self.event_bus.unsubscribe(events.GPS_FIX_LOST, self._on_gps_lost)
         except Exception:
-            pass
+            self.log.debug("GPS event unsubscription failed", exc_info=True)
         self._join_threads(timeout=5)
 
     # ── Public API ─────────────────────────────────────────────────────

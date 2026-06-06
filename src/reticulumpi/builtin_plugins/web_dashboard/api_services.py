@@ -9,15 +9,18 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import logging
 import threading
 import time
 from collections import deque
 
-from .api_cache import api_cache
-
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok, _run_sync
+
+from .api_cache import api_cache
+
+log = logging.getLogger(__name__)
 
 
 # ── Send-endpoint rate limiter ─────────────────────────────────────
@@ -95,7 +98,7 @@ async def handle_lora_announce_mode(
 
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return _error("Invalid JSON body", 400)
 
     mode = body.get("mode", "")
@@ -123,6 +126,7 @@ async def handle_alerts(request: aiohttp.web.Request) -> aiohttp.web.Response:
     try:
         status = await _run_sync(alert_sys.get_status)
     except Exception:
+        log.debug("alert_system status collection failed", exc_info=True)
         status = {"error": "status collection failed"}
     return _ok(status)
 
@@ -212,7 +216,7 @@ async def handle_nomadnet_auth_add(
     try:
         body = await request.json()
         identity = body.get("identity", "")
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
         return _error("Invalid request body", 400)
     if not identity:
         return _error("identity field is required", 400)
@@ -236,7 +240,7 @@ async def handle_nomadnet_auth_remove(
     try:
         body = await request.json()
         identity = body.get("identity", "")
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
         return _error("Invalid request body", 400)
     if not identity:
         return _error("identity field is required", 400)
@@ -344,7 +348,7 @@ async def handle_meshtastic_channel_join(
 
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return _error("Invalid JSON body", 400)
 
     # URL-based join
@@ -482,7 +486,7 @@ async def handle_mesh_bridge_running(
         return _error("mesh_bridge plugin not available", 503)
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return _error("Invalid JSON body", 400)
     running = body.get("running")
     if not isinstance(running, bool):
@@ -609,7 +613,7 @@ async def handle_send_message(
 
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return _error("Invalid JSON body", 400)
 
     transport = body.get("transport", "")
@@ -701,6 +705,7 @@ async def handle_contacts(
                     functools.partial(hub.get_peer_sub_transports, transport),
                 )
             except Exception:
+                log.debug("peer sub-transport lookup failed", exc_info=True)
                 peer_subs = {}
 
         def _keep(c: dict) -> bool:
@@ -844,7 +849,7 @@ async def handle_mark_read(
         return _error("messaging_hub not available", 503)
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return _error("Invalid JSON", 400)
     contact_id = body.get("contact_id", "")
     if not contact_id:
@@ -898,6 +903,7 @@ async def handle_space_snapshot(
     try:
         snap = await _run_sync(tracker.get_snapshot)
     except Exception:
+        log.debug("space_tracker snapshot failed", exc_info=True)
         return _error("Failed to gather space_tracker snapshot", 500)
     snap["available"] = True
     return _ok(snap)
@@ -965,6 +971,7 @@ async def handle_adsb_snapshot(
     try:
         snap = await _run_sync(adsb.get_snapshot)
     except Exception:
+        log.debug("adsb_radar snapshot failed", exc_info=True)
         return _error("Failed to gather adsb_radar snapshot", 500)
     snap["available"] = True
     return _ok(snap)
@@ -981,6 +988,7 @@ async def handle_ntp_snapshot(
     try:
         snap = await _run_sync(ntp.get_snapshot)
     except Exception:
+        log.debug("ntp_server snapshot failed", exc_info=True)
         return _error("Failed to gather ntp_server snapshot", 500)
     snap["available"] = True
     return _ok(snap)
@@ -997,6 +1005,7 @@ async def handle_ntp_sources(
     try:
         snap = await _run_sync(ntp.get_snapshot)
     except Exception:
+        log.debug("ntp_server sources snapshot failed", exc_info=True)
         return _ok({"available": False, "sources": []})
     return _ok({"available": True, "sources": snap.get("sources", [])})
 
@@ -1015,6 +1024,7 @@ async def handle_link_tester_snapshot(
     try:
         return _ok(await _run_sync(lt.get_history))
     except Exception:
+        log.debug("link tester history failed", exc_info=True)
         return _error("Failed to gather link tester data", 500)
 
 
@@ -1028,7 +1038,7 @@ async def handle_link_tester_start(
         return _error("lora_link_tester plugin not available", 503)
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         body = {}
     count = body.get("count")
     if count is not None:
