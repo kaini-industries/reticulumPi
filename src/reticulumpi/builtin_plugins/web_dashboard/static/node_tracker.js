@@ -13,6 +13,7 @@
   var _activeIdx = -1;
   var _renderPending = false;
   var _debounceTimer = 0;
+  var _trailsEnabled = false;
 
   function _resolveDom() {
     if (_dom) return true;
@@ -33,6 +34,17 @@
       _closeResults();
       if (_dom.search) _dom.search.value = '';
     });
+    var trailCb = document.getElementById('node-tracker-trail-toggle');
+    if (trailCb) {
+      trailCb.checked = _trailsEnabled;
+      trailCb.addEventListener('change', function () {
+        _trailsEnabled = trailCb.checked;
+        try {
+          if (window.localStorage) localStorage.setItem('rpi_node_tracker_trails', _trailsEnabled ? 'true' : 'false');
+        } catch (e) { /* */ }
+        if (R.toggleMapTrails) R.toggleMapTrails(_trailsEnabled);
+      });
+    }
     return true;
   }
 
@@ -169,6 +181,10 @@
         }
       }
     } catch (e) { if (typeof console !== 'undefined') console.warn('node_tracker: could not load tracked nodes', e); }
+    try {
+      var trailPref = window.localStorage ? localStorage.getItem('rpi_node_tracker_trails') : null;
+      if (trailPref === 'true') _trailsEnabled = true;
+    } catch (e) { /* ignore */ }
   }
 
   function _saveTracked() {
@@ -361,4 +377,12 @@
   R.getTrackedNodeIds = getTrackedNodeIds;
   R.addTrackedNode = _addTrackedNode;
   R.removeTrackedNode = _removeTrackedNode;
+  R.getTrackedNodeSources = function () {
+    var result = {};
+    for (var id in _trackedIds) {
+      var d = _latestData[id];
+      result[id] = (d && d._source) || 'meshtastic';
+    }
+    return result;
+  };
 })();

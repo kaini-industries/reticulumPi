@@ -957,6 +957,34 @@ async def handle_gps_satellites(
     )
 
 
+# ── Node location tracker ───────────────────────────────────────────
+
+
+@api_cache(ttl=30, stale=60)
+async def handle_node_tracker_history(
+    request: aiohttp.web.Request,
+) -> aiohttp.web.Response:
+    """GET /api/node_tracker/history — position history for tracked nodes."""
+    plugin = _get_plugin(request)
+    tracker = plugin.app.get_plugin("node_location_tracker")
+    if not tracker or not hasattr(tracker, "get_history"):
+        return _ok({"history": {}, "message": "Node location tracker not available"})
+    nodes_param = request.query.get("nodes", "")
+    if not nodes_param:
+        return _error("nodes parameter is required", 400)
+    node_keys = [k.strip() for k in nodes_param.split(",") if k.strip()]
+    if len(node_keys) > 10:
+        return _error("Maximum 10 nodes per request", 400)
+    try:
+        hours = min(float(request.query.get("hours", "24")), 720)
+        limit = min(int(request.query.get("limit", "500")), 2000)
+    except ValueError:
+        return _error("Invalid hours or limit parameter", 400)
+    since = time.time() - (hours * 3600)
+    history = await _run_sync(tracker.get_history, node_keys, since, None, limit)
+    return _ok({"history": history})
+
+
 # ── ADS-B radar ──────────────────────────────────────────────────────
 
 
@@ -1242,6 +1270,8 @@ def setup_service_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/gps", handle_gps_snapshot)
     app.router.add_get("/api/gps/status", handle_gps_status)
     app.router.add_get("/api/gps/satellites", handle_gps_satellites)
+    # Node location tracker
+    app.router.add_get("/api/node_tracker/history", handle_node_tracker_history)
     # ADS-B radar
     app.router.add_get("/api/adsb", handle_adsb_snapshot)
     # NTP server

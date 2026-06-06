@@ -223,3 +223,6 @@ CAPTIVE_PORTAL_DEACTIVATED = "captive_portal.deactivated"
 
 # NomadNet subprocess health
 NOMADNET_CPU_RUNAWAY = "nomadnet.cpu_runaway"
+
+# Node location tracking
+NODE_POSITION_RECORDED = "node.position_recorded"

@@ -5308,6 +5308,34 @@ tr.lt-lost td { color: #ff6b6b; opacity: 0.7; }
 }
 .nt-chip-mc .nt-chip-remove { color: rgba(255, 107, 107, 0.7); }
 .nt-source-badge { font-size: 0.6rem; vertical-align: middle; }
+.nt-trail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin-left: 0.5rem;
+  user-select: none;
+}
+.nt-trail-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.map-trail-range {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+.map-trail-range.hidden {
+  display: none;
+}
+.map-trail-range .mesh-tab {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  min-width: unset;
+}
 
 /* ── Toast notifications ───────────────────────────────────────── */
 #toast-container {

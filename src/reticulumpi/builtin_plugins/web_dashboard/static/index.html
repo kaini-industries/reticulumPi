@@ -821,6 +821,9 @@
             <input type="text" id="node-tracker-search" class="rt-input" placeholder="Search nodes by name or ID..." autocomplete="off">
             <div class="nt-results" id="node-tracker-results"></div>
           </div>
+          <label class="nt-trail-toggle" id="node-tracker-trail-label">
+            <input type="checkbox" id="node-tracker-trail-toggle"> Show Trails
+          </label>
         </div>
         <div class="nt-chips" id="node-tracker-chips"></div>
         <div class="table-scroll">
@@ -852,6 +855,12 @@
           <button class="mesh-tab active" id="map-show-lora" title="Show LoRa neighbors only">LoRa Neighbors</button>
           <button class="mesh-tab" id="map-show-rns" title="Show Reticulum mesh peers only">Reticulum Peers</button>
           <button class="mesh-tab" id="map-show-tracked" title="Show tracked nodes only">Tracked</button>
+          <span class="map-trail-range hidden" id="map-trail-range">
+            <button class="mesh-tab" data-trail-hours="1">1h</button>
+            <button class="mesh-tab" data-trail-hours="6">6h</button>
+            <button class="mesh-tab active" data-trail-hours="24">24h</button>
+            <button class="mesh-tab" data-trail-hours="168">7d</button>
+          </span>
           <button class="mesh-tab" id="map-center-gps" title="Center on GPS location">My Location</button>
           <span class="map-stats" id="map-stats"></span>
         </div>

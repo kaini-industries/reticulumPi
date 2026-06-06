@@ -21,6 +21,10 @@
   var _gpsLive = false;      // true after first live GPS fix (not cached)
   var _hasLiveData = false;  // true after first WS/API data arrives
   var _idbSaveTimer = null;  // debounce timer for IndexedDB writes
+  var _trails = {};
+  var _trailCache = null;
+  var _trailHours = 24;
+  var _trailsEnabled = false;
 
   // -- IndexedDB persistence for last-known positions ----------------------
 
@@ -508,6 +512,92 @@
     }
   }
 
+  // -- Trail rendering ----------------------------------------------------
+
+  function _clearTrails() {
+    for (var k in _trails) {
+      if (_trails[k]) _map.removeLayer(_trails[k]);
+    }
+    _trails = {};
+  }
+
+  function _fetchTrails() {
+    if (!_map) return;
+    var sources = R.getTrackedNodeSources ? R.getTrackedNodeSources() : {};
+    var keys = [];
+    for (var id in sources) {
+      keys.push(sources[id] === 'meshcore' ? 'mc:' + id : 'msh:' + id);
+    }
+    if (!keys.length) { _clearTrails(); return; }
+    if (_trailCache && (performance.now() - _trailCache.fetchedAt) < 60000
+        && _trailCache.hours === _trailHours) {
+      _renderTrails(_trailCache.data);
+      return;
+    }
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/node_tracker/history?nodes=' + encodeURIComponent(keys.join(','))
+      + '&hours=' + _trailHours + '&limit=500');
+    xhr.onload = function () {
+      if (xhr.status === 200) {
+        try {
+          var resp = JSON.parse(xhr.responseText);
+          if (resp.ok && resp.data && resp.data.history) {
+            _trailCache = { data: resp.data.history, fetchedAt: performance.now(), hours: _trailHours };
+            _renderTrails(resp.data.history);
+          }
+        } catch (e) { /* ignore */ }
+      }
+    };
+    xhr.onerror = function () { _clearTrails(); };
+    xhr.send();
+  }
+
+  function _renderTrails(historyData) {
+    _clearTrails();
+    if (!_map) return;
+    for (var nodeKey in historyData) {
+      var points = historyData[nodeKey];
+      if (!points || points.length < 2) continue;
+      points.sort(function (a, b) { return a.timestamp - b.timestamp; });
+      var color = nodeKey.indexOf('mc:') === 0 ? '#f59e0b' : '#67ea94';
+      var group = L.layerGroup();
+      var bucketSize = Math.max(1, Math.ceil(points.length / 4));
+      var opacities = [0.2, 0.4, 0.6, 0.9];
+      for (var b = 0; b < 4; b++) {
+        var bStart = b * bucketSize;
+        var bEnd = Math.min(bStart + bucketSize, points.length);
+        if (bStart >= points.length) break;
+        var segCoords = [];
+        if (b > 0 && bStart > 0) {
+          segCoords.push([points[bStart - 1].latitude, points[bStart - 1].longitude]);
+        }
+        for (var si = bStart; si < bEnd; si++) {
+          segCoords.push([points[si].latitude, points[si].longitude]);
+        }
+        if (segCoords.length >= 2) {
+          L.polyline(segCoords, { color: color, weight: 3, opacity: opacities[b] }).addTo(group);
+        }
+      }
+      for (var j = 0; j < points.length; j++) {
+        var p = points[j];
+        var ts = new window.Date(p.timestamp * 1000).toLocaleString();
+        var popupText = esc(p.name || nodeKey) + '<br>' + esc(ts);
+        L.circleMarker([p.latitude, p.longitude], {
+          radius: 3, color: color, fillColor: color, fillOpacity: 0.7, weight: 1
+        }).bindPopup(popupText).addTo(group);
+      }
+      group.addTo(_map);
+      _trails[nodeKey] = group;
+    }
+  }
+
+  function _updateTrailRangeVisibility() {
+    var rangeEl = document.getElementById('map-trail-range');
+    if (rangeEl) {
+      rangeEl.classList.toggle('hidden', !(_trailsEnabled && _filter === 'tracked'));
+    }
+  }
+
   // -- Public API ----------------------------------------------------------
 
   function updateMap(nodes) {
@@ -608,12 +698,16 @@
       _clearActive();
       allBtn.classList.add('active');
       _render();
+      _clearTrails();
+      _updateTrailRangeVisibility();
     });
     loraBtn.addEventListener('click', function () {
       _filter = 'lora';
       _clearActive();
       loraBtn.classList.add('active');
       _render();
+      _clearTrails();
+      _updateTrailRangeVisibility();
     });
     if (rnsBtn) {
       rnsBtn.addEventListener('click', function () {
@@ -621,6 +715,8 @@
         _clearActive();
         rnsBtn.classList.add('active');
         _render();
+        _clearTrails();
+        _updateTrailRangeVisibility();
       });
     }
     if (trackedBtn) {
@@ -629,6 +725,8 @@
         _clearActive();
         trackedBtn.classList.add('active');
         _render();
+        if (_trailsEnabled) _fetchTrails(); else _clearTrails();
+        _updateTrailRangeVisibility();
       });
     }
     if (gpsBtn) {
@@ -644,6 +742,17 @@
     }
   }
   _wireFilterTabs();
+
+  var trailBtns = document.querySelectorAll('[data-trail-hours]');
+  for (var tb = 0; tb < trailBtns.length; tb++) {
+    trailBtns[tb].addEventListener('click', function () {
+      var hrs = parseInt(this.getAttribute('data-trail-hours'), 10);
+      for (var x = 0; x < trailBtns.length; x++) trailBtns[x].classList.remove('active');
+      this.classList.add('active');
+      R.setTrailHours(hrs);
+    });
+  }
+
   _loadGpsCache();
   if (_gpsPos && !_gpsLive) {
     _initMap();
@@ -656,6 +765,16 @@
 
   R.refreshMapTrackedFilter = function () {
     if (_filter === 'tracked') _render();
+  };
+  R.toggleMapTrails = function (enabled) {
+    _trailsEnabled = enabled;
+    _updateTrailRangeVisibility();
+    if (enabled && _filter === 'tracked') _fetchTrails(); else _clearTrails();
+  };
+  R.setTrailHours = function (hours) {
+    _trailHours = hours;
+    _trailCache = null;
+    if (_trailsEnabled && _filter === 'tracked') _fetchTrails();
   };
 
   // -- Handle window resize (Leaflet needs invalidateSize) -----------------
