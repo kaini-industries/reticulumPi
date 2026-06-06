@@ -936,6 +936,8 @@ body {
 .section.svc-meshcore   { border-left: 3px solid var(--yellow); }
 .section.svc-gps        { border-left: 3px solid var(--gps, #00e5ff); }
 .section.svc-ntp        { border-left: 3px solid var(--purple); }
+#ntp-metrics            { margin: 0.75rem 1rem 0; }
+.section.svc-ntp > .section-details { margin: 0.75rem 1rem; }
 .section.svc-hotspot    { border-left: 3px solid #4dd0e1; }
 
 .section.svc-reticulum > .section-header {
