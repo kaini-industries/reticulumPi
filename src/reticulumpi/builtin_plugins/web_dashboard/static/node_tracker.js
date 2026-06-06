@@ -13,7 +13,7 @@
   var _activeIdx = -1;
   var _renderPending = false;
   var _debounceTimer = 0;
-  var _trailsEnabled = false;
+  var _trailsEnabled = true;
 
   function _resolveDom() {
     if (_dom) return true;
@@ -183,7 +183,7 @@
     } catch (e) { if (typeof console !== 'undefined') console.warn('node_tracker: could not load tracked nodes', e); }
     try {
       var trailPref = window.localStorage ? localStorage.getItem('rpi_node_tracker_trails') : null;
-      if (trailPref === 'true') _trailsEnabled = true;
+      if (trailPref === 'false') _trailsEnabled = false;
     } catch (e) { /* ignore */ }
   }
 
