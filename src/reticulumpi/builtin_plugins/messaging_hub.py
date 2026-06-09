@@ -1779,6 +1779,7 @@ class MessagingHubPlugin(PluginBase):
         self._last_prune_ts = 0.0
         self._broadcast_cache: tuple[float, dict] | None = None
         self._broadcast_cache_ttl: float = 10.0
+        self._broadcast_cache_dirty_ts: float = 0.0
 
         # Register built-in LXMF adapter
         lxmf_cfg = self.config.get("lxmf", {})
@@ -2793,13 +2794,17 @@ class MessagingHubPlugin(PluginBase):
         }
 
     def _invalidate_broadcast_cache(self, event_type: str, data: dict) -> None:
-        self._broadcast_cache = None
+        if not self._broadcast_cache_dirty_ts:
+            self._broadcast_cache_dirty_ts = time.monotonic()
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
         now = time.monotonic()
         cached = self._broadcast_cache
         if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
-            return cached[1]
+            if self._broadcast_cache_dirty_ts and (now - self._broadcast_cache_dirty_ts) >= 2.0:
+                pass  # dirty and debounce expired — fall through to refresh
+            else:
+                return cached[1]
         result = {
             "transports": self.get_transports(),
             "unread": self.get_unread_counts_grouped(),
@@ -2807,6 +2812,7 @@ class MessagingHubPlugin(PluginBase):
         }
         snapshot = result or None
         self._broadcast_cache = (now, snapshot)
+        self._broadcast_cache_dirty_ts = 0.0
         return snapshot
 
     # ── Internal ───────────────────────────────────────────────────

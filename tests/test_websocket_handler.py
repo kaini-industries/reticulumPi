@@ -7,6 +7,7 @@ enrichment, WebSocket auth/connection lifecycle, and broadcast logic.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import tempfile
@@ -1468,6 +1469,46 @@ class TestPushToClients:
         # With gather, the fast send completes before the slow one wakes up.
         assert order == ["fast", "slow"]
 
+    def test_json_dumps_runs_in_executor(self):
+        """json.dumps must run via run_in_executor, not on the event loop."""
+        ws = MagicMock()
+        ws.send_str = AsyncMock()
+        _ws_clients.add(ws)
+
+        # Set a sentinel so the executor-identity assertion is non-vacuous.
+        sentinel_executor = object()
+        original_executor = wsh_module._broadcast_executor
+
+        executor_calls = []
+
+        async def fake_run_in_executor(executor, fn, *args):
+            executor_calls.append((executor, fn))
+            return fn(*args) if args else fn()
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            original_run = loop.run_in_executor
+            loop.run_in_executor = fake_run_in_executor
+            try:
+                await _push_to_clients("message", {"id": 1})
+            finally:
+                loop.run_in_executor = original_run
+
+        wsh_module._broadcast_executor = sentinel_executor
+        try:
+            asyncio.run(run())
+        finally:
+            wsh_module._broadcast_executor = original_executor
+
+        # run_in_executor was called exactly once (for json.dumps).
+        assert len(executor_calls) == 1
+        executor_arg, fn_arg = executor_calls[0]
+        # The executor passed should be _broadcast_executor.
+        assert executor_arg is sentinel_executor
+        # The callable should be a functools.partial wrapping json.dumps.
+        assert isinstance(fn_arg, functools.partial)
+        assert fn_arg.func is json.dumps
+
 
 # ── _enrich_and_push tests ────────────────────────────────────────
 
@@ -2408,6 +2449,52 @@ class TestWarmCacheLifecycle:
         assert wsh._hb_fail == 0
         assert wsh._cache_hits == 0
         assert wsh._last_hb_summary_ts == 0.0
+
+    def test_broadcast_executor_created_with_two_workers(self):
+        """_start_broadcast_task creates ThreadPoolExecutor with max_workers=2."""
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        plugin = MagicMock()
+        plugin.config = MagicMock()
+        plugin.config.get = MagicMock(return_value=5)
+        plugin.app.reticulum = MagicMock()
+        plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
+        plugin.app.plugins = {}
+        plugin.app.internet_probe = None
+        plugin.app.event_bus = MagicMock()
+
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+        app.on_startup = []
+        app.on_shutdown = []
+
+        async def run():
+            await wsh._start_broadcast_task(app)
+            assert wsh._broadcast_executor is not None
+            assert wsh._broadcast_executor._max_workers == 2
+            # Clean up
+            if wsh._broadcast_executor:
+                wsh._broadcast_executor.shutdown(wait=False)
+                wsh._broadcast_executor = None
+            if wsh._command_executor:
+                wsh._command_executor.shutdown(wait=False)
+                wsh._command_executor = None
+            if wsh._broadcast_task:
+                wsh._broadcast_task.cancel()
+                try:
+                    await wsh._broadcast_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                wsh._broadcast_task = None
+            if hasattr(wsh, "_spectrum_task") and wsh._spectrum_task:
+                wsh._spectrum_task.cancel()
+                try:
+                    await wsh._spectrum_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                wsh._spectrum_task = None
+
+        asyncio.run(run())
 
 
 class TestWarmCacheSummaryLog:

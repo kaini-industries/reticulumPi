@@ -561,12 +561,14 @@ async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
             if not payload:
                 continue
 
-            message = json.dumps(
+            message = await loop.run_in_executor(
+                _broadcast_executor,
+                json.dumps,
                 {
                     "type": "update",
                     "data": payload,
                     "timestamp": time.time(),
-                }
+                },
             )
 
             clients = list(_spectrum_clients)
@@ -1042,7 +1044,7 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
     _ws_plugin = app["plugin"]
     _push_sem = asyncio.Semaphore(8)
     _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=1,
+        max_workers=2,
         thread_name_prefix="ws-broadcast",
     )
     _command_executor = concurrent.futures.ThreadPoolExecutor(
@@ -1519,13 +1521,18 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
     try:
         if not _ws_clients:
             return
-        message = json.dumps(
-            {
-                "type": push_type,
-                "data": payload,
-                "timestamp": time.time(),
-            },
-            default=str,
+        loop = asyncio.get_running_loop()
+        message = await loop.run_in_executor(
+            _broadcast_executor,
+            functools.partial(
+                json.dumps,
+                {
+                    "type": push_type,
+                    "data": payload,
+                    "timestamp": time.time(),
+                },
+                default=str,
+            ),
         )
         clients = list(_ws_clients)
 

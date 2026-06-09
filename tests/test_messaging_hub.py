@@ -949,6 +949,84 @@ class TestMessagingHubPlugin:
         assert len(snapshot["conversations"]) == 1
         assert snapshot["conversations"][0]["contact_name"] == "Alice"
 
+    def test_debounce_serves_stale_cache_within_window(self, hub_plugin):
+        """Cache is NOT immediately invalidated — a call within the 2s debounce
+        window returns stale data even after a message event."""
+        # Prime the cache with a known monotonic base.
+        with patch("time.monotonic", return_value=99.0):
+            snap1 = hub_plugin.broadcast_snapshot(cycle_count=0)
+        assert snap1 is not None
+
+        # Store a new message (changes what get_conversations would return).
+        hub_plugin._store.store(
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="new msg",
+            from_id="bob1",
+            from_name="Bob",
+        )
+
+        # Simulate the event handler marking the cache dirty.
+        with patch("time.monotonic", return_value=100.0):
+            hub_plugin._invalidate_broadcast_cache(events.MESSAGE_RECEIVED, {})
+
+        # Call broadcast_snapshot 0.5s later — within the 2s debounce window.
+        with patch("time.monotonic", return_value=100.5):
+            snap2 = hub_plugin.broadcast_snapshot(cycle_count=0)
+
+        # Must return the cached (stale) snapshot — no Bob yet.
+        assert snap2 is snap1
+
+    def test_debounce_refreshes_after_window_expires(self, hub_plugin):
+        """Cache IS refreshed once the 2-second debounce window has elapsed."""
+        # Prime the cache with a known monotonic base.
+        with patch("time.monotonic", return_value=50.0):
+            snap1 = hub_plugin.broadcast_snapshot(cycle_count=0)
+        assert snap1 is not None
+        assert len(snap1["conversations"]) == 0
+
+        # Store a new message.
+        hub_plugin._store.store(
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="new msg",
+            from_id="bob1",
+            from_name="Bob",
+        )
+
+        # Mark dirty at t=51.
+        with patch("time.monotonic", return_value=51.0):
+            hub_plugin._invalidate_broadcast_cache(events.MESSAGE_RECEIVED, {})
+
+        # Call broadcast_snapshot at t=53.1 — 2.1s after dirty timestamp,
+        # but still within the 10s cache TTL (53.1 - 50.0 = 3.1s < 10s).
+        with patch("time.monotonic", return_value=53.1):
+            snap2 = hub_plugin.broadcast_snapshot(cycle_count=0)
+
+        # Must be a fresh snapshot containing the new conversation.
+        assert snap2 is not snap1
+        assert len(snap2["conversations"]) == 1
+        assert snap2["conversations"][0]["contact_name"] == "Bob"
+
+    def test_debounce_dirty_ts_resets_after_refresh(self, hub_plugin):
+        """The dirty timestamp resets to 0.0 after a debounced refresh."""
+        # Prime cache.
+        with patch("time.monotonic", return_value=10.0):
+            hub_plugin.broadcast_snapshot(cycle_count=0)
+
+        # Mark dirty.
+        with patch("time.monotonic", return_value=11.0):
+            hub_plugin._invalidate_broadcast_cache(events.MESSAGE_RECEIVED, {})
+        assert hub_plugin._broadcast_cache_dirty_ts == 11.0
+
+        # Refresh after debounce window.
+        with patch("time.monotonic", return_value=13.5):
+            hub_plugin.broadcast_snapshot(cycle_count=0)
+
+        assert hub_plugin._broadcast_cache_dirty_ts == 0.0
+
 
 # ═══════════════════════════════════════════════════════════════════
 # LXMFAdapter
