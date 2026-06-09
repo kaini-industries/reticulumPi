@@ -718,9 +718,9 @@ reticulumpi:
     #        - {freq_mhz: 101.1, label: "WKQX"}
     #        - {freq_mhz: 93.1, label: "WXRT"}
 
-    # Node Location Tracker — records node position over time from GPS.
+    # Node Location Tracker — records mesh node positions over time.
     # Builds a position history in SQLite for track visualization.
-    # Requires: gps_telemetry plugin enabled.
+    # Requires: meshtastic_gateway and/or meshcore_gateway plugin enabled.
     #node_location_tracker:
     #  enabled: true
     #  sample_interval: 120        # seconds between position samples

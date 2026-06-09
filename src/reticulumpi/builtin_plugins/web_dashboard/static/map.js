@@ -27,6 +27,7 @@
   var _trailsEnabled = false;
   var _trailRefreshTimer = null;
   var _trailFetching = false;
+  var _trailNoDataToasted = false;
 
   // -- IndexedDB persistence for last-known positions ----------------------
 
@@ -543,51 +544,79 @@
       + '&hours=' + _trailHours + '&limit=500').then(function (resp) {
       _trailFetching = false;
       if (resp && resp.ok && resp.data && resp.data.history) {
+        _trailNoDataToasted = false;
         _trailCache = { data: resp.data.history, fetchedAt: performance.now(), hours: _trailHours };
         _renderTrails(resp.data.history);
       } else {
         _clearTrails();
+        if (!_trailNoDataToasted) {
+          _trailNoDataToasted = true;
+          var msg = (resp && resp.data && resp.data.message) || 'No trail data for tracked nodes';
+          if (RPI.showToast) RPI.showToast(msg, 'info');
+        }
       }
-    });
+    }).catch(function () { _trailFetching = false; });
   }
 
   function _renderTrails(historyData) {
     _clearTrails();
     if (!_map) return;
+    var anyData = false;
     for (var nodeKey in historyData) {
       var points = historyData[nodeKey];
-      if (!points || points.length < 2) continue;
+      if (!points || points.length < 1) continue;
+      anyData = true;
       points.sort(function (a, b) { return a.timestamp - b.timestamp; });
       var color = nodeKey.indexOf('mc:') === 0 ? '#f59e0b' : '#67ea94';
       var group = L.layerGroup();
-      var bucketSize = Math.max(1, Math.ceil(points.length / 4));
-      var opacities = [0.2, 0.4, 0.6, 0.9];
-      for (var b = 0; b < 4; b++) {
-        var bStart = b * bucketSize;
-        var bEnd = Math.min(bStart + bucketSize, points.length);
-        if (bStart >= points.length) break;
-        var segCoords = [];
-        if (b > 0 && bStart > 0) {
-          segCoords.push([points[bStart - 1].latitude, points[bStart - 1].longitude]);
-        }
-        for (var si = bStart; si < bEnd; si++) {
-          segCoords.push([points[si].latitude, points[si].longitude]);
-        }
-        if (segCoords.length >= 2) {
-          L.polyline(segCoords, { color: color, weight: 3, opacity: opacities[b] }).addTo(group);
+      var stationary = true;
+      var eps = 0.0001;
+      for (var si = 1; si < points.length; si++) {
+        if (Math.abs(points[si].latitude - points[0].latitude) > eps ||
+            Math.abs(points[si].longitude - points[0].longitude) > eps) {
+          stationary = false;
+          break;
         }
       }
-      for (var j = 0; j < points.length; j++) {
-        var p = points[j];
-        var ts = new window.Date(p.timestamp * 1000).toLocaleString();
-        var popupText = esc(p.name || nodeKey) + '<br>' + esc(ts);
-        L.circleMarker([p.latitude, p.longitude], {
-          radius: 3, color: color, fillColor: color, fillOpacity: 0.7, weight: 1
-        }).bindPopup(popupText).addTo(group);
+      if (stationary) {
+        var center = [points[0].latitude, points[0].longitude];
+        L.circleMarker(center, {
+          radius: 14, color: color, weight: 2, dashArray: '4 4',
+          fillColor: color, fillOpacity: 0.1
+        }).bindPopup(
+          esc(points[0].name || nodeKey) + '<br>Stationary &middot; ' + points.length + ' points'
+        ).addTo(group);
+      } else {
+        var bucketSize = Math.max(1, Math.ceil(points.length / 4));
+        var opacities = [0.2, 0.4, 0.6, 0.9];
+        for (var b = 0; b < 4; b++) {
+          var bStart = b * bucketSize;
+          var bEnd = Math.min(bStart + bucketSize, points.length);
+          if (bStart >= points.length) break;
+          var segCoords = [];
+          if (b > 0 && bStart > 0) {
+            segCoords.push([points[bStart - 1].latitude, points[bStart - 1].longitude]);
+          }
+          for (var pi = bStart; pi < bEnd; pi++) {
+            segCoords.push([points[pi].latitude, points[pi].longitude]);
+          }
+          if (segCoords.length >= 2) {
+            L.polyline(segCoords, { color: color, weight: 3, opacity: opacities[b] }).addTo(group);
+          }
+        }
+        for (var j = 0; j < points.length; j++) {
+          var p = points[j];
+          var ts = new window.Date(p.timestamp * 1000).toLocaleString();
+          var popupText = esc(p.name || nodeKey) + '<br>' + esc(ts);
+          L.circleMarker([p.latitude, p.longitude], {
+            radius: 3, color: color, fillColor: color, fillOpacity: 0.7, weight: 1
+          }).bindPopup(popupText).addTo(group);
+        }
       }
       group.addTo(_map);
       _trails[nodeKey] = group;
     }
+    if (!anyData) _trailNoDataToasted = false;
   }
 
   function _updateTrailRangeVisibility() {
@@ -741,8 +770,7 @@
         _clearActive();
         trackedBtn.classList.add('active');
         _render();
-        if (_trailsEnabled) _fetchTrails(); else _clearTrails();
-        _startTrailRefresh();
+        if (_trailsEnabled) { _fetchTrails(); _startTrailRefresh(); } else _clearTrails();
         _updateTrailRangeVisibility();
       });
     }
@@ -800,6 +828,7 @@
     _updateTrailRangeVisibility();
     if (enabled && _filter === 'tracked') {
       _fetchTrails();
+      _startTrailRefresh();
     } else {
       _stopTrailRefresh();
       _clearTrails();

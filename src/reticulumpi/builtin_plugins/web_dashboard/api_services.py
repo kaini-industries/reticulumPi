@@ -981,7 +981,11 @@ async def handle_node_tracker_history(
     except ValueError:
         return _error("Invalid hours or limit parameter", 400)
     since = time.time() - (hours * 3600)
-    history = await _run_sync(tracker.get_history, node_keys, since, None, limit)
+    try:
+        history = await _run_sync(tracker.get_history, node_keys, since, None, limit)
+    except Exception:
+        log.debug("node_location_tracker history failed", exc_info=True)
+        return _error("Failed to retrieve position history", 500)
     return _ok({"history": history})
 
 
