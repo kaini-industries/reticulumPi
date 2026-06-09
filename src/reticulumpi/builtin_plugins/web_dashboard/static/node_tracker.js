@@ -384,7 +384,9 @@
     var result = {};
     for (var id in _trackedIds) {
       var d = _latestData[id];
-      result[id] = (d && d._source) || 'meshtastic';
+      var src = d && d._source;
+      if (!src) src = /^[0-9a-f]{64}$/i.test(id) ? 'meshcore' : 'meshtastic';
+      result[id] = src;
     }
     return result;
   };
