@@ -1082,6 +1082,9 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.OFFGRID_MODE_CHANGED, _on_offgrid_event)
         event_bus.subscribe(_events.MESHTASTIC_FIRMWARE_HANG, _on_firmware_event)
         event_bus.subscribe(_events.MESHTASTIC_FIRMWARE_RECOVERED, _on_firmware_event)
+        event_bus.subscribe(
+            _events.NODE_POSITION_RECORDED, _on_position_recorded_event
+        )
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -1112,6 +1115,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_internet_event)
             event_bus.unsubscribe_all(_on_offgrid_event)
             event_bus.unsubscribe_all(_on_firmware_event)
+            event_bus.unsubscribe_all(_on_position_recorded_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _spectrum_task:
@@ -1385,6 +1389,19 @@ def _on_alert_event(event_type: str, data: dict) -> None:
         return
     try:
         loop.call_soon_threadsafe(_schedule_push, "alert", data)
+    except (RuntimeError, AttributeError):
+        pass
+
+
+def _on_position_recorded_event(event_type: str, data: dict) -> None:
+    """Event-bus callback for NODE_POSITION_RECORDED — notify WS clients."""
+    loop = _ws_loop
+    if loop is None or not _ws_clients:
+        return
+    try:
+        loop.call_soon_threadsafe(
+            _schedule_push, "trail_update", {"count": data.get("count", 0)}
+        )
     except (RuntimeError, AttributeError):
         pass
 

@@ -960,7 +960,7 @@ async def handle_gps_satellites(
 # ── Node location tracker ───────────────────────────────────────────
 
 
-@api_cache(ttl=30, stale=60)
+@api_cache(ttl=10, stale=20)
 async def handle_node_tracker_history(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:

@@ -1719,6 +1719,10 @@
           if (_offgridReenableTimer) { clearTimeout(_offgridReenableTimer); _offgridReenableTimer = null; }
           return;
         }
+        if (msg.type === 'trail_update') {
+          if (RPI.onTrailUpdate) RPI.onTrailUpdate(msg.data);
+          return;
+        }
         if (msg.type === 'update' && msg.data) {
           _lastWsUpdate = Date.now() / 1000;
           if (!_wsFirstTick) {

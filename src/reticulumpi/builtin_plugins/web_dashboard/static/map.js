@@ -25,6 +25,7 @@
   var _trailCache = null;
   var _trailHours = 24;
   var _trailsEnabled = false;
+  var _trailRefreshTimer = null;
 
   // -- IndexedDB persistence for last-known positions ----------------------
 
@@ -529,7 +530,7 @@
       keys.push(sources[id] === 'meshcore' ? 'mc:' + id : 'msh:' + id);
     }
     if (!keys.length) { _clearTrails(); return; }
-    if (_trailCache && (performance.now() - _trailCache.fetchedAt) < 60000
+    if (_trailCache && (performance.now() - _trailCache.fetchedAt) < 15000
         && _trailCache.hours === _trailHours) {
       _renderTrails(_trailCache.data);
       return;
@@ -595,6 +596,20 @@
     var rangeEl = document.getElementById('map-trail-range');
     if (rangeEl) {
       rangeEl.classList.toggle('hidden', !(_trailsEnabled && _filter === 'tracked'));
+    }
+  }
+
+  function _startTrailRefresh() {
+    if (_trailRefreshTimer) return;
+    _trailRefreshTimer = setInterval(function () {
+      if (_filter === 'tracked' && _trailsEnabled) _fetchTrails();
+    }, 30000);
+  }
+
+  function _stopTrailRefresh() {
+    if (_trailRefreshTimer) {
+      clearInterval(_trailRefreshTimer);
+      _trailRefreshTimer = null;
     }
   }
 
@@ -699,6 +714,7 @@
       allBtn.classList.add('active');
       _render();
       _clearTrails();
+      _stopTrailRefresh();
       _updateTrailRangeVisibility();
     });
     loraBtn.addEventListener('click', function () {
@@ -707,6 +723,7 @@
       loraBtn.classList.add('active');
       _render();
       _clearTrails();
+      _stopTrailRefresh();
       _updateTrailRangeVisibility();
     });
     if (rnsBtn) {
@@ -716,6 +733,7 @@
         rnsBtn.classList.add('active');
         _render();
         _clearTrails();
+        _stopTrailRefresh();
         _updateTrailRangeVisibility();
       });
     }
@@ -726,6 +744,7 @@
         trackedBtn.classList.add('active');
         _render();
         if (_trailsEnabled) _fetchTrails(); else _clearTrails();
+        _startTrailRefresh();
         _updateTrailRangeVisibility();
       });
     }
@@ -764,7 +783,19 @@
   _loadPositions();
 
   R.refreshMapTrackedFilter = function () {
-    if (_filter === 'tracked') _render();
+    if (_filter === 'tracked') {
+      _render();
+      if (_trailsEnabled) {
+        _trailCache = null;
+        _fetchTrails();
+      }
+    }
+  };
+  R.onTrailUpdate = function () {
+    if (_filter === 'tracked' && _trailsEnabled) {
+      _trailCache = null;
+      _fetchTrails();
+    }
   };
   R.toggleMapTrails = function (enabled) {
     _trailsEnabled = enabled;
