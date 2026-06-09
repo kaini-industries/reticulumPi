@@ -32,6 +32,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _on_firmware_event,
     _on_internet_event,
     _on_message_event,
+    _on_position_recorded_event,
     _on_status_event,
     _parse_rnode_config,
     _push_to_clients,
@@ -3027,6 +3028,60 @@ class TestOnFirmwareEvent:
             _on_firmware_event("meshtastic.firmware_hang", {"reason": "probe_timeout"})
         finally:
             _ws_clients.discard(ws)
+
+
+# ── _on_position_recorded_event tests ────────────────────────────────
+
+
+class TestOnPositionRecordedEvent:
+    """NODE_POSITION_RECORDED callback → scheduled WS push with trail_update type."""
+
+    def test_noop_when_loop_missing(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        with patch.object(wsh, "_ws_loop", None):
+            _on_position_recorded_event("node.position_recorded", {"count": 3})
+
+    def test_noop_when_no_clients(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_position_recorded_event("node.position_recorded", {"count": 3})
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_schedules_push_with_trail_update_type(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        _ws_clients.add(MagicMock())
+        data = {"count": 5}
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_position_recorded_event("node.position_recorded", data)
+        loop.call_soon_threadsafe.assert_called_once()
+        args = loop.call_soon_threadsafe.call_args.args
+        assert args[0] is wsh._schedule_push
+        assert args[1] == "trail_update"
+        assert args[2] == {"count": 5}
+
+    def test_defaults_count_to_zero(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_position_recorded_event("node.position_recorded", {})
+        args = loop.call_soon_threadsafe.call_args.args
+        assert args[2] == {"count": 0}
+
+    def test_swallows_runtime_error_on_closed_loop(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        loop = MagicMock()
+        loop.call_soon_threadsafe.side_effect = RuntimeError("loop closed")
+        _ws_clients.add(MagicMock())
+        with patch.object(wsh, "_ws_loop", loop):
+            _on_position_recorded_event("node.position_recorded", {"count": 1})
 
 
 # ── Origin validation tests ──────────────────────────────────────────

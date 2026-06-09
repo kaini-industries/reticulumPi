@@ -372,6 +372,9 @@
   });
 
   _loadTracked();
+  setTimeout(function () {
+    if (_trailsEnabled && R.toggleMapTrails) R.toggleMapTrails(true);
+  }, 0);
 
   R.updateNodeTracker = updateNodeTracker;
   R.getTrackedNodeIds = getTrackedNodeIds;

@@ -293,6 +293,35 @@ class TestPositionRecording:
 
         plugin.stop()
 
+    def test_publishes_position_recorded_event(self, mock_app, base_config):
+        from reticulumpi import events
+
+        msh_gw = _mock_meshtastic_gateway(
+            nodes=[_meshtastic_node("!evtnode", 40.7128, -74.0060, "EvtNode")]
+        )
+        mock_app.get_plugin = MagicMock(
+            side_effect=lambda name: {
+                "meshtastic_gateway": msh_gw,
+                "meshcore_gateway": None,
+            }.get(name)
+        )
+
+        received = []
+        mock_app.event_bus.subscribe(
+            events.NODE_POSITION_RECORDED,
+            lambda et, data: received.append((et, data)),
+        )
+
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+        plugin._collect_positions()
+
+        assert len(received) == 1
+        assert received[0][0] == events.NODE_POSITION_RECORDED
+        assert received[0][1] == {"count": 1}
+
+        plugin.stop()
+
 
 class TestDeduplication:
     def test_dedup_by_distance(self, mock_app, base_config):

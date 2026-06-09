@@ -1116,6 +1116,7 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
             event_bus.unsubscribe_all(_on_offgrid_event)
             event_bus.unsubscribe_all(_on_firmware_event)
             event_bus.unsubscribe_all(_on_position_recorded_event)
+            event_bus.unsubscribe_all(_on_conversation_deleted_event)
     except Exception:
         log.debug("Error unsubscribing WS handler", exc_info=True)
     if _spectrum_task:

@@ -26,6 +26,7 @@
   var _trailHours = 24;
   var _trailsEnabled = false;
   var _trailRefreshTimer = null;
+  var _trailFetching = false;
 
   // -- IndexedDB persistence for last-known positions ----------------------
 
@@ -516,6 +517,7 @@
   // -- Trail rendering ----------------------------------------------------
 
   function _clearTrails() {
+    if (!_map) return;
     for (var k in _trails) {
       if (_trails[k]) _map.removeLayer(_trails[k]);
     }
@@ -535,10 +537,13 @@
       _renderTrails(_trailCache.data);
       return;
     }
+    if (_trailFetching) return;
+    _trailFetching = true;
     var xhr = new XMLHttpRequest();
     xhr.open('GET', '/api/node_tracker/history?nodes=' + encodeURIComponent(keys.join(','))
       + '&hours=' + _trailHours + '&limit=500');
     xhr.onload = function () {
+      _trailFetching = false;
       if (xhr.status === 200) {
         try {
           var resp = JSON.parse(xhr.responseText);
@@ -549,7 +554,7 @@
         } catch (e) { /* ignore */ }
       }
     };
-    xhr.onerror = function () { _clearTrails(); };
+    xhr.onerror = function () { _trailFetching = false; _clearTrails(); };
     xhr.send();
   }
 
@@ -800,7 +805,12 @@
   R.toggleMapTrails = function (enabled) {
     _trailsEnabled = enabled;
     _updateTrailRangeVisibility();
-    if (enabled && _filter === 'tracked') _fetchTrails(); else _clearTrails();
+    if (enabled && _filter === 'tracked') {
+      _fetchTrails();
+    } else {
+      _stopTrailRefresh();
+      _clearTrails();
+    }
   };
   R.setTrailHours = function (hours) {
     _trailHours = hours;
