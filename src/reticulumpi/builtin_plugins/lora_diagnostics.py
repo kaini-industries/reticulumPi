@@ -69,6 +69,10 @@ class LoRaDiagnosticsPlugin(PluginBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def __init__(self, app: Any, plugin_config: dict[str, Any]) -> None:
+        self._lock = threading.Lock()
+        super().__init__(app, plugin_config)
+
     def validate_config(self) -> None:
         monitor = self.config.get("monitor_interval", _DEFAULT_MONITOR_INTERVAL)
         if not isinstance(monitor, (int, float)) or monitor < _MIN_MONITOR_INTERVAL:
@@ -89,7 +93,6 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
     def start(self) -> None:
         self._active = True
-        self._lock = threading.Lock()
 
         # Parse monitored destinations
         self._monitored: dict[str, dict[str, Any]] = {}
@@ -156,6 +159,8 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
     def get_status(self) -> dict[str, Any]:
         with self._lock:
+            if not hasattr(self, "_monitored"):
+                return {"active": False}
             return {
                 "active": self._active,
                 "monitored_destinations": len(self._monitored),
@@ -164,6 +169,8 @@ class LoRaDiagnosticsPlugin(PluginBase):
             }
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
+        if not hasattr(self, "_monitored"):
+            return None
         return self.get_diagnostics()
 
     def get_diagnostics(self) -> dict[str, Any]:
