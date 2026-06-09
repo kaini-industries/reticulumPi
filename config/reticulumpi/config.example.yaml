@@ -604,7 +604,7 @@ reticulumpi:
     #
     # Example 2-dongle setup:
     #   spectrum_scanner:  device_serial: "07143901"  # Nooelec SMArTee XTR (wideband + LoRa presets)
-    #   adsb_radar:        device_serial: "00000001"  # RTL-SDR Blog V4 (1090 MHz ADS-B)
+    #   adsb_radar:        device_serial: "00001000"  # FlightAware Pro Stick Plus (1090 MHz ADS-B)
     # --------------------------------------------------------------------
 
     # SDR spectrum scanner — RTL-SDR sweep feeding a waterfall panel in
@@ -672,11 +672,11 @@ reticulumpi:
     #adsb_radar:
     #  enabled: false
     #  dump1090_bin: dump1090              # Binary name or path
-    #  device_serial: "00000001"          # RTL-SDR USB serial (stable; run rtl_test -t to find)
+    #  device_serial: "00001000"          # RTL-SDR USB serial (stable; run rtl_test -t to find)
     #  # device_index: 2                  # Numeric index fallback (fragile; prefer device_serial)
     #  gain: max                          # Tuner gain (dB or "max")
     #  ppm: 0                             # Frequency correction (ppm)
-    #  enable_bias_tee: false             # Enable bias-T power (for active antennas)
+    #  enable_bias_tee: false             # Enable bias-T power (not needed for FA Pro Stick Plus)
     #  sbs_port: 30003                    # SBS BaseStation TCP port
     #  stale_timeout: 300                 # Remove aircraft after N seconds without a message
     #  max_restarts: 5                    # Subprocess crash-restart cap
