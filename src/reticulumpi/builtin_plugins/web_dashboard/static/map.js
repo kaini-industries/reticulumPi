@@ -539,23 +539,16 @@
     }
     if (_trailFetching) return;
     _trailFetching = true;
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', '/api/node_tracker/history?nodes=' + encodeURIComponent(keys.join(','))
-      + '&hours=' + _trailHours + '&limit=500');
-    xhr.onload = function () {
+    api('/api/node_tracker/history?nodes=' + encodeURIComponent(keys.join(','))
+      + '&hours=' + _trailHours + '&limit=500').then(function (resp) {
       _trailFetching = false;
-      if (xhr.status === 200) {
-        try {
-          var resp = JSON.parse(xhr.responseText);
-          if (resp.ok && resp.data && resp.data.history) {
-            _trailCache = { data: resp.data.history, fetchedAt: performance.now(), hours: _trailHours };
-            _renderTrails(resp.data.history);
-          }
-        } catch (e) { /* ignore */ }
+      if (resp && resp.ok && resp.data && resp.data.history) {
+        _trailCache = { data: resp.data.history, fetchedAt: performance.now(), hours: _trailHours };
+        _renderTrails(resp.data.history);
+      } else {
+        _clearTrails();
       }
-    };
-    xhr.onerror = function () { _trailFetching = false; _clearTrails(); };
-    xhr.send();
+    });
   }
 
   function _renderTrails(historyData) {
