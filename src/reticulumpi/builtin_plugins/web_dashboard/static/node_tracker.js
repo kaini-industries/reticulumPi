@@ -6,6 +6,7 @@
 
   var LS_KEY = 'rpi_tracked_nodes';
   var _trackedIds = Object.create(null);
+  var _trackedSources = Object.create(null);
   var _latestData = Object.create(null);
   var _allKnownMsh = [];
   var _allKnownMc = [];
@@ -172,11 +173,20 @@
     try {
       var raw = window.localStorage ? localStorage.getItem(LS_KEY) : null;
       if (raw) {
-        var arr = JSON.parse(raw);
-        if (Array.isArray(arr)) {
+        var parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
           _trackedIds = Object.create(null);
-          for (var i = 0; i < arr.length; i++) {
-            if (typeof arr[i] === 'string' && arr[i]) _trackedIds[arr[i]] = true;
+          _trackedSources = Object.create(null);
+          for (var i = 0; i < parsed.length; i++) {
+            if (typeof parsed[i] === 'string' && parsed[i]) _trackedIds[parsed[i]] = true;
+          }
+        } else if (parsed && typeof parsed === 'object') {
+          _trackedIds = Object.create(null);
+          _trackedSources = Object.create(null);
+          for (var id in parsed) {
+            if (!id) continue;
+            _trackedIds[id] = true;
+            if (typeof parsed[id] === 'string' && parsed[id]) _trackedSources[id] = parsed[id];
           }
         }
       }
@@ -189,14 +199,25 @@
 
   function _saveTracked() {
     try {
-      var arr = Object.keys(_trackedIds);
-      if (window.localStorage) localStorage.setItem(LS_KEY, JSON.stringify(arr));
+      var obj = {};
+      var ids = Object.keys(_trackedIds);
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var src = _trackedSources[id];
+        if (!src) src = /^[0-9a-f]{64}$/i.test(id) ? 'meshcore' : 'meshtastic';
+        obj[id] = src;
+      }
+      if (window.localStorage) localStorage.setItem(LS_KEY, JSON.stringify(obj));
     } catch (e) { /* localStorage unavailable */ }
   }
 
   function _addTrackedNode(id) {
     if (_trackedIds[id]) return;
     _trackedIds[id] = true;
+    var d = _latestData[id];
+    var src = d && d._source;
+    if (!src) src = /^[0-9a-f]{64}$/i.test(id) ? 'meshcore' : 'meshtastic';
+    _trackedSources[id] = src;
     _saveTracked();
     _renderAll();
     if (R.refreshMapTrackedFilter) R.refreshMapTrackedFilter();
@@ -205,6 +226,7 @@
   function _removeTrackedNode(id) {
     if (!_trackedIds[id]) return;
     delete _trackedIds[id];
+    delete _trackedSources[id];
     _saveTracked();
     _renderAll();
     if (R.refreshMapTrackedFilter) R.refreshMapTrackedFilter();
@@ -384,8 +406,9 @@
     var result = {};
     for (var id in _trackedIds) {
       var d = _latestData[id];
-      var src = d && d._source;
+      var src = (d && d._source) || _trackedSources[id];
       if (!src) src = /^[0-9a-f]{64}$/i.test(id) ? 'meshcore' : 'meshtastic';
+      if (src === 'reticulum' || src === 'rns') continue;
       result[id] = src;
     }
     return result;

@@ -533,8 +533,9 @@
       keys.push(sources[id] === 'meshcore' ? 'mc:' + id : 'msh:' + id);
     }
     if (!keys.length) { _clearTrails(); return; }
+    var keyset = keys.slice().sort().join(',');
     if (_trailCache && (performance.now() - _trailCache.fetchedAt) < 15000
-        && _trailCache.hours === _trailHours) {
+        && _trailCache.hours === _trailHours && _trailCache.keyset === keyset) {
       _renderTrails(_trailCache.data);
       return;
     }
@@ -543,9 +544,10 @@
     api('/api/node_tracker/history?nodes=' + encodeURIComponent(keys.join(','))
       + '&hours=' + _trailHours + '&limit=500').then(function (resp) {
       _trailFetching = false;
+      if (_filter !== 'tracked' || !_trailsEnabled) return;
       if (resp && resp.ok && resp.data && resp.data.history) {
         _trailNoDataToasted = false;
-        _trailCache = { data: resp.data.history, fetchedAt: performance.now(), hours: _trailHours };
+        _trailCache = { data: resp.data.history, fetchedAt: performance.now(), hours: _trailHours, keyset: keyset };
         _renderTrails(resp.data.history);
       } else {
         _clearTrails();
