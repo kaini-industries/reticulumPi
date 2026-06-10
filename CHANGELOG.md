@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-10
+
+### Fixed
+- **node_location_tracker `get_history` newest-N** — with `limit_per_node` set, the query
+  returned the *oldest* N rows in the window instead of the newest, so a busy node's trail
+  silently dropped its most recent positions. The limited path now selects newest-N and
+  returns them in ascending order (contract unchanged).
+- **Map trail fetch race** — switching filter tabs (or toggling trails off) mid-fetch no
+  longer renders trails on the wrong view or raises a late no-data toast.
+- **Map trail cache keyed on node set** — the 15s trail cache now also matches on the
+  sorted tracked-node key set, so a just-added node's trail appears immediately instead of
+  serving a stale cached set.
+- **node_location_tracker `_last_pos` prune** — the in-memory last-position cache is now
+  pruned alongside DB retention instead of growing unbounded.
+
+### Added
+- **Tracked-node source persistence** — the map tracker now stores `{id: source}` in
+  localStorage instead of a bare id array, so meshcore/meshtastic key prefixes survive
+  reloads without regex inference (legacy array payloads still load). Ids resolving to
+  reticulum/rns are omitted from trail queries.
+- **API test coverage for `/api/node_tracker/history`** — new `tests/test_api_services.py`
+  covering parameter validation, hours/limit caps, CSV parsing, limit semantics, and
+  error paths; tightened `get_history` tests to assert *which* rows are returned.
+
+## [0.2.1] - 2026-06-02
+
 ### Added
 - **Mesh Bridge plugin** (`mesh_bridge`) — bidirectional relay between Meshtastic and MeshCore mesh networks. Subscribes to `MESHTASTIC_MESSAGE_RECEIVED` and `MESHCORE_MESSAGE_RECEIVED` events, re-sends broadcasts (and optionally DMs) on the opposite network via `messaging_hub.send_message()`. Features: origin tag prefix (`[via Mesh]` / `[via Core]`), two-layer loop prevention (regex + 60s dedup cache with opposite-side pre-seeding), MTU-aware truncation, per-pair allow/deny regex filters, and optional DM bridging with explicit identity pairs.
 - **Mesh Bridge runtime pause/resume** — operator can pause/resume relaying without restarting the service via (1) dashboard toggle card, (2) `POST /api/mesh_bridge/running` endpoint, or (3) `reticulumpi --mesh-bridge {status,pause,resume}` CLI. Runtime state persists to `~/.local/share/reticulumpi/mesh_bridge_state.json` across restarts. Rate-based circuit breaker auto-pauses if traffic exceeds a configurable threshold (default 20 relays/60s).
