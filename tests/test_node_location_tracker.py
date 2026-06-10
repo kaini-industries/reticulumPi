@@ -416,6 +416,25 @@ class TestPruning:
 
         plugin.stop()
 
+    def test_prune_drops_stale_last_pos(self, mock_app, base_config):
+        retention_days = base_config.get("retention_days", 30)
+
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        now = time.time()
+        cutoff = now - retention_days * 86400
+        # Fresh entry stays, stale entry (older than the retention cutoff) is dropped.
+        plugin._last_pos["msh:!fresh"] = (40.0, -74.0, now)
+        plugin._last_pos["msh:!stale"] = (41.0, -73.0, cutoff - 86400)
+
+        plugin._prune()
+
+        assert "msh:!fresh" in plugin._last_pos
+        assert "msh:!stale" not in plugin._last_pos
+
+        plugin.stop()
+
     def test_prune_by_row_cap(self, mock_app, base_config):
         base_config["max_rows"] = 5
         base_config["retention_days"] = 365
@@ -500,8 +519,28 @@ class TestGetHistory:
         )
         assert len(result["msh:!a1"]) == 2
 
+        # Regression guard: must return the NEWEST 2 rows (now-3600, now-1800),
+        # not the oldest 2, and still in ascending timestamp order.
         timestamps = [e["timestamp"] for e in result["msh:!a1"]]
-        assert timestamps == sorted(timestamps)
+        assert timestamps == [pytest.approx(now - 3600), pytest.approx(now - 1800)]
+
+        plugin.stop()
+
+    def test_get_history_no_limit_returns_all_ascending(self, mock_app, base_config):
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+        now = self._populate(base_config["db_path"])
+
+        result = plugin.get_history(["msh:!a1"], since=now - 8000)
+        assert len(result["msh:!a1"]) == 3
+
+        # No-limit path returns ALL rows in ascending timestamp order.
+        timestamps = [e["timestamp"] for e in result["msh:!a1"]]
+        assert timestamps == [
+            pytest.approx(now - 7200),
+            pytest.approx(now - 3600),
+            pytest.approx(now - 1800),
+        ]
 
         plugin.stop()
 

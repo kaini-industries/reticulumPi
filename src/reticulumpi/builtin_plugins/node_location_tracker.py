@@ -260,6 +260,15 @@ class NodeLocationTrackerPlugin(PluginBase):
         finally:
             conn.close()
 
+        # Prune the in-memory last-position cache using the same cutoff so it
+        # does not grow unbounded as nodes go stale (the DB prune above only
+        # touches sqlite). _prune is called only from _prune_loop, which does
+        # not hold self._lock, so acquiring it here cannot deadlock.
+        with self._lock:
+            stale = [k for k, v in self._last_pos.items() if v[2] < cutoff]
+            for k in stale:
+                del self._last_pos[k]
+
     def get_history(
         self,
         node_keys: list[str],
@@ -280,16 +289,24 @@ class NodeLocationTrackerPlugin(PluginBase):
         conn.row_factory = sqlite3.Row
         try:
             for key in node_keys:
-                sql = (
-                    "SELECT * FROM node_positions "
-                    "WHERE node_key = ? AND timestamp >= ? AND timestamp <= ? "
-                    "ORDER BY timestamp ASC"
-                )
                 params: list[Any] = [key, since, until]
                 if limit_per_node is not None:
-                    sql += " LIMIT ?"
+                    # Select the newest N rows in the window, then reverse so the
+                    # returned list stays ascending (docstring contract).
+                    sql = (
+                        "SELECT * FROM node_positions "
+                        "WHERE node_key = ? AND timestamp >= ? AND timestamp <= ? "
+                        "ORDER BY timestamp DESC LIMIT ?"
+                    )
                     params.append(limit_per_node)
-                rows = conn.execute(sql, params).fetchall()
+                    rows = list(reversed(conn.execute(sql, params).fetchall()))
+                else:
+                    sql = (
+                        "SELECT * FROM node_positions "
+                        "WHERE node_key = ? AND timestamp >= ? AND timestamp <= ? "
+                        "ORDER BY timestamp ASC"
+                    )
+                    rows = conn.execute(sql, params).fetchall()
                 result[key] = [
                     {
                         "timestamp": r["timestamp"],
