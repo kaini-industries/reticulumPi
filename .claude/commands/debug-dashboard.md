@@ -19,22 +19,32 @@ Steps:
    ```
    - Check each for HTTP 200 and valid JSON. Report any failures with status code and body.
 
-4. **WebSocket connectivity:**
+4. **WebSocket connectivity:** `/ws/metrics` requires auth (401 without a token) — log in first:
    ```
-   .venv/bin/python -c "
-   import asyncio, aiohttp
+   PW=$(sudo cat /home/reticulumpi/.config/reticulumpi/dashboard_password.txt 2>/dev/null)
+   .venv/bin/python - "$PW" <<'EOF'
+   import asyncio, aiohttp, sys
    async def test():
        async with aiohttp.ClientSession() as s:
-           async with s.ws_connect('http://127.0.0.1:8080/ws/metrics') as ws:
+           r = await s.post('http://127.0.0.1:8080/api/auth/login', json={'password': sys.argv[1]})
+           token = (await r.json())['data']['token']
+           async with s.ws_connect('http://127.0.0.1:8080/ws/metrics',
+                                   headers={'Authorization': f'Bearer {token}'}) as ws:
                msg = await asyncio.wait_for(ws.receive(), timeout=10)
                print(f'OK: received {len(msg.data)} bytes')
    asyncio.run(test())
-   "
+   EOF
    ```
-   - If this fails, check `sudo journalctl -u reticulumpi --since "2 min ago" | grep -i websocket`.
+   - First message should be a large JSON `update` payload.
+   - `dashboard_password.txt` only exists for auto-generated passwords; if the operator set one
+     in config, ask them for it.
+   - If login returns 401, the password is wrong; 429 means rate-limited (wait per Retry-After).
+   - If the ws_connect fails, check `sudo journalctl -u reticulumpi --since "2 min ago" | grep -i websocket`.
 
-5. **Auth database:** Check that the dashboard secret file exists:
-   `ls -la /home/reticulumpi/.local/share/reticulumpi/dashboard_secret`
+5. **Auth secret:** Check that the dashboard secret file exists (dir is owned by the
+   reticulumpi user, so use sudo):
+   `sudo ls -la /home/reticulumpi/.config/reticulumpi/dashboard_secret`
+   - Default location is the `secret_dir` config option (`~/.config/reticulumpi`).
 
 6. **Static files:** Verify key frontend files exist:
    ```
@@ -44,3 +54,7 @@ Steps:
    ```
 
 7. Report a summary: which checks passed, which failed, and suggested fix for the first failure.
+
+Note: `journalctl -p err` / `-p warning` does NOT catch the app's Python-level WARNING/ERROR
+lines — stdout logs land in journald at INFO priority. Grep message text instead, e.g.
+`sudo journalctl -u reticulumpi --since "10 min ago" | grep -E "ERROR:|Slow broadcast plugin"`.
