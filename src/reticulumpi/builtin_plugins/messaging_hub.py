@@ -514,6 +514,17 @@ class MessageStore:
                 self._conn.commit()
             return total_deleted
 
+    def checkpoint(self) -> None:
+        """Truncate the WAL and run a planner optimize on the write conn.
+
+        Called periodically (~5 min) from the prune path so the WAL doesn't
+        grow unbounded under steady write traffic.  Both pragmas are
+        best-effort — failures are swallowed by the caller.
+        """
+        with self._lock:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("PRAGMA optimize")
+
     # ── Read ───────────────────────────────────────────────────────
 
     def get_messages(
@@ -594,34 +605,38 @@ class MessageStore:
         self,
         transport: str | None = None,
         sub_transport: str | None = None,
+        conv_limit: int = 200,
     ) -> list[dict[str, Any]]:
         """Return conversation summaries, one per contact_id.
 
         Each entry: ``{contact_id, contact_name, transport, sub_transport,
         msg_type, last_text, last_ts, unread_count}``.  Ordered by most
-        recent first.
+        recent first, capped at the *conv_limit* newest conversations.
+
+        Replaces an earlier ``ROW_NUMBER() OVER (PARTITION BY …)`` CTE that
+        scanned and sorted the whole table on every call.  The aggregate is
+        now an index-assisted GROUP BY with ``ORDER BY last_ts DESC LIMIT``,
+        and ``last_text`` is a correlated scalar subquery — one
+        ``idx_msg_contact_ts`` seek per returned row.
         """
-        clauses: list[str] = []
         m_clauses: list[str] = []
         params: list[Any] = []
         if transport:
-            clauses.append("transport = ?")
             m_clauses.append("m.transport = ?")
             params.append(transport)
         if sub_transport is not None:
-            clauses.append("sub_transport = ?")
             m_clauses.append("m.sub_transport = ?")
             params.append(sub_transport)
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         m_where = (" WHERE " + " AND ".join(m_clauses)) if m_clauses else ""
+        # last_text mirrors the old latest_text CTE: newest text for this
+        # contact_id within the same transport/sub_transport filter.
+        lt_clauses = ["lt.contact_id = m.contact_id"]
+        if transport:
+            lt_clauses.append("lt.transport = ?")
+        if sub_transport is not None:
+            lt_clauses.append("lt.sub_transport = ?")
+        lt_where = " AND ".join(lt_clauses)
         sql = f"""
-            WITH latest_text AS (
-                SELECT contact_id, text AS last_text,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY contact_id ORDER BY timestamp DESC
-                       ) AS rn
-                FROM messages{where}
-            )
             SELECT m.contact_id,
                    m.transport,
                    COALESCE(m.sub_transport, '') AS sub_transport,
@@ -635,16 +650,19 @@ class MessageStore:
                        WHEN m.direction = 'received' AND m.read = 0 THEN 1
                        ELSE 0
                    END) AS unread_count,
-                   lt.last_text
+                   (SELECT lt.text FROM messages lt
+                    WHERE {lt_where}
+                    ORDER BY lt.timestamp DESC LIMIT 1) AS last_text
             FROM messages m
-            LEFT JOIN latest_text lt
-                ON lt.contact_id = m.contact_id AND lt.rn = 1
             {m_where}
             GROUP BY m.contact_id, m.transport,
                      COALESCE(m.sub_transport, ''), m.msg_type
             ORDER BY last_ts DESC
+            LIMIT ?
         """
-        all_params = params + params if params else []
+        # Params bind in textual order: correlated subquery filters first,
+        # then the outer WHERE, then the LIMIT.
+        all_params = params + params + [conv_limit]
         with self._read_lock:
             rows = self._read_conn.execute(sql, all_params).fetchall()
         return [
@@ -1777,9 +1795,20 @@ class MessagingHubPlugin(PluginBase):
         self._recover_queued_messages()
         self._history_limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)
         self._last_prune_ts = 0.0
+        self._last_checkpoint_ts = 0.0
         self._broadcast_cache: tuple[float, dict] | None = None
+        # Cache policy: within _broadcast_cache_ttl always serve the cache;
+        # once it expires recompute.  The dirty flag may shorten the wait
+        # but never forces a recompute sooner than _broadcast_min_interval
+        # since the last compute (so steady traffic can't defeat the cache).
         self._broadcast_cache_ttl: float = 10.0
+        self._broadcast_min_interval: float = 8.0
         self._broadcast_cache_dirty_ts: float = 0.0
+        # Per-adapter is_available() TTL cache so get_transports/get_status
+        # stop acquiring the meshtastic/meshcore gateway locks every cycle.
+        self._avail_cache: dict[str, bool] = {}
+        self._avail_cache_ts: float = 0.0
+        self._avail_cache_ttl: float = 5.0
 
         # Register built-in LXMF adapter
         lxmf_cfg = self.config.get("lxmf", {})
@@ -2651,16 +2680,36 @@ class MessagingHubPlugin(PluginBase):
         """Retrieve a single message row by ID."""
         return self._store.get_message(msg_id)
 
+    def _availability_map(self) -> dict[str, bool]:
+        """Return ``{transport_name: is_available}`` from a 5s TTL cache.
+
+        ``is_available()`` on the meshtastic/meshcore adapters acquires the
+        gateway plugins' locks; calling it for every adapter on every
+        broadcast cycle coupled the hub to those locks.  The cache collapses
+        that to at most one probe per adapter per TTL window.
+        """
+        now = time.monotonic()
+        cached = self._avail_cache
+        if cached and (now - self._avail_cache_ts) < self._avail_cache_ttl:
+            return cached
+        with self._lock:
+            adapters = list(self._adapters.values())
+        fresh = {a.transport_name: a.is_available() for a in adapters}
+        self._avail_cache = fresh
+        self._avail_cache_ts = now
+        return fresh
+
     def get_transports(self) -> list[dict[str, Any]]:
         """Return registered transports with availability status."""
         with self._lock:
             adapters = list(self._adapters.values())
+        avail = self._availability_map()
         result = []
         for a in adapters:
             info: dict[str, Any] = {
                 "name": a.transport_name,
                 "display": a.display_name,
-                "available": a.is_available(),
+                "available": avail.get(a.transport_name, False),
             }
             if a.max_message_bytes is not None:
                 info["max_message_bytes"] = a.max_message_bytes
@@ -2783,8 +2832,7 @@ class MessagingHubPlugin(PluginBase):
 
     def get_status(self) -> dict[str, Any]:
         stats = self._store.get_stats()
-        with self._lock:
-            transports = {name: adapter.is_available() for name, adapter in self._adapters.items()}
+        transports = dict(self._availability_map())
         return {
             "active": self._active,
             "transports": transports,
@@ -2800,15 +2848,21 @@ class MessagingHubPlugin(PluginBase):
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
         now = time.monotonic()
         cached = self._broadcast_cache
-        if cached is not None and (now - cached[0]) < self._broadcast_cache_ttl:
-            if self._broadcast_cache_dirty_ts and (now - self._broadcast_cache_dirty_ts) >= 2.0:
-                pass  # dirty and debounce expired — fall through to refresh
-            else:
+        if cached is not None:
+            age = now - cached[0]
+            # Within the min-recompute interval, always serve the cache —
+            # steady traffic must never force a recompute sooner than this.
+            if age < self._broadcast_min_interval:
+                return cached[1]
+            # Past the min interval but within the TTL: only recompute if the
+            # cache has been dirtied since the last compute; otherwise keep
+            # serving until the TTL expires.
+            if age < self._broadcast_cache_ttl and not self._broadcast_cache_dirty_ts:
                 return cached[1]
         result = {
             "transports": self.get_transports(),
             "unread": self.get_unread_counts_grouped(),
-            "conversations": self.get_conversations(),
+            "conversations": self.get_conversations(conv_limit=200),
         }
         snapshot = result or None
         self._broadcast_cache = (now, snapshot)
@@ -2822,8 +2876,10 @@ class MessagingHubPlugin(PluginBase):
 
         Throttled to run at most once every 30s: prune() does a COUNT + DELETE
         per (transport, sub_transport) bucket and was otherwise firing on every
-        single stored message during bursty traffic.
+        single stored message during bursty traffic.  WAL hygiene rides the
+        same path on its own ~300s cadence (see _maybe_checkpoint).
         """
+        self._maybe_checkpoint()
         if self._history_limit <= 0:
             return
         now = time.time()
@@ -2834,3 +2890,18 @@ class MessagingHubPlugin(PluginBase):
             self._store.prune(self._history_limit)
         except Exception:
             self.log.debug("Error pruning messages", exc_info=True)
+
+    def _maybe_checkpoint(self) -> None:
+        """Truncate the WAL + run PRAGMA optimize on the write conn, ~5 min.
+
+        Independent of the history limit: the WAL grows with every write,
+        not just when pruning is configured.  Best-effort.
+        """
+        now = time.time()
+        if now - self._last_checkpoint_ts < 300.0:
+            return
+        self._last_checkpoint_ts = now
+        try:
+            self._store.checkpoint()
+        except Exception:
+            self.log.debug("Error checkpointing message store WAL", exc_info=True)

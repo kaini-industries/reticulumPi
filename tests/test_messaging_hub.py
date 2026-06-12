@@ -463,6 +463,149 @@ class TestMessageStore:
         assert mqtt_convos[0]["sub_transport"] == "mqtt"
         assert lora_convos[0]["sub_transport"] == "lora"
 
+    def test_get_conversations_shape_and_ordering(self, store):
+        """The rewritten query keeps the exact output shape, types, and
+        newest-first ordering (one row per contact, latest text, unread sum)."""
+        # Older conversation: two received from Carol, one read, one unread.
+        store.store(
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="carol first",
+            from_id="carol",
+            from_name="Carol",
+        )
+        store.store(
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="carol latest",
+            from_id="carol",
+            from_name="Carol",
+        )
+        # Newer conversation with Dave: one sent (read), one received (unread).
+        store.store(
+            transport="lxmf",
+            direction="sent",
+            msg_type="direct",
+            text="hi dave",
+            from_id="me",
+            to_id="dave",
+            to_name="Dave",
+        )
+        store.store(
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="dave latest",
+            from_id="dave",
+            from_name="Dave",
+        )
+        # Mark one Carol message read so unread_count is a partial sum.
+        store.mark_read("carol")
+        store.store(
+            transport="lxmf",
+            direction="received",
+            msg_type="direct",
+            text="carol unread again",
+            from_id="carol",
+            from_name="Carol",
+        )
+
+        convos = store.get_conversations()
+        # Exact key set and types, preserved from the pre-rewrite query.
+        expected_keys = {
+            "contact_id",
+            "contact_name",
+            "transport",
+            "sub_transport",
+            "msg_type",
+            "last_ts",
+            "last_text",
+            "unread_count",
+        }
+        for c in convos:
+            assert set(c.keys()) == expected_keys
+            assert isinstance(c["last_ts"], float)
+            assert isinstance(c["unread_count"], int)
+            assert c["sub_transport"] == ""
+
+        by_id = {c["contact_id"]: c for c in convos}
+        assert set(by_id) == {"carol", "dave"}
+        # Carol: latest received text, unread_count = 1 (the re-marked one).
+        assert by_id["carol"]["last_text"] == "carol unread again"
+        assert by_id["carol"]["contact_name"] == "Carol"
+        assert by_id["carol"]["unread_count"] == 1
+        # Dave: contact_name resolves via to_name for the sent leg; latest
+        # text is the received one; unread_count = 1.
+        assert by_id["dave"]["last_text"] == "dave latest"
+        assert by_id["dave"]["contact_name"] == "Dave"
+        assert by_id["dave"]["unread_count"] == 1
+        # Ordering: Carol's last message is newest, so Carol sorts first.
+        assert [c["contact_id"] for c in convos] == ["carol", "dave"]
+
+    def test_get_conversations_respects_conv_limit(self, store):
+        """Seeding more than conv_limit conversations keeps only the newest
+        by last_ts and never exceeds the bound."""
+        # 250 distinct contacts, stored oldest-first so contact 249 is newest.
+        for i in range(250):
+            store.store(
+                transport="lxmf",
+                direction="received",
+                msg_type="direct",
+                text=f"hello {i}",
+                from_id=f"peer{i:03d}",
+                from_name=f"Peer {i}",
+            )
+
+        convos = store.get_conversations(conv_limit=200)
+        assert len(convos) == 200
+        # Strictly newest-first ordering.
+        ts = [c["last_ts"] for c in convos]
+        assert ts == sorted(ts, reverse=True)
+        # The newest 200 contacts (peer050..peer249) are kept; the oldest 50
+        # (peer000..peer049) are dropped.
+        kept = {c["contact_id"] for c in convos}
+        assert "peer249" in kept
+        assert "peer050" in kept
+        assert "peer049" not in kept
+        assert "peer000" not in kept
+
+        # A tiny bound is honored exactly.
+        assert len(store.get_conversations(conv_limit=3)) == 3
+
+    def test_get_conversations_one_row_per_group(self, store):
+        """Many messages across few contacts collapse to one row per
+        (contact_id, transport, sub_transport, msg_type) with the right
+        last_text and unread_count."""
+        # Two contacts, 10 received messages each (all unread).
+        for i in range(10):
+            store.store(
+                transport="lxmf",
+                direction="received",
+                msg_type="direct",
+                text=f"alice {i}",
+                from_id="alice",
+                from_name="Alice",
+            )
+        for i in range(10):
+            store.store(
+                transport="lxmf",
+                direction="received",
+                msg_type="direct",
+                text=f"bob {i}",
+                from_id="bob",
+                from_name="Bob",
+            )
+
+        convos = store.get_conversations()
+        assert len(convos) == 2
+        by_id = {c["contact_id"]: c for c in convos}
+        assert by_id["alice"]["last_text"] == "alice 9"
+        assert by_id["alice"]["unread_count"] == 10
+        assert by_id["bob"]["last_text"] == "bob 9"
+        assert by_id["bob"]["unread_count"] == 10
+
     def test_sub_transport_filter_on_messages(self, store):
         """get_messages(sub_transport=...) filters by source channel."""
         store.store(
@@ -949,9 +1092,9 @@ class TestMessagingHubPlugin:
         assert len(snapshot["conversations"]) == 1
         assert snapshot["conversations"][0]["contact_name"] == "Alice"
 
-    def test_debounce_serves_stale_cache_within_window(self, hub_plugin):
-        """Cache is NOT immediately invalidated — a call within the 2s debounce
-        window returns stale data even after a message event."""
+    def test_cache_served_within_min_interval_even_when_dirty(self, hub_plugin):
+        """Within the 8s min-recompute interval the cache is served
+        unconditionally — a dirty flag cannot force a recompute sooner."""
         # Prime the cache with a known monotonic base.
         with patch("time.monotonic", return_value=99.0):
             snap1 = hub_plugin.broadcast_snapshot(cycle_count=0)
@@ -971,15 +1114,17 @@ class TestMessagingHubPlugin:
         with patch("time.monotonic", return_value=100.0):
             hub_plugin._invalidate_broadcast_cache(events.MESSAGE_RECEIVED, {})
 
-        # Call broadcast_snapshot 0.5s later — within the 2s debounce window.
-        with patch("time.monotonic", return_value=100.5):
+        # Call broadcast_snapshot at t=105 — 6s after compute, inside the 8s
+        # min interval, so the cache must still be served despite the dirty flag.
+        with patch("time.monotonic", return_value=105.0):
             snap2 = hub_plugin.broadcast_snapshot(cycle_count=0)
 
         # Must return the cached (stale) snapshot — no Bob yet.
         assert snap2 is snap1
 
-    def test_debounce_refreshes_after_window_expires(self, hub_plugin):
-        """Cache IS refreshed once the 2-second debounce window has elapsed."""
+    def test_cache_refreshes_when_dirty_past_min_interval(self, hub_plugin):
+        """Once past the 8s min interval (but still within the 10s TTL) a
+        dirty cache IS recomputed."""
         # Prime the cache with a known monotonic base.
         with patch("time.monotonic", return_value=50.0):
             snap1 = hub_plugin.broadcast_snapshot(cycle_count=0)
@@ -1000,9 +1145,9 @@ class TestMessagingHubPlugin:
         with patch("time.monotonic", return_value=51.0):
             hub_plugin._invalidate_broadcast_cache(events.MESSAGE_RECEIVED, {})
 
-        # Call broadcast_snapshot at t=53.1 — 2.1s after dirty timestamp,
-        # but still within the 10s cache TTL (53.1 - 50.0 = 3.1s < 10s).
-        with patch("time.monotonic", return_value=53.1):
+        # Call broadcast_snapshot at t=59 — 9s after compute (past the 8s min
+        # interval) and still within the 10s TTL.
+        with patch("time.monotonic", return_value=59.0):
             snap2 = hub_plugin.broadcast_snapshot(cycle_count=0)
 
         # Must be a fresh snapshot containing the new conversation.
@@ -1010,8 +1155,26 @@ class TestMessagingHubPlugin:
         assert len(snap2["conversations"]) == 1
         assert snap2["conversations"][0]["contact_name"] == "Bob"
 
-    def test_debounce_dirty_ts_resets_after_refresh(self, hub_plugin):
-        """The dirty timestamp resets to 0.0 after a debounced refresh."""
+    def test_clean_cache_served_until_ttl_past_min_interval(self, hub_plugin):
+        """Past the min interval but within the TTL, a NON-dirty cache keeps
+        being served — only the TTL forces a recompute."""
+        with patch("time.monotonic", return_value=20.0):
+            snap1 = hub_plugin.broadcast_snapshot(cycle_count=0)
+        assert snap1 is not None
+
+        # No invalidation event. At t=29 (9s after compute, >8s min interval,
+        # <10s TTL) the still-clean cache is served as-is.
+        with patch("time.monotonic", return_value=29.0):
+            snap2 = hub_plugin.broadcast_snapshot(cycle_count=0)
+        assert snap2 is snap1
+
+        # At t=30.1 the TTL has expired → recompute.
+        with patch("time.monotonic", return_value=30.1):
+            snap3 = hub_plugin.broadcast_snapshot(cycle_count=0)
+        assert snap3 is not snap1
+
+    def test_cache_dirty_ts_resets_after_refresh(self, hub_plugin):
+        """The dirty timestamp resets to 0.0 after a recompute."""
         # Prime cache.
         with patch("time.monotonic", return_value=10.0):
             hub_plugin.broadcast_snapshot(cycle_count=0)
@@ -1021,11 +1184,97 @@ class TestMessagingHubPlugin:
             hub_plugin._invalidate_broadcast_cache(events.MESSAGE_RECEIVED, {})
         assert hub_plugin._broadcast_cache_dirty_ts == 11.0
 
-        # Refresh after debounce window.
-        with patch("time.monotonic", return_value=13.5):
+        # Recompute after the min interval has elapsed.
+        with patch("time.monotonic", return_value=19.0):
             hub_plugin.broadcast_snapshot(cycle_count=0)
 
         assert hub_plugin._broadcast_cache_dirty_ts == 0.0
+
+    def test_steady_invalidation_recomputes_at_most_once_per_min_interval(self, hub_plugin):
+        """Simulate steady traffic: a stream of invalidations plus frequent
+        broadcast cycles must trigger at most one recompute per 8s window."""
+        recompute_calls: list[float] = []
+        real_get = hub_plugin.get_conversations
+
+        def _spy(*args, **kwargs):
+            recompute_calls.append(time.monotonic())
+            return real_get(*args, **kwargs)
+
+        # Drive 30s of activity at 1s granularity: every tick invalidates the
+        # cache and asks for a snapshot (the broadcast loop cadence).
+        with patch.object(hub_plugin, "get_conversations", side_effect=_spy):
+            for t in range(100, 131):
+                with patch("time.monotonic", return_value=float(t)):
+                    hub_plugin._invalidate_broadcast_cache(events.MESSAGE_RECEIVED, {})
+                    hub_plugin.broadcast_snapshot(cycle_count=0)
+
+        # First compute at t=100, then no sooner than +8s each: t=100, 108,
+        # 116, 124 → at most ceil(31 / 8) recomputes over the 31 ticks.
+        assert len(recompute_calls) <= 5
+        # And consecutive recomputes are always >= the 8s min interval apart.
+        for earlier, later in zip(recompute_calls, recompute_calls[1:]):
+            assert later - earlier >= hub_plugin._broadcast_min_interval
+
+    def test_availability_cache_probes_once_per_ttl(self, hub_plugin):
+        """is_available() is probed at most once per 5s TTL window even
+        across repeated get_transports/get_status calls."""
+        adapter = MagicMock(spec=TransportAdapter)
+        adapter.transport_name = "test"
+        adapter.display_name = "Test"
+        adapter.max_message_bytes = None
+        adapter.is_available.return_value = True
+        adapter.get_contacts.return_value = []
+        hub_plugin.register_adapter(adapter)
+        adapter.is_available.reset_mock()
+
+        # Many calls inside one TTL window → a single probe.
+        with patch("time.monotonic", return_value=200.0):
+            hub_plugin.get_transports()
+            hub_plugin.get_transports()
+            hub_plugin.get_status()
+        assert adapter.is_available.call_count == 1
+
+        # Still within TTL (200 + 4 < 200 + 5) → no new probe.
+        with patch("time.monotonic", return_value=204.0):
+            hub_plugin.get_transports()
+        assert adapter.is_available.call_count == 1
+
+        # Past the TTL → exactly one more probe.
+        with patch("time.monotonic", return_value=206.0):
+            hub_plugin.get_transports()
+            hub_plugin.get_transports()
+        assert adapter.is_available.call_count == 2
+
+    def test_maybe_prune_checkpoints_write_conn(self, hub_plugin):
+        """The prune path issues PRAGMA wal_checkpoint(TRUNCATE) + optimize on
+        the write connection, throttled to ~5 min."""
+
+        # sqlite3.Connection.execute is read-only, so wrap the connection in a
+        # thin spy that records SQL while delegating to the real connection.
+        class _ConnSpy:
+            def __init__(self, real):
+                self._real = real
+                self.executed: list[str] = []
+
+            def execute(self, sql, *args, **kwargs):
+                self.executed.append(sql)
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        spy = _ConnSpy(hub_plugin._store._conn)
+        hub_plugin._store._conn = spy
+
+        hub_plugin._last_checkpoint_ts = 0.0
+        hub_plugin._maybe_prune()
+        assert "PRAGMA wal_checkpoint(TRUNCATE)" in spy.executed
+        assert "PRAGMA optimize" in spy.executed
+
+        # A second immediate call is throttled — no further checkpoint pragmas.
+        spy.executed.clear()
+        hub_plugin._maybe_prune()
+        assert "PRAGMA wal_checkpoint(TRUNCATE)" not in spy.executed
 
 
 # ═══════════════════════════════════════════════════════════════════
