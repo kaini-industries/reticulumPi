@@ -8,6 +8,7 @@ var TILE_RE = /\.tile\.openstreetmap\.org\/|\/tiles\//;
 var SHELL_ASSETS = [
   '/index.html',
   '/login.html',
+  '/static/errlog.js',
   '/static/style.css',
   '/static/vendor/leaflet.css',
   '/static/vendor/leaflet.js',

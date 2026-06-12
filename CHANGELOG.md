@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-06-12
+
+### Fixed
+- **Dashboard boot fragility** — the live-data pipeline (WebSocket connect, 2s HTTP
+  fallback, periodic refresh) is now armed at the very top of app.js inside a guarded
+  `boot()` call, so an exception anywhere in the ~2,000 lines of later DOM wiring can no
+  longer freeze the main metrics silently (the v0.2.3 incident class). All DOM/event
+  wiring is wrapped in per-block `safeWire` isolation — one broken block can't kill the
+  rest.
+- **Silent "no data ever" state** — the stale-data banner now appears ~20s after boot if
+  neither the WebSocket nor the HTTP fallback ever delivered data (previously it stayed
+  hidden forever in exactly that case).
+- **Connection badge** — after WebSocket reconnect attempts are exhausted the badge now
+  correctly reads "polling (10s)" instead of "disconnected".
+
+### Added
+- **Client-side error reporting** — new `errlog.js` (loaded before app.js) catches
+  uncaught JS errors and unhandled promise rejections and POSTs them to the new
+  auth+CSRF-protected `/api/client_error` endpoint, which logs a single-line WARNING to
+  the journal (per-IP rate limited, fields sanitized/truncated against log injection).
+  Browser-side failures are now diagnosable from `journalctl -u reticulumpi`.
+
 ## [0.2.3] - 2026-06-11
 
 ### Fixed
