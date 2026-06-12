@@ -59,6 +59,34 @@ class WebDashboardPlugin(PluginBase):
         ssl_config = self.config.get("ssl", {})
         if not isinstance(ssl_config, dict):
             raise ValueError("ssl must be a dict")
+        extra_hostnames = ssl_config.get("extra_hostnames", [])
+        if not isinstance(extra_hostnames, list) or not all(
+            isinstance(h, str) for h in extra_hostnames
+        ):
+            raise ValueError("ssl.extra_hostnames must be a list of strings")
+
+        rate_limit = self.config.get("rate_limit", {})
+        if not isinstance(rate_limit, dict):
+            raise ValueError("rate_limit must be a dict")
+        max_attempts = rate_limit.get("max_attempts", 5)
+        if not isinstance(max_attempts, int) or max_attempts < 1:
+            raise ValueError("rate_limit.max_attempts must be an integer >= 1")
+        window_seconds = rate_limit.get("window_seconds", 60)
+        if not isinstance(window_seconds, int) or window_seconds < 1:
+            raise ValueError("rate_limit.window_seconds must be an integer >= 1")
+
+        import ipaddress
+
+        allowed_networks = self.config.get("allowed_networks", [])
+        if not isinstance(allowed_networks, list):
+            raise ValueError("allowed_networks must be a list of CIDR strings")
+        for cidr in allowed_networks:
+            if not isinstance(cidr, str):
+                raise ValueError("allowed_networks entries must be CIDR strings")
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                raise ValueError(f"allowed_networks entry is not a valid CIDR: {cidr!r}")
 
         tile_cache_entries = self.config.get("tile_cache_entries", 5000)
         if not isinstance(tile_cache_entries, int) or tile_cache_entries < 100:
@@ -153,12 +181,15 @@ class WebDashboardPlugin(PluginBase):
         )
         session_db = os.path.join(secret_dir_resolved, "sessions.db")
 
+        rate_limit = self.config.get("rate_limit", {})
         self._auth = AuthManager(
             password_hash=password_hash,
             plaintext_password=plaintext_password,
             session_timeout=self.config.get("session_timeout", 86400),
             max_sessions=self.config.get("max_sessions", 5),
             session_db_path=session_db,
+            rate_limit_max_attempts=rate_limit.get("max_attempts", 5),
+            rate_limit_window=rate_limit.get("window_seconds", 60),
         )
 
         ssl_ctx = self._setup_ssl()
@@ -181,12 +212,13 @@ class WebDashboardPlugin(PluginBase):
 
         self._mdns_proc: subprocess.Popen | None = None
         if self._host != "127.0.0.1" and shutil.which("avahi-publish-service"):
+            mdns_service_type = "_https._tcp" if self._ssl_ctx else "_http._tcp"
             try:
                 self._mdns_proc = subprocess.Popen(
                     [
                         "avahi-publish-service",
                         "ReticulumPi Dashboard",
-                        "_http._tcp",
+                        mdns_service_type,
                         str(self._port),
                     ],
                     stdout=subprocess.DEVNULL,
@@ -348,6 +380,14 @@ class WebDashboardPlugin(PluginBase):
                     )
             except Exception:
                 self.log.exception("Session GC error")
+            # Truncate the sessions WAL so it doesn't grow unbounded on a tiny
+            # DB (a 12KB store had accreted a 4.1MB WAL). Best-effort.
+            checkpoint = getattr(self._auth.sessions, "checkpoint", None)
+            if checkpoint is not None:
+                try:
+                    checkpoint()
+                except Exception:
+                    self.log.debug("Session WAL checkpoint failed", exc_info=True)
 
     async def _shutdown(self) -> None:
         if hasattr(self, "_session_gc_task") and self._session_gc_task:
@@ -400,7 +440,10 @@ class WebDashboardPlugin(PluginBase):
 
             cert_dir = ssl_config.get("cert_dir", "~/.config/reticulumpi/web_certs")
             cert_file, key_file = generate_self_signed_cert(
-                cert_dir, self.app.config.node_name, self.log
+                cert_dir,
+                self.app.config.node_name,
+                self.log,
+                extra_sans=ssl_config.get("extra_hostnames", []),
             )
 
         if not cert_file or not key_file:

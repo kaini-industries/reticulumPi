@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import logging
 import os
 import tempfile
+import time
 from typing import TYPE_CHECKING
 
 import aiohttp.web
 
+from reticulumpi.builtin_plugins.web_dashboard.auth import _normalize_ip
+
 if TYPE_CHECKING:
     from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+
+log = logging.getLogger(__name__)
 
 # Paths that do not require authentication
 PUBLIC_PATHS = frozenset(
@@ -23,8 +30,11 @@ PUBLIC_PATHS = frozenset(
     }
 )
 
-# Static file prefixes that are public
-PUBLIC_PREFIXES = ("/static/", "/tiles/")
+# Static file prefixes that are public. NOTE: /tiles/ is intentionally NOT
+# public — map tile requests are same-origin <img> loads that carry the
+# SameSite=Lax session cookie, so the auth middleware lets logged-in clients
+# through while denying anonymous use of the node as an open OSM proxy.
+PUBLIC_PREFIXES = ("/static/",)
 
 
 def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
@@ -36,6 +46,7 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
 
     app = aiohttp.web.Application(
         middlewares=[
+            ip_allowlist_middleware_factory(plugin),
             compression_middleware,
             security_headers_middleware,
             auth_middleware_factory(plugin),
@@ -64,6 +75,59 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
         app.router.add_get("/tiles/{z}/{x}/{y}.png", _handle_tile_proxy)
 
     return app
+
+
+def ip_allowlist_middleware_factory(plugin: WebDashboardPlugin):
+    """Create middleware that restricts access to configured CIDR networks.
+
+    Ships dark: ``allowed_networks`` defaults to ``[]`` which allows all
+    remotes. When populated, requests from non-member addresses get a 404
+    (minimal signal to scanners) and a throttled WARNING. CIDRs are parsed
+    once here at factory time; malformed entries are logged and skipped.
+    """
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for cidr in plugin.config.get("allowed_networks", []) or []:
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            log.warning("Ignoring malformed allowed_networks entry: %r", cidr)
+
+    deny_log_state: dict[str, float] = {}
+    _DENY_LOG_INTERVAL = 10.0
+
+    def _log_denied(ip: str) -> None:
+        now = time.monotonic()
+        last = deny_log_state.get(ip)
+        if last is not None and now - last < _DENY_LOG_INTERVAL:
+            return
+        if len(deny_log_state) >= 10_000:
+            oldest_ip = min(deny_log_state, key=lambda k: deny_log_state[k])
+            del deny_log_state[oldest_ip]
+        deny_log_state[ip] = now
+        log.warning("Denied request from %s (not in allowed_networks)", ip)
+
+    @aiohttp.web.middleware
+    async def ip_allowlist_middleware(
+        request: aiohttp.web.Request,
+        handler,
+    ) -> aiohttp.web.StreamResponse:
+        if not networks:
+            return await handler(request)
+
+        remote = _normalize_ip(request.remote or "")
+        try:
+            addr = ipaddress.ip_address(remote)
+        except ValueError:
+            _log_denied(remote or "<unknown>")
+            raise aiohttp.web.HTTPNotFound()
+
+        if any(addr in net for net in networks):
+            return await handler(request)
+
+        _log_denied(remote)
+        raise aiohttp.web.HTTPNotFound()
+
+    return ip_allowlist_middleware
 
 
 _COMPRESSIBLE = frozenset(
@@ -114,6 +178,10 @@ async def security_headers_middleware(
         "img-src 'self' data: https://*.tile.openstreetmap.org https://api.planespotters.net https://*.plnspttrs.net"
     )
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # HSTS only over HTTPS — sending it on plain HTTP is meaningless and could
+    # wedge a client if they later downgrade. No preload/includeSubDomains.
+    if request.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
     if request.path.startswith("/api/"):
         response.headers["Api-Version"] = API_VERSION
     return response

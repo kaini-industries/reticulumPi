@@ -330,6 +330,117 @@ class TestAuthManager:
         assert mgr.cleanup_expired_sessions() == 0
 
 
+class TestRateLimitConfig:
+    def test_configurable_max_attempts_enforced(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(
+            plaintext_password="testpass",
+            rate_limit_max_attempts=2,
+            rate_limit_window=60,
+        )
+        # Two wrong attempts permitted, recorded.
+        assert mgr.login("wrong", "10.0.0.1") is None
+        assert mgr.login("wrong", "10.0.0.1") is None
+        # Now rate-limited: the correct password is also rejected.
+        assert mgr.is_rate_limited("10.0.0.1")
+        assert mgr.login("testpass", "10.0.0.1") is None
+
+    def test_default_rate_limit_is_five(self):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="testpass")
+        assert mgr.rate_limiter.max_attempts == 5
+        assert mgr.rate_limiter.window_seconds == 60
+
+
+class TestFailedLoginAudit:
+    def test_failed_login_emits_warning_with_ip(self, caplog):
+        import logging
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="testpass")
+        with caplog.at_level(logging.WARNING):
+            mgr.login("wrong", "203.0.113.7")
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        audit = [r for r in warnings if "Failed dashboard login" in r.getMessage()]
+        assert len(audit) == 1
+        msg = audit[0].getMessage()
+        assert "203.0.113.7" in msg
+        assert "bad_password" in msg
+        # Never log the password.
+        assert "wrong" not in msg
+
+    def test_second_immediate_failure_is_throttled(self, caplog):
+        import logging
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="testpass")
+        with caplog.at_level(logging.WARNING):
+            mgr.login("wrong", "203.0.113.8")
+            mgr.login("wrong", "203.0.113.8")
+
+        audit = [
+            r
+            for r in caplog.records
+            if "Failed dashboard login" in r.getMessage() and "203.0.113.8" in r.getMessage()
+        ]
+        # Only the first failure logs; the immediate second is suppressed.
+        assert len(audit) == 1
+
+    def test_throttle_reports_suppressed_count(self, caplog):
+        import logging
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(plaintext_password="testpass")
+        # First failure logs. Force the throttle window to elapse, then the
+        # next failure should report the suppressed count.
+        mgr.login("wrong", "203.0.113.9")
+        mgr.login("wrong", "203.0.113.9")  # suppressed
+        mgr.login("wrong", "203.0.113.9")  # suppressed
+        mgr._audit_state["203.0.113.9"]["last_log_ts"] -= 100
+
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            mgr.login("wrong", "203.0.113.9")
+
+        audit = [
+            r
+            for r in caplog.records
+            if "Failed dashboard login" in r.getMessage() and "203.0.113.9" in r.getMessage()
+        ]
+        assert len(audit) == 1
+        assert "2 suppressed" in audit[0].getMessage()
+
+    def test_rate_limited_reason_logged(self, caplog):
+        import logging
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        mgr = AuthManager(
+            plaintext_password="testpass",
+            rate_limit_max_attempts=1,
+        )
+        mgr.login("wrong", "203.0.113.10")  # bad_password, logs
+        # Push throttle window back so the next (rate-limited) attempt logs.
+        mgr._audit_state["203.0.113.10"]["last_log_ts"] -= 100
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            mgr.login("wrong", "203.0.113.10")
+
+        audit = [
+            r
+            for r in caplog.records
+            if "Failed dashboard login" in r.getMessage() and "203.0.113.10" in r.getMessage()
+        ]
+        assert len(audit) == 1
+        assert "rate_limited" in audit[0].getMessage()
+
+
 # --- SQLite session persistence tests ---
 
 
@@ -423,6 +534,18 @@ class TestSqliteSessionStore:
         with pytest.raises(KeyError):
             del store["missing"]
         store.close()
+
+    def test_checkpoint_truncates_wal(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.auth import SqliteSessionStore
+
+        db = str(tmp_path / "sessions.db")
+        store = SqliteSessionStore(db)
+        store["a"] = {"v": 1}
+        # Should run without error and issue the truncating checkpoint pragma.
+        store.checkpoint()
+        store.close()
+        # Checkpoint on a closed store is a no-op, not a crash.
+        store.checkpoint()
 
 
 class TestAuthManagerPersistent:
@@ -580,6 +703,44 @@ class TestPluginValidation:
         config = {"enabled": True, "password": "test", "session_gc_interval": 60}
         plugin = self._make_plugin(mock_app, config)
         assert plugin.plugin_name == "web_dashboard"
+
+    def test_rejects_zero_rate_limit_max_attempts(self, mock_app):
+        config = {"enabled": True, "password": "test", "rate_limit": {"max_attempts": 0}}
+        with pytest.raises(ValueError, match="rate_limit.max_attempts"):
+            self._make_plugin(mock_app, config)
+
+    def test_rejects_zero_rate_limit_window(self, mock_app):
+        config = {"enabled": True, "password": "test", "rate_limit": {"window_seconds": 0}}
+        with pytest.raises(ValueError, match="rate_limit.window_seconds"):
+            self._make_plugin(mock_app, config)
+
+    def test_accepts_valid_rate_limit(self, mock_app):
+        config = {
+            "enabled": True,
+            "password": "test",
+            "rate_limit": {"max_attempts": 3, "window_seconds": 30},
+        }
+        plugin = self._make_plugin(mock_app, config)
+        assert plugin.plugin_name == "web_dashboard"
+
+    def test_rejects_bad_allowed_networks(self, mock_app):
+        config = {"enabled": True, "password": "test", "allowed_networks": ["not-a-cidr"]}
+        with pytest.raises(ValueError, match="allowed_networks"):
+            self._make_plugin(mock_app, config)
+
+    def test_accepts_valid_allowed_networks(self, mock_app):
+        config = {
+            "enabled": True,
+            "password": "test",
+            "allowed_networks": ["127.0.0.1/32", "10.0.0.0/8"],
+        }
+        plugin = self._make_plugin(mock_app, config)
+        assert plugin.plugin_name == "web_dashboard"
+
+    def test_rejects_non_string_extra_hostnames(self, mock_app):
+        config = {"enabled": True, "password": "test", "ssl": {"extra_hostnames": [123]}}
+        with pytest.raises(ValueError, match="extra_hostnames"):
+            self._make_plugin(mock_app, config)
 
 
 # --- API response tests (mocked app) ---
@@ -843,6 +1004,281 @@ class TestAPIEndpoints:
         event_loop.run_until_complete(_do())
 
 
+class TestTilesAuth:
+    """Tiles are auth-gated (removed from PUBLIC_PREFIXES): anonymous tile
+    fetches are rejected, logged-in clients reach the proxy handler."""
+
+    @pytest.fixture
+    def tile_plugin(self, dashboard_app):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+        from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+
+        config = {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 8080,
+            "password": "testpass",
+            "allow_localhost_api": False,
+            "tile_proxy": {"enabled": True},
+        }
+        plugin = WebDashboardPlugin(dashboard_app, config)
+        plugin._start_time = time.time()
+        plugin._active = True
+        plugin._auth = AuthManager(plaintext_password="testpass")
+
+        # Mock the upstream tile session so the handler returns bytes without
+        # touching the network, and route writes to a tmp cache dir.
+        import tempfile
+
+        plugin._tile_cache_dir = tempfile.mkdtemp()
+        plugin._tile_upstream = "https://tile.example/{z}/{x}/{y}.png"
+        plugin._tile_max_bytes = 0
+        plugin._tile_cache_bytes = 0
+
+        resp_cm = MagicMock()
+        resp_cm.__aenter__ = AsyncMock(
+            return_value=MagicMock(status=200, read=AsyncMock(return_value=b"PNGDATA"))
+        )
+        resp_cm.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.get = MagicMock(return_value=resp_cm)
+        plugin._tile_session = session
+        return plugin
+
+    @pytest.fixture
+    def tile_app(self, tile_plugin):
+        from reticulumpi.builtin_plugins.web_dashboard.server import create_app
+
+        return create_app(tile_plugin)
+
+    @pytest.fixture
+    def event_loop(self):
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def client(self, tile_app, event_loop):
+        pytest.importorskip("aiohttp")
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async def _make():
+            server = TestServer(tile_app)
+            client = TestClient(server)
+            await client.start_server()
+            return client
+
+        client = event_loop.run_until_complete(_make())
+        yield client
+        event_loop.run_until_complete(client.close())
+
+    def test_unauthenticated_tile_rejected(self, client, event_loop):
+        async def _do():
+            resp = await client.get(
+                "/tiles/3/1/2.png",
+                headers={"Accept": "application/json"},
+                allow_redirects=False,
+            )
+            # Auth-gated now: 401 for JSON accept (or a 302 redirect for HTML).
+            assert resp.status in (401, 302)
+
+        event_loop.run_until_complete(_do())
+
+    def test_authenticated_tile_reaches_handler(self, client, event_loop):
+        async def _do():
+            login = await client.post("/api/auth/login", json={"password": "testpass"})
+            token = (await login.json())["data"]["token"]
+            resp = await client.get(
+                "/tiles/3/1/2.png",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 200
+            assert resp.headers.get("Content-Type") == "image/png"
+            body = await resp.read()
+            assert body == b"PNGDATA"
+
+        event_loop.run_until_complete(_do())
+
+
+class TestIpAllowlist:
+    """IP allowlist middleware (ships dark)."""
+
+    def test_empty_list_allows_all(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from reticulumpi.builtin_plugins.web_dashboard.server import (
+            ip_allowlist_middleware_factory,
+        )
+
+        plugin = MagicMock()
+        plugin.config = {"allowed_networks": []}
+        mw = ip_allowlist_middleware_factory(plugin)
+
+        request = MagicMock()
+        request.remote = "203.0.113.5"
+        handler = AsyncMock(return_value="ok")
+        result = asyncio.run(mw(request, handler))
+        assert result == "ok"
+        handler.assert_awaited_once()
+
+    def test_non_member_gets_404(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        import aiohttp.web
+
+        from reticulumpi.builtin_plugins.web_dashboard.server import (
+            ip_allowlist_middleware_factory,
+        )
+
+        plugin = MagicMock()
+        plugin.config = {"allowed_networks": ["10.0.0.0/8"]}
+        mw = ip_allowlist_middleware_factory(plugin)
+
+        request = MagicMock()
+        request.remote = "203.0.113.5"
+        handler = AsyncMock(return_value="ok")
+        with pytest.raises(aiohttp.web.HTTPNotFound):
+            asyncio.run(mw(request, handler))
+        handler.assert_not_awaited()
+
+    def test_member_allowed(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from reticulumpi.builtin_plugins.web_dashboard.server import (
+            ip_allowlist_middleware_factory,
+        )
+
+        plugin = MagicMock()
+        plugin.config = {"allowed_networks": ["10.0.0.0/8"]}
+        mw = ip_allowlist_middleware_factory(plugin)
+
+        request = MagicMock()
+        request.remote = "10.1.2.3"
+        handler = AsyncMock(return_value="ok")
+        assert asyncio.run(mw(request, handler)) == "ok"
+
+    def test_malformed_cidr_skipped(self):
+        from unittest.mock import MagicMock
+
+        from reticulumpi.builtin_plugins.web_dashboard.server import (
+            ip_allowlist_middleware_factory,
+        )
+
+        plugin = MagicMock()
+        plugin.config = {"allowed_networks": ["not-a-cidr", "10.0.0.0/8"]}
+        # Factory should not raise; malformed entry is logged and skipped.
+        mw = ip_allowlist_middleware_factory(plugin)
+        assert mw is not None
+
+    def test_loopback_allowlist_via_client(self, dashboard_app):
+        """An allowlist of 127.0.0.1/32 lets loopback (the TestClient) through."""
+        import asyncio
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+        from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+        from reticulumpi.builtin_plugins.web_dashboard.server import create_app
+
+        config = {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 8080,
+            "password": "testpass",
+            "allow_localhost_api": False,
+            "allowed_networks": ["127.0.0.1/32", "::1/128"],
+        }
+        plugin = WebDashboardPlugin(dashboard_app, config)
+        plugin._start_time = time.time()
+        plugin._active = True
+        plugin._auth = AuthManager(plaintext_password="testpass")
+        app = create_app(plugin)
+
+        loop = asyncio.new_event_loop()
+        try:
+
+            async def _do():
+                server = TestServer(app)
+                client = TestClient(server)
+                await client.start_server()
+                try:
+                    # login.html is public; the allowlist must let loopback reach it.
+                    resp = await client.get("/login.html")
+                    assert resp.status == 200
+                finally:
+                    await client.close()
+
+            loop.run_until_complete(_do())
+        finally:
+            loop.close()
+
+
+class TestSanGeneration:
+    def test_cert_includes_expected_sans(self, tmp_path):
+        pytest.importorskip("cryptography")
+        from cryptography import x509
+
+        from reticulumpi.builtin_plugins.web_dashboard.ssl_utils import (
+            generate_self_signed_cert,
+        )
+
+        cert_path, key_path = generate_self_signed_cert(
+            str(tmp_path),
+            "TestNode",
+            extra_sans=["pi.local", "192.168.1.50"],
+        )
+        with open(cert_path, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        dns_names = set(san.get_values_for_type(x509.DNSName))
+        ip_addrs = {str(ip) for ip in san.get_values_for_type(x509.IPAddress)}
+
+        import socket
+
+        assert "localhost" in dns_names
+        assert "127.0.0.1" in ip_addrs
+        assert socket.gethostname() in dns_names
+        # extra_sans classified correctly: DNS vs IP.
+        assert "pi.local" in dns_names
+        assert "192.168.1.50" in ip_addrs
+
+
+class TestHstsHeader:
+    def _run_middleware(self, scheme):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from reticulumpi.builtin_plugins.web_dashboard.server import (
+            security_headers_middleware,
+        )
+
+        request = MagicMock()
+        request.scheme = scheme
+        request.path = "/index.html"
+        response = MagicMock()
+        response.headers = {}
+        response.content_type = "text/html"
+        handler = AsyncMock(return_value=response)
+        asyncio.run(security_headers_middleware(request, handler))
+        return response.headers
+
+    def test_hsts_present_on_https(self):
+        headers = self._run_middleware("https")
+        assert headers.get("Strict-Transport-Security") == "max-age=31536000"
+
+    def test_hsts_absent_on_http(self):
+        headers = self._run_middleware("http")
+        assert "Strict-Transport-Security" not in headers
+
+
 class TestFormLogin:
     """Test form-based login flow (POST /auth/login -> 302 redirect)."""
 
@@ -911,6 +1347,39 @@ class TestFormLogin:
             assert data["ok"] is True
 
         event_loop.run_until_complete(_do())
+
+
+class TestSessionGcCheckpoint:
+    def test_gc_loop_issues_wal_checkpoint(self, dashboard_plugin, tmp_path):
+        """The periodic session GC sweep truncates the sessions WAL."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+
+        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+
+        db = str(tmp_path / "sessions.db")
+        dashboard_plugin._auth = AuthManager(plaintext_password="testpass", session_db_path=db)
+        dashboard_plugin.config["session_gc_interval"] = 0
+
+        checkpoint_spy = MagicMock(wraps=dashboard_plugin._auth.sessions.checkpoint)
+        dashboard_plugin._auth.sessions.checkpoint = checkpoint_spy
+
+        # Run exactly one sweep: the first sleep returns, then deactivate so the
+        # while-loop exits on the next condition check.
+        async def _fake_sleep(_interval):
+            dashboard_plugin._active = False
+
+        async def _drive():
+            with patch("asyncio.sleep", _fake_sleep):
+                await dashboard_plugin._session_gc_loop()
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_drive())
+        finally:
+            loop.close()
+
+        checkpoint_spy.assert_called_once()
 
 
 class TestGetStatus:

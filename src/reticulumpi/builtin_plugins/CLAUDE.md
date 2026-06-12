@@ -24,8 +24,11 @@ participating plugins within a time budget.
 
 Not a single file -- it's a full sub-package:
 - `plugin.py` -- WebDashboardPlugin (aiohttp server, SSL, mDNS)
-- `server.py` -- app factory, middleware (auth, CORS, rate limiting)
-- `auth.py` -- scrypt password hashing, token sessions, SQLite persistence
+- `server.py` -- app factory, middleware chain (in order: optional IP allowlist →
+  compression → security headers + HSTS → auth + CSRF). No CORS middleware exists;
+  per-IP login rate limiting lives in `auth.py`, not the middleware.
+- `auth.py` -- scrypt password hashing, token sessions, SQLite persistence,
+  per-IP rate limiting, throttled failed-login audit logging
 - `api.py` -- core REST routes
 - `api_radio.py`, `api_mesh.py`, `api_services.py`, `api_interfaces.py` -- domain-specific routes
 - `websocket_handler.py` -- `/ws/metrics` and `/ws/spectrum` endpoints, diff-based updates

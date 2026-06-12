@@ -112,12 +112,31 @@ reticulumpi:
     #                              # With avahi-daemon installed, clients can reach the
     #                              # dashboard at http://<hostname>.local:8080
     #  port: 8080
+    #  secret_dir: ~/.config/reticulumpi  # Holds dashboard_secret (password hash),
+    #                              # sessions.db, and dashboard_password.txt (the
+    #                              # auto-generated plaintext password, written 0600
+    #                              # on first start). To rotate the password: delete
+    #                              # dashboard_secret here and restart — a new password
+    #                              # is generated and saved to dashboard_password.txt.
     #  # password_hash: "scrypt:..."  # Optional — overrides auto-generated password
     #  session_timeout: 86400      # Session lifetime in seconds (default: 24h)
     #  max_sessions: 5
     #  metrics_interval: 5         # WebSocket push interval in seconds
     #  max_websocket_clients: 10
     #  ws_compress: true             # Enable per-message deflate on WebSocket
+    #  rate_limit:                 # Per-IP failed-login throttle (sliding window).
+    #    max_attempts: 5           # Failures allowed per window before 429.
+    #    window_seconds: 60        # Window length in seconds.
+    #  allowed_networks: []        # CIDR allowlist. Default [] = allow all remotes.
+    #                              # When non-empty, requests from addresses outside
+    #                              # these networks get a 404. IMPORTANT: include
+    #                              # loopback (127.0.0.1/32 and ::1/128) or local
+    #                              # services (NomadNet pages, scripts) break.
+    #                              # Example lockdown to LAN + loopback:
+    #                              #   allowed_networks:
+    #                              #     - 127.0.0.1/32
+    #                              #     - ::1/128
+    #                              #     - 192.168.0.0/16
     #  lora_region: "US"           # Default LoRa Spectrum panel region.
     #                              # One of: US, EU_868, EU_433, CN, JP, ANZ.
     #                              # Users can override per-browser via the
@@ -144,6 +163,11 @@ reticulumpi:
     #    key_file: null
     #    auto_generate: false      # Auto-generate self-signed cert
     #    cert_dir: ~/.config/reticulumpi/web_certs
+    #    extra_hostnames: []       # Additional SAN entries baked into the
+    #                              # auto-generated cert (DNS names or IPs), e.g.
+    #                              # ["pi.local", "192.168.1.50"]. localhost,
+    #                              # loopback, the hostname + .local, and detected
+    #                              # LAN IPs are always included automatically.
 
     # Captive Portal — guides hotspot clients to the web dashboard.
     # When a device connects to the Wi-Fi hotspot, OS captive portal

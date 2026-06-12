@@ -306,9 +306,26 @@ class SqliteSessionStore:
             rows = self._conn.execute("SELECT token, data FROM sessions").fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
 
+    def checkpoint(self) -> None:
+        """Truncate the WAL so it does not grow unbounded on a tiny DB.
+
+        Called from the dashboard's periodic session GC sweep. Best-effort:
+        a busy checkpoint failure is harmless and simply retried next sweep.
+        """
+        if self._is_closed():
+            return
+        with self._lock:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
 
 class AuthManager:
     """Manages password verification, session tokens, and rate limiting."""
+
+    # Throttle for failed-login audit logging: at most one WARNING per IP per
+    # this many seconds, with a count of suppressed attempts since the last
+    # line. Capped to bound memory under a distributed login flood.
+    _AUDIT_LOG_INTERVAL = 10.0
+    _MAX_AUDIT_IPS = 10_000
 
     def __init__(
         self,
@@ -317,6 +334,8 @@ class AuthManager:
         session_timeout: float = 86400,
         max_sessions: int = 5,
         session_db_path: str | None = None,
+        rate_limit_max_attempts: int = 5,
+        rate_limit_window: int = 60,
     ):
         if password_hash:
             self._password_hash = password_hash
@@ -334,15 +353,60 @@ class AuthManager:
             log.info("Using persistent session store: %s", session_db_path)
         else:
             self.sessions = {}
-        self.rate_limiter = RateLimiter()
+        self.rate_limiter = RateLimiter(
+            max_attempts=rate_limit_max_attempts,
+            window_seconds=rate_limit_window,
+        )
+        # Per-IP throttle state for failed-login audit logging:
+        # {normalized_ip: {"last_log_ts": float, "suppressed_count": int}}
+        self._audit_state: dict[str, dict[str, float]] = {}
+
+    def _audit_failed_login(self, remote_ip: str, reason: str) -> None:
+        """Emit a throttled WARNING for a failed login. Never logs the password.
+
+        At most one line per normalized IP per ``_AUDIT_LOG_INTERVAL`` seconds;
+        the line carries the count of attempts suppressed since the previous
+        line for that IP.
+        """
+        ip = _normalize_ip(remote_ip)
+        now = time.monotonic()
+        state = self._audit_state.get(ip)
+        if state is not None and now - state["last_log_ts"] < self._AUDIT_LOG_INTERVAL:
+            state["suppressed_count"] += 1
+            return
+
+        if state is None:
+            # Evict the oldest tracked IP if at capacity (mirror RateLimiter).
+            if len(self._audit_state) >= self._MAX_AUDIT_IPS:
+                oldest_ip = min(
+                    self._audit_state,
+                    key=lambda k: self._audit_state[k]["last_log_ts"],
+                )
+                del self._audit_state[oldest_ip]
+            suppressed = 0
+        else:
+            suppressed = int(state["suppressed_count"])
+
+        self._audit_state[ip] = {"last_log_ts": now, "suppressed_count": 0}
+        if suppressed:
+            log.warning(
+                "Failed dashboard login from %s (reason=%s, %d suppressed since last log)",
+                ip,
+                reason,
+                suppressed,
+            )
+        else:
+            log.warning("Failed dashboard login from %s (reason=%s)", ip, reason)
 
     def login(self, password: str, remote_ip: str) -> str | None:
         """Verify password and create session. Returns token or None."""
         if not self.rate_limiter.is_allowed(remote_ip):
+            self._audit_failed_login(remote_ip, "rate_limited")
             return None
 
         if not verify_password(password, self._password_hash):
             self.rate_limiter.record_attempt(remote_ip)
+            self._audit_failed_login(remote_ip, "bad_password")
             return None
 
         token = secrets.token_hex(32)
