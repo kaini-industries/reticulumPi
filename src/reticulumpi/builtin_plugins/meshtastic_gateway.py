@@ -996,7 +996,9 @@ class MeshtasticGateway(PluginBase):
         self._broadcast_cache: tuple[float, dict] | None = None
         self._broadcast_cache_ttl: float = 10.0
         self._nodes_cache: tuple[float, list] | None = None
-        self._nodes_cache_ttl: float = 10.0
+        # Node tables change slowly; a longer TTL cuts the dict-copy/rebuild
+        # frequency (and the periodic disk save) ~3x on the broadcast thread.
+        self._nodes_cache_ttl: float = 30.0
 
         # Packet dedup — same message can arrive via both MQTT and serial,
         # and MQTT bridges can replay packets many minutes apart. Keep a
@@ -1029,6 +1031,9 @@ class MeshtasticGateway(PluginBase):
         self._node_data_cache_path = os.path.join(storage_path, "node_data_cache.json")
         self._persisted_nodes: dict[str, dict[str, Any]] = {}
         self._node_data_save_counter: int = 0
+        # Guards the background node-data save so the periodic dispatch from the
+        # broadcast thread never starts a second concurrent disk write.
+        self._node_data_save_inflight: bool = False
         self._mqtt_node_ttl: float = float(self.config.get("mqtt_node_ttl_seconds", 86400))
         self._load_node_data_cache()
 
@@ -2039,6 +2044,34 @@ class MeshtasticGateway(PluginBase):
                 json.dump(snapshot, f)
         except Exception:
             self.log.debug("Error saving node data cache", exc_info=True)
+
+    def _save_node_data_cache_async(self) -> None:
+        """Dispatch the node-data disk save to a background thread.
+
+        The periodic save fires from ``get_meshtastic_nodes`` on the broadcast
+        thread; the json.dump to the SD card can spike, so push it off-thread.
+        The in-flight flag is lock-free: dispatch only ever originates from the
+        single broadcast thread, and a raced flag at worst causes one redundant
+        save.
+        """
+        if self._node_data_save_inflight:
+            return
+        self._node_data_save_inflight = True
+
+        def _run() -> None:
+            try:
+                self._save_node_data_cache()
+            finally:
+                self._node_data_save_inflight = False
+                self._remove_thread(threading.current_thread())
+
+        try:
+            self._start_thread(_run, "meshtastic-node-save")
+        except Exception:
+            # If the thread couldn't be started, fall back to inline save so we
+            # don't silently skip persistence (and clear the flag).
+            self._node_data_save_inflight = False
+            self._save_node_data_cache()
 
     def _extract_lora_neighbors(
         self,
@@ -3257,7 +3290,8 @@ class MeshtasticGateway(PluginBase):
         self._node_data_save_counter += 1
         if self._node_data_save_counter >= 20:
             self._node_data_save_counter = 0
-            self._save_node_data_cache()
+            # Off-thread: keep the json.dump to SD off the broadcast thread.
+            self._save_node_data_cache_async()
 
         return result
 

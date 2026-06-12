@@ -858,6 +858,110 @@ class TestNodeDataCache:
 
 
 # ---------------------------------------------------------------------------
+# TestNodeDataSaveDispatch (A5: off-thread periodic save + 30s TTL)
+# ---------------------------------------------------------------------------
+
+
+class TestNodeDataSaveDispatch:
+    def test_periodic_save_dispatched_off_thread(self, gateway_plugin):
+        """The 20th refresh dispatches the disk save to a thread, never inline."""
+        gateway_plugin._connected = True
+        gateway_plugin._mesh_interface = _make_mock_mesh_interface()
+        # Next get_meshtastic_nodes() crosses the 20-cycle threshold.
+        gateway_plugin._node_data_save_counter = 19
+        gateway_plugin._nodes_cache = None  # force a real rebuild
+
+        dispatched = []
+
+        def _fake_start_thread(target, name=None):
+            dispatched.append((target, name))
+            return MagicMock()  # do NOT run it — prove the caller returns first
+
+        with (
+            patch.object(gateway_plugin, "_start_thread", side_effect=_fake_start_thread),
+            patch.object(gateway_plugin, "_save_node_data_cache") as mock_save,
+        ):
+            nodes = gateway_plugin.get_meshtastic_nodes()
+
+            # The caller returned its node list without doing the disk write.
+            assert nodes is not None
+            mock_save.assert_not_called()
+            # A background thread was scheduled for the save.
+            assert len(dispatched) == 1
+            target, name = dispatched[0]
+            assert name == "meshtastic-node-save"
+
+            # Running the dispatched target performs the actual save.
+            target()
+            mock_save.assert_called_once()
+
+    def test_save_not_dispatched_before_threshold(self, gateway_plugin):
+        """Refreshes below the 20-cycle threshold neither save nor dispatch."""
+        gateway_plugin._connected = True
+        gateway_plugin._mesh_interface = _make_mock_mesh_interface()
+        gateway_plugin._node_data_save_counter = 0
+        gateway_plugin._nodes_cache = None
+
+        with (
+            patch.object(gateway_plugin, "_start_thread") as mock_start,
+            patch.object(gateway_plugin, "_save_node_data_cache") as mock_save,
+        ):
+            gateway_plugin.get_meshtastic_nodes()
+            mock_start.assert_not_called()
+            mock_save.assert_not_called()
+
+    def test_async_save_skips_when_inflight(self, gateway_plugin):
+        """A save already in flight is not started a second time."""
+        gateway_plugin._node_data_save_inflight = True
+        with patch.object(gateway_plugin, "_start_thread") as mock_start:
+            gateway_plugin._save_node_data_cache_async()
+            mock_start.assert_not_called()
+
+    def test_async_save_clears_inflight_after_run(self, gateway_plugin):
+        """The dispatched target clears the in-flight flag when it finishes."""
+        captured = {}
+
+        def _fake_start_thread(target, name=None):
+            captured["target"] = target
+            return MagicMock()
+
+        with (
+            patch.object(gateway_plugin, "_start_thread", side_effect=_fake_start_thread),
+            patch.object(gateway_plugin, "_save_node_data_cache"),
+        ):
+            gateway_plugin._save_node_data_cache_async()
+            assert gateway_plugin._node_data_save_inflight is True
+            captured["target"]()
+            assert gateway_plugin._node_data_save_inflight is False
+
+    def test_nodes_cache_ttl_is_30_seconds(self, gateway_plugin):
+        """A5(ii): node cache TTL was raised from 10s to 30s."""
+        assert gateway_plugin._nodes_cache_ttl == 30.0
+
+    def test_nodes_cache_served_within_ttl(self, gateway_plugin):
+        """A cached node list within the 30s TTL is returned without a rebuild."""
+        sentinel = [{"id": "!cached", "long_name": "Cached"}]
+        # Stamp the cache 20s ago — still inside the 30s window.
+        gateway_plugin._nodes_cache = (time.monotonic() - 20.0, sentinel)
+        gateway_plugin._connected = True
+        gateway_plugin._mesh_interface = _make_mock_mesh_interface()
+
+        result = gateway_plugin.get_meshtastic_nodes()
+        assert result is sentinel  # served from cache, no rebuild
+
+    def test_nodes_cache_rebuilds_after_ttl(self, gateway_plugin):
+        """Past the 30s TTL the node list is rebuilt from the live interface."""
+        stale = [{"id": "!stale", "long_name": "Stale"}]
+        gateway_plugin._nodes_cache = (time.monotonic() - 31.0, stale)
+        gateway_plugin._connected = True
+        gateway_plugin._mesh_interface = _make_mock_mesh_interface()
+
+        result = gateway_plugin.get_meshtastic_nodes()
+        assert result is not stale
+        assert {n["id"] for n in result} == {"!abcd1234", "!beef5678"}
+
+
+# ---------------------------------------------------------------------------
 # TestConnectionManagement
 # ---------------------------------------------------------------------------
 
