@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from reticulumpi.builtin_plugins.web_dashboard.broadcast_registry import (
     BroadcastRegistry,
 )
@@ -81,6 +83,120 @@ class TestBudgetMultiplier:
             "t1_slow": _make_plugin(1, "mesh", delay=0.1, result={"peers": []}),
             "t1_after": _make_plugin(1, "alerts", delay=0.0, result={"count": 0}),
         }
-        data = registry.collect(plugins, cycle_count=1)
+        # cycle_count=0 keeps the rotation start index at 0 so iteration order
+        # is the dict order (slow plugin first), and the fast one is skipped.
+        data = registry.collect(plugins, cycle_count=0)
         assert "mesh" in data
         assert "alerts" not in data
+
+
+class TestFairnessRotation:
+    def test_no_permanent_starvation_across_cycles(self):
+        """With N tier-2 plugins and a budget fitting only one, every plugin
+        should run at least once across N cycles thanks to start-index rotation.
+        """
+        n = 4
+        # Budget fits roughly one plugin per cycle (each ~50ms; tier2 budget
+        # ~= 0.06 * 0.225 = ~13.5ms, so only the first plugin runs).
+        registry = BroadcastRegistry(metrics_interval=0.06)
+        keys = [f"k{i}" for i in range(n)]
+        plugins = {
+            f"t2_{i}": _make_plugin(2, keys[i], delay=0.05, result={keys[i]: i})
+            for i in range(n)
+        }
+
+        ran_keys: set[str] = set()
+        for cycle in range(n):
+            data = registry.collect(plugins, cycle_count=cycle)
+            ran_keys.update(k for k in keys if k in data)
+
+        # Every plugin must have produced output at least once across the cycles.
+        assert ran_keys == set(keys)
+
+    def test_rotation_start_index_advances(self):
+        """The first plugin run in a tier should advance with cycle_count."""
+        n = 3
+        # Large enough budget so the first plugin always runs (others may be
+        # skipped depending on remaining time); we only assert the head order.
+        registry = BroadcastRegistry(metrics_interval=10.0)
+        order: list[str] = []
+
+        def make_recording(idx):
+            p = _make_plugin(2, f"k{idx}", delay=0.0, result={f"k{idx}": idx})
+            orig = p.broadcast_snapshot
+
+            def snap(cycle_count=0):
+                order.append(f"t2_{idx}")
+                return orig(cycle_count=cycle_count)
+
+            p.broadcast_snapshot = snap
+            return p
+
+        plugins = {f"t2_{i}": make_recording(i) for i in range(n)}
+
+        for cycle in range(n):
+            order.clear()
+            registry.collect(plugins, cycle_count=cycle)
+            # The first plugin invoked this cycle is rotated by cycle % n.
+            assert order[0] == f"t2_{cycle % n}"
+
+
+class TestConfigurableParams:
+    def test_slow_threshold_override_changes_warning(self, caplog):
+        """A higher slow_threshold_ms suppresses the slow-plugin warning."""
+        plugins = {"t1": _make_plugin(1, "mesh", delay=0.05, result={"x": 1})}
+
+        # Default threshold (200ms) — 50ms delay does NOT warn.
+        default_reg = BroadcastRegistry(metrics_interval=5.0)
+        with caplog.at_level("WARNING"):
+            default_reg.collect(plugins, cycle_count=0)
+        assert not any("Slow broadcast plugin" in r.message for r in caplog.records)
+
+        caplog.clear()
+        # Very low threshold (10ms) — 50ms delay DOES warn.
+        low_reg = BroadcastRegistry(metrics_interval=5.0, slow_threshold_ms=10.0)
+        with caplog.at_level("WARNING"):
+            low_reg.collect(plugins, cycle_count=0)
+        assert any("Slow broadcast plugin" in r.message for r in caplog.records)
+
+    def test_tier_factor_overrides_change_budgets(self):
+        """Constructor tier factors override the hardcoded defaults."""
+        reg = BroadcastRegistry(
+            metrics_interval=10.0,
+            tier1_factor=0.5,
+            tier2_factor=0.25,
+        )
+        assert reg._tier1_budget == pytest.approx(10.0 * 0.5)
+        assert reg._tier2_budget == pytest.approx(10.0 * 0.25)
+
+        default_reg = BroadcastRegistry(metrics_interval=10.0)
+        assert default_reg._tier1_budget == pytest.approx(10.0 * (0.75 * 0.70))
+        assert default_reg._tier2_budget == pytest.approx(10.0 * (0.75 * 0.30))
+        # Overridden budgets differ from the defaults.
+        assert reg._tier1_budget != default_reg._tier1_budget
+        assert reg._tier2_budget != default_reg._tier2_budget
+
+
+class TestInstrumentation:
+    def test_records_per_tier_elapsed_and_skipped(self):
+        registry = BroadcastRegistry(metrics_interval=0.01)
+        plugins = {
+            "t0": _make_plugin(0, "sys", delay=0.0, result={"cpu": 1}),
+            "t1_slow": _make_plugin(1, "mesh", delay=0.05, result={"peers": []}),
+            "t1_after": _make_plugin(1, "alerts", delay=0.0, result={"count": 0}),
+        }
+        registry.collect(plugins, cycle_count=0)
+        # Per-tier elapsed populated for all three tiers.
+        assert set(registry.last_tier_ms) == {0, 1, 2}
+        assert registry.last_tier_ms[1] >= 0.0
+        # The fast tier-1 plugin after the slow one was skipped.
+        assert registry.last_skipped >= 1
+
+    def test_skipped_zero_when_all_fit(self):
+        registry = BroadcastRegistry(metrics_interval=5.0)
+        plugins = {
+            "t1": _make_plugin(1, "mesh", delay=0.0, result={"peers": []}),
+            "t2": _make_plugin(2, "gps", delay=0.0, result={"lat": 0}),
+        }
+        registry.collect(plugins, cycle_count=0)
+        assert registry.last_skipped == 0

@@ -23,6 +23,7 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _check_ws_origin,
     _collect_broadcast_data,
     _collect_interfaces,
+    _dashboard_exception_handler,
     _enrich_transport_traffic,
     _extract_radio,
     _handle_ws_command,
@@ -36,9 +37,11 @@ from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
     _on_status_event,
     _parse_rnode_config,
     _push_to_clients,
+    _schedule_push,
     _send_with_timeout,
     _start_broadcast_task,
     _stop_broadcast_task,
+    _track_bg_task,
     _ws_clients,
     websocket_metrics,
     websocket_spectrum,
@@ -1677,6 +1680,205 @@ class TestSendWithTimeout:
                 assert result is False
             except asyncio.CancelledError:
                 pass  # CancelledError may propagate through wait_for
+
+        asyncio.run(run())
+
+    def test_timeout_aborts_transport_once(self):
+        """On timeout, the stalled client's transport.abort() is called once."""
+
+        async def stall(_msg):
+            await asyncio.sleep(10)
+
+        transport = MagicMock()
+        ws = MagicMock()
+        ws.send_str = stall
+        ws._req.transport = transport
+
+        async def run():
+            result = await _send_with_timeout(ws, "hello", timeout=0.05)
+            assert result is False
+            transport.abort.assert_called_once_with()
+
+        asyncio.run(run())
+
+    def test_timeout_no_crash_when_req_none(self):
+        """ws._req is None → no crash, still returns False."""
+
+        async def stall(_msg):
+            await asyncio.sleep(10)
+
+        ws = MagicMock()
+        ws.send_str = stall
+        ws._req = None
+
+        async def run():
+            result = await _send_with_timeout(ws, "hello", timeout=0.05)
+            assert result is False
+
+        asyncio.run(run())
+
+    def test_timeout_no_crash_when_transport_none(self):
+        """ws._req.transport is None → no crash, still returns False."""
+
+        async def stall(_msg):
+            await asyncio.sleep(10)
+
+        ws = MagicMock()
+        ws.send_str = stall
+        ws._req.transport = None
+
+        async def run():
+            result = await _send_with_timeout(ws, "hello", timeout=0.05)
+            assert result is False
+
+        asyncio.run(run())
+
+    def test_timeout_swallows_abort_errors(self):
+        """An exception from transport.abort() is swallowed; returns False."""
+
+        async def stall(_msg):
+            await asyncio.sleep(10)
+
+        transport = MagicMock()
+        transport.abort.side_effect = RuntimeError("already closed")
+        ws = MagicMock()
+        ws.send_str = stall
+        ws._req.transport = transport
+
+        async def run():
+            result = await _send_with_timeout(ws, "hello", timeout=0.05)
+            assert result is False
+
+        asyncio.run(run())
+
+
+# ── _dashboard_exception_handler tests ────────────────────────────
+
+
+class TestDashboardExceptionHandler:
+    def test_matching_context_suppressed_no_delegate(self, caplog):
+        """Bare-future ConnectionError('Connection lost') → DEBUG, no delegate."""
+        loop = MagicMock()
+        context = {
+            "exception": ConnectionError("Connection lost"),
+            "future": MagicMock(),
+        }
+        with caplog.at_level("DEBUG"):
+            _dashboard_exception_handler(loop, context)
+        loop.default_exception_handler.assert_not_called()
+        assert any("drain-waiter" in r.message for r in caplog.records)
+
+    def test_non_connection_error_delegates(self):
+        """A different exception type delegates to the default handler."""
+        loop = MagicMock()
+        context = {"exception": ValueError("boom"), "future": MagicMock()}
+        _dashboard_exception_handler(loop, context)
+        loop.default_exception_handler.assert_called_once_with(context)
+
+    def test_wrong_message_delegates(self):
+        """ConnectionError with a different message still delegates."""
+        loop = MagicMock()
+        context = {
+            "exception": ConnectionError("Some other reason"),
+            "future": MagicMock(),
+        }
+        _dashboard_exception_handler(loop, context)
+        loop.default_exception_handler.assert_called_once_with(context)
+
+    def test_with_task_key_delegates(self):
+        """A 'task' in the context means it's a task error → delegate."""
+        loop = MagicMock()
+        context = {
+            "exception": ConnectionError("Connection lost"),
+            "future": MagicMock(),
+            "task": MagicMock(),
+        }
+        _dashboard_exception_handler(loop, context)
+        loop.default_exception_handler.assert_called_once_with(context)
+
+    def test_with_handle_key_delegates(self):
+        """A 'handle' in the context → delegate."""
+        loop = MagicMock()
+        context = {
+            "exception": ConnectionError("Connection lost"),
+            "future": MagicMock(),
+            "handle": MagicMock(),
+        }
+        _dashboard_exception_handler(loop, context)
+        loop.default_exception_handler.assert_called_once_with(context)
+
+    def test_missing_future_delegates(self):
+        """No 'future' in the context → delegate (not the drain-waiter case)."""
+        loop = MagicMock()
+        context = {"exception": ConnectionError("Connection lost")}
+        _dashboard_exception_handler(loop, context)
+        loop.default_exception_handler.assert_called_once_with(context)
+
+
+# ── _bg_tasks lifecycle tests ─────────────────────────────────────
+
+
+class TestBackgroundTaskTracking:
+    def test_track_adds_and_discards(self):
+        """A tracked task is in _bg_tasks until done, then discarded."""
+
+        async def run():
+            wsh_module._bg_tasks.clear()
+
+            async def noop():
+                return None
+
+            task = asyncio.create_task(noop())
+            _track_bg_task(task)
+            assert task in wsh_module._bg_tasks
+            await task
+            # Done callbacks run on the loop; let them flush.
+            await asyncio.sleep(0)
+            assert task not in wsh_module._bg_tasks
+
+        asyncio.run(run())
+
+    def test_exception_consumed_no_unretrieved(self, caplog):
+        """A failing tracked task's exception is consumed (no 'never retrieved')."""
+
+        async def run():
+            wsh_module._bg_tasks.clear()
+
+            async def boom():
+                raise ConnectionError("Connection lost")
+
+            with caplog.at_level("DEBUG"):
+                task = asyncio.create_task(boom())
+                _track_bg_task(task)
+                try:
+                    await task
+                except ConnectionError:
+                    pass
+                await asyncio.sleep(0)
+            assert task not in wsh_module._bg_tasks
+            # The done-callback logged the failure at debug.
+            assert any("Background WS push task failed" in r.message for r in caplog.records)
+
+        asyncio.run(run())
+
+        # No "never retrieved" warning should have been emitted by GC.
+        assert not any("never retrieved" in r.message for r in caplog.records)
+
+    def test_schedule_push_tracks_task(self):
+        """_schedule_push registers its task in _bg_tasks."""
+
+        async def run():
+            wsh_module._bg_tasks.clear()
+            with patch.object(
+                wsh_module, "_push_to_clients", new_callable=AsyncMock
+            ) as push:
+                _schedule_push("offgrid_mode_changed", {"enabled": True})
+                assert len(wsh_module._bg_tasks) == 1
+                # Drain the scheduled task.
+                await asyncio.gather(*list(wsh_module._bg_tasks))
+                await asyncio.sleep(0)
+            push.assert_awaited_once()
+            assert len(wsh_module._bg_tasks) == 0
 
         asyncio.run(run())
 

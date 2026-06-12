@@ -108,6 +108,18 @@ async def _send_with_timeout(
         return True
     except asyncio.TimeoutError:
         log.warning("WS send timed out after %.1fs, evicting client", timeout)
+        # Force-close the stalled client's transport.  abort() ->
+        # connection_lost(None) -> drain waiter.set_result(None), which
+        # prevents the orphaned "Future exception was never retrieved"
+        # noise (only a non-None exc sets an exception) and frees the dead
+        # socket immediately instead of lingering ~15 min.
+        try:
+            req = getattr(ws, "_req", None)
+            transport = getattr(req, "transport", None) if req is not None else None
+            if transport is not None:
+                transport.abort()
+        except (AttributeError, RuntimeError, OSError):
+            pass
         return False
     except Exception:
         return False
@@ -759,10 +771,16 @@ _mesh_version: int = 0
 _broadcast_registry: BroadcastRegistry | None = None
 
 
-def _get_registry(interval: float) -> BroadcastRegistry:
+def _get_registry(interval: float, config: Any = None) -> BroadcastRegistry:
     global _broadcast_registry
     if _broadcast_registry is None:
-        _broadcast_registry = BroadcastRegistry(metrics_interval=interval)
+        cfg = config if config is not None else {}
+        _broadcast_registry = BroadcastRegistry(
+            metrics_interval=interval,
+            slow_threshold_ms=cfg.get("broadcast_slow_threshold_ms", 200.0),
+            tier1_factor=cfg.get("broadcast_tier1_factor", 0.75 * 0.70),
+            tier2_factor=cfg.get("broadcast_tier2_factor", 0.75 * 0.30),
+        )
     return _broadcast_registry
 
 
@@ -779,7 +797,7 @@ def _collect_broadcast_data(
     time budget, then post-processes to preserve the frontend contract.
     """
     interval = plugin.config.get("metrics_interval", 5)
-    registry = _get_registry(interval)
+    registry = _get_registry(interval, plugin.config)
 
     plugin_statuses: dict[str, Any] = {}
     for name, p in plugin.app.plugins.items():
@@ -1005,13 +1023,21 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
             # Periodic health log (~every 60s at default interval).
             if _cycle_count % 30 == 0:
+                reg = _broadcast_registry
+                tier_ms = reg.last_tier_ms if reg is not None else {0: 0.0, 1: 0.0, 2: 0.0}
+                skipped_n = reg.last_skipped if reg is not None else 0
                 log.info(
-                    "WS broadcast: collect=%.0fms payload=%dB diff=%d/%d clients=%d",
+                    "WS broadcast: collect=%.0fms payload=%dB diff=%d/%d clients=%d "
+                    "tier0=%.0fms tier1=%.0fms tier2=%.0fms skipped=%d",
                     collect_elapsed * 1000,
                     len(message),
                     len(diff_data),
                     len(data),
                     len(clients),
+                    tier_ms.get(0, 0.0),
+                    tier_ms.get(1, 0.0),
+                    tier_ms.get(2, 0.0),
+                    skipped_n,
                 )
 
         except asyncio.CancelledError:
@@ -1022,6 +1048,36 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
 
 
 _push_sem: asyncio.Semaphore | None = None
+
+# Fire-and-forget tasks (event-bus pushes) kept referenced so the event
+# loop can't GC them mid-flight; the done-callback also consumes their
+# exception so an aborted-client ConnectionError never surfaces as the
+# "Future exception was never retrieved" noise.
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _dashboard_exception_handler(
+    loop: asyncio.AbstractEventLoop, context: dict[str, Any]
+) -> None:
+    """Scoped loop handler: swallow the orphaned aiohttp drain-waiter noise.
+
+    When a 5s send timeout aborts a write to a stalled WS client, aiohttp's
+    drain waiter is occasionally orphaned with a bare ``ConnectionError(
+    'Connection lost')``.  That surfaces on the loop as a future-level error
+    (no ``task``/``handle``).  Demote exactly that signature to DEBUG and
+    delegate everything else to the default handler so real bugs stay loud.
+    """
+    exc = context.get("exception")
+    if (
+        isinstance(exc, ConnectionError)
+        and str(exc) == "Connection lost"
+        and context.get("future") is not None
+        and "task" not in context
+        and "handle" not in context
+    ):
+        log.debug("Suppressed orphaned WS drain-waiter ConnectionError")
+        return
+    loop.default_exception_handler(context)
 
 
 async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
@@ -1041,6 +1097,7 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         _cache_hits, \
         _last_hb_summary_ts
     _ws_loop = asyncio.get_running_loop()
+    _ws_loop.set_exception_handler(_dashboard_exception_handler)
     _ws_plugin = app["plugin"]
     _push_sem = asyncio.Semaphore(8)
     _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
@@ -1133,6 +1190,21 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
         except asyncio.CancelledError:
             pass
         _broadcast_task = None
+    # Cancel and drain any in-flight fire-and-forget event-bus pushes.
+    if _bg_tasks:
+        pending = list(_bg_tasks)
+        for task in pending:
+            task.cancel()
+        try:
+            await asyncio.gather(*pending, return_exceptions=True)
+        except Exception:
+            log.debug("Error draining background WS tasks", exc_info=True)
+        _bg_tasks.clear()
+    if _ws_loop is not None:
+        try:
+            _ws_loop.set_exception_handler(None)
+        except Exception:
+            log.debug("Error restoring loop exception handler", exc_info=True)
     _ws_loop = None
     _ws_plugin = None
     _broadcast_registry = None
@@ -1467,10 +1539,31 @@ def _on_offgrid_event(event_type: str, data: dict) -> None:
         pass
 
 
+def _track_bg_task(task: asyncio.Task) -> None:
+    """Keep a strong ref to a fire-and-forget task and consume its result.
+
+    Prevents the loop from GC'ing the task mid-flight, and the done-callback
+    retrieves any exception (logging non-cancellation ones at debug) so an
+    aborted-client ConnectionError never becomes "Future exception was never
+    retrieved" noise.
+    """
+    _bg_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _bg_tasks.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.debug("Background WS push task failed: %r", exc)
+
+    task.add_done_callback(_done)
+
+
 def _schedule_push(push_type: str, payload: dict) -> None:
     """Schedule an async broadcast on the WS event loop."""
     try:
-        asyncio.create_task(_push_to_clients(push_type, payload))
+        _track_bg_task(asyncio.create_task(_push_to_clients(push_type, payload)))
     except RuntimeError:
         pass
 
@@ -1482,7 +1575,7 @@ def _schedule_enriched_push(
 ) -> None:
     """Schedule an async broadcast that enriches the payload before sending."""
     try:
-        asyncio.create_task(_enrich_and_push(push_type, event_type, data))
+        _track_bg_task(asyncio.create_task(_enrich_and_push(push_type, event_type, data)))
     except RuntimeError:
         pass
 
