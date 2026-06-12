@@ -17,6 +17,9 @@ from typing import TYPE_CHECKING, Any
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.shared_state import (
+    client_error_rate_limiter as _client_error_rl,
+)
+from reticulumpi.builtin_plugins.web_dashboard.shared_state import (
     offgrid_rate_limiter as _offgrid_rl,
 )
 
@@ -203,6 +206,8 @@ def setup_api_routes(app: aiohttp.web.Application) -> None:
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/offgrid", handle_offgrid_get)
     app.router.add_post("/api/offgrid", handle_offgrid_set)
+    # Client-side JS error reporting (auth + CSRF protected; NOT public)
+    app.router.add_post("/api/client_error", handle_client_error)
     # Spectrum presets
     app.router.add_get("/api/spectrum/presets", handle_spectrum_presets)
     app.router.add_post("/api/spectrum/preset", handle_spectrum_switch_preset)
@@ -568,3 +573,64 @@ async def handle_offgrid_set(request: aiohttp.web.Request) -> aiohttp.web.Respon
         return _error("Rate limited, try again shortly")
     result = await _run_sync(plugin.app.set_offgrid_mode, enabled)
     return _ok(result)
+
+
+# ── Client-side error reporting ──────────────────────────────────────
+
+
+def _clean_single_line(value: Any, max_len: int) -> str:
+    """Coerce to str, strip newlines/control chars, and truncate.
+
+    Used for fields logged on a single journal line so they stay
+    one-line greppable. Control chars (incl. CR/LF/TAB) are replaced
+    with spaces before truncation.
+    """
+    text = str(value) if value is not None else ""
+    cleaned = "".join(" " if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in text)
+    return cleaned[:max_len]
+
+
+async def handle_client_error(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """POST /api/client_error — receive a browser-side JS error report.
+
+    Auth + CSRF protected (not in PUBLIC_PATHS). Per-IP rate limited to
+    bound log-flood risk. Payload fields are coerced to str, truncated,
+    and (for single-line fields) stripped of control chars so journal
+    lines stay one-line greppable.
+    """
+    if not request.get("token"):
+        return _error("Authentication required", 401)
+
+    ip = request.remote or "unknown"
+    if not _client_error_rl.is_allowed(ip):
+        return _error("Rate limited", 429)
+    _client_error_rl.record_attempt(ip)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("Invalid JSON body", 400)
+
+    message = _clean_single_line(body.get("message"), 512)
+    source = _clean_single_line(body.get("source"), 512)
+    url = _clean_single_line(body.get("url"), 512)
+    ua = _clean_single_line(body.get("ua"), 512)
+    line = _clean_single_line(body.get("line"), 16)
+    col = _clean_single_line(body.get("col"), 16)
+    # Stack may legitimately be multi-line; only truncate (control chars kept).
+    stack = (str(body.get("stack")) if body.get("stack") is not None else "")[:4096]
+
+    log.warning("Client JS error from %s: %s @ %s:%s", ip, message, source, line)
+    if stack:
+        log.debug(
+            "Client JS error stack from %s (col=%s, url=%s, ua=%s):\n%s",
+            ip,
+            col,
+            url,
+            ua,
+            stack,
+        )
+
+    return _ok({})

@@ -12,6 +12,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from reticulumpi.builtin_plugins.web_dashboard.api import (
+    handle_client_error,
     handle_offgrid_get,
     handle_offgrid_set,
     handle_services_restart,
@@ -1125,6 +1126,129 @@ class TestOffgridEndpoints:
         data = _parse_response(resp)
         assert data["ok"] is False
         assert "required" in data["error"]
+
+
+# ── Client error reporting endpoint ───────────────────────────────────────
+
+
+class TestClientError:
+    """Tests for POST /api/client_error (handle_client_error).
+
+    The endpoint is auth-gated, per-IP rate limited, and truncates/sanitises
+    the reported fields before logging them to the journal.
+    """
+
+    def setup_method(self):
+        # Reset the shared per-IP limiter so bursts in one test do not bleed
+        # into another (mirrors the offgrid reset pattern above).
+        from reticulumpi.builtin_plugins.web_dashboard.shared_state import (
+            client_error_rate_limiter,
+        )
+
+        client_error_rate_limiter._attempts.clear()
+
+    def test_happy_path_logs_warning(self):
+        body = {
+            "message": "TypeError: x is undefined",
+            "source": "/static/app.js",
+            "line": 42,
+            "col": 7,
+            "stack": "TypeError: x is undefined\n  at boot (/static/app.js:42:7)",
+            "url": "https://node.local/",
+            "ua": "Mozilla/5.0",
+        }
+        request = _make_request(body=body)
+        with patch("reticulumpi.builtin_plugins.web_dashboard.api.log") as mock_log:
+            resp = asyncio.run(handle_client_error(request))
+        data = _parse_response(resp)
+        assert resp.status == 200
+        assert data["ok"] is True
+        # WARNING line was emitted with ip/message/source/line.
+        mock_log.warning.assert_called_once()
+        args = mock_log.warning.call_args.args
+        assert args[1] == "127.0.0.1"
+        assert args[2] == "TypeError: x is undefined"
+        assert args[3] == "/static/app.js"
+        # line/col are cleaned to single-line strings (log-injection hardening).
+        assert args[4] == "42"
+
+    def test_invalid_json_body_returns_400(self):
+        # body=None makes the mock request.json() raise.
+        request = _make_request(body=None)
+        resp = asyncio.run(handle_client_error(request))
+        data = _parse_response(resp)
+        assert resp.status == 400
+        assert data["ok"] is False
+        assert "Invalid JSON body" in data["error"]
+
+    def test_non_dict_body_returns_400(self):
+        request = _make_request(body=["not", "a", "dict"])
+        resp = asyncio.run(handle_client_error(request))
+        data = _parse_response(resp)
+        assert resp.status == 400
+        assert data["ok"] is False
+        assert "Invalid JSON body" in data["error"]
+
+    def test_truncation_and_newline_stripping(self):
+        long_message = "A" * 1000  # > 512 cap
+        long_stack = "S" * 10000  # > 4096 cap
+        body = {
+            "message": "line1\nline2\r\tmore" + long_message,
+            "source": "/static/app.js",
+            "line": "1\nFAKE WARNING: forged line",
+            "col": 1,
+            "stack": long_stack,
+            "url": "https://node.local/page",
+            "ua": "UA",
+        }
+        request = _make_request(body=body)
+        with patch("reticulumpi.builtin_plugins.web_dashboard.api.log") as mock_log:
+            resp = asyncio.run(handle_client_error(request))
+        assert resp.status == 200
+
+        warn_args = mock_log.warning.call_args.args
+        logged_message = warn_args[2]
+        # Single-line field is capped at 512 and has no control chars.
+        assert len(logged_message) == 512
+        assert "\n" not in logged_message
+        assert "\r" not in logged_message
+        assert "\t" not in logged_message
+        # line is cleaned and capped too — newline injection is neutralized.
+        logged_line = warn_args[4]
+        assert "\n" not in logged_line
+        assert len(logged_line) <= 16
+
+        # Stack is logged at debug, capped at 4096 chars.
+        mock_log.debug.assert_called_once()
+        debug_args = mock_log.debug.call_args.args
+        logged_stack = debug_args[-1]
+        assert len(logged_stack) == 4096
+
+    def test_rate_limit_returns_429_after_burst(self):
+        body = {"message": "boom", "source": "app.js", "line": 1}
+        # 20 allowed within the window, the 21st is rejected.
+        with patch("reticulumpi.builtin_plugins.web_dashboard.api.log"):
+            for _ in range(20):
+                request = _make_request(body=dict(body))
+                request.remote = "10.0.0.5"
+                resp = asyncio.run(handle_client_error(request))
+                assert resp.status == 200
+            request = _make_request(body=dict(body))
+            request.remote = "10.0.0.5"
+            resp = asyncio.run(handle_client_error(request))
+        data = _parse_response(resp)
+        assert resp.status == 429
+        assert data["ok"] is False
+        assert "Rate limited" in data["error"]
+
+    def test_no_token_returns_401(self):
+        body = {"message": "boom", "source": "app.js", "line": 1}
+        request = _make_request(body=body, token=None)
+        resp = asyncio.run(handle_client_error(request))
+        data = _parse_response(resp)
+        assert resp.status == 401
+        assert data["ok"] is False
+        assert "Authentication required" in data["error"]
 
 
 # ── Auth gate negative tests ──────────────────────────────────────────────

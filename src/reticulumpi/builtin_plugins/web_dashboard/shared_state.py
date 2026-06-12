@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import time
 
+from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
+
 
 class OffgridRateLimiter:
     """Rate limiter for the off-grid mode toggle."""
@@ -30,3 +32,9 @@ class OffgridRateLimiter:
 
 
 offgrid_rate_limiter = OffgridRateLimiter()
+
+# Per-IP sliding-window limiter for the client-error reporting endpoint
+# (POST /api/client_error). Bounds log-flood / feedback-loop risk from the
+# browser-side error reporter (errlog.js). Distinct from the global offgrid
+# debounce above — this is keyed per remote IP.
+client_error_rate_limiter = RateLimiter(max_attempts=20, window_seconds=60)

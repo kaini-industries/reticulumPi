@@ -890,6 +890,52 @@ class TestAPIEndpoints:
 
         event_loop.run_until_complete(_do())
 
+    def test_client_error_requires_csrf_header(self, client, event_loop):
+        """POST /api/client_error without X-Requested-With is CSRF-rejected."""
+        token = self._login(client, event_loop)
+
+        async def _do():
+            resp = await client.post(
+                "/api/client_error",
+                json={"message": "boom"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 403
+
+        event_loop.run_until_complete(_do())
+
+    def test_client_error_unauthenticated_returns_401(self, client, event_loop):
+        async def _do():
+            resp = await client.post(
+                "/api/client_error",
+                json={"message": "boom"},
+                headers={
+                    "Accept": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
+            assert resp.status == 401
+
+        event_loop.run_until_complete(_do())
+
+    def test_client_error_accepted_with_auth_and_csrf(self, client, event_loop):
+        token = self._login(client, event_loop)
+
+        async def _do():
+            resp = await client.post(
+                "/api/client_error",
+                json={"message": "boom", "source": "/static/app.js", "line": 1},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["ok"] is True
+
+        event_loop.run_until_complete(_do())
+
     def test_node_endpoint(self, client, event_loop):
         token = self._login(client, event_loop)
 
