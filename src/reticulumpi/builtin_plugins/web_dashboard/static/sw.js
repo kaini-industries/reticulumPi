@@ -1,5 +1,5 @@
 /* Service worker — cache-first tiles + stale-while-revalidate app shell */
-importScripts('./version.js');
+importScripts('/static/version.js');
 var TILE_CACHE = 'rpi-tiles-v1';
 var SHELL_CACHE = 'rpi-shell-' + APP_VERSION;
 var MAX_ENTRIES = 5000;
