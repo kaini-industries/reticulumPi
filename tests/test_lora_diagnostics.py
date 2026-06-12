@@ -591,6 +591,142 @@ class TestAnnounceMode:
 
 
 # ---------------------------------------------------------------------------
+# Broadcast snapshot TTL cache (A3a)
+# ---------------------------------------------------------------------------
+
+
+class TestBroadcastSnapshotCache:
+    @patch("RNS.Transport")
+    def test_snapshot_served_from_cache_within_ttl(self, mock_transport, mock_app, base_config):
+        """broadcast_snapshot reuses the cached dict instead of re-scanning."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        call_count = {"n": 0}
+        real_get_diag = plugin.get_diagnostics
+
+        def _counting_get_diagnostics():
+            call_count["n"] += 1
+            return real_get_diag()
+
+        plugin.get_diagnostics = _counting_get_diagnostics
+
+        first = plugin.broadcast_snapshot()
+        second = plugin.broadcast_snapshot()
+        third = plugin.broadcast_snapshot()
+
+        # Only the first call does the work; the rest are served from cache.
+        assert call_count["n"] == 1
+        assert second is first
+        assert third is first
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    def test_snapshot_recomputes_after_ttl_expiry(self, mock_transport, mock_app, base_config):
+        """Once the TTL window passes, broadcast_snapshot recomputes."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        call_count = {"n": 0}
+        real_get_diag = plugin.get_diagnostics
+
+        def _counting_get_diagnostics():
+            call_count["n"] += 1
+            return real_get_diag()
+
+        plugin.get_diagnostics = _counting_get_diagnostics
+
+        plugin.broadcast_snapshot()
+        assert call_count["n"] == 1
+
+        # Force the cache stamp to look older than the TTL.
+        plugin._snapshot_cache_time -= plugin._snapshot_cache_ttl + 1
+        plugin.broadcast_snapshot()
+        assert call_count["n"] == 2
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    def test_snapshot_none_when_not_started(self, mock_transport, mock_app, base_config):
+        plugin = _make_plugin(mock_app, base_config)
+        assert plugin.broadcast_snapshot() is None
+
+
+# ---------------------------------------------------------------------------
+# mtime-gated announce-mode detection (A3a)
+# ---------------------------------------------------------------------------
+
+
+class TestAnnounceModeMtimeGate:
+    @patch("RNS.Transport")
+    def test_reparse_only_when_mtime_changes(self, mock_transport, mock_app, base_config):
+        """The rnsd config is parsed once per mtime change, not every call."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        from reticulumpi.rns_config import InterfaceEntry
+
+        iface = InterfaceEntry(
+            name="RNode LoRa Interface",
+            properties={"announce_cap": "5"},
+        )
+
+        stat_result = MagicMock()
+        stat_result.st_mtime = 1000.0
+
+        with (
+            patch("os.stat", return_value=stat_result),
+            patch(
+                "reticulumpi.rns_config.parse_rns_config",
+                return_value=([], [iface]),
+            ) as mock_parse,
+        ):
+            assert plugin._detect_announce_mode() == "all"
+            assert mock_parse.call_count == 1
+
+            # Same mtime → cached, no re-parse.
+            assert plugin._detect_announce_mode() == "all"
+            assert plugin._detect_announce_mode() == "all"
+            assert mock_parse.call_count == 1
+
+            # mtime changes → re-parse exactly once more.
+            stat_result.st_mtime = 2000.0
+            assert plugin._detect_announce_mode() == "all"
+            assert mock_parse.call_count == 2
+        plugin.stop()
+
+    @patch("RNS.Transport")
+    def test_stat_failure_falls_back_to_cache(self, mock_transport, mock_app, base_config):
+        """A stat failure serves the last cached mode rather than re-parsing."""
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+
+        from reticulumpi.rns_config import InterfaceEntry
+
+        iface = InterfaceEntry(
+            name="RNode LoRa Interface",
+            properties={"announce_cap": "1"},
+        )
+
+        stat_result = MagicMock()
+        stat_result.st_mtime = 500.0
+
+        with patch(
+            "reticulumpi.rns_config.parse_rns_config",
+            return_value=([], [iface]),
+        ) as mock_parse:
+            # Prime the cache with a successful stat.
+            with patch("os.stat", return_value=stat_result):
+                assert plugin._detect_announce_mode() == "local_priority"
+            assert mock_parse.call_count == 1
+
+            # Now stat fails — we should serve the cached value, no re-parse.
+            with patch("os.stat", side_effect=OSError("gone")):
+                assert plugin._detect_announce_mode() == "local_priority"
+            assert mock_parse.call_count == 1
+        plugin.stop()
+
+
+# ---------------------------------------------------------------------------
 # Interface stats polling
 # ---------------------------------------------------------------------------
 

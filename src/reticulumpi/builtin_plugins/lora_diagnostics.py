@@ -71,6 +71,15 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
     def __init__(self, app: Any, plugin_config: dict[str, Any]) -> None:
         self._lock = threading.Lock()
+        # Snapshot TTL cache for broadcast_snapshot (avoids re-running the full
+        # get_diagnostics scan under self._lock on every 2s broadcast cycle).
+        self._snapshot_cache: dict[str, Any] | None = None
+        self._snapshot_cache_time = 0.0
+        self._snapshot_cache_ttl = 15.0
+        # mtime-gated cache for the rnsd-config-derived announce mode so we only
+        # re-parse the file from disk when it actually changes on disk.
+        self._announce_mode_cache: str | None = None
+        self._announce_mode_mtime: float | None = None
         super().__init__(app, plugin_config)
 
     def validate_config(self) -> None:
@@ -171,7 +180,14 @@ class LoRaDiagnosticsPlugin(PluginBase):
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
         if not hasattr(self, "_monitored"):
             return None
-        return self.get_diagnostics()
+        now = time.monotonic()
+        cached = self._snapshot_cache
+        if cached is not None and (now - self._snapshot_cache_time) < self._snapshot_cache_ttl:
+            return cached
+        snapshot = self.get_diagnostics()
+        self._snapshot_cache = snapshot
+        self._snapshot_cache_time = now
+        return snapshot
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Full diagnostic data for the /api/lora endpoint."""
@@ -316,11 +332,38 @@ class LoRaDiagnosticsPlugin(PluginBase):
         self.log.warning("rnsd did not become responsive within %ds", timeout)
 
     def _detect_announce_mode(self) -> str:
-        """Read current rnsd config to determine active announce mode."""
+        """Read current rnsd config to determine active announce mode.
+
+        The rnsd config rarely changes, so we mtime-gate the parse: stat the
+        file and only re-parse when its mtime differs from the cached value.
+        Stat failures fall back to the last cached mode (or re-parse if we have
+        none yet).
+        """
+        rns_config_path = self._get_rns_config_path()
+        try:
+            import os
+
+            mtime: float | None = os.stat(rns_config_path).st_mtime
+        except OSError:
+            mtime = None
+
+        # Serve the cached mode when the file hasn't changed (or stat failed but
+        # we already have a value).
+        if self._announce_mode_cache is not None and (
+            mtime is None or mtime == self._announce_mode_mtime
+        ):
+            return self._announce_mode_cache
+
+        mode = self._parse_announce_mode(rns_config_path)
+        self._announce_mode_cache = mode
+        self._announce_mode_mtime = mtime
+        return mode
+
+    def _parse_announce_mode(self, rns_config_path: str) -> str:
+        """Parse the rnsd config file and derive the active announce mode."""
         try:
             from reticulumpi.rns_config import parse_rns_config
 
-            rns_config_path = self._get_rns_config_path()
             _, interfaces = parse_rns_config(rns_config_path)
             iface_name = self.config.get("lora_interface_name", "RNode LoRa Interface")
             for iface in interfaces:

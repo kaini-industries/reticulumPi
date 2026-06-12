@@ -347,3 +347,234 @@ def test_paginated_sort_col_falls_back_on_unknown(mock_transport, mock_app, plug
     assert result["total"] == 1
     assert len(result["nodes"]) == 1
     plugin.stop()
+
+
+# ---------------------------------------------------------------------------
+# Mesh-summary cache moved off the broadcast thread (A3b)
+# ---------------------------------------------------------------------------
+
+
+def _quiesce_maintenance(plugin) -> None:
+    """Stop the background maintenance thread (so it stops refreshing the
+    summary cache) without closing the read connection that ``stop()`` would.
+    """
+    plugin._active = False
+    plugin._join_threads(timeout=5)
+
+
+@patch("RNS.Transport")
+def test_broadcast_snapshot_never_scans_when_cache_populated(
+    mock_transport, mock_app, plugin_config
+):
+    """broadcast_snapshot reads _summary_cache only — never runs the scan."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    _quiesce_maintenance(plugin)
+
+    # Pre-populate the cache as the maintenance loop would.
+    sentinel = {"total_nodes": 42}
+    import time as _time
+
+    plugin._summary_cache = (_time.monotonic(), sentinel)
+
+    # Spy on the read connection so we can detect any inline summary scan.
+    # sqlite3.Connection.execute is read-only, so wrap the whole connection.
+    scan_calls = []
+
+    class _SpyConn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            scan_calls.append(sql)
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    real_conn = plugin._read_conn
+    plugin._read_conn = _SpyConn(real_conn)
+
+    # cycle_count % 3 == 0 → want_summary is True; the cache must serve it.
+    snap = plugin.broadcast_snapshot(cycle_count=0)
+
+    assert snap is not None
+    assert snap["summary"] is sentinel
+    # No summary aggregation / app GROUP BY scan from the broadcast thread.
+    # (The cheap indexed recent-announces seek is allowed and expected.)
+    assert not any("COUNT(*) AS total" in s for s in scan_calls)
+    assert not any("GROUP BY app" in s for s in scan_calls)
+    real_conn.close()
+
+
+@patch("RNS.Transport")
+def test_broadcast_snapshot_omits_summary_when_cache_missing(
+    mock_transport, mock_app, plugin_config
+):
+    """With no cache yet, broadcast_snapshot must not compute the scan inline."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    _quiesce_maintenance(plugin)
+    plugin._summary_cache = None
+
+    compute_calls = []
+    real_compute = plugin._compute_mesh_summary
+
+    def _spy_compute():
+        compute_calls.append(True)
+        return real_compute()
+
+    plugin._compute_mesh_summary = _spy_compute
+
+    snap = plugin.broadcast_snapshot(cycle_count=0)
+
+    # The heavy scan was NOT run on the broadcast thread.
+    assert compute_calls == []
+    # Summary key gracefully omitted rather than blocking.
+    assert snap is None or "summary" not in snap
+    plugin._read_conn.close()
+
+
+@patch("RNS.Transport")
+def test_maintenance_refresh_populates_summary_cache(mock_transport, mock_app, plugin_config):
+    """_refresh_summary_cache runs the scan and warms _summary_cache."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    mock_transport.hops_to.return_value = 1
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    plugin.record_announce(b"\x11" * 16, MagicMock(), b"node", "reticulumpi.node")
+    _drain_announce_queue(plugin)
+    plugin._flush_pending_upserts()
+    _quiesce_maintenance(plugin)
+
+    plugin._summary_cache = None
+    plugin._refresh_summary_cache()
+
+    assert plugin._summary_cache is not None
+    stamp, summary = plugin._summary_cache
+    assert summary["total_nodes"] == 1
+    plugin._read_conn.close()
+
+
+@patch("RNS.Transport")
+def test_get_mesh_summary_serves_cache_when_fresh(mock_transport, mock_app, plugin_config):
+    """REST callers get the cached value without re-running the scan."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    _quiesce_maintenance(plugin)
+
+    import time as _time
+
+    sentinel = {"total_nodes": 7}
+    plugin._summary_cache = (_time.monotonic(), sentinel)
+
+    compute_calls = []
+    real_compute = plugin._compute_mesh_summary
+
+    def _spy_compute():
+        compute_calls.append(True)
+        return real_compute()
+
+    plugin._compute_mesh_summary = _spy_compute
+
+    result = plugin.get_mesh_summary()
+    assert result is sentinel
+    assert compute_calls == []  # served from cache, no scan
+    plugin._read_conn.close()
+
+
+@patch("RNS.Transport")
+def test_get_mesh_summary_computes_when_stale(mock_transport, mock_app, plugin_config):
+    """A stale/missing cache forces a direct compute for REST callers."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    _quiesce_maintenance(plugin)
+    plugin._summary_cache = None
+
+    compute_calls = []
+    real_compute = plugin._compute_mesh_summary
+
+    def _spy_compute():
+        compute_calls.append(True)
+        return real_compute()
+
+    plugin._compute_mesh_summary = _spy_compute
+
+    result = plugin.get_mesh_summary()
+    assert compute_calls == [True]
+    assert "total_nodes" in result
+    # The fresh result is now cached.
+    assert plugin._summary_cache is not None
+    plugin._read_conn.close()
+
+
+# ---------------------------------------------------------------------------
+# WAL hygiene (A4)
+# ---------------------------------------------------------------------------
+
+
+@patch("RNS.Transport")
+def test_prune_checkpoints_wal(mock_transport, mock_app, plugin_config):
+    """The hourly prune issues PRAGMA wal_checkpoint(TRUNCATE) after deletes."""
+    from reticulumpi.builtin_plugins import network_map as nm_module
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    executed_sql = []
+    real_connect = sqlite3.connect
+
+    class _RecordingConn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            executed_sql.append(sql)
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def __enter__(self):
+            self._conn.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._conn.__exit__(*exc)
+
+    def _recording_connect(*args, **kwargs):
+        return _RecordingConn(real_connect(*args, **kwargs))
+
+    with patch.object(nm_module.sqlite3, "connect", side_effect=_recording_connect):
+        plugin._prune_old_data()
+
+    assert any("wal_checkpoint(TRUNCATE)" in s for s in executed_sql)
+    # The deletes still ran first.
+    assert any("DELETE FROM known_nodes" in s for s in executed_sql)
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+def test_init_db_sets_incremental_auto_vacuum(mock_transport, mock_app, plugin_config):
+    """New DBs are created with auto_vacuum=INCREMENTAL (mode 2)."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    plugin.stop()
+
+    with sqlite3.connect(plugin_config["db_path"]) as conn:
+        (mode,) = conn.execute("PRAGMA auto_vacuum").fetchone()
+    # 2 == INCREMENTAL
+    assert mode == 2

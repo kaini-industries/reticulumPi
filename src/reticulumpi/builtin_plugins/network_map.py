@@ -110,6 +110,9 @@ class NetworkMapPlugin(PluginBase):
         self._broadcast_cache_ttl = 15.0
         self._summary_cache: tuple[float, dict] | None = None
         self._summary_cache_ttl = 120.0
+        # Guards _summary_cache so the maintenance thread (writer) and the
+        # broadcast/REST threads (readers) never see a torn tuple.
+        self._summary_cache_lock = threading.Lock()
 
         self._announces_dirty = threading.Event()
         self._announces_dirty.set()
@@ -170,15 +173,16 @@ class NetworkMapPlugin(PluginBase):
                 self._recent_announces_time = now
             mesh["recent_announces"] = self._recent_announces_cache
         has_summary = False
-        if want_summary and hasattr(self, "get_mesh_summary"):
-            sc = self._summary_cache
-            if sc and (now - sc[0]) < self._summary_cache_ttl:
+        if want_summary:
+            # Read-only: the maintenance loop owns the heavy scan and keeps
+            # _summary_cache warm.  Never compute inline on the broadcast
+            # thread — if the cache is missing, serve the last known value or
+            # omit the key gracefully rather than block the broadcast.
+            with self._summary_cache_lock:
+                sc = self._summary_cache
+            if sc is not None:
                 mesh["summary"] = sc[1]
-            else:
-                summary = self.get_mesh_summary()
-                self._summary_cache = (now, summary)
-                mesh["summary"] = summary
-            has_summary = True
+                has_summary = True
         result = mesh or None
         self._broadcast_cache = (now, has_summary, result)
         return result
@@ -375,8 +379,26 @@ class NetworkMapPlugin(PluginBase):
     def get_mesh_summary(self) -> dict[str, Any]:
         """Return aggregate mesh stats for the dashboard summary strip.
 
+        Cache-aware entry point for REST callers: serve the cache when it is
+        still fresh, otherwise compute it directly (rare path — the broadcast
+        thread never reaches this; the maintenance loop keeps the cache warm).
+        """
+        now = time.monotonic()
+        with self._summary_cache_lock:
+            sc = self._summary_cache
+        if sc and (now - sc[0]) < self._summary_cache_ttl:
+            return sc[1]
+        summary = self._compute_mesh_summary()
+        with self._summary_cache_lock:
+            self._summary_cache = (now, summary)
+        return summary
+
+    def _compute_mesh_summary(self) -> dict[str, Any]:
+        """Run the two full known_nodes scans that back the summary strip.
+
         Consolidates into 2 queries (one aggregation + one GROUP BY)
-        instead of 6 separate full-table scans.
+        instead of 6 separate full-table scans.  This is the heavy path —
+        call it from the maintenance loop, never on the broadcast thread.
         """
         now = time.time()
         try:
@@ -730,6 +752,10 @@ class NetworkMapPlugin(PluginBase):
 
     def _init_db(self) -> None:
         with sqlite3.connect(self._db_path) as conn:
+            # auto_vacuum must be set before any table exists to take effect on
+            # a new DB (no-op on existing DBs — the live file is VACUUMed
+            # separately).  Lets incremental_vacuum reclaim freed pages.
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("""
@@ -865,6 +891,12 @@ class NetworkMapPlugin(PluginBase):
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute("DELETE FROM interface_stats WHERE timestamp < ?", (cutoff,))
                 conn.execute("DELETE FROM known_nodes WHERE last_seen < ?", (cutoff,))
+                # Reclaim WAL/file space the deletes freed up — without this the
+                # WAL grows unbounded and the file never shrinks.
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    self.log.debug("wal_checkpoint(TRUNCATE) failed", exc_info=True)
             # Also prune from memory
             with self._nodes_lock:
                 expired = [h for h, info in self._known_nodes.items() if info["last_seen"] < cutoff]
@@ -873,14 +905,35 @@ class NetworkMapPlugin(PluginBase):
         except Exception:
             self.log.debug("Error pruning old data", exc_info=True)
 
+    def _refresh_summary_cache(self) -> None:
+        """Run the heavy mesh-summary scan and warm _summary_cache.
+
+        Owned by the maintenance loop so the broadcast thread never has to run
+        the two full known_nodes scans inline.
+        """
+        try:
+            summary = self._compute_mesh_summary()
+        except Exception:
+            self.log.debug("Error refreshing mesh summary cache", exc_info=True)
+            return
+        with self._summary_cache_lock:
+            self._summary_cache = (time.monotonic(), summary)
+
     def _maintenance_loop(self) -> None:
         """Periodically collect interface stats and prune old data."""
         cycles_since_prune = 0
+        # Warm the summary cache once up front so broadcasts have it from the
+        # start instead of waiting a full 60s cycle.
+        self._refresh_summary_cache()
         while self._active:
             try:
                 self._save_interface_stats()
             except Exception:
                 self.log.debug("Error in maintenance loop", exc_info=True)
+
+            # Keep the broadcast-thread summary cache warm (heavy scan lives
+            # here, off the broadcast thread).
+            self._refresh_summary_cache()
 
             self._sleep_while_active(60)
             if not self._active:
