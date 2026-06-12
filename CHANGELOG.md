@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-11
+
+### Fixed
+- **Broadcast pipeline slowness** — messaging_hub's conversation query ran a windowed
+  full-table scan with no LIMIT on nearly every cycle (up to 13s live), and its snapshot
+  cache was defeated by per-message invalidation. Rewritten index-assisted and bounded
+  (200 newest conversations), with an 8s min-recompute interval and a 5s transport-
+  availability cache that removes cross-plugin lock acquisition from the broadcast thread.
+- **Stale dashboard panels** — broadcast budget overruns skipped the same plugins every
+  cycle; per-tier collection order now rotates so no panel is permanently starved.
+  lora_diagnostics no longer re-parses the rnsd config from disk every 2s (15s snapshot
+  TTL + mtime-gated parse); network_map's mesh summary (full scans of a 42MB table)
+  computes in the maintenance loop instead of the broadcast thread; meshtastic_gateway's
+  periodic node-cache disk save moved off the broadcast thread.
+- **SQLite WAL bloat** — messaging_hub, network_map, and the auth sessions store now run
+  periodic `wal_checkpoint(TRUNCATE)`; network_map enables `auto_vacuum=INCREMENTAL` for
+  new installs.
+- **asyncio "Future exception was never retrieved" noise** — a WebSocket send timeout now
+  aborts the stalled client's transport immediately (previously the dead socket lingered
+  ~15min until kernel ETIMEDOUT fired an orphaned aiohttp drain-waiter); a scoped loop
+  exception handler downgrades the residual signature to debug.
+
+### Added
+- **TLS support hardened for real use** — auto-generated self-signed certs now carry SANs
+  for the hostname, `<hostname>.local`, loopback, and LAN IPs (plus configurable
+  `ssl.extra_hostnames`); HSTS header when serving HTTPS; mDNS advertises `_https._tcp`
+  when TLS is active.
+- **Failed-login audit logging** — throttled WARNING (one per IP per 10s with suppressed
+  count); login rate limiter is now configurable via `web_dashboard.rate_limit`.
+- **Optional IP allowlist** — `web_dashboard.allowed_networks` CIDR list enforced ahead of
+  all other middleware; non-members receive 404. Default empty (allow all).
+- **Tile proxy now requires auth** — `/tiles/` moved behind the session, closing anonymous
+  use of the node as an OSM tile proxy; the map is unaffected for logged-in users.
+- Broadcast health log now reports per-tier collection timings and skipped count;
+  registry slow-threshold and tier budget factors are configurable.
+
 ## [0.2.2] - 2026-06-10
 
 ### Fixed

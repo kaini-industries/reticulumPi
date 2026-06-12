@@ -5,17 +5,17 @@ Steps:
    - If nothing listening, check `sudo systemctl status reticulumpi --no-pager` for errors.
    - Common cause: plugin disabled in config or port conflict.
 
-2. **Plugin loaded:** `curl -s --max-time 3 http://127.0.0.1:8080/api/version`
+2. **Plugin loaded** (TLS with self-signed cert since v0.2.3 — `-k`/`ssl=False` required): `curl -sk --max-time 3 https://127.0.0.1:8080/api/version`
    - Should return JSON with `api_version` and `app_version`.
    - If connection refused, the service is up but dashboard plugin failed to start.
 
 3. **Key endpoints (test in parallel):**
    ```
-   curl -s --max-time 5 http://127.0.0.1:8080/api/status
-   curl -s --max-time 5 http://127.0.0.1:8080/api/plugins
-   curl -s --max-time 5 http://127.0.0.1:8080/api/mesh/summary
-   curl -s --max-time 5 http://127.0.0.1:8080/api/interfaces
-   curl -s --max-time 5 http://127.0.0.1:8080/api/metrics
+   curl -sk --max-time 5 https://127.0.0.1:8080/api/status
+   curl -sk --max-time 5 https://127.0.0.1:8080/api/plugins
+   curl -sk --max-time 5 https://127.0.0.1:8080/api/mesh/summary
+   curl -sk --max-time 5 https://127.0.0.1:8080/api/interfaces
+   curl -sk --max-time 5 https://127.0.0.1:8080/api/metrics
    ```
    - Check each for HTTP 200 and valid JSON. Report any failures with status code and body.
 
@@ -25,10 +25,10 @@ Steps:
    .venv/bin/python - "$PW" <<'EOF'
    import asyncio, aiohttp, sys
    async def test():
-       async with aiohttp.ClientSession() as s:
-           r = await s.post('http://127.0.0.1:8080/api/auth/login', json={'password': sys.argv[1]})
+       async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
+           r = await s.post('https://127.0.0.1:8080/api/auth/login', json={'password': sys.argv[1]})
            token = (await r.json())['data']['token']
-           async with s.ws_connect('http://127.0.0.1:8080/ws/metrics',
+           async with s.ws_connect('https://127.0.0.1:8080/ws/metrics',
                                    headers={'Authorization': f'Bearer {token}'}) as ws:
                msg = await asyncio.wait_for(ws.receive(), timeout=10)
                print(f'OK: received {len(msg.data)} bytes')
