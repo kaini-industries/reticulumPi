@@ -1253,7 +1253,9 @@
     </div>
   </div>
 
-  <script defer src="/static/app.js?v=39"></script>
+  <!-- errlog.js must load before app.js -- defer preserves order, so it catches app.js eval-time errors. -->
+  <script defer src="/static/errlog.js?v=1"></script>
+  <script defer src="/static/app.js?v=40"></script>
   <script defer src="/static/messages_panel.js?v=8"></script>
   <script defer src="/static/messages_lxmf.js?v=1"></script>
   <script defer src="/static/mqtt_feed.js?v=1"></script>
