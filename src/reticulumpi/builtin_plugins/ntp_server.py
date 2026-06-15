@@ -98,6 +98,10 @@ class NtpServerPlugin(PluginBase):
         self._last_check: float = 0.0
         self._check_errors = 0
 
+        # Source recovery state
+        self._last_online_recovery: float = 0.0
+        self._online_recovery_interval = self.config.get("online_recovery_interval", 300)
+
         # GPS refclock state
         self._gps_refclock_active = False
         self._gps_refclock_configured = False
@@ -175,6 +179,7 @@ class NtpServerPlugin(PluginBase):
                     )
 
                 self._handle_state_transitions()
+                self._check_source_recovery(parsed_sources)
 
                 self.event_bus.publish(
                     events.NTP_STATUS_UPDATED,
@@ -361,6 +366,34 @@ class NtpServerPlugin(PluginBase):
             )
         elif curr == "unsynced" and prev in ("synced", "gps_disciplined"):
             self.log.warning("NTP sync state changed to unsynced")
+
+    # ── Source recovery ─────────────────────────────────────────────────
+
+    def _check_source_recovery(self, sources: list[dict[str, Any]]) -> None:
+        network_sources = [s for s in sources if s.get("mode") == "^"]
+        if not network_sources:
+            return
+
+        any_reachable = any(s.get("reach", 0) > 0 for s in network_sources)
+        if any_reachable:
+            return
+
+        now = time.time()
+        if now - self._last_online_recovery < self._online_recovery_interval:
+            return
+
+        self._last_online_recovery = now
+        self.log.warning(
+            "All %d network time sources offline — running chronyc online",
+            len(network_sources),
+        )
+        try:
+            cmd = ["chronyc", "online"]
+            if self._use_sudo:
+                cmd = ["sudo", "-n"] + cmd
+            subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True)
+        except Exception:
+            self.log.debug("chronyc online failed", exc_info=True)
 
     # ── GPS refclock management ────────────────────────────────────────
 

@@ -274,7 +274,7 @@ async def _serve_sw(request: aiohttp.web.Request) -> aiohttp.web.Response:
         "var MAX_ENTRIES = 5000;",
         f"var MAX_ENTRIES = {max_entries};",
     ).replace(
-        "var SHELL_CACHE = 'rpi-shell-v1';",
+        "var SHELL_CACHE = 'rpi-shell-' + APP_VERSION;",
         f"var SHELL_CACHE = 'rpi-shell-v{__version__}';",
     )
     return aiohttp.web.Response(

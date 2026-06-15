@@ -140,22 +140,27 @@ function _placeholder() {
 // -- Shell: stale-while-revalidate -----------------------------------------
 
 function _shellFetch(request) {
+  var isVersion = request.url.indexOf('/version.js') !== -1;
   return caches.open(SHELL_CACHE).then(function (cache) {
     return cache.match(request).then(function (cached) {
+      var snapshot = (cached && isVersion) ? cached.clone() : null;
       var networkFetch = fetch(request).then(function (resp) {
         if (resp.ok) {
           cache.put(request, resp.clone());
-          if (cached) {
-            self.clients.matchAll().then(function (clients) {
-              clients.forEach(function (c) {
-                c.postMessage({ type: 'sw-updated' });
-              });
+          if (snapshot) {
+            Promise.all([snapshot.text(), resp.clone().text()]).then(function (pair) {
+              if (pair[0] !== pair[1]) {
+                self.clients.matchAll().then(function (clients) {
+                  clients.forEach(function (c) {
+                    c.postMessage({ type: 'sw-updated' });
+                  });
+                });
+              }
             });
           }
         }
         return resp;
       }).catch(function () {
-        // Network failed and no cache — return an offline response
         if (!cached) {
           return new Response('Offline — cached version not available', {
             status: 503,
