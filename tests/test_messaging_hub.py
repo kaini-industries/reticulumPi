@@ -2886,3 +2886,59 @@ class TestReadReceipts:
         )
         hub_plugin.mark_read("!aabb1122__lora")
         assert mock_gw.send_read_receipt.call_count == 1  # still 1, rate-limited
+
+
+# ---------------------------------------------------------------------------
+# Broadcast snapshot conv_limit regression
+# ---------------------------------------------------------------------------
+
+
+def test_broadcast_snapshot_uses_reduced_conv_limit(tmp_path):
+    """broadcast_snapshot() must pass conv_limit <= 50, not the REST default of 200."""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    # messaging_hub imports RNS at module level — mock it if needed.
+    rns_mock = MagicMock()
+    with patch.dict(
+        sys.modules, {"RNS": rns_mock, "RNS.vendor": rns_mock, "RNS.vendor.umsgpack": rns_mock}
+    ):
+        from reticulumpi.builtin_plugins.messaging_hub import MessagingHubPlugin
+
+    app = MagicMock()
+    app.reticulum = MagicMock()
+    app.identity = MagicMock()
+    app.identity.hash = b"\x01" * 16
+    from reticulumpi.event_bus import EventBus
+
+    app.event_bus = EventBus()
+    app.plugins = {}
+
+    config = {
+        "enabled": True,
+        "db_path": str(tmp_path / "msg_hub.db"),
+        "lxmf": {"enabled": False},
+        "meshtastic": {"enabled": False},
+        "meshcore": {"enabled": False},
+    }
+
+    plugin = MessagingHubPlugin(app, config)
+    plugin.start()
+
+    # Spy on get_conversations to capture the kwargs it receives.
+    call_kwargs = []
+
+    def _spy_get(**kwargs):
+        call_kwargs.append(kwargs)
+        return []
+
+    plugin.get_conversations = _spy_get
+    plugin._broadcast_cache = None
+
+    plugin.broadcast_snapshot(cycle_count=0)
+
+    assert len(call_kwargs) >= 1, "get_conversations was not called"
+    limit_used = call_kwargs[0].get("conv_limit", 200)
+    assert limit_used <= 50, f"conv_limit was {limit_used}, expected <= 50"
+
+    plugin.stop()

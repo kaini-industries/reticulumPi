@@ -61,11 +61,16 @@ class NetworkMapPlugin(PluginBase):
         max_cached = self.config.get("max_cached_nodes", 10000)
         if not isinstance(max_cached, int) or max_cached < 100:
             raise ValueError("max_cached_nodes must be an integer >= 100")
+        max_stats = self.config.get("max_stats_rows", 50000)
+        if not isinstance(max_stats, int) or max_stats < 1000:
+            raise ValueError("max_stats_rows must be an integer >= 1000")
 
     def start(self) -> None:
         self._active = True
         self._known_nodes: dict[bytes, dict[str, Any]] = {}
         self._max_cached_nodes: int = self.config.get("max_cached_nodes", 10000)
+        self._max_stats_rows: int = self.config.get("max_stats_rows", 50000)
+        self._stats_save_count: int = 0
         self._nodes_lock = threading.Lock()
 
         db_path = os.path.expanduser(
@@ -120,10 +125,16 @@ class NetworkMapPlugin(PluginBase):
         self._recent_announces_time: float = 0.0
         self._recent_announces_ttl = 5.0
 
-        self._read_conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._read_conn.row_factory = sqlite3.Row
-        self._read_conn.execute("PRAGMA journal_mode=WAL")
-        self._read_db_lock = threading.Lock()
+        self._broadcast_read_conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._broadcast_read_conn.row_factory = sqlite3.Row
+        self._broadcast_read_conn.execute("PRAGMA journal_mode=WAL")
+        self._broadcast_read_conn.execute("PRAGMA query_only=ON")
+
+        self._maintenance_read_conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._maintenance_read_conn.row_factory = sqlite3.Row
+        self._maintenance_read_conn.execute("PRAGMA journal_mode=WAL")
+        self._maintenance_read_conn.execute("PRAGMA query_only=ON")
+        self._maintenance_conn_lock = threading.Lock()
 
         # Background thread for periodic interface stats and DB pruning
         self._start_thread(self._maintenance_loop, "network-map")
@@ -139,12 +150,13 @@ class NetworkMapPlugin(PluginBase):
         for sub_id in getattr(self, "_sub_ids", []):
             self.announce_dispatcher.unsubscribe(sub_id)
         self._join_threads()
-        read_conn = getattr(self, "_read_conn", None)
-        if read_conn:
-            try:
-                read_conn.close()
-            except OSError:
-                pass
+        for conn_attr in ("_broadcast_read_conn", "_maintenance_read_conn"):
+            conn = getattr(self, conn_attr, None)
+            if conn:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     def get_status(self) -> dict[str, Any]:
         return {
@@ -402,8 +414,8 @@ class NetworkMapPlugin(PluginBase):
         """
         now = time.time()
         try:
-            with self._read_db_lock:
-                conn = self._read_conn
+            with self._maintenance_conn_lock:
+                conn = self._maintenance_read_conn
 
                 # Single-pass aggregation for totals, hops, activity, growth, nearby
                 agg = conn.execute(
@@ -475,24 +487,23 @@ class NetworkMapPlugin(PluginBase):
         instead of scanning the full in-memory dict.
         """
         try:
-            with self._read_db_lock:
-                conn = self._read_conn
-                rows = conn.execute(
-                    "SELECT * FROM known_nodes WHERE last_seen > ? ORDER BY last_seen DESC LIMIT ?",
-                    (since, limit),
-                ).fetchall()
-                return [
-                    {
-                        "destination_hash": "<" + (row["destination_hash"] or "") + ">",
-                        "app_name": row["app_name"] or "",
-                        "aspects": row["aspects"] or "",
-                        "hops": row["hops"],
-                        "last_seen": row["last_seen"],
-                        "announce_count": row["announce_count"] or 0,
-                        "app_data": row["app_data_str"] or "",
-                    }
-                    for row in rows
-                ]
+            conn = self._broadcast_read_conn
+            rows = conn.execute(
+                "SELECT * FROM known_nodes WHERE last_seen > ? ORDER BY last_seen DESC LIMIT ?",
+                (since, limit),
+            ).fetchall()
+            return [
+                {
+                    "destination_hash": "<" + (row["destination_hash"] or "") + ">",
+                    "app_name": row["app_name"] or "",
+                    "aspects": row["aspects"] or "",
+                    "hops": row["hops"],
+                    "last_seen": row["last_seen"],
+                    "announce_count": row["announce_count"] or 0,
+                    "app_data": row["app_data_str"] or "",
+                }
+                for row in rows
+            ]
         except Exception:
             self.log.exception("Error querying recent announces")
             return []
@@ -883,6 +894,21 @@ class NetworkMapPlugin(PluginBase):
                     )
         except Exception:
             self.log.debug("Error saving interface stats", exc_info=True)
+        self._stats_save_count += 1
+        if self._stats_save_count % 10 == 0:
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    (count,) = conn.execute("SELECT COUNT(*) FROM interface_stats").fetchone()
+                    if count > self._max_stats_rows:
+                        excess = count - self._max_stats_rows
+                        conn.execute(
+                            "DELETE FROM interface_stats WHERE rowid IN "
+                            "(SELECT rowid FROM interface_stats ORDER BY timestamp ASC LIMIT ?)",
+                            (excess,),
+                        )
+                        self.log.debug("Trimmed %d old interface_stats rows", excess)
+            except Exception:
+                self.log.debug("Error trimming interface stats", exc_info=True)
 
     def _prune_old_data(self) -> None:
         max_days = self.config.get("max_history_days", 30)

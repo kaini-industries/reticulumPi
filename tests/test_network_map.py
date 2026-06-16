@@ -394,8 +394,8 @@ def test_broadcast_snapshot_never_scans_when_cache_populated(
         def __getattr__(self, name):
             return getattr(self._conn, name)
 
-    real_conn = plugin._read_conn
-    plugin._read_conn = _SpyConn(real_conn)
+    real_conn = plugin._broadcast_read_conn
+    plugin._broadcast_read_conn = _SpyConn(real_conn)
 
     # cycle_count % 3 == 0 → want_summary is True; the cache must serve it.
     snap = plugin.broadcast_snapshot(cycle_count=0)
@@ -436,7 +436,7 @@ def test_broadcast_snapshot_omits_summary_when_cache_missing(
     assert compute_calls == []
     # Summary key gracefully omitted rather than blocking.
     assert snap is None or "summary" not in snap
-    plugin._read_conn.close()
+    plugin._broadcast_read_conn.close()
 
 
 @patch("RNS.Transport")
@@ -459,7 +459,7 @@ def test_maintenance_refresh_populates_summary_cache(mock_transport, mock_app, p
     assert plugin._summary_cache is not None
     stamp, summary = plugin._summary_cache
     assert summary["total_nodes"] == 1
-    plugin._read_conn.close()
+    plugin._broadcast_read_conn.close()
 
 
 @patch("RNS.Transport")
@@ -488,7 +488,7 @@ def test_get_mesh_summary_serves_cache_when_fresh(mock_transport, mock_app, plug
     result = plugin.get_mesh_summary()
     assert result is sentinel
     assert compute_calls == []  # served from cache, no scan
-    plugin._read_conn.close()
+    plugin._broadcast_read_conn.close()
 
 
 @patch("RNS.Transport")
@@ -515,7 +515,7 @@ def test_get_mesh_summary_computes_when_stale(mock_transport, mock_app, plugin_c
     assert "total_nodes" in result
     # The fresh result is now cached.
     assert plugin._summary_cache is not None
-    plugin._read_conn.close()
+    plugin._broadcast_read_conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -578,3 +578,114 @@ def test_init_db_sets_incremental_auto_vacuum(mock_transport, mock_app, plugin_c
         (mode,) = conn.execute("PRAGMA auto_vacuum").fetchone()
     # 2 == INCREMENTAL
     assert mode == 2
+
+
+# ---------------------------------------------------------------------------
+# Connection contention regression (split read connections)
+# ---------------------------------------------------------------------------
+
+
+@patch("RNS.Transport")
+def test_broadcast_does_not_block_on_maintenance(mock_transport, mock_app, plugin_config):
+    """get_recent_announces() must complete fast even when _maintenance_read_conn is held."""
+    import threading
+    import time as _time
+
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    mock_transport.hops_to.return_value = 1
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    _quiesce_maintenance(plugin)
+
+    # Seed a node directly in the DB so the query has something to return.
+    # We cannot use record_announce + _drain_announce_queue here because
+    # _quiesce_maintenance already stopped the announce worker thread.
+    import time as _time2
+
+    with sqlite3.connect(plugin_config["db_path"]) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO known_nodes "
+            "(destination_hash, app_name, aspects, hops, last_seen, first_seen, announce_count, app_data_str) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("22" * 16, "reticulumpi", "node", 1, _time2.time(), _time2.time(), 1, "test"),
+        )
+
+    # Hold the maintenance connection busy for 2 seconds (simulates the
+    # heavy _compute_mesh_summary scan on slow SD I/O).
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold_maintenance():
+        with plugin._maintenance_conn_lock:
+            held.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=_hold_maintenance, daemon=True)
+    holder.start()
+    held.wait(timeout=2)
+
+    # get_recent_announces uses _broadcast_read_conn — must NOT block.
+    start = _time.monotonic()
+    result = plugin.get_recent_announces()
+    elapsed_ms = (_time.monotonic() - start) * 1000
+
+    release.set()
+    holder.join(timeout=2)
+
+    assert elapsed_ms < 50, f"get_recent_announces blocked for {elapsed_ms:.0f}ms"
+    assert len(result) >= 1
+    plugin._broadcast_read_conn.close()
+    plugin._maintenance_read_conn.close()
+
+
+@patch("RNS.Transport")
+def test_interface_stats_capped(mock_transport, mock_app, plugin_config):
+    """_save_interface_stats trims rows when count exceeds max_stats_rows."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin_config["max_stats_rows"] = 1000
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+    _quiesce_maintenance(plugin)
+
+    # Seed 1500 rows directly into the DB (exceeds max_stats_rows=1000).
+    with sqlite3.connect(plugin_config["db_path"]) as conn:
+        for i in range(1500):
+            conn.execute(
+                "INSERT INTO interface_stats (timestamp, name, type, online) VALUES (?, ?, ?, ?)",
+                (float(i), f"iface_{i}", "TCPInterface", 1),
+            )
+
+    # Force the trim check (every 10th save cycle).
+    # Provide a dummy interface so get_interface_stats() returns non-empty
+    # and the method doesn't bail before reaching the trim logic.
+    plugin._stats_save_count = 9
+    dummy_iface = MagicMock()
+    dummy_iface.__str__ = lambda s: "DummyInterface"
+    dummy_iface.online = True
+    mock_transport.interfaces = [dummy_iface]
+    plugin._save_interface_stats()
+
+    with sqlite3.connect(plugin_config["db_path"]) as conn:
+        (count,) = conn.execute("SELECT COUNT(*) FROM interface_stats").fetchone()
+    assert count <= 1000, f"Expected <= 1000 rows after trim, got {count}"
+    plugin._broadcast_read_conn.close()
+    plugin._maintenance_read_conn.close()
+
+
+@patch("RNS.Transport")
+def test_no_shared_read_lock(mock_transport, mock_app, plugin_config):
+    """Verify the old _read_db_lock and _read_conn attributes are gone."""
+    from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
+
+    plugin = NetworkMapPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    assert not hasattr(plugin, "_read_db_lock"), "_read_db_lock should be removed"
+    assert not hasattr(plugin, "_read_conn"), "_read_conn should be replaced by split connections"
+    assert hasattr(plugin, "_broadcast_read_conn")
+    assert hasattr(plugin, "_maintenance_read_conn")
+    assert hasattr(plugin, "_maintenance_conn_lock")
+
+    plugin.stop()

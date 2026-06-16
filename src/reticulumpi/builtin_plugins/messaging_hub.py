@@ -1804,6 +1804,8 @@ class MessagingHubPlugin(PluginBase):
         self._broadcast_cache_ttl: float = 10.0
         self._broadcast_min_interval: float = 8.0
         self._broadcast_cache_dirty_ts: float = 0.0
+        self._conv_cache: tuple[float, list] | None = None
+        self._conv_cache_ttl: float = 5.0
         # Per-adapter is_available() TTL cache so get_transports/get_status
         # stop acquiring the meshtastic/meshcore gateway locks every cycle.
         self._avail_cache: dict[str, bool] = {}
@@ -2842,8 +2844,18 @@ class MessagingHubPlugin(PluginBase):
         }
 
     def _invalidate_broadcast_cache(self, event_type: str, data: dict) -> None:
+        self._conv_cache = None
         if not self._broadcast_cache_dirty_ts:
             self._broadcast_cache_dirty_ts = time.monotonic()
+
+    def _get_cached_conversations(self, **kwargs: Any) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        cached = self._conv_cache
+        if cached is not None and (now - cached[0]) < self._conv_cache_ttl:
+            return cached[1]
+        result = self.get_conversations(**kwargs)
+        self._conv_cache = (now, result)
+        return result
 
     def broadcast_snapshot(self, cycle_count: int = 0) -> dict | None:
         now = time.monotonic()
@@ -2862,7 +2874,7 @@ class MessagingHubPlugin(PluginBase):
         result = {
             "transports": self.get_transports(),
             "unread": self.get_unread_counts_grouped(),
-            "conversations": self.get_conversations(conv_limit=200),
+            "conversations": self._get_cached_conversations(conv_limit=50),
         }
         snapshot = result or None
         self._broadcast_cache = (now, snapshot)
