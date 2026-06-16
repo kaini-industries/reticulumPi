@@ -624,7 +624,7 @@
   function _updateTrailRangeVisibility() {
     var rangeEl = document.getElementById('map-trail-range');
     if (rangeEl) {
-      rangeEl.classList.toggle('hidden', !(_trailsEnabled && _filter === 'tracked'));
+      rangeEl.classList.toggle('hidden', _filter !== 'tracked');
     }
   }
 
@@ -796,6 +796,13 @@
       var hrs = parseInt(this.getAttribute('data-trail-hours'), 10);
       for (var x = 0; x < trailBtns.length; x++) trailBtns[x].classList.remove('active');
       this.classList.add('active');
+      if (!_trailsEnabled) {
+        _trailsEnabled = true;
+        var cb = document.getElementById('node-tracker-trail-toggle');
+        if (cb) cb.checked = true;
+        try { localStorage.setItem('rpi_node_tracker_trails', 'true'); } catch (e) {}
+        _startTrailRefresh();
+      }
       R.setTrailHours(hrs);
     });
   }
