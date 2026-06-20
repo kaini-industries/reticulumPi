@@ -190,7 +190,7 @@ async def security_headers_middleware(
         "script-src 'self'; "
         "connect-src 'self' https://api.planespotters.net; "
         "worker-src 'self'; "
-        "style-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https://*.tile.openstreetmap.org"
         " https://api.planespotters.net https://*.plnspttrs.net; "
         "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
