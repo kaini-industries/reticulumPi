@@ -36,6 +36,20 @@ PUBLIC_PATHS = frozenset(
 # through while denying anonymous use of the node as an open OSM proxy.
 PUBLIC_PREFIXES = ("/static/",)
 
+# net-009: When allow_localhost_api is enabled, only these read-only GET
+# endpoints are accessible without authentication.  Keeps the bypass narrow
+# so that internal services (NomadNet pages, scripts) can read status but
+# cannot mutate state.
+LOCALHOST_ALLOWED_PATHS = frozenset(
+    {
+        "/api/status",
+        "/api/health",
+        "/api/nodes",
+        "/api/interfaces",
+        "/api/version",
+    }
+)
+
 
 def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
     """Build and return the aiohttp Application with all routes and middleware."""
@@ -172,10 +186,14 @@ async def security_headers_middleware(
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; connect-src 'self' ws: wss: https://api.planespotters.net; "
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "connect-src 'self' https://api.planespotters.net; "
         "worker-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https://*.tile.openstreetmap.org https://api.planespotters.net https://*.plnspttrs.net"
+        "style-src 'self'; "
+        "img-src 'self' data: https://*.tile.openstreetmap.org"
+        " https://api.planespotters.net https://*.plnspttrs.net; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     # HSTS only over HTTPS — sending it on plain HTTP is meaningless and could
@@ -204,18 +222,20 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
             if path.startswith(prefix):
                 return await handler(request)
 
-        # Allow localhost requests for internal services (NomadNet pages, scripts)
-        if plugin.config.get("allow_localhost_api", False) and request.remote in (
-            "127.0.0.1",
-            "::1",
-        ):
-            if request.method in ("POST", "PUT", "DELETE"):
-                if not request.headers.get("X-Requested-With"):
-                    raise aiohttp.web.HTTPForbidden(
-                        text='{"ok": false, "error": "Missing X-Requested-With header", "code": 403}',
-                        content_type="application/json",
-                    )
-            return await handler(request)
+        # Allow localhost requests for internal services (NomadNet pages, scripts).
+        # net-004: normalise remote IP so IPv4-mapped-IPv6 (::ffff:127.0.0.1)
+        # is handled consistently.
+        # net-009: only whitelisted read-only GET paths are allowed.
+        if plugin.config.get("allow_localhost_api", False):
+            normalized_remote = _normalize_ip(request.remote or "")
+            if normalized_remote in ("127.0.0.1", "::1"):
+                if request.method == "GET" and path in LOCALHOST_ALLOWED_PATHS:
+                    return await handler(request)
+                log.debug("Localhost bypass denied: %s %s", request.method, path)
+                raise aiohttp.web.HTTPForbidden(
+                    text='{"ok": false, "error": "Not allowed via localhost bypass", "code": 403}',
+                    content_type="application/json",
+                )
 
         # Extract token from Authorization header or cookie
         token = _extract_token(request)
@@ -324,7 +344,7 @@ async def _handle_tile_proxy(request: aiohttp.web.Request) -> aiohttp.web.Respon
         async with session.get(url) as resp:
             if resp.status != 200:
                 raise aiohttp.web.HTTPBadGateway(text=f"Upstream returned {resp.status}")
-            data = await resp.read()
+            data = await resp.content.read(512_000)
     except (aiohttp.ClientError, asyncio.TimeoutError):
         raise aiohttp.web.HTTPGatewayTimeout(text="Upstream tile fetch failed")
 

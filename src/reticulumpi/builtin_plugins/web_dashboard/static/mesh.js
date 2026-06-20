@@ -28,6 +28,7 @@
 
   // Sorting is now server-side. This map translates UI sort keys to API params.
   var _di = R._di;
+  var _diRaw = R._diRaw;
 
   var _meshSortMap = {
     'score': 'score',
@@ -75,16 +76,16 @@
     if (reach) {
       h += '<div class="node-detail-section">Reachability</div>'
         + '<div class="node-detail-grid">'
-        + _di('Score', _reachBadgeHTML(reach.score, reach.label))
+        + _diRaw('Score', _reachBadgeHTML(reach.score, reach.label))
         + '</div>'
         + _reachFactorHTML(reach.factors);
     }
 
     h += '<div class="node-detail-section">Identity</div>'
       + '<div class="node-detail-grid">'
-      + _di('Address', esc(node.destination_hash || '--'))
-      + _di('Name', esc(node.app_data || '--'))
-      + _di('App', esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : ''))
+      + _di('Address', node.destination_hash || '--')
+      + _di('Name', node.app_data || '--')
+      + _di('App', (node.app_name || '--') + (node.aspects ? '.' + node.aspects : ''))
       + '</div>'
       + '<div class="node-detail-section">Network</div>'
       + '<div class="node-detail-grid">'
@@ -102,7 +103,7 @@
       if (peer.mem != null) h += _di('Memory', peer.mem.toFixed(1) + '%', metricClass(peer.mem, 70, 90));
       if (peer.disk != null) h += _di('Disk', peer.disk.toFixed(1) + '%', metricClass(peer.disk, 80, 95));
       if (peer.uptime != null) h += _di('Uptime', formatUptime(peer.uptime));
-      if (peer.v) h += _di('Version', esc(peer.v));
+      if (peer.v) h += _di('Version', peer.v);
       if (peer.plugins != null) h += _di('Plugins', peer.plugins);
       h += '</div>';
     }

@@ -989,7 +989,10 @@ class FMReceiver(PluginBase):
             return None
         if not filename.endswith(".wav"):
             return None
-        path = os.path.join(self._recordings_dir(), filename)
+        rec_dir = os.path.realpath(self._recordings_dir())
+        path = os.path.realpath(os.path.join(rec_dir, filename))
+        if not path.startswith(rec_dir + os.sep) and path != rec_dir:
+            return None
         if os.path.isfile(path):
             return path
         return None

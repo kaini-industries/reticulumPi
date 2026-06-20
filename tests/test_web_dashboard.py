@@ -167,7 +167,7 @@ class TestRateLimiter:
         time.sleep(0.02)
         removed = rl.cleanup_all_expired()
         assert removed == 3
-        assert len(rl._attempts) == 0
+        assert len(rl._state) == 0
 
     def test_cleanup_all_expired_keeps_fresh_ips(self):
         from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
@@ -177,7 +177,7 @@ class TestRateLimiter:
         rl.record_attempt("2.2.2.2")
         removed = rl.cleanup_all_expired()
         assert removed == 0
-        assert len(rl._attempts) == 2
+        assert len(rl._state) == 2
 
     def test_cleanup_all_expired_enforces_max_tracked_ips(self):
         from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
@@ -187,10 +187,10 @@ class TestRateLimiter:
         for i in range(10):
             rl.record_attempt(f"10.0.0.{i}")
         # LRU eviction keeps the dict at MAX_TRACKED_IPS
-        assert len(rl._attempts) == 5
+        assert len(rl._state) == 5
         # Most recent IPs are retained, oldest evicted
-        assert rl._attempts.get("10.0.0.9") is not None
-        assert rl._attempts.get("10.0.0.0") is None
+        assert rl._state.get("10.0.0.9") is not None
+        assert rl._state.get("10.0.0.0") is None
 
     def test_ip_cap_evicts_oldest_instead_of_bypassing(self):
         from reticulumpi.builtin_plugins.web_dashboard.auth import RateLimiter
@@ -200,12 +200,12 @@ class TestRateLimiter:
         rl.record_attempt("10.0.0.1")
         rl.record_attempt("10.0.0.2")
         rl.record_attempt("10.0.0.3")
-        assert len(rl._attempts) == 3
+        assert len(rl._state) == 3
         # New IP should evict oldest and still be recorded (not bypassed)
         rl.record_attempt("10.0.0.4")
-        assert len(rl._attempts) == 3
-        assert "10.0.0.4" in rl._attempts
-        assert "10.0.0.1" not in rl._attempts
+        assert len(rl._state) == 3
+        assert "10.0.0.4" in rl._state
+        assert "10.0.0.1" not in rl._state
         # The new IP is tracked, so a second attempt should count
         rl.record_attempt("10.0.0.4")
         assert not rl.is_allowed("10.0.0.4")
@@ -214,12 +214,12 @@ class TestRateLimiter:
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
 
         mgr = AuthManager(plaintext_password="test", session_timeout=60)
-        mgr.rate_limiter.window_seconds = 0.01
+        mgr.rate_limiter.base_window = 0.01
         mgr.rate_limiter.record_attempt("10.0.0.1")
         mgr.rate_limiter.record_attempt("10.0.0.2")
         time.sleep(0.02)
         mgr.cleanup_expired_sessions()
-        assert len(mgr.rate_limiter._attempts) == 0
+        assert len(mgr.rate_limiter._state) == 0
 
 
 class TestAuthManager:
@@ -551,11 +551,17 @@ class TestSqliteSessionStore:
 class TestAuthManagerPersistent:
     def test_sessions_survive_restart(self, tmp_path):
         """Sessions persist across AuthManager instances via SQLite."""
-        from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
+        from reticulumpi.builtin_plugins.web_dashboard.auth import (
+            AuthManager,
+            hash_password,
+        )
 
         db = str(tmp_path / "sessions.db")
+        # Use the same pre-computed hash for both managers so the
+        # password_hash_checksum matches across "restart".
+        pw_hash = hash_password("test")
         mgr1 = AuthManager(
-            plaintext_password="test",
+            password_hash=pw_hash,
             session_db_path=db,
         )
         token = mgr1.login("test", "127.0.0.1")
@@ -564,7 +570,7 @@ class TestAuthManagerPersistent:
 
         # Create a new manager pointing to the same DB — simulates restart
         mgr2 = AuthManager(
-            plaintext_password="test",
+            password_hash=pw_hash,
             session_db_path=db,
         )
         assert mgr2.validate_token(token)
@@ -844,8 +850,10 @@ class TestAPIEndpoints:
     def _login(self, client, event_loop):
         async def _do():
             resp = await client.post("/api/auth/login", json={"password": "testpass"})
-            data = await resp.json()
-            return data["data"]["token"]
+            # Token is in the httponly Set-Cookie header, not the body
+            cookie = resp.cookies.get("session")
+            assert cookie is not None, "session cookie not set"
+            return cookie.value
 
         return event_loop.run_until_complete(_do())
 
@@ -855,7 +863,9 @@ class TestAPIEndpoints:
             assert resp.status == 200
             data = await resp.json()
             assert data["ok"] is True
-            assert "token" in data["data"]
+            assert data["data"]["message"] == "Login successful"
+            # Token is set as httponly cookie, not in response body
+            assert "session" in resp.cookies
 
         event_loop.run_until_complete(_do())
 
@@ -1083,10 +1093,11 @@ class TestTilesAuth:
         plugin._tile_max_bytes = 0
         plugin._tile_cache_bytes = 0
 
+        upstream_resp = MagicMock(status=200)
+        upstream_resp.content = MagicMock()
+        upstream_resp.content.read = AsyncMock(return_value=b"PNGDATA")
         resp_cm = MagicMock()
-        resp_cm.__aenter__ = AsyncMock(
-            return_value=MagicMock(status=200, read=AsyncMock(return_value=b"PNGDATA"))
-        )
+        resp_cm.__aenter__ = AsyncMock(return_value=upstream_resp)
         resp_cm.__aexit__ = AsyncMock(return_value=False)
         session = MagicMock()
         session.get = MagicMock(return_value=resp_cm)
@@ -1137,7 +1148,7 @@ class TestTilesAuth:
     def test_authenticated_tile_reaches_handler(self, client, event_loop):
         async def _do():
             login = await client.post("/api/auth/login", json={"password": "testpass"})
-            token = (await login.json())["data"]["token"]
+            token = login.cookies["session"].value
             resp = await client.get(
                 "/tiles/3/1/2.png",
                 headers={"Authorization": f"Bearer {token}"},

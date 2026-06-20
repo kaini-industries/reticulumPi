@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -42,10 +43,23 @@ class DS18B20Driver(SensorDriver):
 
     driver_name = "ds18b20"
 
+    _ADDRESS_RE = re.compile(r"^[0-9a-fA-F]{2}-[0-9a-fA-F]{12}$")
+    _W1_PREFIX = "/sys/bus/w1/devices/"
+
     def __init__(self, sensor_config: dict[str, Any]) -> None:
         super().__init__(sensor_config)
         self._address = sensor_config.get("address", "")
-        self._path = f"/sys/bus/w1/devices/{self._address}/temperature"
+        if not self._ADDRESS_RE.match(self._address):
+            raise ValueError(
+                f"Invalid DS18B20 address '{self._address}': "
+                "must match XX-XXXXXXXXXXXX (hex)"
+            )
+        raw_path = f"/sys/bus/w1/devices/{self._address}/temperature"
+        self._path = os.path.realpath(raw_path)
+        if not self._path.startswith(self._W1_PREFIX):
+            raise ValueError(
+                f"DS18B20 path escapes /sys/bus/w1/devices/: {self._path}"
+            )
 
     def read(self) -> dict[str, Any]:
         try:

@@ -34,7 +34,8 @@ class TestCoordinateValidation:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
-        resp_mock.read = AsyncMock(return_value=b"\x89PNG data")
+        resp_mock.content = MagicMock()
+        resp_mock.content.read = AsyncMock(return_value=b"\x89PNG data")
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -122,7 +123,8 @@ class TestCoordinateValidation:
         plugin = req.app["plugin"]
         resp_mock = AsyncMock()
         resp_mock.status = 200
-        resp_mock.read = AsyncMock(return_value=b"\x89PNG")
+        resp_mock.content = MagicMock()
+        resp_mock.content.read = AsyncMock(return_value=b"\x89PNG")
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -190,7 +192,8 @@ class TestCacheMiss:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
-        resp_mock.read = AsyncMock(return_value=tile_data)
+        resp_mock.content = MagicMock()
+        resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -268,7 +271,8 @@ class TestCacheSizeEnforcement:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
-        resp_mock.read = AsyncMock(return_value=tile_data)
+        resp_mock.content = MagicMock()
+        resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -296,7 +300,8 @@ class TestCacheSizeEnforcement:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
-        resp_mock.read = AsyncMock(return_value=tile_data)
+        resp_mock.content = MagicMock()
+        resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -323,7 +328,8 @@ class TestCacheSizeEnforcement:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
-        resp_mock.read = AsyncMock(return_value=tile_data)
+        resp_mock.content = MagicMock()
+        resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)

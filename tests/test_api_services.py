@@ -14,6 +14,11 @@ import time
 from unittest.mock import MagicMock
 
 from reticulumpi.builtin_plugins.web_dashboard.api_services import (
+    _check_send_rate_limit,
+    handle_delete_conversation,
+    handle_meshtastic_channel_delete,
+    handle_meshtastic_channel_join,
+    handle_meshtastic_device_reset,
     handle_node_tracker_history,
 )
 
@@ -210,3 +215,306 @@ class TestHandleNodeTrackerHistory:
         assert resp.status == 500
         data = _parse_response(resp)
         assert data["ok"] is False
+
+
+# ── gap-003: State-changing handler tests ──────────────────────────────
+
+
+def _make_json_request(body, match_info=None, plugin_mock=None):
+    """Create a mock aiohttp.web.Request with a JSON body."""
+    request = MagicMock()
+    request.query = {}
+    request.match_info = match_info or {}
+    request.remote = "127.0.0.1"
+
+    async def _json():
+        return body
+
+    request.json = _json
+    if plugin_mock is None:
+        plugin_mock = MagicMock()
+    request.app = {"plugin": plugin_mock}
+    return request
+
+
+class TestHandleMeshtasticChannelJoin:
+    """Tests for POST /api/meshtastic/channels/join."""
+
+    def test_join_by_name_and_psk(self):
+        gw = MagicMock()
+        gw.join_channel.return_value = {"ok": True, "index": 1, "name": "test-ch"}
+        plugin_mock = _make_plugin(gw)
+        request = _make_json_request(
+            {"name": "test-ch", "psk": "default"},
+            plugin_mock=plugin_mock,
+        )
+
+        resp = asyncio.run(handle_meshtastic_channel_join(request))
+
+        assert resp.status == 200
+        data = _parse_response(resp)
+        assert data["ok"] is True
+        gw.join_channel.assert_called_once()
+
+    def test_join_missing_name_returns_400(self):
+        gw = MagicMock()
+        plugin_mock = _make_plugin(gw)
+        request = _make_json_request({"psk": "default"}, plugin_mock=plugin_mock)
+
+        resp = asyncio.run(handle_meshtastic_channel_join(request))
+
+        assert resp.status == 400
+        data = _parse_response(resp)
+        assert "name" in data["error"]
+
+    def test_join_by_url(self):
+        gw = MagicMock()
+        gw.join_channel_url.return_value = {"ok": True}
+        plugin_mock = _make_plugin(gw)
+        request = _make_json_request(
+            {"url": "https://meshtastic.org/e/#test"},
+            plugin_mock=plugin_mock,
+        )
+
+        resp = asyncio.run(handle_meshtastic_channel_join(request))
+
+        assert resp.status == 200
+        gw.join_channel_url.assert_called_once_with("https://meshtastic.org/e/#test")
+
+    def test_join_gateway_unavailable_returns_503(self):
+        plugin_mock = _make_plugin(None)
+        request = _make_json_request(
+            {"name": "test"},
+            plugin_mock=plugin_mock,
+        )
+
+        resp = asyncio.run(handle_meshtastic_channel_join(request))
+
+        assert resp.status == 503
+
+    def test_join_failure_returns_400(self):
+        gw = MagicMock()
+        gw.join_channel.return_value = {"ok": False, "reason": "Radio busy"}
+        plugin_mock = _make_plugin(gw)
+        request = _make_json_request(
+            {"name": "test-ch", "psk": "default"},
+            plugin_mock=plugin_mock,
+        )
+
+        resp = asyncio.run(handle_meshtastic_channel_join(request))
+
+        assert resp.status == 400
+        data = _parse_response(resp)
+        assert "Radio busy" in data["error"]
+
+
+class TestHandleMeshtasticChannelDelete:
+    """Tests for DELETE /api/meshtastic/channels/{index}."""
+
+    def test_delete_channel_success(self):
+        gw = MagicMock()
+        gw.delete_channel.return_value = {"ok": True, "index": 3}
+        plugin_mock = _make_plugin(gw)
+        request = _make_request(plugin_mock=plugin_mock)
+        request.match_info = {"index": "3"}
+
+        resp = asyncio.run(handle_meshtastic_channel_delete(request))
+
+        assert resp.status == 200
+        data = _parse_response(resp)
+        assert data["ok"] is True
+        gw.delete_channel.assert_called_once_with(3)
+
+    def test_delete_channel_invalid_index_returns_400(self):
+        gw = MagicMock()
+        plugin_mock = _make_plugin(gw)
+        request = _make_request(plugin_mock=plugin_mock)
+        request.match_info = {"index": "abc"}
+
+        resp = asyncio.run(handle_meshtastic_channel_delete(request))
+
+        assert resp.status == 400
+
+    def test_delete_channel_out_of_range_returns_400(self):
+        gw = MagicMock()
+        plugin_mock = _make_plugin(gw)
+        request = _make_request(plugin_mock=plugin_mock)
+        request.match_info = {"index": "0"}
+
+        resp = asyncio.run(handle_meshtastic_channel_delete(request))
+
+        assert resp.status == 400
+        data = _parse_response(resp)
+        assert "1-7" in data["error"]
+
+    def test_delete_channel_gateway_unavailable_returns_503(self):
+        plugin_mock = _make_plugin(None)
+        request = _make_request(plugin_mock=plugin_mock)
+        request.match_info = {"index": "1"}
+
+        resp = asyncio.run(handle_meshtastic_channel_delete(request))
+
+        assert resp.status == 503
+
+
+class TestHandleMeshtasticDeviceReset:
+    """Tests for POST /api/meshtastic/device/reset."""
+
+    def test_reset_success(self):
+        gw = MagicMock()
+        gw.reset_device.return_value = {"ok": True, "method": "usb"}
+        plugin_mock = _make_plugin(gw)
+        request = _make_request(plugin_mock=plugin_mock)
+
+        resp = asyncio.run(handle_meshtastic_device_reset(request))
+
+        assert resp.status == 200
+        data = _parse_response(resp)
+        assert data["ok"] is True
+        gw.reset_device.assert_called_once()
+
+    def test_reset_failure_returns_400(self):
+        gw = MagicMock()
+        gw.reset_device.return_value = {"ok": False, "reason": "Device offline"}
+        plugin_mock = _make_plugin(gw)
+        request = _make_request(plugin_mock=plugin_mock)
+
+        resp = asyncio.run(handle_meshtastic_device_reset(request))
+
+        assert resp.status == 400
+        data = _parse_response(resp)
+        assert "Device offline" in data["error"]
+
+    def test_reset_gateway_unavailable_returns_503(self):
+        plugin_mock = _make_plugin(None)
+        request = _make_request(plugin_mock=plugin_mock)
+
+        resp = asyncio.run(handle_meshtastic_device_reset(request))
+
+        assert resp.status == 503
+
+
+class TestHandleDeleteConversation:
+    """Tests for DELETE /api/messages/conversation/{contact_id}."""
+
+    def test_delete_success(self):
+        hub = MagicMock()
+        hub.delete_conversation.return_value = 5
+        plugin_mock = MagicMock()
+        plugin_mock.app.get_plugin.return_value = hub
+        request = _make_request(plugin_mock=plugin_mock)
+        request.match_info = {"contact_id": "peer123"}
+
+        resp = asyncio.run(handle_delete_conversation(request))
+
+        assert resp.status == 200
+        data = _parse_response(resp)
+        assert data["ok"] is True
+        assert data["data"]["deleted"] == 5
+        hub.delete_conversation.assert_called_once()
+        call_args = hub.delete_conversation.call_args
+        assert call_args[0][0] == "peer123"
+
+    def test_delete_hub_unavailable_returns_503(self):
+        plugin_mock = MagicMock()
+        plugin_mock.app.get_plugin.return_value = None
+        request = _make_request(plugin_mock=plugin_mock)
+        request.match_info = {"contact_id": "peer123"}
+
+        resp = asyncio.run(handle_delete_conversation(request))
+
+        assert resp.status == 503
+        data = _parse_response(resp)
+        assert data["ok"] is False
+
+
+# ── gap-009: Rate limiter tests ────────────────────────────────────────
+
+
+class TestCheckSendRateLimit:
+    """Unit tests for _check_send_rate_limit sliding window."""
+
+    def test_first_request_allowed(self):
+        plugin = MagicMock(spec=[])  # empty spec so no auto-vivified attrs
+        allowed, retry_after = _check_send_rate_limit(
+            plugin, "test-key", max_per_window=5, window_seconds=60
+        )
+        assert allowed is True
+        assert retry_after == 0.0
+
+    def test_second_request_blocked_at_limit_1(self):
+        plugin = MagicMock(spec=[])
+        # First request: allowed
+        ok1, _ = _check_send_rate_limit(
+            plugin, "key-a", max_per_window=1, window_seconds=60
+        )
+        assert ok1 is True
+
+        # Second request: blocked
+        ok2, retry_after = _check_send_rate_limit(
+            plugin, "key-a", max_per_window=1, window_seconds=60
+        )
+        assert ok2 is False
+        assert retry_after > 0
+
+    def test_different_keys_independent(self):
+        plugin = MagicMock(spec=[])
+        ok1, _ = _check_send_rate_limit(
+            plugin, "key-x", max_per_window=1, window_seconds=60
+        )
+        ok2, _ = _check_send_rate_limit(
+            plugin, "key-y", max_per_window=1, window_seconds=60
+        )
+        assert ok1 is True
+        assert ok2 is True
+
+    def test_429_response_has_retry_after_header(self):
+        """Integration-style: send 2 messages with max_per_window=1,
+        verify the handler returns 429 with a Retry-After header."""
+        hub = MagicMock()
+        hub.send_message.return_value = {"sent": True}
+        plugin_mock = MagicMock()
+        plugin_mock.app.get_plugin.return_value = hub
+        plugin_mock.config = {"allow_localhost_send": True}
+
+        # Clear any stale rate state from previous test runs
+        if hasattr(plugin_mock, "_send_rate_state"):
+            del plugin_mock._send_rate_state
+
+        from reticulumpi.builtin_plugins.web_dashboard.api_services import (
+            handle_send_message,
+        )
+
+        def _make_send_request():
+            req = MagicMock()
+            req.query = {}
+            req.match_info = {}
+            req.remote = "127.0.0.1"
+            req.headers = {"User-Agent": "test-agent"}
+            req.get = lambda k, default=None: None  # no token
+
+            async def _json():
+                return {
+                    "transport": "lxmf",
+                    "text": "hello",
+                    "destination": "aabb",
+                }
+
+            req.json = _json
+            req.app = {"plugin": plugin_mock}
+            return req
+
+        # Override rate limit config to max_per_window=1
+        plugin_mock.config["send_rate_limit"] = {
+            "max_per_window": 1,
+            "window_seconds": 60,
+        }
+
+        # First send: should succeed
+        resp1 = asyncio.run(handle_send_message(_make_send_request()))
+        assert resp1.status == 200
+
+        # Second send: should be rate-limited (429)
+        resp2 = asyncio.run(handle_send_message(_make_send_request()))
+        assert resp2.status == 429
+        assert "Retry-After" in resp2.headers

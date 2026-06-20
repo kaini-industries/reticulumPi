@@ -34,14 +34,41 @@ def _check_ws_origin(request: aiohttp.web.Request) -> bool:
     """Reject cross-origin WebSocket upgrades (CSWSH mitigation)."""
     origin = request.headers.get("Origin")
     if not origin:
-        return True
+        return False
     try:
         from urllib.parse import urlparse
 
-        origin_host = urlparse(origin).netloc
+        origin_netloc = urlparse(origin).netloc
     except Exception:
         return False
-    return origin_host == request.host
+
+    # Build an allowed-origins set from the plugin's configured host/SSL names.
+    plugin = request.app.get("plugin")
+    allowed: set[str] = {request.host}
+    if plugin is not None:
+        cfg_host = plugin.config.get("host", "127.0.0.1")
+        cfg_port = plugin.config.get("port", 8080)
+        ssl_config = plugin.config.get("ssl", {})
+        extra_hostnames = ssl_config.get("extra_hostnames", [])
+
+        # Add configured listen address with port
+        allowed.add(f"{cfg_host}:{cfg_port}")
+        # Add each extra SSL hostname with the configured port
+        for hostname in extra_hostnames:
+            if isinstance(hostname, str) and hostname:
+                allowed.add(f"{hostname}:{cfg_port}")
+        # Also allow without port for standard ports (443/80)
+        if cfg_port in (443, 80):
+            allowed.add(cfg_host)
+            for hostname in extra_hostnames:
+                if isinstance(hostname, str) and hostname:
+                    allowed.add(hostname)
+        # Add localhost variants when listening on 0.0.0.0
+        if cfg_host == "0.0.0.0":
+            allowed.add(f"127.0.0.1:{cfg_port}")
+            allowed.add(f"localhost:{cfg_port}")
+
+    return origin_netloc in allowed
 
 
 _SWEEP_COUNT_KEYS = frozenset({"spectrum", "lora_scanner", "link_tester"})
@@ -490,18 +517,35 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
     _spectrum_clients.add(ws)
     log.debug("Spectrum WS client connected (%d total)", len(_spectrum_clients))
 
+    _spectrum_revalidate_ts = time.monotonic()
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.ERROR:
                 break
+
+            # Periodic session re-validation (every 5 minutes)
+            _now_mono = time.monotonic()
+            if _now_mono - _spectrum_revalidate_ts >= 300.0:
+                _spectrum_revalidate_ts = _now_mono
+                if not token or not plugin._auth.validate_token(token):
+                    await _send_with_timeout(
+                        ws,
+                        json.dumps({"type": "error", "error": "Session expired"}),
+                    )
+                    await ws.close(code=4001, message=b"Session expired")
+                    break
+
             if msg.type == aiohttp.WSMsgType.TEXT:
                 loop = asyncio.get_running_loop()
                 resp = await loop.run_in_executor(
                     _command_executor,
-                    _handle_ws_command,
-                    msg.data,
-                    plugin,
-                    ws,
+                    functools.partial(
+                        _handle_ws_command,
+                        msg.data,
+                        plugin,
+                        ws,
+                        token=token,
+                    ),
                 )
                 if resp is not None:
                     if not await _send_with_timeout(ws, json.dumps(resp)):
@@ -509,6 +553,7 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
     finally:
         _spectrum_clients.discard(ws)
         _ws_preset_rate.pop(id(ws), None)
+        _ws_last_snapshot.pop(id(ws), None)
         log.info(
             "Spectrum WS disconnected (code=%s, %d remaining)",
             ws.close_code,
@@ -727,12 +772,26 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     _ws_last_activity[ws] = time.time()
     log.debug("WebSocket client connected (%d total)", len(_ws_clients))
 
+    _session_revalidate_ts = time.monotonic()
     try:
         async for msg in ws:
             _ws_last_activity[ws] = time.time()
             if msg.type == aiohttp.WSMsgType.ERROR:
                 log.debug("WebSocket error: %s", ws.exception())
                 break
+
+            # Periodic session re-validation (every 5 minutes)
+            _now_mono = time.monotonic()
+            if _now_mono - _session_revalidate_ts >= 300.0:
+                _session_revalidate_ts = _now_mono
+                if not token or not plugin._auth.validate_token(token):
+                    await _send_with_timeout(
+                        ws,
+                        json.dumps({"type": "error", "error": "Session expired"}),
+                    )
+                    await ws.close(code=4001, message=b"Session expired")
+                    break
+
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     parsed = json.loads(msg.data)
@@ -744,10 +803,13 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
                 loop = asyncio.get_running_loop()
                 resp = await loop.run_in_executor(
                     _command_executor,
-                    _handle_ws_command,
-                    parsed or msg.data,
-                    plugin,
-                    ws,
+                    functools.partial(
+                        _handle_ws_command,
+                        parsed or msg.data,
+                        plugin,
+                        ws,
+                        token=token,
+                    ),
                 )
                 if resp is not None:
                     if not await _send_with_timeout(ws, json.dumps(resp)):
@@ -1056,9 +1118,7 @@ _push_sem: asyncio.Semaphore | None = None
 _bg_tasks: set[asyncio.Task] = set()
 
 
-def _dashboard_exception_handler(
-    loop: asyncio.AbstractEventLoop, context: dict[str, Any]
-) -> None:
+def _dashboard_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
     """Scoped loop handler: swallow the orphaned aiohttp drain-waiter noise.
 
     When a 5s send timeout aborts a write to a stalled WS client, aiohttp's
@@ -1139,9 +1199,7 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         event_bus.subscribe(_events.OFFGRID_MODE_CHANGED, _on_offgrid_event)
         event_bus.subscribe(_events.MESHTASTIC_FIRMWARE_HANG, _on_firmware_event)
         event_bus.subscribe(_events.MESHTASTIC_FIRMWARE_RECOVERED, _on_firmware_event)
-        event_bus.subscribe(
-            _events.NODE_POSITION_RECORDED, _on_position_recorded_event
-        )
+        event_bus.subscribe(_events.NODE_POSITION_RECORDED, _on_position_recorded_event)
     except Exception:
         log.exception("Failed to subscribe WS handler to events")
 
@@ -1306,7 +1364,30 @@ def _on_conversation_deleted_event(event_type: str, data: dict) -> None:
         pass
 
 
-def _handle_ws_command(raw: dict | str, plugin: Any, ws: Any = None) -> dict | None:
+_WS_WRITE_ACTIONS = frozenset(
+    {
+        "radio_tune",
+        "radio_play",
+        "radio_stop",
+        "radio_gain",
+        "radio_squelch",
+        "radio_volume",
+        "radio_lock",
+        "radio_unlock",
+        "radio_add_favorite",
+        "radio_remove_favorite",
+        "radio_tune_favorite",
+        "radio_record_start",
+        "radio_record_stop",
+        "set_offgrid_mode",
+        "spectrum_switch_preset",
+    }
+)
+
+
+def _handle_ws_command(
+    raw: dict | str, plugin: Any, ws: Any = None, token: str | None = None
+) -> dict | None:
     """Process a JSON command from a WebSocket client.
 
     Returns an optional response dict to send back to the caller.
@@ -1321,6 +1402,12 @@ def _handle_ws_command(raw: dict | str, plugin: Any, ws: Any = None) -> dict | N
     action = cmd.get("action")
     if not action:
         return None
+
+    # Re-validate session for state-changing commands
+    if action in _WS_WRITE_ACTIONS:
+        if not token or not plugin._auth.validate_token(token):
+            return {"type": "error", "error": "Session expired"}
+
     if action == "ping":
         return {"type": "pong", "ts": cmd.get("ts", 0)}
     if action == "spectrum_switch_preset":
@@ -1472,9 +1559,7 @@ def _on_position_recorded_event(event_type: str, data: dict) -> None:
     if loop is None or not _ws_clients:
         return
     try:
-        loop.call_soon_threadsafe(
-            _schedule_push, "trail_update", {"count": data.get("count", 0)}
-        )
+        loop.call_soon_threadsafe(_schedule_push, "trail_update", {"count": data.get("count", 0)})
     except (RuntimeError, AttributeError):
         pass
 
@@ -1632,19 +1717,21 @@ async def _push_to_clients(push_type: str, payload: dict) -> None:
     try:
         if not _ws_clients:
             return
-        loop = asyncio.get_running_loop()
-        message = await loop.run_in_executor(
-            _broadcast_executor,
-            functools.partial(
-                json.dumps,
-                {
-                    "type": push_type,
-                    "data": payload,
-                    "timestamp": time.time(),
-                },
-                default=str,
-            ),
-        )
+        envelope = {
+            "type": push_type,
+            "data": payload,
+            "timestamp": time.time(),
+        }
+        # Inline serialization for small payloads (< 4KB estimated);
+        # only offload large payloads to the executor.
+        if len(payload) <= 20:
+            message = json.dumps(envelope, default=str)
+        else:
+            loop = asyncio.get_running_loop()
+            message = await loop.run_in_executor(
+                _broadcast_executor,
+                functools.partial(json.dumps, envelope, default=str),
+            )
         clients = list(_ws_clients)
 
         results = await asyncio.gather(

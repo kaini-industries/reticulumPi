@@ -17,6 +17,7 @@ import http.server
 import shutil
 import subprocess
 import threading
+import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -290,8 +291,10 @@ class CaptivePortalPlugin(PluginBase):
         if configured:
             return configured
         hm = self.app.get_plugin("hotspot_monitor") if hasattr(self.app, "get_plugin") else None
-        if hm and hasattr(hm, "_iface"):
-            return hm._iface
+        if hm and hasattr(hm, "get_interface"):
+            iface = hm.get_interface()
+            if isinstance(iface, str) and iface:
+                return iface
         return self._parse_hostapd_interface()
 
     def _resolve_ap_ip(self) -> str:
@@ -318,10 +321,19 @@ class CaptivePortalPlugin(PluginBase):
         if configured:
             return configured
         wd = self.app.get_plugin("web_dashboard") if hasattr(self.app, "get_plugin") else None
-        if wd:
-            port = getattr(wd, "_port", 8080)
-            scheme = "https" if getattr(wd, "_ssl_context", None) else "http"
-            return f"{scheme}://{self._ap_ip}:{port}"
+        if wd and hasattr(wd, "get_status"):
+            try:
+                status = wd.get_status()
+                url = status.get("web_url") if isinstance(status, dict) else None
+                if isinstance(url, str) and url:
+                    # Replace host with AP IP for captive-portal context
+                    parsed = urllib.parse.urlparse(url)
+                    port = parsed.port or 80
+                    return parsed._replace(
+                        netloc=f"{self._ap_ip}:{port}"
+                    ).geturl()
+            except Exception:
+                pass
         return f"http://{self._ap_ip}:8080"
 
     def _resolve_helper_path(self) -> str:

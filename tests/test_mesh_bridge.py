@@ -708,7 +708,7 @@ def test_dedup_eviction_preserves_valid_ttl_entries(
     assert len(plugin._dedup_cache) <= 10
     # The newest entry should still be a dedup-hit
     newest_key = ("mesh", "!new00004", hash("new-4"))
-    assert plugin._dedup_hit(newest_key, fake_now[0])
+    assert plugin._dedup_check_and_record(newest_key, fake_now[0])
 
 
 def test_dedup_eviction_fifo_when_all_valid(
@@ -733,7 +733,7 @@ def test_dedup_eviction_fifo_when_all_valid(
     assert len(plugin._dedup_cache) <= 6
     # Newest entry should survive FIFO eviction
     newest_key = ("mesh", "!fifo00003", hash("msg-3"))
-    assert plugin._dedup_hit(newest_key, fake_now[0])
+    assert plugin._dedup_check_and_record(newest_key, fake_now[0])
 
 
 # ── State file edge cases ─────────────────────────────────────

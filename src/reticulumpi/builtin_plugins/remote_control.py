@@ -467,7 +467,7 @@ class RemoteControlPlugin(PluginBase):
         heartbeat = self.app.get_plugin("heartbeat_announce")
         if heartbeat and hasattr(heartbeat, "destination"):
             try:
-                app_data = heartbeat._build_app_data()
+                app_data = heartbeat.build_app_data()
                 heartbeat.destination.announce(
                     app_data=app_data.encode("utf-8") if app_data else None
                 )

@@ -347,7 +347,15 @@
   }
 
   // Shared detail-item builder used by mesh.js, lora.js, and meshtastic.js
+  // _di escapes value for safe display; use _diRaw for pre-escaped HTML values
   function _di(label, value, cls) {
+    return '<div class="node-detail-item">'
+      + '<span class="node-detail-label">' + label + '</span>'
+      + '<span class="node-detail-value' + (cls ? ' ' + cls : '') + '">' + esc(value) + '</span>'
+      + '</div>';
+  }
+
+  function _diRaw(label, value, cls) {
     return '<div class="node-detail-item">'
       + '<span class="node-detail-label">' + label + '</span>'
       + '<span class="node-detail-value' + (cls ? ' ' + cls : '') + '">' + value + '</span>'
@@ -372,6 +380,7 @@
   RPI.setMetric = setMetric;
   RPI.formatTimeAgo = formatTimeAgo;
   RPI._di = _di;
+  RPI._diRaw = _diRaw;
   RPI.onWsReady = onWsReady;
 
   // Shared mutable object used by both mesh.js and lora.js

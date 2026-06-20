@@ -41,6 +41,10 @@ class HotspotMonitorPlugin(PluginBase):
         self._active = False
         self._join_threads()
 
+    def get_interface(self) -> str:
+        """Return the monitored AP interface name."""
+        return self._iface
+
     def get_status(self) -> dict[str, Any]:
         with self._lock:
             snap = self._snapshot

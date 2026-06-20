@@ -45,7 +45,7 @@ class HeartbeatAnnounce(PluginBase):
         interval = self.config.get("interval_seconds", 300)
         while self._active:
             try:
-                app_data = self._build_app_data()
+                app_data = self.build_app_data()
                 self.destination.announce(
                     app_data=app_data.encode("utf-8") if app_data else None,
                 )
@@ -54,7 +54,7 @@ class HeartbeatAnnounce(PluginBase):
                 self.log.exception("Error during heartbeat announce")
             self._sleep_while_active(interval)
 
-    def _build_app_data(self) -> str | None:
+    def build_app_data(self) -> str | None:
         if not self.config.get("include_telemetry", False):
             return None
         try:

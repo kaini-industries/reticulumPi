@@ -526,38 +526,32 @@ def test_get_mesh_summary_computes_when_stale(mock_transport, mock_app, plugin_c
 @patch("RNS.Transport")
 def test_prune_checkpoints_wal(mock_transport, mock_app, plugin_config):
     """The hourly prune issues PRAGMA wal_checkpoint(TRUNCATE) after deletes."""
-    from reticulumpi.builtin_plugins import network_map as nm_module
     from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
 
     plugin = NetworkMapPlugin(mock_app, plugin_config)
     plugin.start()
 
+    # sqlite3.Connection.execute is a read-only C slot, so we cannot patch it
+    # directly.  Instead, swap the entire _write_conn with a thin wrapper that
+    # delegates to the real connection but records every SQL statement.
     executed_sql = []
-    real_connect = sqlite3.connect
+    real_conn = plugin._write_conn
 
     class _RecordingConn:
-        def __init__(self, conn):
-            self._conn = conn
+        """Proxy that records execute() calls, forwarding to the real conn."""
 
         def execute(self, sql, *args, **kwargs):
             executed_sql.append(sql)
-            return self._conn.execute(sql, *args, **kwargs)
+            return real_conn.execute(sql, *args, **kwargs)
 
         def __getattr__(self, name):
-            return getattr(self._conn, name)
+            return getattr(real_conn, name)
 
-        def __enter__(self):
-            self._conn.__enter__()
-            return self
-
-        def __exit__(self, *exc):
-            return self._conn.__exit__(*exc)
-
-    def _recording_connect(*args, **kwargs):
-        return _RecordingConn(real_connect(*args, **kwargs))
-
-    with patch.object(nm_module.sqlite3, "connect", side_effect=_recording_connect):
+    plugin._write_conn = _RecordingConn()
+    try:
         plugin._prune_old_data()
+    finally:
+        plugin._write_conn = real_conn
 
     assert any("wal_checkpoint(TRUNCATE)" in s for s in executed_sql)
     # The deletes still ran first.

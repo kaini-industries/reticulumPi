@@ -196,7 +196,7 @@ async def handle_nomadnet_auth(request: aiohttp.web.Request) -> aiohttp.web.Resp
     nn = plugin.app.get_plugin("nomadnet_server")
     if not nn or not hasattr(nn, "get_allowed_identities"):
         return _ok({"message": "nomadnet_server plugin not available"})
-    protected = nn._get_protected_pages() if hasattr(nn, "_get_protected_pages") else []
+    protected = nn.get_protected_pages() if hasattr(nn, "get_protected_pages") else []
     return _ok(
         {
             "allowed_identities": nn.get_allowed_identities(),
@@ -1190,7 +1190,10 @@ async def handle_noaa_image(
     image_dir = getattr(noaa, "_image_dir", "")
     if not image_dir:
         return _error("image directory not configured", 503)
-    path = os.path.join(image_dir, filename)
+    real_dir = os.path.realpath(image_dir)
+    path = os.path.realpath(os.path.join(image_dir, filename))
+    if not path.startswith(real_dir + os.sep) and path != real_dir:
+        return _error("invalid filename", 400)
     if not os.path.exists(path):
         return _error("image not found", 404)
     return aiohttp.web.FileResponse(path)

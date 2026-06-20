@@ -70,6 +70,7 @@ class DongleState:
     bg_last_rotation: float = 0.0
     default_signal: str = ""
     bg_slice_seconds: float = 120.0
+    generation: int = 0
 
 
 class SdrScheduler:
@@ -578,6 +579,7 @@ class SdrScheduler:
             return
 
         dongle.device_index = idx
+        dongle.generation += 1
         slot.is_active = True
         slot.last_acquired = time.time()
         dongle.current_holder = caller
@@ -660,6 +662,17 @@ class SdrScheduler:
                     )
             windows.sort(key=lambda w: w["start_ts"])
             return windows
+
+    def get_generation(self, serial: str) -> int:
+        """Return the current slot-allocation generation for a dongle.
+
+        Callers can snapshot this value before releasing the lock and
+        compare after re-acquiring to detect whether their slot was
+        reallocated in the interim.
+        """
+        with self._lock:
+            dongle = self._dongles.get(serial)
+            return dongle.generation if dongle is not None else 0
 
     def dongle_released(self, serial: str, caller: str) -> None:
         with self._condition:

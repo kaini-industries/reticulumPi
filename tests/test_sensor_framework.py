@@ -123,7 +123,7 @@ def test_command_driver_no_command():
 def test_ds18b20_driver_missing_device():
     from reticulumpi.builtin_plugins.sensor_framework import DS18B20Driver
 
-    driver = DS18B20Driver({"address": "28-nonexistent"})
+    driver = DS18B20Driver({"address": "28-000000000000"})
     reading = driver.read()
     assert "error" in reading
 

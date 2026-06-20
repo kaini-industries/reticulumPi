@@ -328,7 +328,7 @@ class TestBeacon:
         mock_dest = MagicMock()
         mock_heartbeat = MagicMock()
         mock_heartbeat.destination = mock_dest
-        mock_heartbeat._build_app_data.return_value = "TestNode|cpu:5%"
+        mock_heartbeat.build_app_data.return_value = "TestNode|cpu:5%"
 
         mock_app.get_plugin = MagicMock(
             side_effect=lambda name: mock_heartbeat if name == "heartbeat_announce" else None
@@ -358,11 +358,11 @@ class TestBeacon:
     @patch("RNS.Transport")
     def test_beacon_announces_messaging_hub(self, mock_transport, mock_app, base_config):
         mock_lxmf_dest = MagicMock()
-        mock_adapter = MagicMock()
-        mock_adapter._destination = mock_lxmf_dest
 
         mock_hub = MagicMock()
-        mock_hub._adapters = {"lxmf": mock_adapter}
+        mock_hub.get_announceable_destinations.return_value = [
+            ("lxmf", mock_lxmf_dest),
+        ]
 
         mock_app.get_plugin = MagicMock(
             side_effect=lambda name: mock_hub if name == "messaging_hub" else None
@@ -381,13 +381,13 @@ class TestBeacon:
         mock_hb_dest = MagicMock()
         mock_heartbeat = MagicMock()
         mock_heartbeat.destination = mock_hb_dest
-        mock_heartbeat._build_app_data.return_value = None
+        mock_heartbeat.build_app_data.return_value = None
 
         mock_lxmf_dest = MagicMock()
-        mock_adapter = MagicMock()
-        mock_adapter._destination = mock_lxmf_dest
         mock_hub = MagicMock()
-        mock_hub._adapters = {"lxmf": mock_adapter}
+        mock_hub.get_announceable_destinations.return_value = [
+            ("lxmf", mock_lxmf_dest),
+        ]
 
         def get_plugin(name):
             if name == "heartbeat_announce":

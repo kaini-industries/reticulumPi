@@ -1,11 +1,14 @@
 """Tests for the info_bot plugin."""
 
+import ast
 import io
 import json
 import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from reticulumpi.builtin_plugins.info_bot import _safe_eval
 
 
 @pytest.fixture
@@ -314,3 +317,373 @@ class TestFetchJson:
         with patch("urllib.request.urlopen", return_value=_mock_urlopen(data)):
             result = info_plugin._fetch_json("https://example.com/api")
         assert result == data
+
+
+# ── gap-013: _safe_eval edge cases ──────────────────────────────────
+
+
+class TestSafeEval:
+    def test_simple_addition(self):
+        tree = ast.parse("2+3", mode="eval")
+        assert _safe_eval(tree) == 5
+
+    def test_sqrt_function(self):
+        tree = ast.parse("sqrt(16)", mode="eval")
+        assert _safe_eval(tree) == 4.0
+
+    def test_exponent_too_large_raises(self):
+        tree = ast.parse("2**1001", mode="eval")
+        with pytest.raises(ValueError, match="Exponent too large"):
+            _safe_eval(tree)
+
+    def test_import_raises(self):
+        tree = ast.parse("__import__('os')", mode="eval")
+        with pytest.raises(ValueError):
+            _safe_eval(tree)
+
+    def test_nested_expression(self):
+        tree = ast.parse("(2+3)*4", mode="eval")
+        assert _safe_eval(tree) == 20
+
+    def test_constant_pi(self):
+        import math
+
+        tree = ast.parse("pi", mode="eval")
+        assert _safe_eval(tree) == math.pi
+
+    def test_negative_exponent_large_magnitude(self):
+        tree = ast.parse("2**(-1001)", mode="eval")
+        with pytest.raises(ValueError, match="Exponent too large"):
+            _safe_eval(tree)
+
+    def test_exponent_at_boundary(self):
+        tree = ast.parse("2**1000", mode="eval")
+        result = _safe_eval(tree)
+        assert result == 2**1000
+
+
+# ── gap-002: Untested info_bot commands ─────────────────────────────
+
+
+class TestCmdCalc:
+    def test_calc_basic(self, info_plugin):
+        result = info_plugin._cmd_calc("2+2")
+        assert "= 4" in result
+
+    def test_calc_sqrt(self, info_plugin):
+        result = info_plugin._cmd_calc("sqrt(144)")
+        assert "= 12" in result
+
+    def test_calc_no_args(self, info_plugin):
+        result = info_plugin._cmd_calc("")
+        assert "Usage" in result
+
+    def test_calc_exponent_too_large(self, info_plugin):
+        result = info_plugin._cmd_calc("2**9999")
+        assert "Error" in result
+
+    def test_calc_unsafe_expression(self, info_plugin):
+        result = info_plugin._cmd_calc("__import__('os')")
+        assert "Error" in result
+
+
+class TestCmdDice:
+    def test_dice_default(self, info_plugin):
+        result = info_plugin._cmd_dice("")
+        assert "Rolling 1d6" in result
+
+    def test_dice_2d6(self, info_plugin):
+        result = info_plugin._cmd_dice("2d6")
+        assert "Rolling 2d6" in result
+        assert "=" in result
+
+    def test_dice_no_d(self, info_plugin):
+        result = info_plugin._cmd_dice("123")
+        assert "Usage" in result
+
+    def test_dice_bounds(self, info_plugin):
+        result = info_plugin._cmd_dice("200d6")
+        assert "Limits" in result
+
+
+class TestCmdFlip:
+    def test_flip_returns_heads_or_tails(self, info_plugin):
+        result = info_plugin._cmd_flip()
+        assert "Heads" in result or "Tails" in result
+        assert "Coin flip" in result
+
+
+class TestCmdFortune:
+    def test_fortune_returns_string(self, info_plugin):
+        result = info_plugin._cmd_fortune()
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+class TestCmdGrid:
+    def test_grid_to_latlon(self, info_plugin):
+        result = info_plugin._cmd_grid("EM10")
+        assert "EM10" in result
+        assert "N" in result or "E" in result
+
+    def test_latlon_to_grid(self, info_plugin):
+        result = info_plugin._cmd_grid("30.27 -97.74")
+        assert "->" in result
+
+    def test_grid_no_args(self, info_plugin):
+        result = info_plugin._cmd_grid("")
+        assert "Usage" in result
+
+    def test_grid_invalid(self, info_plugin):
+        result = info_plugin._cmd_grid("123")
+        assert "Invalid" in result or "grid" in result.lower()
+
+
+class TestCmdReach:
+    def test_reach_no_network_map(self, info_plugin):
+        info_plugin.app.get_plugin.return_value = None
+        result = info_plugin._cmd_reach()
+        assert "not available" in result.lower()
+
+    def test_reach_no_nodes(self, info_plugin):
+        network_map = MagicMock()
+        network_map.get_known_nodes.return_value = []
+        info_plugin.app.get_plugin.return_value = network_map
+        result = info_plugin._cmd_reach()
+        assert "No known nodes" in result
+
+    def test_reach_with_nodes(self, info_plugin):
+        import time
+
+        network_map = MagicMock()
+        network_map.get_known_nodes.return_value = [
+            {
+                "destination_hash": "<aabbccdd00112233>",
+                "app_data": "TestPeer",
+                "app_name": "test",
+                "last_seen": time.time() - 60,
+                "hops": 2,
+            }
+        ]
+        conn_mon = MagicMock()
+        conn_mon.get_routing_data.return_value = {"paths": []}
+        th = MagicMock()
+        th.get_transport_nodes.return_value = []
+
+        def _get_plugin(name):
+            return {
+                "network_map": network_map,
+                "connectivity_monitor": conn_mon,
+                "transport_health": th,
+            }.get(name)
+
+        info_plugin.app.get_plugin.side_effect = _get_plugin
+        with patch(
+            "reticulumpi.reachability.score_all_nodes",
+            return_value=[
+                {
+                    "destination_hash": "<aabbccdd00112233>",
+                    "app_data": "TestPeer",
+                    "score": 80,
+                    "label": "High",
+                    "hops": 2,
+                    "last_seen": time.time() - 60,
+                }
+            ],
+        ):
+            result = info_plugin._cmd_reach()
+        assert "Reachability" in result
+
+
+class TestCmdPageauth:
+    def test_pageauth_no_plugin(self, info_plugin):
+        info_plugin.app.get_plugin.return_value = None
+        result = info_plugin._cmd_pageauth()
+        assert "not available" in result.lower()
+
+    def test_pageauth_status(self, info_plugin):
+        nn = MagicMock()
+        nn.get_protected_pages.return_value = ["/protected"]
+        nn.get_allowed_identities.return_value = ["aabb"]
+        info_plugin.app.get_plugin.return_value = nn
+        result = info_plugin._cmd_pageauth("status")
+        assert "Page Auth" in result
+        assert "1" in result  # 1 protected page
+
+    def test_pageauth_list(self, info_plugin):
+        nn = MagicMock()
+        nn.get_allowed_identities.return_value = ["aabb", "ccdd"]
+        info_plugin.app.get_plugin.return_value = nn
+        result = info_plugin._cmd_pageauth("list")
+        assert "aabb" in result
+        assert "ccdd" in result
+
+    def test_pageauth_add_no_admin(self, info_plugin):
+        nn = MagicMock()
+        nn.get_allowed_identities.return_value = []
+        info_plugin.app.get_plugin.return_value = nn
+        info_plugin.config["admin_identities"] = []
+        result = info_plugin._cmd_pageauth("add aabbccdd", sender="someone")
+        assert "admin" in result.lower()
+
+
+class TestCmdCrypto:
+    def test_crypto_no_args(self, info_plugin):
+        result = info_plugin._cmd_crypto("")
+        assert "Usage" in result
+
+    def test_crypto_success(self, info_plugin):
+        mock_data = {"bitcoin": {"usd": 67000.50, "usd_24h_change": 2.5, "usd_market_cap": 1.3e12}}
+        with patch("urllib.request.urlopen", return_value=_mock_urlopen(mock_data)):
+            result = info_plugin._cmd_crypto("BTC")
+        assert "BTC" in result
+        assert "$67,000.50" in result
+        assert "+2.50%" in result
+
+    def test_crypto_unknown_symbol(self, info_plugin):
+        with patch("urllib.request.urlopen", return_value=_mock_urlopen({})):
+            result = info_plugin._cmd_crypto("ZZZZZ")
+        assert "Unknown" in result
+
+
+class TestCmdIss:
+    def test_iss_success(self, info_plugin):
+        iss_data = {
+            "iss_position": {"latitude": "51.5", "longitude": "-0.1"},
+            "message": "success",
+        }
+        crew_data = {"people": [{"name": "A", "craft": "ISS"}]}
+
+        call_count = 0
+
+        def mock_open(req, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _mock_urlopen(iss_data)
+            return _mock_urlopen(crew_data)
+
+        with patch("urllib.request.urlopen", side_effect=mock_open):
+            result = info_plugin._cmd_iss()
+        assert "International Space Station" in result
+        assert "51.5" in result
+        assert "Crew aboard: 1" in result
+
+    def test_iss_network_error(self, info_plugin):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("Connection refused"),
+        ):
+            result = info_plugin._cmd_iss()
+        assert "unavailable" in result.lower()
+
+
+class TestCmdSolar:
+    def test_solar_success(self, info_plugin):
+        kp_data = [
+            ["time_tag", "Kp", "Kp_fraction", "a_running", "station_count"],
+            ["2026-06-19 12:00:00", "3.33", "3.33", "15", "8"],
+        ]
+        wind_data = {"Bt": "5.2", "Bz": "-1.3"}
+
+        call_count = 0
+
+        def mock_open(req, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _mock_urlopen(kp_data)
+            return _mock_urlopen(wind_data)
+
+        with patch("urllib.request.urlopen", side_effect=mock_open):
+            result = info_plugin._cmd_solar()
+        assert "Kp index: 3.33" in result
+        assert "Unsettled" in result
+        assert "Bt: 5.2" in result
+
+
+class TestCmdDefine:
+    def test_define_no_args(self, info_plugin):
+        result = info_plugin._cmd_define("")
+        assert "Usage" in result
+
+    def test_define_success(self, info_plugin):
+        api_data = [
+            {
+                "word": "test",
+                "phonetic": "/tEst/",
+                "meanings": [
+                    {
+                        "partOfSpeech": "noun",
+                        "definitions": [
+                            {"definition": "A procedure to evaluate something."}
+                        ],
+                    }
+                ],
+            }
+        ]
+        with patch("urllib.request.urlopen", return_value=_mock_urlopen(api_data)):
+            result = info_plugin._cmd_define("test")
+        assert "test" in result
+        assert "noun" in result
+        assert "procedure" in result
+
+    def test_define_not_found(self, info_plugin):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError(
+                "url", 404, "Not Found", {}, None
+            ),
+        ):
+            result = info_plugin._cmd_define("xyznotaword")
+        assert "No definition found" in result
+
+
+class TestCmdNews:
+    def test_news_offline(self, info_plugin):
+        info_plugin._internet_available = False
+        with patch.object(
+            type(info_plugin), "internet_available", new_callable=lambda: property(lambda s: False)
+        ):
+            result = info_plugin._cmd_news()
+        assert "offline" in result.lower() or "unavailable" in result.lower()
+
+
+class TestCmdJoke:
+    def test_joke_offline_fallback(self, info_plugin):
+        with patch.object(
+            type(info_plugin), "internet_available", new_callable=lambda: property(lambda s: False)
+        ):
+            result = info_plugin._cmd_joke()
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert "\n\n" in result  # setup + punchline format
+
+
+# ── gap-008: _handle_message with !ping ─────────────────────────────
+
+
+class TestHandleMessage:
+    def test_ping_replies_pong(self, info_plugin):
+        """Sending !ping should produce a Pong! reply via LXMF."""
+        msg = MagicMock()
+        msg.source_hash = b"\x03" * 16
+        msg.content_as_string.return_value = "!ping"
+        msg.source = MagicMock()
+
+        import RNS as _RNS
+
+        mock_reply = MagicMock()
+        with (
+            patch.object(_RNS, "prettyhexrep", return_value="<0303030303030303>"),
+            patch("LXMF.LXMessage", return_value=mock_reply) as mock_lxm_cls,
+        ):
+            info_plugin._handle_message(msg)
+
+        # The router's handle_outbound should have been called with the reply
+        router = info_plugin.lxmf_router
+        router.handle_outbound.assert_called_once_with(mock_reply)
+        # The third positional arg to LXMessage is the content string
+        mock_lxm_cls.assert_called_once()
+        response_text = mock_lxm_cls.call_args[0][2]
+        assert "Pong" in response_text

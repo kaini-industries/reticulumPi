@@ -543,28 +543,27 @@ class LoRaDiagnosticsPlugin(PluginBase):
         if heartbeat and hasattr(heartbeat, "destination") and heartbeat.destination:
             try:
                 app_data = None
-                if hasattr(heartbeat, "_build_app_data"):
-                    raw = heartbeat._build_app_data()
+                if hasattr(heartbeat, "build_app_data"):
+                    raw = heartbeat.build_app_data()
                     app_data = raw.encode("utf-8") if raw else None
                 heartbeat.destination.announce(app_data=app_data)
                 announced += 1
             except Exception:
                 self.log.debug("Failed to beacon heartbeat destination", exc_info=True)
 
-        # 2. Messaging hub LXMF destination
+        # 2. Messaging hub adapter destinations (LXMF, etc.)
         messaging_hub = self.app.get_plugin("messaging_hub")
-        if messaging_hub and hasattr(messaging_hub, "_adapters"):
-            for adapter in getattr(messaging_hub, "_adapters", {}).values():
-                dest = getattr(adapter, "_destination", None)
-                if dest and hasattr(dest, "announce"):
-                    try:
-                        dest.announce()
-                        announced += 1
-                    except Exception:
-                        self.log.debug(
-                            "Failed to beacon messaging_hub destination",
-                            exc_info=True,
-                        )
+        if messaging_hub and hasattr(messaging_hub, "get_announceable_destinations"):
+            for name, dest in messaging_hub.get_announceable_destinations():
+                try:
+                    dest.announce()
+                    announced += 1
+                except Exception:
+                    self.log.debug(
+                        "Failed to beacon %s destination",
+                        name,
+                        exc_info=True,
+                    )
 
         if announced:
             with self._lock:

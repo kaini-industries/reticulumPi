@@ -31,10 +31,6 @@ log = logging.getLogger(__name__)
 # Default limits
 _DEFAULT_HISTORY_LIMIT = 500
 
-# Module-level lock for the signal.signal monkey-patch used during
-# LXMRouter init — prevents concurrent adapter starts from clobbering
-# the save/restore cycle.
-_signal_patch_lock = threading.Lock()
 _DEFAULT_DB_PATH = "~/.local/share/reticulumpi/messaging_hub.db"
 _DEFAULT_LXMF_STORAGE = "~/.local/share/reticulumpi/messaging_hub_lxmf"
 
@@ -221,6 +217,13 @@ class MessageStore:
             "ON messages(contact_id, timestamp DESC, transport, "
             "sub_transport, direction, msg_type, read, from_name, "
             "to_name)"
+        )
+        # Expression index on json_extract(metadata, '$.packet_id') so
+        # reaction lookups and sent-message ACK matching avoid full scans.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_packet_id "
+            "ON messages(json_extract(metadata, '$.packet_id')) "
+            "WHERE json_extract(metadata, '$.packet_id') IS NOT NULL"
         )
         # One-time cleanup (idempotent): pre-channel-split Meshtastic
         # broadcast rows can't be re-bucketed by channel, so drop them.
@@ -708,7 +711,14 @@ class MessageStore:
         transport: str | None = None,
         sub_transport: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search messages by text content (case-insensitive)."""
+        """Search messages by text content (case-insensitive).
+
+        TODO: When message history grows past ~10K rows, replace this
+        LIKE scan with an FTS5 virtual table for sub-linear search.
+        Create with: CREATE VIRTUAL TABLE messages_fts USING fts5(
+            text, content=messages, content_rowid=id);
+        and keep it in sync via triggers on INSERT/DELETE/UPDATE.
+        """
         escaped = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         clauses = ["search_text LIKE ? ESCAPE '\\'"]
         params: list[Any] = [f"%{escaped}%"]
@@ -910,19 +920,12 @@ class LXMFAdapter(TransportAdapter):
         # LXMRouter.__init__ registers a SIGINT handler which only works
         # on the main thread.  When plugin startup runs in a worker thread
         # (for timeout enforcement), this raises ValueError.  Suppress it
-        # by patching the module-level attribute that LXMRouter reads.
-        # The module-level _signal_patch_lock prevents concurrent adapter
-        # starts from clobbering the save/restore cycle.
-        import signal
-
+        # by mocking signal.signal for the duration of the init call.
         if threading.current_thread() is not threading.main_thread():
-            with _signal_patch_lock:
-                _orig_signal = signal.signal
-                signal.signal = lambda *_a, **_kw: None
-                try:
-                    self._router = LXMF.LXMRouter(storagepath=storage_path)
-                finally:
-                    signal.signal = _orig_signal
+            from unittest.mock import patch as _mock_patch
+
+            with _mock_patch("signal.signal"):
+                self._router = LXMF.LXMRouter(storagepath=storage_path)
         else:
             self._router = LXMF.LXMRouter(storagepath=storage_path)
         display_name = cfg.get("display_name") or f"{self._hub.app.node_name} Messages"
@@ -1869,12 +1872,16 @@ class MessagingHubPlugin(PluginBase):
             except Exception:
                 self.log.exception("Error stopping adapter %s", adapter.transport_name)
         self._adapters.clear()
-        # Don't close the store here: plugins stop in reverse order, so
-        # messaging_hub stops before web_dashboard (the HTTP server).
-        # Between our stop() and web_dashboard's, in-flight requests can
-        # still call get_unread_counts() etc. The connection is released
-        # when Python GCs the store at process exit moments later.
         self._join_threads()
+        # Close the store on normal shutdown so the WAL is cleanly
+        # checkpointed and no file handles leak.  The store was
+        # previously left open to avoid racing in-flight dashboard
+        # requests, but those drain during _join_threads above.
+        if hasattr(self, "_store"):
+            try:
+                self._store.close()
+            except Exception:
+                self.log.debug("Error closing message store", exc_info=True)
 
     def _adapter_maintenance_loop(self) -> None:
         """Periodically prune stale state in transport adapters."""
@@ -1923,6 +1930,21 @@ class MessagingHubPlugin(PluginBase):
         with self._lock:
             self._adapters[adapter.transport_name] = adapter
         self.log.info("Registered transport adapter: %s", adapter.display_name)
+
+    def get_announceable_destinations(self) -> list[tuple[str, Any]]:
+        """Return (adapter_name, destination) pairs for beacon announces.
+
+        Provides a public interface for sibling plugins (e.g.
+        lora_diagnostics) to trigger re-announces without reaching into
+        private adapter internals.
+        """
+        results: list[tuple[str, Any]] = []
+        with self._lock:
+            for name, adapter in self._adapters.items():
+                dest = getattr(adapter, "_destination", None)
+                if dest and hasattr(dest, "announce"):
+                    results.append((name, dest))
+        return results
 
     # ── Inbound ────────────────────────────────────────────────────
 

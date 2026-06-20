@@ -5,6 +5,7 @@
   var api = R.api, $ = R.$, esc = R.esc;
   var formatTimeAgo = R.formatTimeAgo;
   var _di = R._di;
+  var _diRaw = R._diRaw;
 
   var _mcContacts = [];
   var _mcSortKey = 'last_advert';
@@ -57,9 +58,9 @@
   function buildContactDetailHTML(contact) {
     var h = '<div class="node-detail-section">Identity</div>'
       + '<div class="node-detail-grid">';
-    h += _di('Public Key', '<span class="addr">' + esc(contact.public_key || '--') + '</span>');
-    if (contact.name) h += _di('Name', esc(contact.name));
-    h += _di('Type', esc(contactTypeLabel(contact.type)));
+    h += _diRaw('Public Key', '<span class="addr">' + esc(contact.public_key || '--') + '</span>');
+    if (contact.name) h += _di('Name', contact.name);
+    h += _di('Type', contactTypeLabel(contact.type));
     if (contact.flags != null) h += _di('Flags', '0x' + contact.flags.toString(16));
     h += '</div>';
 

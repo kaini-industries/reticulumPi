@@ -80,6 +80,9 @@ _MESHTASTIC_DEFAULT_KEY = bytes(
 # Broadcast address for all nodes
 _MESH_BROADCAST = 0xFFFFFFFF
 
+# Maximum concurrent abandoned serial-open threads before blocking.
+_MAX_ABANDONED_SERIAL_THREADS = 3
+
 # Characters allowed in a channel-name suffix of contact_id (conservative set
 # to avoid any surprises in URLs, SQL-ish identifiers, regex matchers).
 _CHANNEL_TAG_SANITIZER = re.compile(r"[^A-Za-z0-9_-]")
@@ -571,9 +574,8 @@ class _MeshtasticMQTTClient:
                 return
             self._node_inserts_since_eviction = 0
 
-        now = time.time()
-        cutoff = now - self._node_ttl_seconds
-        with self._lock:
+            now = time.time()
+            cutoff = now - self._node_ttl_seconds
             self.nodes = {
                 nid: data
                 for nid, data in self.nodes.items()
@@ -985,6 +987,12 @@ class MeshtasticGateway(PluginBase):
 
         # Persistent serial listener for LoRa message reception (MQTT mode)
         self._serial_listener: Any = None
+
+        # Abandoned serial-open threads — tracks workers that timed out but
+        # are still running (the daemon thread will eventually close the
+        # interface).  Capped at _MAX_ABANDONED_SERIAL_THREADS to prevent
+        # unbounded thread accumulation when the device is wedged.
+        self._abandoned_serial_threads: list[threading.Thread] = []
 
         # Channel-list cache — returned by get_channels() when the serial
         # listener is unavailable, so the dashboard doesn't flip to "no
@@ -1478,12 +1486,7 @@ class MeshtasticGateway(PluginBase):
         delivering messages even while MQTT is reconnecting.
         """
         with self._lock:
-            if self._mesh_interface is None:
-                return
-            try:
-                self._mesh_interface.close()
-            except Exception:
-                self.log.debug("Error closing Meshtastic interface", exc_info=True)
+            iface = self._mesh_interface
             self._mesh_interface = None
             self._connected = False
             self._nodes_cache = None
@@ -1491,6 +1494,11 @@ class MeshtasticGateway(PluginBase):
             if self._mode == MODE_SERIAL:
                 self._cached_device_info = None
                 self._cached_lora_neighbors = []
+        if iface is not None:
+            try:
+                iface.close()
+            except Exception:
+                self.log.debug("Error closing Meshtastic interface", exc_info=True)
 
     # ── Device reset ────────────────────────────────────────────
 
@@ -1503,8 +1511,10 @@ class MeshtasticGateway(PluginBase):
             tty = os.path.realpath(self._device_probe_port)
             tty_name = os.path.basename(tty)
             sysfs = f"/sys/class/tty/{tty_name}/device/.."
-            busnum = int(open(f"{sysfs}/busnum").read().strip())
-            devnum = int(open(f"{sysfs}/devnum").read().strip())
+            with open(f"{sysfs}/busnum") as f:
+                busnum = int(f.read().strip())
+            with open(f"{sysfs}/devnum") as f:
+                devnum = int(f.read().strip())
             return f"/dev/bus/usb/{busnum:03d}/{devnum:03d}"
         except Exception:
             return None
@@ -1616,10 +1626,32 @@ class MeshtasticGateway(PluginBase):
         the constructor eventually completes.  If the constructor fails,
         ``_close_leaked_serial_fd`` cleans up the leaked fd on the next
         attempt.
+
+        Abandoned threads (timed-out workers still running) are tracked in
+        ``_abandoned_serial_threads``.  When the cap is reached the caller
+        blocks until the oldest one finishes, preventing unbounded thread
+        accumulation when the device is wedged.
         """
         import meshtastic.serial_interface
 
         self._close_leaked_serial_fd()
+
+        # ── Enforce abandoned-thread cap ──────────────────────────
+        # Prune any that have finished since the last call.
+        abandoned = getattr(self, "_abandoned_serial_threads", [])
+        self._abandoned_serial_threads = [t for t in abandoned if t.is_alive()]
+        if len(self._abandoned_serial_threads) >= _MAX_ABANDONED_SERIAL_THREADS:
+            oldest = self._abandoned_serial_threads[0]
+            self.log.warning(
+                "Abandoned serial thread cap (%d) reached — waiting for "
+                "oldest worker %r to finish before starting a new one",
+                _MAX_ABANDONED_SERIAL_THREADS,
+                oldest.name,
+            )
+            oldest.join(timeout=self._device_probe_open_timeout)
+            self._abandoned_serial_threads = [
+                t for t in self._abandoned_serial_threads if t.is_alive()
+            ]
 
         timeout_s = self._device_probe_open_timeout
         result: dict[str, Any] = {"iface": None, "error": None}
@@ -1637,7 +1669,10 @@ class MeshtasticGateway(PluginBase):
                 try:
                     iface.close()
                 except (OSError, RuntimeError):
-                    self.log.debug("Error closing abandoned serial interface", exc_info=True)
+                    self.log.debug(
+                        "Error closing abandoned serial interface",
+                        exc_info=True,
+                    )
                 self.log.info(
                     "Abandoned serial worker closed interface on %s",
                     self._device_probe_port,
@@ -1653,12 +1688,15 @@ class MeshtasticGateway(PluginBase):
 
         if t.is_alive():
             cancelled.set()
+            self._abandoned_serial_threads.append(t)
             self.log.warning(
                 "Meshtastic serial open on %s timed out after %.0fs — "
-                "abandoning worker (will auto-close), retrying in %.0fs",
+                "abandoning worker (will auto-close), retrying in %.0fs "
+                "(%d abandoned thread(s) active)",
                 self._device_probe_port,
                 timeout_s,
                 self._serial_retry_interval,
+                len(self._abandoned_serial_threads),
             )
             return None
         if result["error"] is not None:

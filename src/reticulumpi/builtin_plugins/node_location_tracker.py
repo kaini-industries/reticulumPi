@@ -53,8 +53,10 @@ class NodeLocationTrackerPlugin(PluginBase):
         self._last_pos: dict[str, tuple[float, float, float]] = {}
         self._lock = threading.Lock()
         self._no_gateways_logged = False
+        self._write_conn: sqlite3.Connection | None = None
 
         self._init_db()
+        self._open_write_conn()
         self._load_last_positions()
         self._active = True
         self._start_thread(self._poll_loop, name="node-loc-poll")
@@ -68,6 +70,12 @@ class NodeLocationTrackerPlugin(PluginBase):
     def stop(self) -> None:
         self._active = False
         self._join_threads(timeout=5)
+        if self._write_conn is not None:
+            try:
+                self._write_conn.close()
+            except Exception:
+                self.log.debug("Error closing write connection", exc_info=True)
+            self._write_conn = None
 
     def _init_db(self) -> None:
         db_dir = os.path.dirname(self._db_path)
@@ -95,6 +103,12 @@ class NodeLocationTrackerPlugin(PluginBase):
             conn.commit()
         finally:
             conn.close()
+
+    def _open_write_conn(self) -> None:
+        """Open a persistent write connection with WAL mode."""
+        self._write_conn = sqlite3.connect(self._db_path)
+        self._write_conn.execute("PRAGMA journal_mode=WAL")
+        self._write_conn.execute("PRAGMA synchronous=NORMAL")
 
     def _load_last_positions(self) -> None:
         """Populate _last_pos from the most recent position per node."""
@@ -221,16 +235,12 @@ class NodeLocationTrackerPlugin(PluginBase):
                 self._last_pos[node_key] = (lat, lon, now)
                 to_insert.append((node_key, now, lat, lon, source, name))
 
-        if to_insert:
-            conn = sqlite3.connect(self._db_path)
-            try:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO node_positions VALUES (?, ?, ?, ?, ?, ?)",
-                    to_insert,
-                )
-                conn.commit()
-            finally:
-                conn.close()
+        if to_insert and self._write_conn is not None:
+            self._write_conn.executemany(
+                "INSERT OR REPLACE INTO node_positions VALUES (?, ?, ?, ?, ?, ?)",
+                to_insert,
+            )
+            self._write_conn.commit()
             self.app.event_bus.publish(
                 events.NODE_POSITION_RECORDED,
                 {"count": len(to_insert)},
@@ -238,27 +248,26 @@ class NodeLocationTrackerPlugin(PluginBase):
 
     def _prune(self) -> None:
         """Remove rows older than retention_days and enforce max_rows cap."""
+        if self._write_conn is None:
+            return
         cutoff = time.time() - self._retention_days * 86400
-        conn = sqlite3.connect(self._db_path)
-        try:
+        conn = self._write_conn
+        conn.execute(
+            "DELETE FROM node_positions WHERE timestamp < ?", (cutoff,)
+        )
+        conn.commit()
+
+        count = conn.execute(
+            "SELECT COUNT(*) FROM node_positions"
+        ).fetchone()[0]
+        if count > self._max_rows:
+            excess = count - self._max_rows
             conn.execute(
-                "DELETE FROM node_positions WHERE timestamp < ?", (cutoff,)
+                "DELETE FROM node_positions WHERE rowid IN "
+                "(SELECT rowid FROM node_positions ORDER BY timestamp ASC LIMIT ?)",
+                (excess,),
             )
             conn.commit()
-
-            count = conn.execute(
-                "SELECT COUNT(*) FROM node_positions"
-            ).fetchone()[0]
-            if count > self._max_rows:
-                excess = count - self._max_rows
-                conn.execute(
-                    "DELETE FROM node_positions WHERE rowid IN "
-                    "(SELECT rowid FROM node_positions ORDER BY timestamp ASC LIMIT ?)",
-                    (excess,),
-                )
-                conn.commit()
-        finally:
-            conn.close()
 
         # Prune the in-memory last-position cache using the same cutoff so it
         # does not grow unbounded as nodes go stale (the DB prune above only
@@ -284,30 +293,42 @@ class NodeLocationTrackerPlugin(PluginBase):
         if until is None:
             until = time.time() + 1
 
-        result: dict[str, list[dict[str, Any]]] = {}
+        result: dict[str, list[dict[str, Any]]] = {k: [] for k in node_keys}
+        if not node_keys:
+            return result
+
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         try:
-            for key in node_keys:
-                params: list[Any] = [key, since, until]
-                if limit_per_node is not None:
-                    # Select the newest N rows in the window, then reverse so the
-                    # returned list stays ascending (docstring contract).
-                    sql = (
-                        "SELECT * FROM node_positions "
-                        "WHERE node_key = ? AND timestamp >= ? AND timestamp <= ? "
-                        "ORDER BY timestamp DESC LIMIT ?"
-                    )
-                    params.append(limit_per_node)
-                    rows = list(reversed(conn.execute(sql, params).fetchall()))
-                else:
-                    sql = (
-                        "SELECT * FROM node_positions "
-                        "WHERE node_key = ? AND timestamp >= ? AND timestamp <= ? "
-                        "ORDER BY timestamp ASC"
-                    )
-                    rows = conn.execute(sql, params).fetchall()
-                result[key] = [
+            placeholders = ",".join("?" for _ in node_keys)
+            if limit_per_node is not None:
+                # Use a window function to rank rows per node_key so we
+                # can fetch the newest N per node in a single query.
+                sql = (
+                    "SELECT * FROM ("
+                    "  SELECT *, ROW_NUMBER() OVER ("
+                    "    PARTITION BY node_key "
+                    "    ORDER BY timestamp DESC"
+                    "  ) AS _rn FROM node_positions "
+                    f"  WHERE node_key IN ({placeholders}) "
+                    "    AND timestamp >= ? AND timestamp <= ?"
+                    ") WHERE _rn <= ? "
+                    "ORDER BY node_key, timestamp ASC"
+                )
+                params: list[Any] = [
+                    *node_keys, since, until, limit_per_node,
+                ]
+            else:
+                sql = (
+                    "SELECT * FROM node_positions "
+                    f"WHERE node_key IN ({placeholders}) "
+                    "  AND timestamp >= ? AND timestamp <= ? "
+                    "ORDER BY node_key, timestamp ASC"
+                )
+                params = [*node_keys, since, until]
+            rows = conn.execute(sql, params).fetchall()
+            for r in rows:
+                result[r["node_key"]].append(
                     {
                         "timestamp": r["timestamp"],
                         "latitude": r["latitude"],
@@ -315,8 +336,7 @@ class NodeLocationTrackerPlugin(PluginBase):
                         "source": r["source"],
                         "name": r["name"],
                     }
-                    for r in rows
-                ]
+                )
         finally:
             conn.close()
         return result

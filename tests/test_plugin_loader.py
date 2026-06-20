@@ -1,6 +1,7 @@
 """Tests for the plugin loader."""
 
 import logging
+import os
 
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.plugin_loader import PluginLoader
@@ -75,3 +76,81 @@ def test_discover_warns_on_external_directory(tmp_path, caplog):
         found = loader.discover([str(tmp_path)])
     assert "ext" in found
     assert any("external directory" in r.message for r in caplog.records)
+
+
+# --- gap-007: caching behavior tests ---
+
+
+def test_discover_returns_cached_on_second_call(plugin_dir):
+    """Second discover() call with unchanged dirs returns cached results."""
+    loader = PluginLoader()
+    first = loader.discover([plugin_dir])
+    assert "sample" in first
+    # Second call -- cache should be used (same object contents)
+    second = loader.discover([plugin_dir])
+    assert second == first
+    # Verify _cache was populated
+    assert loader._cache is not None
+
+
+def test_discover_rescans_after_mtime_change(tmp_path):
+    """Modifying the plugin directory mtime invalidates the cache."""
+    plugin_file = tmp_path / "alpha_plugin.py"
+    plugin_file.write_text(
+        "from reticulumpi.plugin_base import PluginBase\n"
+        "class AlphaPlugin(PluginBase):\n"
+        "    plugin_name = 'alpha'\n"
+        "    plugin_version = '1.0.0'\n"
+        "    def start(self): pass\n"
+        "    def stop(self): pass\n"
+    )
+    loader = PluginLoader()
+    first = loader.discover([str(tmp_path)])
+    assert "alpha" in first
+    assert len(first) == 1
+
+    # Add a second plugin (which changes the directory mtime)
+    (tmp_path / "beta_plugin.py").write_text(
+        "from reticulumpi.plugin_base import PluginBase\n"
+        "class BetaPlugin(PluginBase):\n"
+        "    plugin_name = 'beta'\n"
+        "    plugin_version = '1.0.0'\n"
+        "    def start(self): pass\n"
+        "    def stop(self): pass\n"
+    )
+    # Force mtime bump in case filesystem granularity is too coarse
+    import time
+
+    new_mtime = time.time() + 10
+    os.utime(str(tmp_path), (new_mtime, new_mtime))
+
+    second = loader.discover([str(tmp_path)])
+    assert "alpha" in second
+    assert "beta" in second
+    assert len(second) == 2
+
+
+def test_discover_warns_on_duplicate_plugin_name(tmp_path, caplog):
+    """Two plugins with the same plugin_name should log a warning."""
+    (tmp_path / "first_plugin.py").write_text(
+        "from reticulumpi.plugin_base import PluginBase\n"
+        "class FirstPlugin(PluginBase):\n"
+        "    plugin_name = 'dupe'\n"
+        "    plugin_version = '1.0.0'\n"
+        "    def start(self): pass\n"
+        "    def stop(self): pass\n"
+    )
+    (tmp_path / "second_plugin.py").write_text(
+        "from reticulumpi.plugin_base import PluginBase\n"
+        "class SecondPlugin(PluginBase):\n"
+        "    plugin_name = 'dupe'\n"
+        "    plugin_version = '2.0.0'\n"
+        "    def start(self): pass\n"
+        "    def stop(self): pass\n"
+    )
+    loader = PluginLoader()
+    with caplog.at_level(logging.WARNING):
+        found = loader.discover([str(tmp_path)])
+    # The duplicate name should still be in the result (second overrides first)
+    assert "dupe" in found
+    assert any("Duplicate plugin name" in r.message for r in caplog.records)

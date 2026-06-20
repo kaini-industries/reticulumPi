@@ -214,7 +214,8 @@ class TestLocalhostBypass:
             loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
 
-    def test_localhost_post_with_csrf_header_allowed(self):
+    def test_localhost_post_with_csrf_header_denied(self):
+        """Localhost bypass is restricted to GET on whitelisted paths only."""
         plugin = _make_plugin(allow_localhost_api=True, token_valid=False)
         mw = _get_auth_middleware(plugin)
         req = _make_request(
@@ -224,9 +225,9 @@ class TestLocalhostBypass:
             peername=("127.0.0.1", 12345),
         )
         loop = asyncio.new_event_loop()
-        resp = loop.run_until_complete(mw(req, _ok_handler))
+        with pytest.raises(aiohttp.web.HTTPForbidden):
+            loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
-        assert resp.status == 200
 
     def test_localhost_put_requires_csrf_header(self):
         plugin = _make_plugin(allow_localhost_api=True, token_valid=False)

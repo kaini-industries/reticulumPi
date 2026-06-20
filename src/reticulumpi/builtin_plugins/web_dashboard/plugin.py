@@ -36,7 +36,7 @@ class WebDashboardPlugin(PluginBase):
         if not isinstance(session_timeout, (int, float)) or session_timeout < 60:
             raise ValueError("session_timeout must be a number >= 60")
 
-        max_sessions = self.config.get("max_sessions", 5)
+        max_sessions = self.config.get("max_sessions", 10)
         if not isinstance(max_sessions, int) or max_sessions < 1:
             raise ValueError("max_sessions must be a positive integer")
 
@@ -64,6 +64,10 @@ class WebDashboardPlugin(PluginBase):
             isinstance(h, str) for h in extra_hostnames
         ):
             raise ValueError("ssl.extra_hostnames must be a list of strings")
+
+        force_secure_cookie = self.config.get("force_secure_cookie", False)
+        if not isinstance(force_secure_cookie, bool):
+            raise ValueError("force_secure_cookie must be a boolean")
 
         rate_limit = self.config.get("rate_limit", {})
         if not isinstance(rate_limit, dict):
@@ -151,28 +155,46 @@ class WebDashboardPlugin(PluginBase):
 
         if password_hash:
             source = (
-                "environment" if os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD_HASH") else "config"
+                "environment"
+                if os.environ.get("RETICULUMPI_DASHBOARD_PASSWORD_HASH")
+                else "config"
             )
             self.log.info("Using dashboard password hash from %s", source)
         elif plaintext_password:
             pass  # handled below
 
+        generated_pw_file: str | None = None
         if not password_hash and not plaintext_password:
-            secret_dir = self.config.get("secret_dir", "~/.config/reticulumpi")
-            password_hash, generated_password = load_or_create_password_hash(secret_dir)
+            secret_dir = self.config.get(
+                "secret_dir", "~/.config/reticulumpi"
+            )
+            password_hash, generated_password = (
+                load_or_create_password_hash(secret_dir)
+            )
             if generated_password:
                 secret_dir_resolved = os.path.expanduser(secret_dir)
-                pw_file = os.path.join(secret_dir_resolved, "dashboard_password.txt")
-                fd = os.open(pw_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+                pw_file = os.path.join(
+                    secret_dir_resolved, "dashboard_password.txt"
+                )
+                fd = os.open(
+                    pw_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600
+                )
                 with os.fdopen(fd, "w") as f:
                     f.write(generated_password + "\n")
                 self.log.warning(
-                    "Generated new dashboard password — saved to %s", pw_file
+                    "Generated new dashboard password: %s "
+                    "(saved to %s — file deleted after first login)",
+                    generated_password,
+                    pw_file,
                 )
+                # Schedule file for deletion after first successful login
+                generated_pw_file = pw_file
         elif plaintext_password and not password_hash:
-            self.log.warning(
-                "Using plaintext password in config. Generate a hash with "
-                "'reticulumpi --hash-password' and set password_hash instead."
+            self.log.critical(
+                "INSECURE: Dashboard password is stored in plaintext "
+                "(env var or config). Generate a hash with "
+                "'reticulumpi --hash-password' and set password_hash "
+                "instead."
             )
 
         # Session persistence — store sessions in SQLite so they survive restarts
@@ -186,10 +208,14 @@ class WebDashboardPlugin(PluginBase):
             password_hash=password_hash,
             plaintext_password=plaintext_password,
             session_timeout=self.config.get("session_timeout", 86400),
-            max_sessions=self.config.get("max_sessions", 5),
+            max_sessions=self.config.get("max_sessions", 10),
             session_db_path=session_db,
             rate_limit_max_attempts=rate_limit.get("max_attempts", 5),
             rate_limit_window=rate_limit.get("window_seconds", 60),
+            force_secure_cookie=self.config.get(
+                "force_secure_cookie", False
+            ),
+            generated_pw_file=generated_pw_file,
         )
 
         ssl_ctx = self._setup_ssl()

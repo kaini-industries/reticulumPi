@@ -99,7 +99,8 @@ class MeshBridge(PluginBase):
     plugin_description = "Relays broadcasts (and optionally DMs) between Meshtastic and MeshCore."
     broadcast_tier = 1
     broadcast_keys = "mesh_bridge"
-    plugin_dependencies = ("meshtastic_gateway", "meshcore_gateway", "messaging_hub")
+    plugin_dependencies = ("meshtastic_gateway", "meshcore_gateway")
+    plugin_soft_dependencies = ("messaging_hub",)
 
     def validate_config(self) -> None:
         pairs = self.config.get("channel_pairs", [])
@@ -611,18 +612,8 @@ class MeshBridge(PluginBase):
                         del self._dedup_cache[k]
             return False
 
-    # Keep old names as thin wrappers for any callers
-    def _dedup_hit(self, key: tuple[str, str, int], now: float) -> bool:
-        with self._lock:
-            ts = self._dedup_cache.get(key)
-            if ts is None:
-                return False
-            if now - ts > self._dedup_ttl:
-                del self._dedup_cache[key]
-                return False
-            return True
-
     def _dedup_record(self, key: tuple[str, str, int], now: float) -> None:
+        """Record a dedup key without checking (used for cross-side entries)."""
         with self._lock:
             self._dedup_cache[key] = now
             if len(self._dedup_cache) > self._dedup_max:

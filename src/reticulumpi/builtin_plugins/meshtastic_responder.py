@@ -523,7 +523,8 @@ class MeshtasticResponder(PluginBase):
             gw = self.app.get_plugin("meshcore_gateway")
             if gw is None:
                 return False
-            mc = getattr(gw, "_mc", None)
+            # Use public accessor; meshcore_gateway exposes get_device_handle()
+            mc = gw.get_device_handle() if hasattr(gw, "get_device_handle") else None
             if mc is not None and hasattr(mc, "self_info"):
                 info = mc.self_info
                 own_key = info.get("public_key", "") if isinstance(info, dict) else ""

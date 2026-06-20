@@ -20,7 +20,7 @@ def _make_app() -> MagicMock:
 class TestBuildAppData:
     def test_no_telemetry(self):
         p = HeartbeatAnnounce(_make_app(), {})
-        assert p._build_app_data() is None
+        assert p.build_app_data() is None
 
     def test_telemetry_with_psutil(self):
         mock_psutil = MagicMock()
@@ -29,7 +29,7 @@ class TestBuildAppData:
         p = HeartbeatAnnounce(_make_app(), {"include_telemetry": True})
         with patch.dict(sys.modules, {"psutil": mock_psutil}):
             with patch("socket.gethostname", return_value="testnode"):
-                result = p._build_app_data()
+                result = p.build_app_data()
         assert result is not None
         assert "testnode" in result
         assert "cpu:25%" in result
@@ -39,7 +39,7 @@ class TestBuildAppData:
         p = HeartbeatAnnounce(_make_app(), {"include_telemetry": True})
         with patch.dict(sys.modules, {"psutil": None}):
             with patch("socket.gethostname", return_value="testnode"):
-                result = p._build_app_data()
+                result = p.build_app_data()
         assert result == "testnode"
 
 

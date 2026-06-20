@@ -7,6 +7,7 @@
   var markUpdated = R.markUpdated;
 
   var _di = R._di;
+  var _diRaw = R._diRaw;
 
   var _currentLoraAnnounceMode = 'all';
   var _loraNodes = [];
@@ -467,7 +468,7 @@
     if (node.score != null && node.factors) {
       h += '<div class="node-detail-section">Reachability</div>'
         + '<div class="node-detail-grid">'
-        + _di('Score', _reachBadgeHTML(node.score, node.label))
+        + _diRaw('Score', _reachBadgeHTML(node.score, node.label))
         + '</div>'
         + _reachFactorHTML(node.factors);
     }
@@ -475,9 +476,9 @@
     // Identity
     h += '<div class="node-detail-section">Identity</div>'
       + '<div class="node-detail-grid">'
-      + _di('Address', esc(node.destination_hash || '--'))
-      + _di('Name', esc(node.app_data || '--'))
-      + _di('App', esc(node.app_name || '--') + (node.aspects ? '.' + esc(node.aspects) : ''))
+      + _di('Address', node.destination_hash || '--')
+      + _di('Name', node.app_data || '--')
+      + _di('App', (node.app_name || '--') + (node.aspects ? '.' + node.aspects : ''))
       + '</div>';
 
     // Network
@@ -489,7 +490,7 @@
       + _di('First Seen', firstSeen)
       + _di('Last Seen', lastSeen)
       + _di('Announces', node.announce_count || 0)
-      + _di('Interface', esc(node.interface || '--'))
+      + _di('Interface', node.interface || '--')
       + '</div>';
 
     // Signal

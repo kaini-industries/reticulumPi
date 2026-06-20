@@ -262,11 +262,16 @@ async def handle_login(request: aiohttp.web.Request) -> aiohttp.web.Response:
     if not token:
         return _error("Invalid password", 401)
 
-    resp = _ok({"token": token})
+    resp = _ok({"message": "Login successful"})
 
-    # Set session cookie — Secure flag when SSL or behind HTTPS proxy
+    # Set session cookie — Secure flag when SSL, behind HTTPS proxy,
+    # or force_secure_cookie is configured.
     ssl_config = plugin.config.get("ssl", {})
-    secure = ssl_config.get("enabled", False) or request.scheme == "https"
+    secure = (
+        ssl_config.get("enabled", False)
+        or request.scheme == "https"
+        or auth.force_secure_cookie
+    )
     resp.set_cookie(
         "session",
         token,
@@ -307,7 +312,11 @@ async def handle_form_login(request: aiohttp.web.Request) -> aiohttp.web.Respons
         raise aiohttp.web.HTTPFound("/login.html?error=invalid")
 
     ssl_config = plugin.config.get("ssl", {})
-    secure = ssl_config.get("enabled", False) or request.scheme == "https"
+    secure = (
+        ssl_config.get("enabled", False)
+        or request.scheme == "https"
+        or auth.force_secure_cookie
+    )
 
     resp = aiohttp.web.HTTPFound("/")
     resp.set_cookie(
@@ -443,13 +452,32 @@ _RESTART_COOLDOWN = 60.0
 async def handle_services_restart(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
-    """POST /api/services/restart — restart rnsd + reticulumpi."""
+    """POST /api/services/restart — restart rnsd + reticulumpi.
+
+    Requires password re-entry via X-Confirm-Password header as an
+    extra safeguard for this destructive operation.
+    """
     import asyncio
+
+    from reticulumpi.builtin_plugins.web_dashboard.auth import (
+        verify_password,
+    )
 
     global _last_restart_time
 
     if not request.get("token"):
         return _error("Authentication required", 401)
+
+    # Require password confirmation for this destructive action
+    confirm_pw = request.headers.get("X-Confirm-Password", "")
+    if not confirm_pw:
+        return _error(
+            "Password confirmation required (X-Confirm-Password header)",
+            403,
+        )
+    plugin = _get_plugin(request)
+    if not verify_password(confirm_pw, plugin._auth._password_hash):
+        return _error("Password confirmation failed", 403)
 
     now = time.monotonic()
     if now - _last_restart_time < _RESTART_COOLDOWN:

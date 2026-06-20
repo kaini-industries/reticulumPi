@@ -159,18 +159,19 @@ class MeshCoreGateway(PluginBase):
     def stop(self) -> None:
         self._active = False
         # Disconnect MeshCore in the async loop
-        if self._loop and self._mc:
+        loop = self._loop
+        if loop is not None and loop.is_running() and self._mc:
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._async_disconnect(),
-                    self._loop,
+                    loop,
                 )
                 future.result(timeout=5)
             except Exception:
                 self.log.debug("Error during MeshCore disconnect", exc_info=True)
         # Shut down the asyncio event loop
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
         self._join_threads()
 
     # ── Asyncio event loop (dedicated thread) ───────────────────────
@@ -184,12 +185,16 @@ class MeshCoreGateway(PluginBase):
             self._loop.run_forever()
         finally:
             # Clean up pending tasks
-            pending = asyncio.all_tasks(self._loop)
+            loop = self._loop
+            self._loop = None
+            pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()
             if pending:
-                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            self._loop.close()
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.close()
 
     def _run_async(self, coro: Any, timeout: float = 15) -> Any:
         """Run an async coroutine from a sync context, blocking until done."""

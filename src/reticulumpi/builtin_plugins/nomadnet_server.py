@@ -166,7 +166,7 @@ class NomadNetServer(PluginBase):
         if self.config.get("auth"):
             status["auth"] = {
                 "allowed_count": len(self.get_allowed_identities()),
-                "protected_pages": self._get_protected_pages(),
+                "protected_pages": self.get_protected_pages(),
             }
         return status
 
@@ -478,7 +478,7 @@ class NomadNetServer(PluginBase):
             for h in identities:
                 f.write(h + "\n")
 
-    def _get_protected_pages(self) -> list[str]:
+    def get_protected_pages(self) -> list[str]:
         auth = self.config.get("auth", {})
         pp = auth.get("protected_pages")
         if not pp:
@@ -501,7 +501,7 @@ class NomadNetServer(PluginBase):
         if not pages_dir or not os.path.isdir(pages_dir):
             return
 
-        protected = set(self._get_protected_pages())
+        protected = set(self.get_protected_pages())
         allow_list_path = self._get_allow_list_path()
 
         shim_content = f"#!/bin/sh\ncat {shlex.quote(allow_list_path)} 2>/dev/null\n"
@@ -539,6 +539,7 @@ class NomadNetServer(PluginBase):
             return
 
         node_name = self.config.get("node_name") or self.app.node_name
+        node_name = re.sub(r"[\n\r\[\]=]", "", node_name)
         enable_propagation = self.config.get("enable_propagation", False)
         disable_propagation = "no" if enable_propagation else "yes"
         content = _DEFAULT_NOMADNET_CONFIG.format(

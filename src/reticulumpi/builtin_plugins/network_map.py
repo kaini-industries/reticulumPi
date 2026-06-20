@@ -80,6 +80,14 @@ class NetworkMapPlugin(PluginBase):
         self._db_path = db_path
         self._init_db()
 
+        # Persistent write connection — all writes go through this.
+        self._write_conn = sqlite3.connect(
+            self._db_path, check_same_thread=False
+        )
+        self._write_conn.execute("PRAGMA journal_mode=WAL")
+        self._write_conn.execute("PRAGMA synchronous=NORMAL")
+        self._write_conn_lock = threading.Lock()
+
         # Load previously known nodes from DB
         self._load_from_db()
 
@@ -130,6 +138,15 @@ class NetworkMapPlugin(PluginBase):
         self._broadcast_read_conn.execute("PRAGMA journal_mode=WAL")
         self._broadcast_read_conn.execute("PRAGMA query_only=ON")
 
+        # Persistent read connection for paginated / general queries
+        self._query_read_conn = sqlite3.connect(
+            self._db_path, check_same_thread=False
+        )
+        self._query_read_conn.row_factory = sqlite3.Row
+        self._query_read_conn.execute("PRAGMA journal_mode=WAL")
+        self._query_read_conn.execute("PRAGMA query_only=ON")
+        self._query_read_conn_lock = threading.Lock()
+
         self._maintenance_read_conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._maintenance_read_conn.row_factory = sqlite3.Row
         self._maintenance_read_conn.execute("PRAGMA journal_mode=WAL")
@@ -150,7 +167,12 @@ class NetworkMapPlugin(PluginBase):
         for sub_id in getattr(self, "_sub_ids", []):
             self.announce_dispatcher.unsubscribe(sub_id)
         self._join_threads()
-        for conn_attr in ("_broadcast_read_conn", "_maintenance_read_conn"):
+        for conn_attr in (
+            "_broadcast_read_conn",
+            "_maintenance_read_conn",
+            "_query_read_conn",
+            "_write_conn",
+        ):
             conn = getattr(self, conn_attr, None)
             if conn:
                 try:
@@ -199,8 +221,15 @@ class NetworkMapPlugin(PluginBase):
         self._broadcast_cache = (now, has_summary, result)
         return result
 
-    def get_known_nodes(self) -> list[dict[str, Any]]:
-        """Return all known nodes as a list of dicts (for API consumption)."""
+    def get_known_nodes(
+        self, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return known nodes as a list of dicts (for API consumption).
+
+        Args:
+            limit: When provided, return only this many nodes sorted by
+                last_seen descending.  Omit to get all nodes.
+        """
         nodes = []
         with self._nodes_lock:
             items = list(self._known_nodes.items())
@@ -217,7 +246,50 @@ class NetworkMapPlugin(PluginBase):
                     "app_data": info.get("app_data_str", ""),
                 }
             )
-        return sorted(nodes, key=lambda n: n.get("last_seen", 0), reverse=True)
+        result = sorted(
+            nodes, key=lambda n: n.get("last_seen", 0), reverse=True
+        )
+        if limit is not None:
+            return result[:limit]
+        return result
+
+    def get_node_by_hash(self, h: bytes) -> dict | None:
+        """Return a single node dict by its raw destination hash.
+
+        Returns None if the hash is not in the known-nodes cache.
+        """
+        with self._nodes_lock:
+            info = self._known_nodes.get(h)
+            if info is None:
+                return None
+            return dict(info)
+
+    def get_nodes_by_hashes(
+        self, hashes: list[bytes]
+    ) -> list[dict]:
+        """Return node dicts for a list of raw destination hashes.
+
+        Each returned dict includes ``destination_hash`` formatted with
+        angle brackets (matching ``get_known_nodes()`` output).
+        Unknown hashes are silently skipped.
+        """
+        results: list[dict] = []
+        with self._nodes_lock:
+            for h in hashes:
+                info = self._known_nodes.get(h)
+                if info is not None:
+                    node = {
+                        "destination_hash": RNS.prettyhexrep(h),
+                        "app_name": info.get("app_name", ""),
+                        "aspects": info.get("aspects", ""),
+                        "hops": info.get("hops"),
+                        "last_seen": info.get("last_seen"),
+                        "first_seen": info.get("first_seen"),
+                        "announce_count": info.get("announce_count", 0),
+                        "app_data": info.get("app_data_str", ""),
+                    }
+                    results.append(node)
+        return results
 
     def get_node_name(self, destination_hash: str) -> str | None:
         """Return the announced display name for a node, or None if unknown."""
@@ -264,8 +336,8 @@ class NetworkMapPlugin(PluginBase):
         sort_dir = order.upper()
 
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.row_factory = sqlite3.Row
+            with self._query_read_conn_lock:
+                conn = self._query_read_conn
 
                 # Build WHERE clause
                 conditions = []
@@ -729,29 +801,40 @@ class NetworkMapPlugin(PluginBase):
         batch = dict(self._pending_upserts)
         self._pending_upserts.clear()
 
+        rows = [
+            (
+                dest_hash.hex(),
+                info.get("app_name", ""),
+                info.get("aspects", ""),
+                info.get("hops"),
+                info.get("last_seen"),
+                info.get("first_seen"),
+                info.get("announce_count", 1),
+                info.get("app_data_str", ""),
+            )
+            for dest_hash, info in batch.items()
+        ]
+
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                for dest_hash, info in batch.items():
-                    conn.execute(
-                        """
-                        INSERT OR REPLACE INTO known_nodes
-                        (destination_hash, app_name, aspects, hops,
-                         last_seen, first_seen, announce_count, app_data_str)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            with self._write_conn_lock:
+                self._write_conn.executemany(
+                    """
+                    INSERT INTO known_nodes
+                    (destination_hash, app_name, aspects, hops,
+                     last_seen, first_seen, announce_count, app_data_str)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(destination_hash) DO UPDATE SET
+                        app_name = excluded.app_name,
+                        aspects = excluded.aspects,
+                        hops = excluded.hops,
+                        last_seen = excluded.last_seen,
+                        first_seen = excluded.first_seen,
+                        announce_count = excluded.announce_count,
+                        app_data_str = excluded.app_data_str
                     """,
-                        (
-                            dest_hash.hex(),
-                            info.get("app_name", ""),
-                            info.get("aspects", ""),
-                            info.get("hops"),
-                            info.get("last_seen"),
-                            info.get("first_seen"),
-                            info.get("announce_count", 1),
-                            info.get("app_data_str", ""),
-                        ),
-                    )
+                    rows,
+                )
+                self._write_conn.commit()
         except Exception:
             self.log.debug(
                 "Error flushing %d node upserts to database",
@@ -814,7 +897,12 @@ class NetworkMapPlugin(PluginBase):
         try:
             with sqlite3.connect(self._db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                for row in conn.execute("SELECT * FROM known_nodes"):
+                rows = conn.execute(
+                    "SELECT * FROM known_nodes "
+                    "ORDER BY last_seen DESC LIMIT ?",
+                    (self._max_cached_nodes,),
+                ).fetchall()
+                for row in rows:
                     dest_hash = bytes.fromhex(row["destination_hash"])
                     self._known_nodes[dest_hash] = {
                         "app_name": row["app_name"],
@@ -825,14 +913,10 @@ class NetworkMapPlugin(PluginBase):
                         "announce_count": row["announce_count"],
                         "app_data_str": row["app_data_str"] or "",
                     }
-            if len(self._known_nodes) > self._max_cached_nodes:
-                by_recency = sorted(
-                    self._known_nodes.items(),
-                    key=lambda kv: kv[1].get("last_seen", 0),
-                    reverse=True,
-                )
-                self._known_nodes = dict(by_recency[: self._max_cached_nodes])
-            self.log.info("Loaded %d known nodes from database", len(self._known_nodes))
+            self.log.info(
+                "Loaded %d known nodes from database",
+                len(self._known_nodes),
+            )
         except Exception:
             self.log.exception("Error loading known nodes from database")
 
@@ -840,16 +924,18 @@ class NetworkMapPlugin(PluginBase):
         """One-time pass: apply app_data heuristics to nodes with empty app_name."""
         reclassified = 0
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                rows = conn.execute(
+            with self._write_conn_lock:
+                rows = self._write_conn.execute(
                     "SELECT destination_hash, app_data_str FROM known_nodes "
                     "WHERE (app_name = '' OR app_name IS NULL) "
                     "AND app_data_str IS NOT NULL AND app_data_str != ''"
                 ).fetchall()
                 for dest_hex, app_data_str in rows:
-                    inferred_app, inferred_aspect = _infer_app_from_data(app_data_str)
+                    inferred_app, inferred_aspect = _infer_app_from_data(
+                        app_data_str
+                    )
                     if inferred_app:
-                        conn.execute(
+                        self._write_conn.execute(
                             "UPDATE known_nodes SET app_name = ?, aspects = ? "
                             "WHERE destination_hash = ?",
                             (inferred_app, inferred_aspect, dest_hex),
@@ -858,13 +944,21 @@ class NetworkMapPlugin(PluginBase):
                         try:
                             dest_hash = bytes.fromhex(dest_hex)
                             if dest_hash in self._known_nodes:
-                                self._known_nodes[dest_hash]["app_name"] = inferred_app
-                                self._known_nodes[dest_hash]["aspects"] = inferred_aspect
+                                self._known_nodes[dest_hash][
+                                    "app_name"
+                                ] = inferred_app
+                                self._known_nodes[dest_hash][
+                                    "aspects"
+                                ] = inferred_aspect
                         except (ValueError, KeyError):
                             pass
                         reclassified += 1
+                self._write_conn.commit()
             if reclassified:
-                self.log.info("Reclassified %d nodes from app_data heuristics", reclassified)
+                self.log.info(
+                    "Reclassified %d nodes from app_data heuristics",
+                    reclassified,
+                )
         except Exception:
             self.log.exception("Error reclassifying nodes")
 
@@ -873,59 +967,88 @@ class NetworkMapPlugin(PluginBase):
         if not stats:
             return
         now = time.time()
+        rows = [
+            (
+                now,
+                s.get("name", ""),
+                s.get("type", ""),
+                1 if s.get("online", True) else 0,
+                s.get("rxb"),
+                s.get("txb"),
+                s.get("bitrate"),
+                s.get("peers"),
+            )
+            for s in stats
+        ]
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                for s in stats:
-                    conn.execute(
-                        """
-                        INSERT INTO interface_stats (timestamp, name, type, online, rxb, txb, bitrate, peers)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            now,
-                            s.get("name", ""),
-                            s.get("type", ""),
-                            1 if s.get("online", True) else 0,
-                            s.get("rxb"),
-                            s.get("txb"),
-                            s.get("bitrate"),
-                            s.get("peers"),
-                        ),
-                    )
+            with self._write_conn_lock:
+                self._write_conn.executemany(
+                    "INSERT INTO interface_stats "
+                    "(timestamp, name, type, online, rxb, txb, "
+                    "bitrate, peers) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                self._write_conn.commit()
         except Exception:
             self.log.debug("Error saving interface stats", exc_info=True)
         self._stats_save_count += 1
         if self._stats_save_count % 10 == 0:
             try:
-                with sqlite3.connect(self._db_path) as conn:
-                    (count,) = conn.execute("SELECT COUNT(*) FROM interface_stats").fetchone()
+                with self._write_conn_lock:
+                    (count,) = self._write_conn.execute(
+                        "SELECT COUNT(*) FROM interface_stats"
+                    ).fetchone()
                     if count > self._max_stats_rows:
                         excess = count - self._max_stats_rows
-                        conn.execute(
-                            "DELETE FROM interface_stats WHERE rowid IN "
-                            "(SELECT rowid FROM interface_stats ORDER BY timestamp ASC LIMIT ?)",
+                        self._write_conn.execute(
+                            "DELETE FROM interface_stats "
+                            "WHERE rowid IN "
+                            "(SELECT rowid FROM interface_stats "
+                            "ORDER BY timestamp ASC LIMIT ?)",
                             (excess,),
                         )
-                        self.log.debug("Trimmed %d old interface_stats rows", excess)
+                        self._write_conn.commit()
+                        self.log.debug(
+                            "Trimmed %d old interface_stats rows",
+                            excess,
+                        )
             except Exception:
-                self.log.debug("Error trimming interface stats", exc_info=True)
+                self.log.debug(
+                    "Error trimming interface stats", exc_info=True
+                )
 
     def _prune_old_data(self) -> None:
         max_days = self.config.get("max_history_days", 30)
         cutoff = time.time() - (max_days * 86400)
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.execute("DELETE FROM interface_stats WHERE timestamp < ?", (cutoff,))
-                conn.execute("DELETE FROM known_nodes WHERE last_seen < ?", (cutoff,))
-                # Reclaim WAL/file space the deletes freed up — without this the
-                # WAL grows unbounded and the file never shrinks.
+            with self._write_conn_lock:
+                self._write_conn.execute(
+                    "DELETE FROM interface_stats WHERE timestamp < ?",
+                    (cutoff,),
+                )
+                self._write_conn.execute(
+                    "DELETE FROM known_nodes WHERE last_seen < ?",
+                    (cutoff,),
+                )
+                self._write_conn.commit()
+                # Reclaim WAL/file space the deletes freed up — without
+                # this the WAL grows unbounded and the file never shrinks.
                 try:
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    self._write_conn.execute(
+                        "PRAGMA wal_checkpoint(TRUNCATE)"
+                    )
                 except Exception:
-                    self.log.debug("wal_checkpoint(TRUNCATE) failed", exc_info=True)
+                    self.log.debug(
+                        "wal_checkpoint(TRUNCATE) failed", exc_info=True
+                    )
             # Also prune from memory
             with self._nodes_lock:
-                expired = [h for h, info in self._known_nodes.items() if info["last_seen"] < cutoff]
+                expired = [
+                    h
+                    for h, info in self._known_nodes.items()
+                    if info["last_seen"] < cutoff
+                ]
                 for h in expired:
                     del self._known_nodes[h]
         except Exception:

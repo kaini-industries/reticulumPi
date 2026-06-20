@@ -49,15 +49,15 @@
   function buildMeshtasticDetailHTML(node) {
     var h = '<div class="node-detail-section">Identity</div>'
       + '<div class="node-detail-grid">';
-    h += _di('Node ID', esc(node.id || '--'));
-    if (node.long_name) h += _di('Long Name', esc(node.long_name));
-    if (node.short_name) h += _di('Short Name', esc(node.short_name));
+    h += _di('Node ID', node.id || '--');
+    if (node.long_name) h += _di('Long Name', node.long_name);
+    if (node.short_name) h += _di('Short Name', node.short_name);
     if (node.is_self) h += _di('Type', 'This gateway');
     h += '</div>';
 
     h += '<div class="node-detail-section">Radio</div>'
       + '<div class="node-detail-grid">';
-    h += _di('Hardware', esc(node.hw_model || '--'));
+    h += _di('Hardware', node.hw_model || '--');
     h += _di('SNR', node.snr != null ? node.snr.toFixed(1) + ' dB' : '--');
     if (node.last_heard) {
       var d = new Date(node.last_heard * 1000);
@@ -603,14 +603,14 @@
   function buildLoraNeighborDetailHTML(node) {
     var h = '<div class="node-detail-section">Identity</div>'
       + '<div class="node-detail-grid">';
-    h += _di('Node ID', esc(node.id || '--'));
-    if (node.long_name) h += _di('Long Name', esc(node.long_name));
-    if (node.short_name) h += _di('Short Name', esc(node.short_name));
+    h += _di('Node ID', node.id || '--');
+    if (node.long_name) h += _di('Long Name', node.long_name);
+    if (node.short_name) h += _di('Short Name', node.short_name);
     h += '</div>';
 
     h += '<div class="node-detail-section">Radio</div>'
       + '<div class="node-detail-grid">';
-    h += _di('Hardware', esc(node.hw_model || '--'));
+    h += _di('Hardware', node.hw_model || '--');
     h += _di('Hops Away', node.hops_away != null ? '' + node.hops_away : '--');
     h += _di('SNR', node.snr != null ? node.snr.toFixed(1) + ' dB' : '--');
     if (node.last_heard) {

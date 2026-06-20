@@ -8,6 +8,7 @@ event bus so other plugins (alerts, dashboard) can react to time quality.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -413,17 +414,36 @@ class NtpServerPlugin(PluginBase):
             self._gps_refclock_active = False
         self.log.debug("GPS fix lost — chrony will handle source unavailability")
 
+    _PPS_DEVICE_RE = re.compile(r"^/dev/pps[0-9]+$")
+
     def _configure_gps_refclock(self) -> None:
         gps_cfg = self.config.get("gps_refclock", {})
         if not gps_cfg.get("enabled", True):
             return
 
-        shm_segment = gps_cfg.get("shm_segment", 0)
-        precision = gps_cfg.get("precision", "1e-1")
-        offset = gps_cfg.get("offset", 0.0)
-        delay = gps_cfg.get("delay", 0.2)
+        shm_segment = int(gps_cfg.get("shm_segment", 0))
+        precision = str(gps_cfg.get("precision", "1e-1"))
+        offset = float(gps_cfg.get("offset", 0.0))
+        delay = float(gps_cfg.get("delay", 0.2))
         pps_device = gps_cfg.get("pps_device")
-        pps_precision = gps_cfg.get("pps_precision", "1e-9")
+        pps_precision = str(gps_cfg.get("pps_precision", "1e-9"))
+
+        # Reject values containing newlines to prevent config injection
+        for name, val in [
+            ("precision", precision),
+            ("pps_precision", pps_precision),
+        ]:
+            if "\n" in val or "\r" in val:
+                raise ValueError(
+                    f"GPS refclock {name} must not contain newlines"
+                )
+
+        if pps_device:
+            if not self._PPS_DEVICE_RE.match(pps_device):
+                raise ValueError(
+                    f"Invalid pps_device '{pps_device}': "
+                    "must match /dev/pps<N>"
+                )
 
         lines = [
             "# ReticulumPi GPS refclock — managed by ntp_server plugin",

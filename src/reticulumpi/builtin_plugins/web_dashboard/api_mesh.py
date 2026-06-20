@@ -298,14 +298,27 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
     # Check if caller requested specific hashes (efficient path)
     specific_hashes = request.query.get("hashes", "")
     if specific_hashes:
-        # Normalize: strip <> and lowercase for comparison
-        hash_set = set(
-            h.strip().lower().strip("<>") for h in specific_hashes.split(",") if h.strip()
-        )
-        all_nodes = await _run_sync(network_map.get_known_nodes)
-        nodes = [
-            n for n in all_nodes if n.get("destination_hash", "").lower().strip("<>") in hash_set
-        ]
+        raw_hashes: list[bytes] = []
+        for h in specific_hashes.split(","):
+            h = h.strip().lower().strip("<>")
+            if h:
+                try:
+                    raw_hashes.append(bytes.fromhex(h))
+                except ValueError:
+                    pass
+        if hasattr(network_map, "get_nodes_by_hashes"):
+            nodes = await _run_sync(
+                network_map.get_nodes_by_hashes, raw_hashes
+            )
+        else:
+            all_nodes = await _run_sync(network_map.get_known_nodes)
+            hash_set = {h.hex() for h in raw_hashes}
+            nodes = [
+                n
+                for n in all_nodes
+                if n.get("destination_hash", "").lower().strip("<>")
+                in hash_set
+            ]
         scored = score_all_nodes(nodes, path_table, transport_nodes)
         return _ok(
             {
@@ -468,21 +481,21 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
     def _enrich_and_score() -> dict:
         network_map = plugin.app.get_plugin("network_map")
-        if network_map and hasattr(network_map, "_known_nodes"):
-            with network_map._nodes_lock:
-                known = network_map._known_nodes
-                for p in paths:
-                    h = p.get("hash", "")
-                    try:
-                        node = known.get(bytes.fromhex(h))
-                        if node:
-                            p["app_name"] = node.get("app_name", "")
-                            p["app_data"] = node.get("app_data_str", "")
-                            p["aspects"] = node.get("aspects", "")
-                            p["announce_count"] = node.get("announce_count", 0)
-                            p["first_seen"] = node.get("first_seen")
-                    except (ValueError, TypeError):
-                        pass
+        if network_map and hasattr(network_map, "get_node_by_hash"):
+            for p in paths:
+                h = p.get("hash", "")
+                try:
+                    node = network_map.get_node_by_hash(bytes.fromhex(h))
+                    if node:
+                        p["app_name"] = node.get("app_name", "")
+                        p["app_data"] = node.get("app_data_str", "")
+                        p["aspects"] = node.get("aspects", "")
+                        p["announce_count"] = node.get(
+                            "announce_count", 0
+                        )
+                        p["first_seen"] = node.get("first_seen")
+                except (ValueError, TypeError):
+                    pass
 
         # Score reachability for filtered paths
         if paths:

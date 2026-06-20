@@ -1145,7 +1145,7 @@ class TestClientError:
             client_error_rate_limiter,
         )
 
-        client_error_rate_limiter._attempts.clear()
+        client_error_rate_limiter._state.clear()
 
     def test_happy_path_logs_warning(self):
         body = {

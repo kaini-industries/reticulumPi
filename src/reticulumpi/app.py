@@ -6,9 +6,10 @@ import concurrent.futures
 import logging
 import os
 import signal
+import sqlite3
 import threading
 import time
-from typing import Any
+from typing import Any, Sequence
 
 import RNS
 
@@ -22,6 +23,45 @@ from reticulumpi.plugin_loader import PluginLoader
 from reticulumpi.sdr_scheduler import SdrScheduler
 
 log = logging.getLogger(__name__)
+
+
+def run_db_migrations(
+    conn: sqlite3.Connection,
+    migrations: Sequence[str],
+    *,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Apply pending PRAGMA user_version-based migrations to *conn*.
+
+    Each entry in *migrations* is a SQL string (may contain multiple
+    statements separated by ``;``).  ``migrations[0]`` is version 1,
+    ``migrations[1]`` is version 2, etc.
+
+    Returns the new user_version after all pending migrations have run.
+    Raises on SQL errors — callers should handle rollback if needed.
+
+    Usage from a plugin::
+
+        from reticulumpi.app import run_db_migrations
+
+        MIGRATIONS = [
+            "CREATE TABLE IF NOT EXISTS foo (id INTEGER PRIMARY KEY);",
+            "ALTER TABLE foo ADD COLUMN bar TEXT DEFAULT '';",
+        ]
+        run_db_migrations(conn, MIGRATIONS, logger=self.log)
+    """
+    _log = logger or log
+    cur = conn.execute("PRAGMA user_version")
+    current = cur.fetchone()[0]
+    if current >= len(migrations):
+        return current
+    for idx in range(current, len(migrations)):
+        version = idx + 1
+        _log.info("Applying DB migration %d/%d", version, len(migrations))
+        conn.executescript(migrations[idx])
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+    return len(migrations)
 
 
 class ReticulumPiApp:
@@ -211,6 +251,9 @@ class ReticulumPiApp:
             future = pool.submit(plugin.start)
             future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
+            # Deactivate the timed-out plugin so its background threads
+            # (if any were spawned during start()) wind down.
+            plugin._active = False
             raise TimeoutError(f"Plugin '{name}' did not start within {timeout:.0f}s") from None
         except Exception as exc:
             if "signal only works in main thread" in str(exc):
@@ -402,6 +445,14 @@ class ReticulumPiApp:
                         name,
                         dep,
                     )
+            for dep in getattr(instance, "plugin_soft_dependencies", []):
+                if dep not in self.plugins:
+                    log.info(
+                        "Plugin '%s' soft-depends on '%s' which is not enabled"
+                        " — degraded functionality possible",
+                        name,
+                        dep,
+                    )
 
     def _topo_sort_plugins(self) -> list[str]:
         """Return plugin names in dependency order (dependees first).
@@ -423,7 +474,12 @@ class ReticulumPiApp:
             if name in visited:
                 return
             visiting.add(name)
-            for dep in getattr(self.plugins[name], "plugin_dependencies", []):
+            plugin = self.plugins[name]
+            for dep in getattr(plugin, "plugin_dependencies", []):
+                if dep in remaining:
+                    visit(dep)
+            # Soft dependencies influence start order but don't block
+            for dep in getattr(plugin, "plugin_soft_dependencies", []):
                 if dep in remaining:
                     visit(dep)
             visiting.discard(name)

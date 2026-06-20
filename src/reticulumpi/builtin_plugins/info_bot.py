@@ -922,7 +922,7 @@ class InfoBot(PluginBase):
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if subcmd in ("status", ""):
-            protected = nn._get_protected_pages() if hasattr(nn, "_get_protected_pages") else []
+            protected = nn.get_protected_pages() if hasattr(nn, "get_protected_pages") else []
             ids = nn.get_allowed_identities()
             lines = ["NomadNet Page Auth"]
             lines.append(f"  Protected pages: {len(protected)}")

@@ -118,44 +118,81 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
 
 class RateLimiter:
-    """Per-IP sliding window rate limiter."""
+    """Per-IP exponential-backoff rate limiter.
+
+    Each consecutive failed attempt from the same IP doubles the lockout
+    window (starting from ``base_window``).  A successful login resets
+    the counter for that IP.  This makes brute-force progressively more
+    expensive without requiring persistent storage.
+    """
 
     MAX_TRACKED_IPS = 10_000
 
     def __init__(self, max_attempts: int = 5, window_seconds: int = 60):
         self.max_attempts = max_attempts
-        self.window_seconds = window_seconds
-        self._attempts: dict[str, list[float]] = {}
+        self.base_window = window_seconds
+        # {ip: {"attempts": [timestamps], "consecutive_failures": int}}
+        self._state: dict[str, dict] = {}
+
+    @property
+    def window_seconds(self) -> int:
+        """Base window — kept for backward compat with retry_after."""
+        return self.base_window
+
+    def _effective_window(self, ip: str) -> float:
+        """Compute the exponential-backoff window for *ip*."""
+        state = self._state.get(ip)
+        if not state:
+            return float(self.base_window)
+        failures = state.get("consecutive_failures", 0)
+        # Cap the multiplier at 2^8 = 256x (~4.25 h at base=60 s)
+        multiplier = min(2 ** failures, 256)
+        return float(self.base_window * multiplier)
 
     def is_allowed(self, ip: str) -> bool:
         """Check if a login attempt from this IP is allowed."""
         ip = _normalize_ip(ip)
         now = time.monotonic()
         self._cleanup(ip, now)
-        attempts = self._attempts.get(ip, [])
-        return len(attempts) < self.max_attempts
+        state = self._state.get(ip)
+        if not state:
+            return True
+        return len(state["attempts"]) < self.max_attempts
 
     def record_attempt(self, ip: str) -> None:
         """Record a failed login attempt."""
         ip = _normalize_ip(ip)
         now = time.monotonic()
         self._cleanup(ip, now)
-        if ip not in self._attempts and len(self._attempts) >= self.MAX_TRACKED_IPS:
+        if ip not in self._state and len(self._state) >= self.MAX_TRACKED_IPS:
             oldest_ip = min(
-                self._attempts,
-                key=lambda k: self._attempts[k][-1] if self._attempts[k] else 0,
+                self._state,
+                key=lambda k: (
+                    self._state[k]["attempts"][-1]
+                    if self._state[k]["attempts"]
+                    else 0
+                ),
             )
-            del self._attempts[oldest_ip]
-        self._attempts.setdefault(ip, []).append(now)
+            del self._state[oldest_ip]
+        if ip not in self._state:
+            self._state[ip] = {"attempts": [], "consecutive_failures": 0}
+        self._state[ip]["attempts"].append(now)
+        self._state[ip]["consecutive_failures"] += 1
+
+    def record_success(self, ip: str) -> None:
+        """Reset backoff state for *ip* on successful login."""
+        ip = _normalize_ip(ip)
+        self._state.pop(ip, None)
 
     def retry_after(self, ip: str) -> int:
-        """Seconds until the oldest attempt expires (for Retry-After header)."""
+        """Seconds until the oldest attempt expires (for Retry-After)."""
         ip = _normalize_ip(ip)
-        attempts = self._attempts.get(ip, [])
-        if not attempts:
+        state = self._state.get(ip)
+        if not state or not state["attempts"]:
             return 0
-        oldest = attempts[0]
-        remaining = self.window_seconds - (time.monotonic() - oldest)
+        oldest = state["attempts"][0]
+        window = self._effective_window(ip)
+        remaining = window - (time.monotonic() - oldest)
         return max(1, int(remaining))
 
     def cleanup_all_expired(self) -> int:
@@ -164,36 +201,42 @@ class RateLimiter:
         Returns the number of IP entries removed.
         """
         now = time.monotonic()
-        cutoff = now - self.window_seconds
         expired_ips: list[str] = []
-        for ip, timestamps in self._attempts.items():
-            fresh = [t for t in timestamps if t > cutoff]
+        for ip, state in self._state.items():
+            window = self._effective_window(ip)
+            cutoff = now - window
+            fresh = [t for t in state["attempts"] if t > cutoff]
             if fresh:
-                self._attempts[ip] = fresh
+                state["attempts"] = fresh
             else:
                 expired_ips.append(ip)
         for ip in expired_ips:
-            del self._attempts[ip]
+            del self._state[ip]
 
         removed_by_cap = 0
-        if len(self._attempts) > self.MAX_TRACKED_IPS:
+        if len(self._state) > self.MAX_TRACKED_IPS:
             by_newest = sorted(
-                self._attempts.items(),
-                key=lambda kv: max(kv[1]),
+                self._state.items(),
+                key=lambda kv: max(kv[1]["attempts"])
+                if kv[1]["attempts"]
+                else 0,
             )
-            excess = len(self._attempts) - self.MAX_TRACKED_IPS
+            excess = len(self._state) - self.MAX_TRACKED_IPS
             for ip, _ in by_newest[:excess]:
-                del self._attempts[ip]
+                del self._state[ip]
                 removed_by_cap += 1
 
         return len(expired_ips) + removed_by_cap
 
     def _cleanup(self, ip: str, now: float) -> None:
-        if ip in self._attempts:
-            cutoff = now - self.window_seconds
-            self._attempts[ip] = [t for t in self._attempts[ip] if t > cutoff]
-            if not self._attempts[ip]:
-                del self._attempts[ip]
+        if ip in self._state:
+            window = self._effective_window(ip)
+            cutoff = now - window
+            self._state[ip]["attempts"] = [
+                t for t in self._state[ip]["attempts"] if t > cutoff
+            ]
+            if not self._state[ip]["attempts"]:
+                del self._state[ip]
 
 
 class SqliteSessionStore:
@@ -211,7 +254,25 @@ class SqliteSessionStore:
         os.chmod(db_path, 0o600)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS sessions (  token TEXT PRIMARY KEY,  data TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "  token TEXT PRIMARY KEY,"
+            "  data TEXT NOT NULL,"
+            "  expires_at REAL"
+            ")"
+        )
+        # Migrate: add expires_at column if missing (pre-existing DB)
+        cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(sessions)")
+        }
+        if "expires_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN expires_at REAL"
+            )
+        # Index for efficient expired-session cleanup
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at "
+            "ON sessions (expires_at)"
         )
         self._conn.commit()
 
@@ -232,10 +293,12 @@ class SqliteSessionStore:
     def __setitem__(self, token: str, value: dict[str, Any]) -> None:
         if self._is_closed():
             raise RuntimeError("session store closed")
+        expires_at = value.get("expires_at")
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO sessions (token, data) VALUES (?, ?)",
-                (token, json.dumps(value)),
+                "INSERT OR REPLACE INTO sessions "
+                "(token, data, expires_at) VALUES (?, ?, ?)",
+                (token, json.dumps(value), expires_at),
             )
             self._conn.commit()
 
@@ -306,6 +369,25 @@ class SqliteSessionStore:
             rows = self._conn.execute("SELECT token, data FROM sessions").fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
 
+    def cleanup_expired(self) -> int:
+        """Delete sessions whose ``expires_at`` is in the past.
+
+        Uses the indexed ``expires_at`` column for an efficient single-pass
+        DELETE instead of fetching + filtering every row.
+        Returns the number of rows removed.
+        """
+        if self._is_closed():
+            return 0
+        now = time.time()
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM sessions WHERE expires_at IS NOT NULL "
+                "AND expires_at <= ?",
+                (now,),
+            )
+            self._conn.commit()
+        return cursor.rowcount
+
     def checkpoint(self) -> None:
         """Truncate the WAL so it does not grow unbounded on a tiny DB.
 
@@ -332,10 +414,12 @@ class AuthManager:
         password_hash: str | None = None,
         plaintext_password: str | None = None,
         session_timeout: float = 86400,
-        max_sessions: int = 5,
+        max_sessions: int = 10,
         session_db_path: str | None = None,
         rate_limit_max_attempts: int = 5,
         rate_limit_window: int = 60,
+        force_secure_cookie: bool = False,
+        generated_pw_file: str | None = None,
     ):
         if password_hash:
             self._password_hash = password_hash
@@ -344,12 +428,21 @@ class AuthManager:
         else:
             raise ValueError("No password configured for web dashboard")
 
+        # Checksum of the current password hash — stored in each session
+        # so that validate_token can detect password rotation.
+        self._password_hash_checksum = hashlib.sha256(
+            self._password_hash.encode()
+        ).hexdigest()
+
         self.session_timeout = session_timeout
         self.max_sessions = max_sessions
+        self.force_secure_cookie = force_secure_cookie
+        # Path to the generated password file; deleted after first login
+        self._generated_pw_file = generated_pw_file
         if session_db_path:
-            self.sessions: dict[str, dict[str, Any]] | SqliteSessionStore = SqliteSessionStore(
-                session_db_path
-            )
+            self.sessions: (
+                dict[str, dict[str, Any]] | SqliteSessionStore
+            ) = SqliteSessionStore(session_db_path)
             log.info("Using persistent session store: %s", session_db_path)
         else:
             self.sessions = {}
@@ -360,6 +453,9 @@ class AuthManager:
         # Per-IP throttle state for failed-login audit logging:
         # {normalized_ip: {"last_log_ts": float, "suppressed_count": int}}
         self._audit_state: dict[str, dict[str, float]] = {}
+
+        # Proportional last_seen update throttle (auth-03)
+        self._last_seen_throttle = min(60, session_timeout / 10)
 
     def _audit_failed_login(self, remote_ip: str, reason: str) -> None:
         """Emit a throttled WARNING for a failed login. Never logs the password.
@@ -409,18 +505,54 @@ class AuthManager:
             self._audit_failed_login(remote_ip, "bad_password")
             return None
 
+        # Reset exponential backoff on success
+        self.rate_limiter.record_success(remote_ip)
+
         token = secrets.token_hex(32)
         now = time.time()
         self.sessions[token] = {
             "created_at": now,
             "last_seen": now,
             "remote_ip": remote_ip,
+            "password_hash_checksum": self._password_hash_checksum,
+            "expires_at": now + self.session_timeout,
         }
 
-        # Evict oldest sessions if over limit
+        # IP-aware session eviction: prefer sessions from same IP
         while len(self.sessions) > self.max_sessions:
-            oldest_token = min(self.sessions, key=lambda t: self.sessions[t]["last_seen"])
-            del self.sessions[oldest_token]
+            norm_ip = _normalize_ip(remote_ip)
+            same_ip = [
+                (t, s) for t, s in self.sessions.items()
+                if t != token
+                and _normalize_ip(s.get("remote_ip", "")) == norm_ip
+            ]
+            if same_ip:
+                victim = min(same_ip, key=lambda ts: ts[1]["last_seen"])
+                del self.sessions[victim[0]]
+            else:
+                oldest_token = min(
+                    (t for t in self.sessions if t != token),
+                    key=lambda t: self.sessions[t]["last_seen"],
+                )
+                del self.sessions[oldest_token]
+
+        # Delete the generated password file after first successful login
+        if self._generated_pw_file:
+            try:
+                os.remove(self._generated_pw_file)
+                log.info(
+                    "Deleted generated password file: %s",
+                    self._generated_pw_file,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.debug(
+                    "Could not delete password file: %s",
+                    self._generated_pw_file,
+                    exc_info=True,
+                )
+            self._generated_pw_file = None
 
         return token
 
@@ -430,20 +562,40 @@ class AuthManager:
         if not session:
             return False
 
+        # Invalidate if the password was rotated since this session began
+        stored_checksum = session.get("password_hash_checksum")
+        if (
+            stored_checksum is not None
+            and stored_checksum != self._password_hash_checksum
+        ):
+            log.warning(
+                "Password rotation detected — invalidating all sessions"
+            )
+            self._invalidate_all_sessions()
+            return False
+
         now = time.time()
         if now - session["last_seen"] > self.session_timeout:
             del self.sessions[token]
             return False
 
-        # Re-assign via __setitem__ so SqliteSessionStore persists the slide —
-        # __getitem__ there returns a fresh json.loads() copy, so mutating the
-        # dict alone is a no-op. Throttled to avoid a SQLite write on every
-        # API poll.
-        if now - session["last_seen"] >= 60:
+        # Re-assign via __setitem__ so SqliteSessionStore persists the
+        # slide.  Throttle is proportional to session_timeout (auth-03).
+        if now - session["last_seen"] >= self._last_seen_throttle:
             session["last_seen"] = now
+            session["expires_at"] = now + self.session_timeout
             self.sessions[token] = session
 
         return True
+
+    def _invalidate_all_sessions(self) -> None:
+        """Remove every active session (used on password rotation)."""
+        tokens = list(self.sessions)
+        for t in tokens:
+            try:
+                del self.sessions[t]
+            except KeyError:
+                pass
 
     def cleanup_expired_sessions(self) -> int:
         """Remove all expired sessions. Returns count of sessions removed.
@@ -451,7 +603,16 @@ class AuthManager:
         Called periodically by the web dashboard's background GC task so
         that sessions abandoned without an explicit logout don't accumulate
         in memory indefinitely.
+
+        When backed by SqliteSessionStore the indexed ``expires_at``
+        column is used for an efficient single-pass DELETE.
         """
+        # Fast path: SqliteSessionStore with indexed expires_at column
+        if hasattr(self.sessions, "cleanup_expired"):
+            removed = self.sessions.cleanup_expired()
+            self.rate_limiter.cleanup_all_expired()
+            return removed
+
         now = time.time()
         expired = [
             token
