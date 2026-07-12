@@ -311,10 +311,23 @@ jobs:
           --requirement constraints/production-universal-build.txt
       - run: python -m build --no-isolation
       - run: twine check dist/*
-      - name: Generate CycloneDX SBOM
+      - name: Prepare the exact wheel for SBOM generation
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/reticulumpi-*.whl)
+          test "${#wheels[@]}" -eq 1
+          sbom_root="$RUNNER_TEMP/reticulumpi-wheel-root"
+          test ! -e "$sbom_root"
+          install -d -m 0755 "$sbom_root"
+          python -m zipfile -e "${wheels[0]}" "$sbom_root"
+          set -- "$sbom_root"/reticulumpi-*.dist-info/METADATA
+          test "$#" -eq 1
+          test -f "$1"
+      - name: Generate exact-wheel CycloneDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          path: dist
+          path: ${{ runner.temp }}/reticulumpi-wheel-root
           format: cyclonedx-json
           output-file: dist/reticulumpi.cdx.json
           artifact-name: reticulumpi-sbom.cdx.json

@@ -18,7 +18,9 @@ case "${1:-}" in
         delay="$5"
         pps_device="$6"
         pps_precision="$7"
-        [[ "$shm" =~ ^[0-9]+$ ]] && [ "$shm" -le 15 ] || die "invalid SHM segment"
+        if ! [[ "$shm" =~ ^[0-9]+$ ]] || [ "$shm" -gt 15 ]; then
+            die "invalid SHM segment"
+        fi
         [[ "$precision" =~ $numeric_re ]] || die "invalid precision"
         [[ "$offset" =~ $numeric_re ]] || die "invalid offset"
         [[ "$delay" =~ $numeric_re ]] || die "invalid delay"

@@ -112,11 +112,30 @@ def test_ci_pins_security_actions_and_runs_supply_chain_gates():
     assert any(action.startswith("anchore/scan-action@") for action in actions)
 
     source = workflow_path.read_text(encoding="utf-8")
+    assert "gitleaks/gitleaks-action@" not in source
+    assert "GITLEAKS_VERSION: 8.30.1" in source
+    assert (
+        "GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        in source
+    )
     assert "systemd-analyze verify" in source
     assert "visudo --check" in source
     assert "node --check" in source
     assert "tools/verify_sbom.py" in source
     assert "provenance: mode=max" in source
+
+    package_steps = workflow["jobs"]["package"]["steps"]
+    prepare_sbom = next(
+        step
+        for step in package_steps
+        if step.get("name") == "Prepare the exact wheel for SBOM generation"
+    )
+    assert "wheels=(dist/reticulumpi-*.whl)" in prepare_sbom["run"]
+    assert 'python -m zipfile -e "${wheels[0]}" "$sbom_root"' in prepare_sbom["run"]
+    generate_sbom = next(
+        step for step in package_steps if step.get("name") == "Generate exact-wheel CycloneDX SBOM"
+    )
+    assert generate_sbom["with"]["path"] == "${{ runner.temp }}/reticulumpi-wheel-root"
 
 
 @pytest.mark.parametrize("profile", CONSTRAINT_PROFILES)

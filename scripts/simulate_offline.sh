@@ -54,8 +54,9 @@ prepare_state_directory() {
 }
 
 validate_offline_overlay() {
-    [ -f "$OFFLINE_OVERLAY" ] && [ ! -L "$OFFLINE_OVERLAY" ] \
-        || die "offline overlay is missing or unsafe: $OFFLINE_OVERLAY"
+    if [ ! -f "$OFFLINE_OVERLAY" ] || [ -L "$OFFLINE_OVERLAY" ]; then
+        die "offline overlay is missing or unsafe: $OFFLINE_OVERLAY"
+    fi
 
     # Keep this parser intentionally strict: comments and blank lines are
     # ignored, and the only accepted payload is internet.force_offline=true.
@@ -93,8 +94,9 @@ remove_offline_overlay() {
         echo "  Runtime overlay is already absent."
         return 0
     fi
-    [ -f "$RUNTIME_OVERLAY" ] && [ ! -L "$RUNTIME_OVERLAY" ] \
-        || die "runtime overlay is not a regular file"
+    if [ ! -f "$RUNTIME_OVERLAY" ] || [ -L "$RUNTIME_OVERLAY" ]; then
+        die "runtime overlay is not a regular file"
+    fi
     rm -f -- "$RUNTIME_OVERLAY"
     fsync_path "$STATE_DIR"
     echo "  Removed forced-offline runtime overlay."

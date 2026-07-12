@@ -42,8 +42,9 @@ atomic_write() {
     local mode="$2"
     local directory temporary owner permissions
     directory="$(dirname "$destination")"
-    [ -d "$directory" ] && [ ! -L "$directory" ] \
-        || die "Unsafe root-owned state directory: $directory"
+    if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+        die "Unsafe root-owned state directory: $directory"
+    fi
     owner="$(stat -c '%u' -- "$directory")"
     permissions="$(stat -c '%a' -- "$directory")"
     if [ "$owner" -ne 0 ] || (( (8#$permissions & 022) != 0 )); then
@@ -69,8 +70,9 @@ cmd_activate() {
 
     # --- input validation ---
     [[ "$iface" =~ ^[a-zA-Z0-9._-]+$ ]] || die "Invalid interface name: $iface"
-    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
-        || die "Port must be numeric 1024-65535, got: $port"
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+        die "Port must be numeric 1024-65535, got: $port"
+    fi
     [[ "$gw_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Invalid IPv4 address: $gw_ip"
 
     trap 'cmd_cleanup 2>/dev/null; exit 1' ERR
