@@ -1,2 +1,0 @@
-# Allow reticulumpi user to manage captive portal (iptables NAT + dnsmasq)
-reticulumpi ALL=(ALL) NOPASSWD: /opt/reticulumpi/scripts/captive_portal_helper.sh

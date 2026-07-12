@@ -7,8 +7,11 @@ from unittest.mock import patch
 import pytest
 
 from reticulumpi.rtlsdr import (
+    claim_device,
     enumerate_devices,
+    get_lease_metrics,
     invalidate_cache,
+    refresh_device_lease,
     release_device,
     reset_cache,
     resolve_device,
@@ -124,6 +127,61 @@ class TestResolveDevice:
             resolve_device("00000001", caller="adsb_radar")
             with pytest.raises(RuntimeError, match="already claimed by 'adsb_radar'"):
                 resolve_device("00000001", caller="spectrum_scanner")
+
+    def test_numeric_index_and_serial_share_one_claim(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            resolve_device("1", caller="ais_receiver")
+            with pytest.raises(RuntimeError, match="already claimed"):
+                resolve_device("07143901", caller="spectrum_scanner")
+
+    def test_device_lease_releases_canonical_claim(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            lease = claim_device("1", caller="ais_receiver")
+            assert lease.index == 1
+            assert lease.canonical_id == "serial:07143901"
+            lease.release()
+            assert resolve_device("07143901", caller="spectrum_scanner") == 1
+
+    def test_lease_metrics_count_claims_without_identifiers(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            lease = claim_device("1", caller="ais_receiver")
+
+        assert get_lease_metrics() == {"canonical_claims": 1}
+        lease.release()
+        assert get_lease_metrics() == {"canonical_claims": 0}
+
+    def test_device_lease_releases_after_enumeration_disappears(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            lease = claim_device("1", caller="ais_receiver")
+        invalidate_cache()
+        with patch("reticulumpi.rtlsdr.shutil.which", return_value=None):
+            lease.release()
+        reset_cache()
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            assert resolve_device("07143901", caller="spectrum_scanner") == 1
+
+    def test_refresh_moves_claim_when_numeric_index_maps_to_new_serial(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            lease = claim_device("1", caller="ais_receiver")
+
+        invalidate_cache()
+        replacement = "Found 2 device(s):\n  1: Test, Replacement, SN: 99999999\n"
+        patches = _mock_rtl_test(output=replacement)
+        with patches[0], patches[1]:
+            refreshed = refresh_device_lease(lease, "1", "ais_receiver")
+            assert refreshed.canonical_id == "serial:99999999"
+            refreshed.release()
+
+        reset_cache()
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            assert resolve_device("07143901", caller="spectrum_scanner") == 1
 
     def test_same_caller_no_error(self):
         patches = _mock_rtl_test()

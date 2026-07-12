@@ -175,7 +175,7 @@ class TestSentenceHandling:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
 
         plugin._handle_sentence(RMC_VALID)
 
@@ -206,7 +206,7 @@ class TestSentenceHandling:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
 
         plugin._handle_sentence(RMC_VALID)
         mock_app.event_bus.publish.reset_mock()
@@ -228,7 +228,7 @@ class TestSentenceHandling:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
 
         # RMC first so last_fix exists; then GGA augments it.
         plugin._handle_sentence(RMC_VALID)
@@ -253,7 +253,7 @@ class TestSentenceHandling:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
 
         plugin._handle_sentence(RMC_VALID)
         plugin._handle_sentence(GSA_3D)
@@ -278,7 +278,7 @@ class TestSentenceHandling:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
 
         plugin._handle_sentence(GSV_1)
         # Partial — should still be empty until group completes
@@ -309,7 +309,7 @@ class TestSentenceHandling:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
 
         plugin._handle_sentence("$GPABC,bogus,data,here*XX")
         assert plugin._parse_errors >= 1
@@ -328,10 +328,10 @@ class TestSentenceHandling:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
         plugin._connected = True
         plugin._reconnect_failures = 0
-        plugin._start_time = time.time()
+        plugin._start_monotonic = time.monotonic()
         plugin._serial_port = "/dev/ttyUSB0"
         plugin._baudrate = 4800
 
@@ -369,10 +369,10 @@ class TestSnapshotShape:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
         plugin._connected = True
         plugin._reconnect_failures = 0
-        plugin._start_time = time.time()
+        plugin._start_monotonic = time.monotonic()
         plugin._serial_port = "/dev/ttyUSB0"
         plugin._baudrate = 4800
 
@@ -423,10 +423,10 @@ class TestSnapshotShape:
         plugin._msgs_received = 0
         plugin._sentences_parsed = 0
         plugin._parse_errors = 0
-        plugin._last_msg_time = 0.0
+        plugin._last_msg_monotonic = 0.0
         plugin._connected = False
         plugin._reconnect_failures = 0
-        plugin._start_time = time.time()
+        plugin._start_monotonic = time.monotonic()
         plugin._serial_port = "/dev/ttyUSB0"
         plugin._baudrate = 4800
 
@@ -434,6 +434,37 @@ class TestSnapshotShape:
         assert snap["last_fix"] is None
         assert snap["satellites_in_view"] == []
         assert snap["have_fix"] is False
+
+    def test_message_age_and_uptime_ignore_wall_clock_jump(self, mock_app, gps_config):
+        plugin = _make_plugin(mock_app, gps_config)
+        plugin._active = True
+        plugin._lock = threading.Lock()
+        plugin._connected = True
+        plugin._serial_port = "/dev/ttyUSB0"
+        plugin._baudrate = 4800
+        plugin._msgs_received = 1
+        plugin._sentences_parsed = 1
+        plugin._parse_errors = 0
+        plugin._reconnect_failures = 0
+        plugin._have_fix = False
+        plugin._satellites_in_view = []
+        plugin._last_msg_monotonic = 100.0
+        plugin._start_monotonic = 90.0
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.gps_telemetry.time.time",
+                return_value=9_999_999_999.0,
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.gps_telemetry.time.monotonic",
+                return_value=110.0,
+            ),
+        ):
+            status = plugin.get_status()
+
+        assert status["last_msg_age_s"] == 10.0
+        assert status["uptime"] == 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +518,7 @@ class TestReadLoopAndStaleness:
             "timestamp": time.time() - 30,
         }
         plugin._have_fix = True
+        plugin._last_fix_monotonic = time.monotonic() - 30
         plugin._stale_check_interval = 0.2
         plugin._fix_stale_seconds = 5
 
@@ -501,6 +533,42 @@ class TestReadLoopAndStaleness:
         assert plugin._have_fix is False
         published = [c.args[0] for c in mock_app.event_bus.publish.call_args_list]
         assert events.GPS_FIX_LOST in published
+
+    def test_wall_clock_jump_does_not_make_fresh_fix_stale(self, mock_app, gps_config):
+        from reticulumpi import events
+
+        plugin = _make_plugin(mock_app, gps_config)
+        plugin._active = True
+        plugin._lock = threading.Lock()
+        plugin.last_fix = {"lat": 10.0, "lon": 20.0, "timestamp": 1_000.0}
+        plugin._have_fix = True
+        plugin._last_fix_monotonic = 100.0
+        plugin._fix_stale_seconds = 5
+        plugin._stale_check_interval = 1
+        sleeps = 0
+
+        def finish_after_one_check(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps == 2:
+                plugin._active = False
+
+        with (
+            patch.object(plugin, "_sleep_while_active", side_effect=finish_after_one_check),
+            patch(
+                "reticulumpi.builtin_plugins.gps_telemetry.time.time",
+                return_value=9_999_999_999.0,
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.gps_telemetry.time.monotonic",
+                return_value=101.0,
+            ),
+        ):
+            plugin._stale_monitor()
+
+        assert plugin._have_fix is True
+        published = [c.args[0] for c in mock_app.event_bus.publish.call_args_list]
+        assert events.GPS_FIX_LOST not in published
 
     def test_reconnect_after_serial_exception(self, mock_app, gps_config):
         """Open raises once, then succeeds — ensures backoff + retry path runs."""
@@ -523,8 +591,8 @@ class TestReadLoopAndStaleness:
 
         with patch("serial.Serial", side_effect=_fake_serial_ctor):
             plugin = _make_plugin(mock_app, gps_config, start=True)
-            deadline = time.time() + 5
-            while time.time() < deadline:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
                 if plugin._connected:
                     break
                 time.sleep(0.05)
@@ -575,18 +643,19 @@ class TestReadLoopAndStaleness:
                 plugin_holder[0] = plugin
                 plugin.start()
 
-                reader = next(
-                    (t for t in plugin._threads if "gps-reader" in t.name),
-                    None,
-                )
-                assert reader is not None, "gps-reader thread not spawned"
-                reader.join(timeout=3)
-                assert not reader.is_alive(), "gps-reader thread did not exit"
+                # Managed threads remove themselves from _threads as soon as
+                # they exit, so this deliberately fast shutdown race may have
+                # completed before start() returns.
+                deadline = time.monotonic() + 3
+                while any("gps-reader" in t.name for t in plugin._threads):
+                    if time.monotonic() >= deadline:
+                        pytest.fail("gps-reader thread did not exit")
+                    time.sleep(0.01)
 
                 # The fix: no unhandled exception escaped the thread.
                 # (Filter to our reader — other daemon threads in the plugin
                 # are unrelated.)
-                reader_crashes = [h for h in unhandled if h.thread is reader]
+                reader_crashes = [h for h in unhandled if "gps-reader" in h.thread.name]
                 assert not reader_crashes, (
                     "gps-reader crashed with "
                     f"{reader_crashes[0].exc_type.__name__}: "

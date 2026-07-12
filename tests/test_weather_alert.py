@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from collections import deque
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.weather_alert import (
@@ -16,6 +16,7 @@ from reticulumpi.builtin_plugins.weather_alert import (
     _parse_issued_ts,
     _SAME_RE,
 )
+from reticulumpi.process_supervisor import ProcessFailure
 
 
 def _make_app() -> MagicMock:
@@ -42,9 +43,77 @@ def _make_plugin(config: dict | None = None) -> WeatherAlert:
     plugin._seen_headers = {}
     plugin._status = "idle"
     plugin._last_error = None
+    plugin._restart_count = 0
+    plugin._rtl_process = None
     plugin._process = None
     plugin._pid = None
     return plugin
+
+
+class TestManagedDecoderLifecycle:
+    def test_launch_uses_transactional_two_stage_group(self):
+        plugin = _make_plugin()
+        rtl_process = MagicMock(pid=1201)
+        decoder_process = MagicMock(pid=1202)
+        managed = MagicMock(restart_count=0)
+
+        def construct(specs, **kwargs):
+            managed.specs = specs
+            managed.hooks = kwargs
+            managed.start.side_effect = lambda: kwargs["on_started"](
+                (rtl_process, decoder_process), False
+            )
+            return managed
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.weather_alert.shutil.which",
+                side_effect=["/usr/bin/rtl_fm", "/usr/bin/multimon-ng"],
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.weather_alert.ManagedProcessGroup",
+                side_effect=construct,
+            ),
+            patch.object(plugin, "_start_stderr_reader"),
+            patch.object(plugin, "_start_thread"),
+        ):
+            plugin._launch_subprocess(3)
+
+        assert [spec.name for spec in managed.specs] == ["rtl_fm", "multimon-ng"]
+        assert managed.specs[0].argv[0] == "/usr/bin/rtl_fm"
+        assert managed.specs[1].argv[0] == "/usr/bin/multimon-ng"
+        assert plugin._rtl_process is rtl_process
+        assert plugin._process is decoder_process
+        assert plugin._process_group is managed
+        assert plugin._status == "monitoring"
+        assert managed.hooks["restart_policy"].enabled is False
+
+    def test_parser_eof_notifies_decoder_stage_only_for_current_process(self):
+        plugin = _make_plugin()
+        current = MagicMock(stdout=[])
+        stale = MagicMock(stdout=[])
+        group = MagicMock(running=True)
+        plugin._process = current
+        plugin._process_group = group
+
+        plugin._parser_loop(stale)
+        group.notify_unexpected_eof.assert_not_called()
+        plugin._parser_loop(current)
+        group.notify_unexpected_eof.assert_called_once_with(1, "SAME decoder stdout ended")
+
+    def test_restart_exhaustion_releases_sdr(self):
+        plugin = _make_plugin()
+        plugin._dongle_serial = "WX-SDR"
+        plugin._dongle_active = True
+        scheduler = MagicMock()
+        plugin.app.sdr_scheduler = scheduler
+        failure = ProcessFailure(1, "multimon-ng", 1, "exited", time.monotonic())
+
+        plugin._on_decoder_exhausted(failure)
+
+        assert plugin._dongle_active is False
+        assert plugin._status == "error"
+        scheduler.dongle_released.assert_called_once_with("WX-SDR", plugin.plugin_name)
 
 
 def _current_issued() -> str:

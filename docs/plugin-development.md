@@ -125,16 +125,52 @@ Your plugin runs until shutdown. Background work happens in threads started via 
 
 Called on SIGTERM/SIGINT (in reverse plugin order). This is where you:
 - Set `self._active = False`
-- Unsubscribe from events
 - Close database connections
 - Cancel timers
 - Call `self._join_threads()` to wait for threads to finish
+
+Resources registered with the managed-resource helpers are cleaned automatically, exactly
+once and in reverse registration order, after normal stop, failed start, or timeout.
 
 ---
 
 ## Base Class Helpers
 
 `PluginBase` provides several helpers to simplify common patterns:
+
+### Managed resource ownership
+
+Register acquired resources immediately, before publishing readiness:
+
+```python
+def start(self):
+    self._active = True
+    self._executor = self.manage_executor(ThreadPoolExecutor(max_workers=2))
+    self._task = self.manage_async_task(loop.create_task(self._poll()))
+    self._destination = self.manage_destination(
+        RNS.Destination(self.identity, RNS.Destination.IN, RNS.Destination.SINGLE,
+                        "reticulumpi", "example")
+    )
+    self._destination.register_request_handler("/status", response_generator=self._status)
+    self.manage_request_handler(self._destination, "/status")
+    self.manage_subscription(self.event_bus.subscribe("example", self._on_event))
+    self.mark_ready()  # lifecycle API v2 only, after every resource is usable
+```
+
+- `register_cleanup(callback, *args, **kwargs)` owns any idempotent custom cleanup.
+- `manage_subscription`, `manage_link`, and `manage_destination` detach RNS/event resources.
+- `manage_process` and `manage_process_group` terminate complete external workloads.
+- `manage_executor` cancels queued futures with `wait=False`; it never blocks an event loop.
+- `manage_async_task` cancels on the task's owning loop, using a thread-safe wakeup when
+  cleanup runs elsewhere.
+- `manage_request_handler(destination, path)` deregisters the exact RNS handler path.
+
+Do not also tear down the same resource concurrently in `stop()`. Use `request_stop()` or
+`on_stop_requested()` to interrupt blocking work, then let reverse-order managed cleanup
+dispose of ownership. Managed callbacks must be idempotent because timeout/failure paths may
+converge on cleanup. A resource registered after cleanup has already completed is immediately
+cleaned on a bounded daemon worker and registration raises `RuntimeError`; plugin code must not
+catch that error and continue serving.
 
 ### Thread Management
 
@@ -188,6 +224,10 @@ This data appears in the dashboard plugin list and the `/api/plugins/<name>` end
 ---
 
 ## Event Bus
+
+The complete constant-to-event-name mapping is generated directly from `reticulumpi.events`
+in the [event bus inventory](generated-code-reference.md#event-bus-constants). Documentation
+CI rejects the snapshot when a constant is added, removed, renamed, or duplicated.
 
 The event bus enables decoupled communication between plugins.
 
@@ -315,16 +355,24 @@ import os
 import RNS
 import LXMF
 
+from reticulumpi.lxmf_compat import create_lxm_router
+
 class MyLXMFPlugin(PluginBase):
     plugin_name = "my_lxmf_plugin"
     plugin_version = "1.0.0"
 
     def start(self):
-        self._active = True
+        # Initialize cleanup-visible fields before any fallible operation.
+        self._active = False
+        self._router = None
+        self._dest = None
 
         # Create a separate identity for this plugin
         storage = os.path.expanduser(
-            self.config.get("storage_path", "~/.local/share/reticulumpi/my_plugin_lxmf")
+            self.config.get(
+                "storage_path",
+                "/var/lib/reticulumpi/.local/share/reticulumpi/my_plugin_lxmf",
+            )
         )
         os.makedirs(storage, exist_ok=True)
         id_path = os.path.join(storage, "identity")
@@ -335,8 +383,10 @@ class MyLXMFPlugin(PluginBase):
             self._lxmf_identity = RNS.Identity()
             self._lxmf_identity.to_file(id_path)
 
-        # Set up LXMF router
-        self._router = LXMF.LXMRouter(
+        # Lifecycle calls run on managed daemon workers. This helper preserves
+        # the application's process-level signal handlers while constructing
+        # LXMF safely from either the main thread or a lifecycle worker.
+        self._router = create_lxm_router(
             identity=self._lxmf_identity,
             storagepath=storage,
         )
@@ -345,6 +395,7 @@ class MyLXMFPlugin(PluginBase):
             display_name=self.config.get("display_name", f"{self.app.node_name} MyPlugin"),
         )
         self._router.register_delivery_callback(self._on_message)
+        self._active = True
 
         self.log.info(f"LXMF active at {RNS.prettyhexrep(self._dest.hash)}")
 
@@ -367,6 +418,8 @@ class MyLXMFPlugin(PluginBase):
 
     def stop(self):
         self._active = False
+        if self._router is not None:
+            self._router.register_delivery_callback(None)
 ```
 
 ### SQLite Storage
@@ -384,7 +437,10 @@ class MyStoragePlugin(PluginBase):
     def start(self):
         self._active = True
         db_path = os.path.expanduser(
-            self.config.get("db_path", "~/.local/share/reticulumpi/my_data.db")
+            self.config.get(
+                "db_path",
+                "/var/lib/reticulumpi/.local/share/reticulumpi/my_data.db",
+            )
         )
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
@@ -579,15 +635,15 @@ Tests must run without a real Reticulum instance:
 
 ```python
 @patch("reticulumpi.builtin_plugins.my_plugin.RNS")
-@patch("reticulumpi.builtin_plugins.my_plugin.LXMF")
-def test_lxmf_setup(self, mock_lxmf, mock_rns):
+@patch("reticulumpi.builtin_plugins.my_plugin.create_lxm_router")
+def test_lxmf_setup(self, mock_router_factory, mock_rns):
     mock_router = MagicMock()
-    mock_lxmf.LXMRouter.return_value = mock_router
+    mock_router_factory.return_value = mock_router
 
     plugin = MyPlugin(self.mock_app, self.config)
     plugin.start()
 
-    mock_lxmf.LXMRouter.assert_called_once()
+    mock_router_factory.assert_called_once()
     mock_router.register_delivery_callback.assert_called_once()
     plugin.stop()
 ```

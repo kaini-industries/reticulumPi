@@ -1,6 +1,5 @@
 """Tests for the TransportMonitor plugin."""
 
-import subprocess
 import time
 from unittest.mock import MagicMock, patch
 
@@ -360,10 +359,21 @@ class TestAutoDiscoveryConfig:
         plugin.stop()
 
     def test_enabled_starts_pool_thread(self, mock_app, auto_config):
-        plugin = _start_plugin(mock_app, auto_config)
+        mock_destination = MagicMock()
+        mock_destination.hash = b"\xdd" * 16
+        with patch(
+            "reticulumpi.builtin_plugins.transport_monitor.RNS.Destination",
+            return_value=mock_destination,
+        ):
+            plugin = _start_plugin(mock_app, auto_config)
         assert plugin._auto_enabled is True
-        # Should have 2 threads: transport-monitor + hub-pool-manager
-        assert len(plugin._threads) == 2
+        # Auto-discovery includes the exchange worker as well as monitoring
+        # and pool management.
+        assert {thread.name for thread in plugin._threads} == {
+            "transport-monitor",
+            "hub-pool-manager",
+            "hub-exchange",
+        }
         plugin.stop()
 
     def test_bad_target_connections(self, mock_app, base_config):
@@ -801,6 +811,97 @@ class TestHubExchange:
         assert len(plugin._threads) == 3
         plugin.stop()
 
+    def test_exchange_resources_are_managed_and_stopped_handler_fails_closed(
+        self,
+        mock_app,
+        auto_config,
+    ):
+        import RNS.vendor.umsgpack as umsgpack
+
+        from reticulumpi.builtin_plugins.transport_monitor import TransportMonitorPlugin
+
+        destination = MagicMock()
+        destination.hash = b"\xdd" * 16
+        with patch("RNS.Destination", return_value=destination), patch("RNS.Transport") as mt:
+            mt.interfaces = []
+            plugin = TransportMonitorPlugin(mock_app, auto_config)
+            plugin.start()
+
+        assert plugin.get_lifecycle_metrics()["rns_resources"] == {
+            "links": 0,
+            "destinations": 1,
+            "request_handlers": 1,
+        }
+        link = MagicMock()
+        plugin._exchange_link_established(link)
+        assert plugin.get_lifecycle_metrics()["rns_resources"]["links"] == 1
+
+        plugin.stop()
+        response = plugin._handle_hub_request("/hubs", None, None, None, None, None)
+        assert umsgpack.unpackb(response) == {
+            "hubs": [],
+            "v": 1,
+            "error": "plugin unavailable",
+        }
+        plugin.cleanup_managed_resources()
+
+        destination.deregister.assert_called_once_with()
+        destination.deregister_request_handler.assert_called_once_with("/hubs")
+        link.teardown.assert_called_once_with()
+
+    def test_outbound_exchange_link_and_destination_are_always_released(
+        self,
+        mock_app,
+        base_config,
+    ):
+        import RNS
+        import RNS.vendor.umsgpack as umsgpack
+
+        plugin = _start_plugin(mock_app, base_config)
+        destination = MagicMock()
+        link = MagicMock()
+
+        def create_link(_destination, established_callback):
+            def request(_path, **kwargs):
+                receipt = MagicMock(response=umsgpack.packb({"hubs": [], "v": 1}))
+                kwargs["response_callback"](receipt)
+
+            link.request.side_effect = request
+            established_callback(link)
+            return link
+
+        with (
+            patch("RNS.Transport") as transport,
+            patch.object(RNS.Identity, "recall", return_value=MagicMock()),
+            patch("RNS.Destination", return_value=destination),
+            patch("RNS.Link", side_effect=create_link),
+        ):
+            transport.has_path.return_value = True
+            assert plugin._query_peer_hubs(b"\xaa" * 16) is True
+            link.teardown.assert_called_once_with()
+            transport.deregister_destination.assert_called_once_with(destination)
+        plugin.stop()
+
+    def test_outbound_exchange_destination_is_released_when_link_creation_fails(
+        self,
+        mock_app,
+        base_config,
+    ):
+        import RNS
+
+        plugin = _start_plugin(mock_app, base_config)
+        destination = MagicMock()
+        with (
+            patch("RNS.Transport") as transport,
+            patch.object(RNS.Identity, "recall", return_value=MagicMock()),
+            patch("RNS.Destination", return_value=destination),
+            patch("RNS.Link", side_effect=RuntimeError("link failed")),
+        ):
+            transport.has_path.return_value = True
+            assert plugin._query_peer_hubs(b"\xbb" * 16) is False
+            transport.deregister_destination.assert_called_once_with(destination)
+        plugin.stop()
+
     def test_handle_hub_request_returns_pool(self, mock_app, auto_config):
         import RNS.vendor.umsgpack as umsgpack
 
@@ -1000,6 +1101,14 @@ class TestBroadcastCache:
 
 class TestTcpAutoManage:
     """Tests for the tcp_auto_manage feature."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_control_broker(self):
+        with patch(
+            "reticulumpi.builtin_plugins.transport_monitor.request_control",
+            return_value={"ok": True},
+        ):
+            yield
 
     @pytest.fixture
     def tam_config(self, base_config):
@@ -1328,14 +1437,11 @@ class TestTcpAutoManage:
         assert health["tcp_auto_manage"]["disable_pending"] is False
         plugin.stop()
 
-    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
-    def test_restart_rnsd_timeout(self, mock_subprocess, mock_app, tam_config):
-        mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-        mock_subprocess.CalledProcessError = subprocess.CalledProcessError
-        mock_subprocess.run.side_effect = subprocess.TimeoutExpired(
-            cmd=["sudo", "systemctl", "restart", "rnsd"],
-            timeout=15,
-        )
+    @patch("reticulumpi.builtin_plugins.transport_monitor.request_control")
+    def test_restart_rnsd_timeout(self, mock_control, mock_app, tam_config):
+        from reticulumpi.control_client import ControlError
+
+        mock_control.side_effect = ControlError("timed out")
         plugin = _start_plugin(mock_app, tam_config)
 
         restarting = []
@@ -1354,15 +1460,11 @@ class TestTcpAutoManage:
         assert len(recovered) == 0
         plugin.stop()
 
-    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
-    def test_restart_rnsd_failed(self, mock_subprocess, mock_app, tam_config):
-        mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-        mock_subprocess.CalledProcessError = subprocess.CalledProcessError
-        mock_subprocess.run.side_effect = subprocess.CalledProcessError(
-            returncode=1,
-            cmd=["sudo", "systemctl", "restart", "rnsd"],
-            stderr=b"unit not found",
-        )
+    @patch("reticulumpi.builtin_plugins.transport_monitor.request_control")
+    def test_restart_rnsd_failed(self, mock_control, mock_app, tam_config):
+        from reticulumpi.control_client import ControlError
+
+        mock_control.side_effect = ControlError("unit not found")
         plugin = _start_plugin(mock_app, tam_config)
 
         restarting = []
@@ -1381,14 +1483,13 @@ class TestTcpAutoManage:
         assert len(recovered) == 0
         plugin.stop()
 
-    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
+    @patch("reticulumpi.builtin_plugins.transport_monitor.request_control")
     def test_restart_rnsd_success_events(
         self,
-        mock_subprocess,
+        mock_control,
         mock_app,
         tam_config,
     ):
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
         plugin = _start_plugin(mock_app, tam_config)
 
         restarting = []
@@ -1402,29 +1503,43 @@ class TestTcpAutoManage:
             lambda e, d: recovered.append(d),
         )
 
-        plugin._restart_rnsd("test_success")
+        with patch.object(plugin, "_wait_for_rnsd", return_value=True):
+            plugin._restart_rnsd("test_success")
+        mock_control.assert_called_once()
         assert len(restarting) == 1
         assert restarting[0]["reason"] == "test_success"
         assert len(recovered) == 1
         assert recovered[0]["reason"] == "test_success"
         plugin.stop()
 
-    @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")
-    def test_restart_rnsd_cooldown(
+    @patch("reticulumpi.builtin_plugins.transport_monitor.request_control")
+    def test_restart_rnsd_returns_false_when_readiness_probe_fails(
         self,
-        mock_subprocess,
+        mock_control,
         mock_app,
         tam_config,
     ):
-        mock_subprocess.run.return_value = MagicMock(returncode=0)
+        plugin = _start_plugin(mock_app, tam_config)
+        with patch.object(plugin, "_wait_for_rnsd", return_value=False):
+            assert plugin._restart_rnsd("probe_failed") is False
+        plugin.stop()
+
+    @patch("reticulumpi.builtin_plugins.transport_monitor.request_control")
+    def test_restart_rnsd_cooldown(
+        self,
+        mock_control,
+        mock_app,
+        tam_config,
+    ):
         plugin = _start_plugin(mock_app, tam_config)
 
-        plugin._restart_rnsd("first")
-        assert mock_subprocess.run.call_count >= 1
-        first_count = mock_subprocess.run.call_count
+        with patch.object(plugin, "_wait_for_rnsd", return_value=True):
+            plugin._restart_rnsd("first")
+        assert mock_control.call_count == 1
+        first_count = mock_control.call_count
 
         plugin._restart_rnsd("second")
-        assert mock_subprocess.run.call_count == first_count
+        assert mock_control.call_count == first_count
         plugin.stop()
 
     @patch("reticulumpi.builtin_plugins.transport_monitor.subprocess")

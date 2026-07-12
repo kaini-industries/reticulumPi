@@ -8,8 +8,11 @@ from collections import deque
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from reticulumpi import events
 from reticulumpi.builtin_plugins.noaa_apt_decoder import NOAAAPTDecoder
+from reticulumpi.process_supervisor import ProcessFailure
 
 
 def _make_app() -> MagicMock:
@@ -45,6 +48,9 @@ def _make_plugin(config: dict | None = None) -> NOAAAPTDecoder:
     plugin._rtl_process = None
     plugin._process = None
     plugin._pid = None
+    plugin._capture_failed = threading.Event()
+    plugin._capture_state_lock = threading.Lock()
+    plugin._capture_lease_released = True
     return plugin
 
 
@@ -99,8 +105,20 @@ class TestOnPassPrediction:
         p = _make_plugin()
         data = {
             "passes": [
-                {"name": "NOAA 19", "max_el": 50, "aos_ts": time.time() + 600, "los_ts": time.time() + 1500, "duration_s": 900},
-                {"name": "ISS", "max_el": 80, "aos_ts": time.time() + 300, "los_ts": time.time() + 900, "duration_s": 600},
+                {
+                    "name": "NOAA 19",
+                    "max_el": 50,
+                    "aos_ts": time.time() + 600,
+                    "los_ts": time.time() + 1500,
+                    "duration_s": 900,
+                },
+                {
+                    "name": "ISS",
+                    "max_el": 80,
+                    "aos_ts": time.time() + 300,
+                    "los_ts": time.time() + 900,
+                    "duration_s": 600,
+                },
             ]
         }
         p._on_pass_prediction(events.SPACE_PASS_UPCOMING, data)
@@ -127,16 +145,159 @@ class TestOnPassPrediction:
         p = _make_plugin()
         passes = []
         for i in range(10):
-            passes.append({
-                "name": "NOAA 19",
-                "max_el": 50,
-                "aos_ts": time.time() + 600 * (i + 1),
-                "los_ts": time.time() + 600 * (i + 1) + 900,
-                "duration_s": 900,
-            })
+            passes.append(
+                {
+                    "name": "NOAA 19",
+                    "max_el": 50,
+                    "aos_ts": time.time() + 600 * (i + 1),
+                    "los_ts": time.time() + 600 * (i + 1) + 900,
+                    "duration_s": 900,
+                }
+            )
         p._on_pass_prediction(events.SPACE_PASS_UPCOMING, {"passes": passes})
         with p._passes_lock:
             assert len(p._next_passes) == 6
+
+
+class TestManagedCaptureLifecycle:
+    def test_launch_is_transactional_and_restart_is_disabled(self):
+        plugin = _make_plugin()
+        now = time.time()
+        plugin._next_passes = [
+            {
+                "satellite": "NOAA 19",
+                "freq_mhz": 137.1,
+                "aos_ts": now - 10,
+                "los_ts": now + 100,
+                "max_el": 55,
+                "duration_s": 110,
+            }
+        ]
+        rtl_process = MagicMock(pid=1601)
+        recorder_process = MagicMock(pid=1602)
+        managed = MagicMock()
+
+        def construct(specs, **kwargs):
+            managed.specs = specs
+            managed.options = kwargs
+            managed.start.side_effect = lambda: kwargs["on_started"](
+                (rtl_process, recorder_process), False
+            )
+            return managed
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.noaa_apt_decoder.shutil.which",
+                side_effect=["/usr/bin/rtl_fm", "/usr/bin/sox"],
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.noaa_apt_decoder.ManagedProcessGroup",
+                side_effect=construct,
+            ),
+            patch.object(plugin, "_start_stderr_reader"),
+            patch.object(plugin, "_start_thread"),
+        ):
+            plugin._launch_subprocess(7)
+
+        assert [spec.name for spec in managed.specs] == ["rtl_fm", "sox"]
+        assert managed.options["restart_policy"].enabled is False
+        assert plugin._process_group is managed
+        assert plugin._rtl_process is rtl_process
+        assert plugin._process is recorder_process
+        assert plugin._status == "recording"
+
+    def test_missing_recorder_fails_acquisition_instead_of_claiming_sdr(self):
+        plugin = _make_plugin()
+        now = time.time()
+        plugin._next_passes = [
+            {
+                "satellite": "NOAA 19",
+                "freq_mhz": 137.1,
+                "aos_ts": now - 10,
+                "los_ts": now + 100,
+                "max_el": 55,
+            }
+        ]
+        with patch(
+            "reticulumpi.builtin_plugins.noaa_apt_decoder.shutil.which",
+            side_effect=["/usr/bin/rtl_fm", None],
+        ):
+            with pytest.raises(RuntimeError, match="sox"):
+                plugin._on_acquire("APT-SDR", 0)
+
+        assert plugin._dongle_active is False
+        assert plugin._dongle_index is None
+
+    def test_monitor_thread_failure_stops_started_pipeline(self):
+        plugin = _make_plugin()
+        now = time.time()
+        plugin._next_passes = [
+            {
+                "satellite": "NOAA 19",
+                "freq_mhz": 137.1,
+                "aos_ts": now - 10,
+                "los_ts": now + 100,
+                "max_el": 55,
+            }
+        ]
+        processes = (MagicMock(pid=1651), MagicMock(pid=1652))
+        managed = MagicMock()
+
+        def construct(_specs, **kwargs):
+            managed.start.side_effect = lambda: kwargs["on_started"](processes, False)
+            return managed
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.noaa_apt_decoder.shutil.which",
+                side_effect=["/usr/bin/rtl_fm", "/usr/bin/sox"],
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.noaa_apt_decoder.ManagedProcessGroup",
+                side_effect=construct,
+            ),
+            patch.object(plugin, "_start_stderr_reader"),
+            patch.object(plugin, "_start_thread", side_effect=RuntimeError("thread cap")),
+        ):
+            with pytest.raises(RuntimeError, match="thread cap"):
+                plugin._launch_subprocess(7)
+
+        managed.stop.assert_called_once_with()
+        assert plugin._process_group is None
+        assert plugin._process is None
+        assert plugin._capture_lease_released is True
+
+    def test_unexpected_exit_stops_pipeline_before_releasing_lease(self):
+        plugin = _make_plugin()
+        now = time.time()
+        plugin._current_pass = {
+            "satellite": "NOAA 19",
+            "recording_file": "capture.wav",
+            "recording_path": "/tmp/capture.wav",
+            "aos_ts": now - 200,
+            "los_ts": now - 100,
+        }
+        plugin._recording_file = "/tmp/capture.wav"
+        plugin._dongle_serial = "APT-SDR"
+        plugin._dongle_active = True
+        plugin._capture_lease_released = False
+        order = []
+        managed = MagicMock()
+        managed.stop.side_effect = lambda: order.append("stop")
+        plugin._process_group = managed
+        scheduler = MagicMock()
+        scheduler.dongle_released.side_effect = lambda *_args: order.append("release")
+        plugin.app.sdr_scheduler = scheduler
+        failure = ProcessFailure(1, "sox", 1, "exited", time.monotonic())
+
+        plugin._on_capture_failure(failure)
+        assert order == ["stop", "release"]
+        plugin._monitor_pass()
+
+        assert order == ["stop", "release"]
+        assert plugin._current_pass is None
+        assert plugin._dongle_active is False
+        assert plugin._stats["failed_decodes"] == 1
 
 
 class TestDecodeRecording:
@@ -184,12 +345,14 @@ class TestDecodeRecording:
     def test_failed_decode(self, _rm, _size, _exists, mock_run, _which):
         mock_run.return_value = MagicMock(returncode=1, stderr="decode error")
         p = _make_plugin()
-        p._decode_recording({
-            "recording_path": "/tmp/test.wav",
-            "satellite": "NOAA 19",
-            "started_at": time.time(),
-            "max_el": 30,
-        })
+        p._decode_recording(
+            {
+                "recording_path": "/tmp/test.wav",
+                "satellite": "NOAA 19",
+                "started_at": time.time(),
+                "max_el": 30,
+            }
+        )
         assert p._stats["failed_decodes"] == 1
 
 

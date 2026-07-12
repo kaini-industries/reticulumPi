@@ -4,15 +4,18 @@
   if (!R) return;
   var api = R.api, $ = R.$, esc = R.esc;
 
-  var _section, _body, _pill;
+  var _section, _body, _toggle, _pill;
   var _summaryEl, _rttChart, _sigChart, _logBody;
   var _startBtn, _stopBtn, _clearBtn, _targetInput, _countInput;
   var _history = [];
   var _lastStatus = {};
 
   function _init() {
+    if (_section) return true;
     _section = $('link-tester-section');
+    if (!_section) return false;
     _body = $('link-tester-body');
+    _toggle = $('link-tester-toggle');
     _pill = $('link-tester-pill');
     _summaryEl = $('link-tester-summary');
     _rttChart = $('link-tester-rtt-chart');
@@ -27,6 +30,25 @@
     if (_startBtn) _startBtn.addEventListener('click', _onStart);
     if (_stopBtn) _stopBtn.addEventListener('click', _onStop);
     if (_clearBtn) _clearBtn.addEventListener('click', _onClear);
+    if (_toggle && _body && !_toggle.dataset.rpiLinkTesterDisclosureBound) {
+      _toggle.dataset.rpiLinkTesterDisclosureBound = 'true';
+      _toggle.addEventListener('click', function () {
+        _setExpanded(_body.classList.contains('hidden') || _body.hidden);
+      });
+      _setExpanded(!_body.classList.contains('hidden') && !_body.hidden);
+    }
+    return true;
+  }
+
+  function _setExpanded(expanded) {
+    if (!_toggle || !_body) return;
+    _body.classList.toggle('hidden', !expanded);
+    _body.hidden = !expanded;
+    _toggle.classList.toggle('open', expanded);
+    _toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    _toggle.title = expanded ? 'Click to collapse' : 'Click to expand';
+    var chevron = _toggle.querySelector('.chevron');
+    if (chevron) chevron.innerHTML = expanded ? '&#9662;' : '&#9656;';
   }
 
   function _onStart() {
@@ -37,8 +59,7 @@
     if (count > 0) body.count = count;
     api('/api/link_tester/start', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
+      json: body,
     });
   }
 
@@ -300,6 +321,7 @@
 
   // ── Register ────────────────────────────────────────────────────
 
+  R.initLinkTesterFeature = _init;
   R.updateLinkTester = _update;
   R.linkTesterHistoryLoad = _loadHistory;
 })();

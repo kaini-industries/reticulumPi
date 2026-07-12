@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from reticulumpi.builtin_plugins.web_dashboard.api import (
     handle_client_error,
@@ -1269,6 +1269,76 @@ class TestAuthGateNegative:
         assert data["ok"] is False
         assert "Authentication required" in data["error"]
 
+    def test_services_restart_prefers_control_broker(self):
+        import reticulumpi.builtin_plugins.web_dashboard.api as dashboard_api
+        from reticulumpi.builtin_plugins.web_dashboard.auth import hash_password
+
+        plugin = MagicMock()
+        plugin.config = {"control_socket": "/run/reticulumpi/control.sock"}
+        plugin._auth._password_hash = hash_password("confirm-me")
+        plugin._restart_operations = {}
+        plugin._restart_tasks = set()
+        request = _make_request(plugin_mock=plugin)
+        request.headers = {"X-Confirm-Password": "confirm-me"}
+
+        async def run():
+            dashboard_api._last_restart_time = 0.0
+            with (
+                patch.object(dashboard_api.asyncio, "sleep", new_callable=AsyncMock),
+                patch(
+                    "reticulumpi.control_client.request_control",
+                    return_value={"ok": True, "operation": "restart_services"},
+                ) as broker,
+            ):
+                response = await handle_services_restart(request)
+                await asyncio.gather(*list(plugin._restart_tasks))
+                broker.assert_called_once()
+                return response
+
+        response = asyncio.run(run())
+        data = _parse_response(response)
+        operation = plugin._restart_operations[data["data"]["operation_id"]]
+        assert response.status == 202
+        assert operation["state"] == "scheduled"
+
+    def test_services_restart_fails_closed_without_control_broker(self):
+        import inspect
+
+        import reticulumpi.builtin_plugins.web_dashboard.api as dashboard_api
+        from reticulumpi.builtin_plugins.web_dashboard.auth import hash_password
+        from reticulumpi.control_client import ControlError
+
+        plugin = MagicMock()
+        plugin.config = {"control_socket": "/run/reticulumpi/missing-control.sock"}
+        plugin._auth._password_hash = hash_password("confirm-me")
+        plugin._restart_operations = {}
+        plugin._restart_tasks = set()
+        request = _make_request(plugin_mock=plugin)
+        request.headers = {"X-Confirm-Password": "confirm-me"}
+
+        async def run():
+            dashboard_api._last_restart_time = 0.0
+            with (
+                patch.object(dashboard_api.asyncio, "sleep", new_callable=AsyncMock),
+                patch(
+                    "reticulumpi.control_client.request_control",
+                    side_effect=ControlError("control broker unavailable"),
+                ),
+            ):
+                response = await handle_services_restart(request)
+                await asyncio.gather(*list(plugin._restart_tasks))
+                return response
+
+        response = asyncio.run(run())
+        data = _parse_response(response)
+        operation = plugin._restart_operations[data["data"]["operation_id"]]
+        assert response.status == 202
+        assert operation["state"] == "failed"
+        assert "control broker unavailable" in operation["error"]
+        source = inspect.getsource(handle_services_restart)
+        assert "sudo" not in source
+        assert "create_subprocess_exec" not in source
+
     def test_spectrum_switch_preset_requires_token(self):
         request = _make_request(body={"preset": "aviation"}, token=None)
         resp = asyncio.run(handle_spectrum_switch_preset(request))
@@ -1277,12 +1347,11 @@ class TestAuthGateNegative:
         assert data["ok"] is False
         assert "Authentication required" in data["error"]
 
-    def test_send_message_requires_token_by_default(self):
-        """handle_send_message rejects unauthenticated callers unless
-        allow_localhost_send is explicitly enabled."""
+    def test_send_message_rejects_deprecated_localhost_bypass(self):
+        """The removed compatibility key cannot authorize a message mutation."""
         plugin = MagicMock()
         plugin.app.get_plugin.return_value = MagicMock()
-        plugin.config = {"allow_localhost_send": False}
+        plugin.config = {"allow_localhost_send": True}
         request = _make_request(
             body={"transport": "lxmf", "text": "hi", "destination": "abc123"},
             plugin_mock=plugin,

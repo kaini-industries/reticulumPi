@@ -604,6 +604,24 @@ class TestPluginLifecycle:
         plugin.stop()
         assert plugin._active is False
 
+    def test_default_cache_uses_xdg_cache_root(self, monkeypatch, mock_app, tmp_path):
+        from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        plugin = SpaceTrackerPlugin(
+            mock_app,
+            {
+                "launches": {"enabled": False},
+                "space_weather": {"enabled": False},
+                "propagation": {"enabled": False},
+            },
+        )
+        plugin.start()
+        try:
+            assert plugin._cache_dir == str(tmp_path / "space_tracker")
+        finally:
+            plugin.stop()
+
     def test_state_persisted_on_stop(self, mock_app, tmp_path):
         from reticulumpi.builtin_plugins.space_tracker import SpaceTrackerPlugin
 

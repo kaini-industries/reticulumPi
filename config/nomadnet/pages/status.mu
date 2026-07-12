@@ -1,4 +1,4 @@
-#!/opt/reticulumpi/.venv/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Dynamic NomadNet page: Node Status
 
@@ -6,6 +6,7 @@ Displays real-time system and Reticulum network status.
 This file must be executable (chmod +x) to work as a dynamic page.
 """
 import os
+import shutil
 import subprocess
 import time
 
@@ -122,10 +123,21 @@ def get_cpu_count():
 
 def get_rnstatus():
     """Run rnstatus and parse the output into structured data."""
-    venv_bin = "/opt/reticulumpi/.venv/bin"
+    executable = shutil.which("rnstatus")
+    if executable is None:
+        for candidate in (
+            "/opt/reticulumpi/current/.venv/bin/rnstatus",
+            "/srv/reticulumpi/current/.venv/bin/rnstatus",
+        ):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                executable = candidate
+                break
+    if executable is None:
+        return None
+    venv_bin = os.path.dirname(executable)
     try:
         result = subprocess.run(
-            [os.path.join(venv_bin, "rnstatus")],
+            [executable],
             capture_output=True, text=True, timeout=10,
             env={"PATH": venv_bin + ":/usr/bin:/bin",
                  "HOME": os.path.expanduser("~")},

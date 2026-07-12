@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.radiosonde_tracker import RadiosondeTracker
+from reticulumpi.process_supervisor import ProcessFailure
 
 
 def _make_app() -> MagicMock:
@@ -42,8 +44,70 @@ def _make_plugin(config: dict | None = None) -> RadiosondeTracker:
     plugin._cached_next_launch = None
     plugin._cached_next_launch_ts = 0.0
     plugin._process = None
+    plugin._rtl_process = None
     plugin._pid = None
     return plugin
+
+
+class TestManagedDecoderLifecycle:
+    def test_launch_uses_transactional_two_stage_group(self):
+        plugin = _make_plugin()
+        rtl_process = MagicMock(pid=1301)
+        decoder_process = MagicMock(pid=1302)
+        managed = MagicMock(restart_count=0)
+
+        def construct(specs, **kwargs):
+            managed.specs = specs
+            managed.hooks = kwargs
+            managed.start.side_effect = lambda: kwargs["on_started"](
+                (rtl_process, decoder_process), False
+            )
+            return managed
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.radiosonde_tracker.shutil.which",
+                side_effect=["/usr/bin/rtl_fm", "/usr/bin/rs41mod"],
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.radiosonde_tracker.ManagedProcessGroup",
+                side_effect=construct,
+            ),
+            patch.object(plugin, "_start_stderr_reader"),
+            patch.object(plugin, "_start_thread"),
+        ):
+            plugin._launch_subprocess(4)
+
+        assert [spec.name for spec in managed.specs] == ["rtl_fm", "rs41mod"]
+        assert plugin._rtl_process is rtl_process
+        assert plugin._process is decoder_process
+        assert plugin._process_group is managed
+        assert plugin._status == "scanning"
+        assert managed.hooks["restart_policy"].enabled is False
+
+    def test_parser_eof_notifies_second_stage(self):
+        plugin = _make_plugin()
+        process = MagicMock(stdout=[])
+        group = MagicMock(running=True)
+        plugin._process = process
+        plugin._process_group = group
+
+        plugin._parser_loop(process)
+
+        group.notify_unexpected_eof.assert_called_once_with(1, "Radiosonde decoder stdout ended")
+
+    def test_restart_exhaustion_releases_sdr(self):
+        plugin = _make_plugin()
+        plugin._dongle_serial = "SONDE-SDR"
+        plugin._dongle_active = True
+        scheduler = MagicMock()
+        plugin.app.sdr_scheduler = scheduler
+        failure = ProcessFailure(0, "rtl_fm", 1, "EOF", time.monotonic())
+
+        plugin._on_decoder_exhausted(failure)
+
+        assert plugin._dongle_active is False
+        scheduler.dongle_released.assert_called_once_with("SONDE-SDR", plugin.plugin_name)
 
 
 def _frame(

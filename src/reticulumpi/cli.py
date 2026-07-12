@@ -7,7 +7,11 @@ import logging
 import sys
 
 from reticulumpi import __version__
-from reticulumpi.app import ReticulumPiApp
+from reticulumpi.cli_help import StableHelpFormatter
+
+# Keep top-level --help/--version dependency-light. Tests and embedders also
+# patch this compatibility seam before the runtime class is loaded.
+ReticulumPiApp = None
 
 # Map RNS log levels (0-7) to Python logging levels
 _RNS_TO_LOGGING = {
@@ -22,10 +26,20 @@ _RNS_TO_LOGGING = {
 }
 
 
+def _app_class():
+    global ReticulumPiApp
+    if ReticulumPiApp is None:
+        from reticulumpi.app import ReticulumPiApp as app_class
+
+        ReticulumPiApp = app_class
+    return ReticulumPiApp
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="reticulumpi",
         description="ReticulumPi - An extensible Reticulum network node",
+        formatter_class=StableHelpFormatter,
     )
     parser.add_argument(
         "--version",
@@ -161,50 +175,43 @@ def main() -> None:
 
     if args.backup_identity:
         import os
-        import shutil
+
+        from reticulumpi.identity_manager import IdentityPersistenceError, backup_identity
 
         config_path_tmp = args.config
         if config_path_tmp is None:
             default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
             if os.path.isfile(default_path):
                 config_path_tmp = default_path
-        tmp_app = ReticulumPiApp(config_path=config_path_tmp)
+        tmp_app = _app_class()(config_path=config_path_tmp)
         src = tmp_app.config.identity_path
-        if not os.path.isfile(src):
-            print(f"Error: identity file not found at {src}")
-            sys.exit(1)
         dst = os.path.expanduser(args.backup_identity)
-        shutil.copy2(src, dst)
+        try:
+            backup_identity(src, dst)
+        except IdentityPersistenceError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         print(f"Identity backed up: {src} -> {dst}")
         sys.exit(0)
 
     if args.restore_identity:
         import os
-        import shutil
+
+        from reticulumpi.identity_manager import IdentityPersistenceError, restore_identity
 
         config_path_tmp = args.config
         if config_path_tmp is None:
             default_path = os.path.expanduser("~/.config/reticulumpi/config.yaml")
             if os.path.isfile(default_path):
                 config_path_tmp = default_path
-        tmp_app = ReticulumPiApp(config_path=config_path_tmp)
+        tmp_app = _app_class()(config_path=config_path_tmp)
         src = os.path.expanduser(args.restore_identity)
-        if not os.path.isfile(src):
-            print(f"Error: backup file not found at {src}")
-            sys.exit(1)
-        # Validate the backup is a loadable RNS identity
-        try:
-            import RNS
-
-            test_id = RNS.Identity.from_file(src)
-            if test_id is None:
-                raise ValueError("Identity.from_file returned None")
-        except Exception as e:
-            print(f"Error: invalid identity file: {e}")
-            sys.exit(1)
         dst = tmp_app.config.identity_path
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src, dst)
+        try:
+            restore_identity(dst, src)
+        except IdentityPersistenceError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         print(f"Identity restored: {src} -> {dst}")
         sys.exit(0)
 
@@ -216,7 +223,7 @@ def main() -> None:
         if os.path.isfile(default_path):
             config_path = default_path
 
-    app = ReticulumPiApp(
+    app = _app_class()(
         config_path=config_path,
         reticulum_config_dir=args.reticulum_config,
         log_level_override=args.log_level,

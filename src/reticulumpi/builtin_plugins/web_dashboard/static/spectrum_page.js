@@ -114,13 +114,5 @@
     if (specWs && specWs.readyState === WebSocket.OPEN) specWs.close(1000);
   });
 
-  var ltToggle = document.getElementById('link-tester-toggle');
-  var ltBody = document.getElementById('link-tester-body');
-  if (ltToggle && ltBody) {
-    ltToggle.addEventListener('click', function() {
-      var hidden = ltBody.classList.toggle('hidden');
-      var chev = ltToggle.querySelector('.chevron');
-      if (chev) chev.textContent = hidden ? '▸' : '▾';
-    });
-  }
+  if (R.initLinkTesterFeature) R.initLinkTesterFeature();
 })();

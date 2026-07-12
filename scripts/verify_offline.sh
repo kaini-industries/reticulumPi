@@ -8,7 +8,7 @@ set -euo pipefail
 
 CHAIN="RETICULUMPI_OFFLINE"
 STATE_FILE="/var/lib/reticulumpi/offline_simulation.active"
-CONFIG_BACKUP="/etc/reticulumpi/config.yaml.pre-offline"
+RUNTIME_OVERLAY="/var/lib/reticulumpi/runtime-overrides.yaml"
 DASHBOARD="http://127.0.0.1:8080"
 
 PASS=0
@@ -20,10 +20,10 @@ check() {
     shift
     if "$@" &>/dev/null; then
         echo "  PASS  $label"
-        ((PASS++))
+        PASS=$((PASS + 1))
     else
         echo "  FAIL  $label"
-        ((FAIL++))
+        FAIL=$((FAIL + 1))
     fi
 }
 
@@ -32,17 +32,17 @@ check_fail() {
     shift
     if ! "$@" &>/dev/null; then
         echo "  PASS  $label"
-        ((PASS++))
+        PASS=$((PASS + 1))
     else
         echo "  FAIL  $label (expected failure but succeeded)"
-        ((FAIL++))
+        FAIL=$((FAIL + 1))
     fi
 }
 
 skip() {
     local label="$1"
     echo "  SKIP  $label"
-    ((SKIP++))
+    SKIP=$((SKIP + 1))
 }
 
 # ---------------------------------------------------------------------------
@@ -54,6 +54,8 @@ echo "=== Firewall ==="
 check "IPv4 chain exists" iptables -n -L "$CHAIN"
 check "IPv6 chain exists" ip6tables -n -L "$CHAIN"
 check "State file exists" test -f "$STATE_FILE"
+check "Forced-offline runtime overlay is active" \
+    grep -Eq '^  force_offline: true$' "$RUNTIME_OVERLAY"
 
 check_fail "DNS resolution blocked (google.com)" \
     timeout 3 getent hosts google.com
@@ -91,20 +93,20 @@ check "reticulumpi active" systemctl is-active --quiet reticulumpi
 ERR_COUNT=$(journalctl -u reticulumpi --since "5 minutes ago" -p err --no-pager -q 2>/dev/null | wc -l)
 if [ "$ERR_COUNT" -eq 0 ]; then
     echo "  PASS  No error-level log entries (last 5 min)"
-    ((PASS++))
+    PASS=$((PASS + 1))
 else
     echo "  FAIL  $ERR_COUNT error-level log entries (last 5 min)"
-    ((FAIL++))
+    FAIL=$((FAIL + 1))
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Plugin health (if offline profile installed)
+# 4. Plugin health (if forced-offline overlay is active)
 # ---------------------------------------------------------------------------
 
 echo ""
 echo "=== Plugins ==="
 
-if [ -f "$CONFIG_BACKUP" ]; then
+if [ -f "$RUNTIME_OVERLAY" ]; then
     STATUS=$(curl -sf --max-time 5 "$DASHBOARD/api/status" 2>/dev/null || echo "")
     if [ -n "$STATUS" ]; then
         FAILED=$(echo "$STATUS" | python3 -c "
@@ -116,18 +118,18 @@ print(len(failed))
 
         if [ "$FAILED" = "0" ]; then
             echo "  PASS  No failed plugins"
-            ((PASS++))
+            PASS=$((PASS + 1))
         elif [ "$FAILED" = "?" ]; then
             skip "Could not parse plugin status"
         else
             echo "  FAIL  $FAILED failed plugin(s)"
-            ((FAIL++))
+            FAIL=$((FAIL + 1))
         fi
     else
         skip "Dashboard API not reachable (auth required?)"
     fi
 else
-    skip "Plugin check (offline profile not installed)"
+    skip "Plugin check (forced-offline overlay not installed)"
 fi
 
 # ---------------------------------------------------------------------------

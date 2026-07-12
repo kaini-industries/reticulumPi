@@ -7,12 +7,16 @@ import queue
 import sqlite3
 import threading
 import time
+from contextlib import closing
+from pathlib import Path
 from typing import Any
 
 import RNS
 
 from reticulumpi import events
+from reticulumpi.migrations import Migration, MigrationTarget
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.runtime_metrics import instrument_sqlite_class
 
 
 # Aspects registered by default.  Each gets its own handler so RNS
@@ -42,6 +46,7 @@ def _infer_app_from_data(app_data_str: str) -> tuple[str, str]:
     return "", ""
 
 
+@instrument_sqlite_class
 class NetworkMapPlugin(PluginBase):
     """Passively monitors all Reticulum announces and builds a live map of
     known nodes, hop counts, and interface statistics.  Stores history in
@@ -53,6 +58,51 @@ class NetworkMapPlugin(PluginBase):
     plugin_description = "Passive network topology mapping via announce monitoring"
     broadcast_tier = 2
     broadcast_keys = "mesh"
+
+    def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
+        path = Path(
+            os.path.expanduser(
+                self.config.get("db_path", "~/.local/share/reticulumpi/network_map.db")
+            )
+        )
+        statements = (
+            """CREATE TABLE IF NOT EXISTS known_nodes (
+                destination_hash TEXT PRIMARY KEY,
+                app_name TEXT,
+                aspects TEXT,
+                hops INTEGER,
+                last_seen REAL,
+                first_seen REAL,
+                announce_count INTEGER,
+                app_data_str TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS interface_stats (
+                timestamp REAL,
+                name TEXT,
+                type TEXT,
+                online INTEGER,
+                rxb INTEGER,
+                txb INTEGER,
+                bitrate INTEGER,
+                peers INTEGER
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_known_nodes_app_name ON known_nodes(app_name)",
+            "CREATE INDEX IF NOT EXISTS idx_known_nodes_last_seen ON known_nodes(last_seen DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_known_nodes_announce_count "
+            "ON known_nodes(announce_count DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_known_nodes_hops ON known_nodes(hops)",
+            "CREATE INDEX IF NOT EXISTS idx_known_nodes_app_lastseen "
+            "ON known_nodes(app_name, last_seen DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_interface_stats_timestamp "
+            "ON interface_stats(timestamp)",
+        )
+        return (
+            MigrationTarget(
+                "network_map",
+                path,
+                (Migration(1, "adopt network map schema", statements),),
+            ),
+        )
 
     def validate_config(self) -> None:
         max_days = self.config.get("max_history_days", 30)
@@ -66,6 +116,19 @@ class NetworkMapPlugin(PluginBase):
             raise ValueError("max_stats_rows must be an integer >= 1000")
 
     def start(self) -> None:
+        try:
+            self._start()
+        except BaseException:
+            # start() may fail after one or more persistent SQLite handles or
+            # announce workers have been created.  Tear down every resource
+            # before propagating the original startup error.
+            try:
+                self.stop()
+            except Exception:
+                self.log.exception("Error cleaning up partial network-map startup")
+            raise
+
+    def _start(self) -> None:
         self._active = True
         self._known_nodes: dict[bytes, dict[str, Any]] = {}
         self._max_cached_nodes: int = self.config.get("max_cached_nodes", 10000)
@@ -81,9 +144,7 @@ class NetworkMapPlugin(PluginBase):
         self._init_db()
 
         # Persistent write connection — all writes go through this.
-        self._write_conn = sqlite3.connect(
-            self._db_path, check_same_thread=False
-        )
+        self._write_conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._write_conn.execute("PRAGMA journal_mode=WAL")
         self._write_conn.execute("PRAGMA synchronous=NORMAL")
         self._write_conn_lock = threading.Lock()
@@ -139,9 +200,7 @@ class NetworkMapPlugin(PluginBase):
         self._broadcast_read_conn.execute("PRAGMA query_only=ON")
 
         # Persistent read connection for paginated / general queries
-        self._query_read_conn = sqlite3.connect(
-            self._db_path, check_same_thread=False
-        )
+        self._query_read_conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._query_read_conn.row_factory = sqlite3.Row
         self._query_read_conn.execute("PRAGMA journal_mode=WAL")
         self._query_read_conn.execute("PRAGMA query_only=ON")
@@ -164,21 +223,31 @@ class NetworkMapPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        for sub_id in getattr(self, "_sub_ids", []):
-            self.announce_dispatcher.unsubscribe(sub_id)
-        self._join_threads()
-        for conn_attr in (
-            "_broadcast_read_conn",
-            "_maintenance_read_conn",
-            "_query_read_conn",
-            "_write_conn",
-        ):
-            conn = getattr(self, conn_attr, None)
-            if conn:
+        try:
+            for sub_id in getattr(self, "_sub_ids", []):
                 try:
-                    conn.close()
-                except OSError:
-                    pass
+                    self.announce_dispatcher.unsubscribe(sub_id)
+                except Exception:
+                    self.log.debug(
+                        "Error unsubscribing network-map announce handler",
+                        exc_info=True,
+                    )
+            self._join_threads()
+        finally:
+            for conn_attr in (
+                "_broadcast_read_conn",
+                "_maintenance_read_conn",
+                "_query_read_conn",
+                "_write_conn",
+            ):
+                conn = getattr(self, conn_attr, None)
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except (OSError, sqlite3.Error):
+                        pass
+                    finally:
+                        setattr(self, conn_attr, None)
 
     def get_status(self) -> dict[str, Any]:
         return {
@@ -221,9 +290,7 @@ class NetworkMapPlugin(PluginBase):
         self._broadcast_cache = (now, has_summary, result)
         return result
 
-    def get_known_nodes(
-        self, limit: int | None = None
-    ) -> list[dict[str, Any]]:
+    def get_known_nodes(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Return known nodes as a list of dicts (for API consumption).
 
         Args:
@@ -246,9 +313,7 @@ class NetworkMapPlugin(PluginBase):
                     "app_data": info.get("app_data_str", ""),
                 }
             )
-        result = sorted(
-            nodes, key=lambda n: n.get("last_seen", 0), reverse=True
-        )
+        result = sorted(nodes, key=lambda n: n.get("last_seen", 0), reverse=True)
         if limit is not None:
             return result[:limit]
         return result
@@ -264,9 +329,7 @@ class NetworkMapPlugin(PluginBase):
                 return None
             return dict(info)
 
-    def get_nodes_by_hashes(
-        self, hashes: list[bytes]
-    ) -> list[dict]:
+    def get_nodes_by_hashes(self, hashes: list[bytes]) -> list[dict]:
         """Return node dicts for a list of raw destination hashes.
 
         Each returned dict includes ``destination_hash`` formatted with
@@ -845,7 +908,7 @@ class NetworkMapPlugin(PluginBase):
     # --- SQLite ---
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self._db_path) as conn:
+        with closing(sqlite3.connect(self._db_path)) as conn, conn:
             # auto_vacuum must be set before any table exists to take effect on
             # a new DB (no-op on existing DBs — the live file is VACUUMed
             # separately).  Lets incremental_vacuum reclaim freed pages.
@@ -895,11 +958,10 @@ class NetworkMapPlugin(PluginBase):
 
     def _load_from_db(self) -> None:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            with closing(sqlite3.connect(self._db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
-                    "SELECT * FROM known_nodes "
-                    "ORDER BY last_seen DESC LIMIT ?",
+                    "SELECT * FROM known_nodes ORDER BY last_seen DESC LIMIT ?",
                     (self._max_cached_nodes,),
                 ).fetchall()
                 for row in rows:
@@ -931,9 +993,7 @@ class NetworkMapPlugin(PluginBase):
                     "AND app_data_str IS NOT NULL AND app_data_str != ''"
                 ).fetchall()
                 for dest_hex, app_data_str in rows:
-                    inferred_app, inferred_aspect = _infer_app_from_data(
-                        app_data_str
-                    )
+                    inferred_app, inferred_aspect = _infer_app_from_data(app_data_str)
                     if inferred_app:
                         self._write_conn.execute(
                             "UPDATE known_nodes SET app_name = ?, aspects = ? "
@@ -944,12 +1004,8 @@ class NetworkMapPlugin(PluginBase):
                         try:
                             dest_hash = bytes.fromhex(dest_hex)
                             if dest_hash in self._known_nodes:
-                                self._known_nodes[dest_hash][
-                                    "app_name"
-                                ] = inferred_app
-                                self._known_nodes[dest_hash][
-                                    "aspects"
-                                ] = inferred_aspect
+                                self._known_nodes[dest_hash]["app_name"] = inferred_app
+                                self._known_nodes[dest_hash]["aspects"] = inferred_aspect
                         except (ValueError, KeyError):
                             pass
                         reclassified += 1
@@ -1014,9 +1070,7 @@ class NetworkMapPlugin(PluginBase):
                             excess,
                         )
             except Exception:
-                self.log.debug(
-                    "Error trimming interface stats", exc_info=True
-                )
+                self.log.debug("Error trimming interface stats", exc_info=True)
 
     def _prune_old_data(self) -> None:
         max_days = self.config.get("max_history_days", 30)
@@ -1035,20 +1089,12 @@ class NetworkMapPlugin(PluginBase):
                 # Reclaim WAL/file space the deletes freed up — without
                 # this the WAL grows unbounded and the file never shrinks.
                 try:
-                    self._write_conn.execute(
-                        "PRAGMA wal_checkpoint(TRUNCATE)"
-                    )
+                    self._write_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
-                    self.log.debug(
-                        "wal_checkpoint(TRUNCATE) failed", exc_info=True
-                    )
+                    self.log.debug("wal_checkpoint(TRUNCATE) failed", exc_info=True)
             # Also prune from memory
             with self._nodes_lock:
-                expired = [
-                    h
-                    for h, info in self._known_nodes.items()
-                    if info["last_seen"] < cutoff
-                ]
+                expired = [h for h, info in self._known_nodes.items() if info["last_seen"] < cutoff]
                 for h in expired:
                     del self._known_nodes[h]
         except Exception:

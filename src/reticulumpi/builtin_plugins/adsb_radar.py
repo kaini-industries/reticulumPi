@@ -41,6 +41,12 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.process_supervisor import (
+    ManagedProcessGroup,
+    ProcessFailure,
+    ProcessSpec,
+    RestartPolicy,
+)
 
 _EMERGENCY_SQUAWKS = frozenset({"7500", "7600", "7700"})
 _RECONNECT_FLAG_DIR = "/run/reticulumpi"
@@ -114,6 +120,7 @@ class AdsbRadarPlugin(PluginBase):
         self._sbs_port = int(cfg.get("sbs_port", 30003))
         self._stale_timeout = float(cfg.get("stale_timeout", 300))
         self._max_restarts = int(cfg.get("max_restarts", 5))
+        self._restart_limit = min(5, max(0, self._max_restarts))
         self._max_aircraft = int(cfg.get("max_aircraft", 500))
         self._wedge_timeout = float(cfg.get("wedge_timeout", 120))
         self._wedge_grace = float(cfg.get("wedge_grace", 30))
@@ -131,7 +138,9 @@ class AdsbRadarPlugin(PluginBase):
 
     def start(self) -> None:
         self._state_lock = threading.Lock()
+        self._process_lock = threading.RLock()
         self._process: subprocess.Popen | None = None
+        self._process_group: ManagedProcessGroup | None = None
         self._pid: int | None = None
         self._restart_count = 0
         self._status = "starting"
@@ -139,6 +148,7 @@ class AdsbRadarPlugin(PluginBase):
         self._dump1090_path: str | None = None
         self._rtl_biast_path: str | None = None
         self._bias_tee_active = False
+        self._bias_tee_lock = threading.Lock()
         self._log_reader_thread: threading.Thread | None = None
         self._patience_active = False
         self._launch_time: float | None = None
@@ -147,6 +157,7 @@ class AdsbRadarPlugin(PluginBase):
         self._total_messages = 0
         self._aircraft_seen_total = 0
         self._resolved_index: int | None = None
+        self._device_lease = None
         self._broadcast_cache: tuple[float, dict] | None = None
         self._broadcast_cache_ttl = 3.0
 
@@ -162,7 +173,9 @@ class AdsbRadarPlugin(PluginBase):
         self.event_bus.subscribe(events.GPS_FIX_UPDATED, self._on_gps_fix)
 
         if self._receiver_lat is None or self._receiver_lon is None:
-            gps = self.app.get_plugin("gps_telemetry") if hasattr(self.app, "get_plugin") else None
+            gps = (
+                self.get_ready_plugin("gps_telemetry") if hasattr(self.app, "get_plugin") else None
+            )
             if gps is not None and hasattr(gps, "last_fix"):
                 fix = getattr(gps, "last_fix", None)
                 if (
@@ -196,12 +209,7 @@ class AdsbRadarPlugin(PluginBase):
         self._terminate_process()
         if self._enable_bias_tee:
             self._set_bias_tee(False)
-        try:
-            from reticulumpi.rtlsdr import release_device
-
-            release_device(self._device_id, caller=self.plugin_name)
-        except Exception:
-            self.log.debug("SDR device release failed", exc_info=True)
+        self._release_device_lease()
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -276,9 +284,8 @@ class AdsbRadarPlugin(PluginBase):
                 "%s not found; adsb_radar will stay idle",
                 self._dump1090_bin,
             )
+            self.mark_degraded(self._last_error or "dump1090 is unavailable")
             return
-
-        from reticulumpi.rtlsdr import invalidate_cache, resolve_device
 
         if self._enable_bias_tee:
             self._rtl_biast_path = shutil.which("rtl_biast")
@@ -286,147 +293,225 @@ class AdsbRadarPlugin(PluginBase):
                 self.log.warning(
                     "rtl_biast not found; bias-tee may not work with this dump1090 build",
                 )
-
-        while self._active:
-            # Resolve device each iteration.  On restarts the cache has
-            # been invalidated so we re-enumerate USB in case the dongle
-            # dropped off and came back at a different index.
-            try:
-                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
-            except RuntimeError as exc:
-                if self._restart_count == 0:
-                    self._set_status("error", str(exc))
-                    self.log.error("%s", exc)
-                    return
-                self._restart_count += 1
-                if self._restart_count > self._max_restarts:
-                    self._enter_patience_mode(invalidate_cache)
-                    if not self._active:
-                        break
-                    continue
-                backoff = min(60.0, 2.0**self._restart_count)
-                self._set_status("restarting", f"device not found, backoff {backoff:.0f}s")
-                self.log.warning(
-                    "%s — retrying in %.0fs (attempt %d/%d)",
-                    exc,
-                    backoff,
-                    self._restart_count,
-                    self._max_restarts,
-                )
-                self._sleep_while_active(backoff)
-                continue
-
-            self._patience_active = False
-
-            try:
-                self._launch_dump1090()
-            except Exception as exc:
-                self._set_status("error", f"launch failed: {exc}")
-                self.log.exception("Failed to launch %s", self._dump1090_bin)
-                break
-
-            parser = self._start_thread(self._parser_loop, name="adsb-parser")
-
-            self._launch_time = time.monotonic()
-            last_msg_count = self._total_messages
-            last_msg_time = self._launch_time
-            restart_count_reset = False
-
-            while self._active and self._process is not None:
-                rc = self._process.poll()
-                if rc is not None:
-                    self.log.warning("dump1090 exited (code %s)", rc)
-                    break
-
-                if not parser.is_alive():
-                    self.log.warning("Parser thread exited unexpectedly")
-                    break
-
-                now = time.monotonic()
-                cur_count = self._total_messages
-                if cur_count != last_msg_count:
-                    last_msg_count = cur_count
-                    last_msg_time = now
-                    if (
-                        not restart_count_reset
-                        and self._restart_count > 0
-                        and now - self._launch_time > 600.0
-                    ):
-                        self.log.info(
-                            "dump1090 stable for %.0fs; resetting restart counter (was %d)",
-                            now - self._launch_time,
-                            self._restart_count,
-                        )
-                        self._restart_count = 0
-                        restart_count_reset = True
-                elif (
-                    self._wedge_timeout > 0
-                    and now - self._launch_time > self._wedge_grace
-                    and now - last_msg_time > self._wedge_timeout
-                ):
-                    self.log.warning(
-                        "No SBS messages for %.0fs — dongle may be wedged; "
-                        "killing dump1090 (PID %s)",
-                        now - last_msg_time,
-                        self._pid,
-                    )
-                    self._publish(
-                        events.ADSB_WEDGE_DETECTED,
-                        {
-                            "pid": self._pid,
-                            "silence_seconds": now - last_msg_time,
-                        },
-                    )
-                    self._terminate_process()
-                    break
-
-                self._sleep_while_active(5.0)
-
-            parser.join(timeout=3.0)
-            self._remove_thread(parser)
-            if self._log_reader_thread is not None:
-                self._log_reader_thread.join(timeout=2.0)
-                self._remove_thread(self._log_reader_thread)
-                self._log_reader_thread = None
+        try:
+            self._refresh_device_lease()
+            self._launch_dump1090()
+        except Exception as exc:
             self._terminate_process()
-            self._launch_time = None
-
+            if self._enable_bias_tee:
+                self._set_bias_tee(False)
+            self._release_device_lease()
             if not self._active:
-                break
-
-            invalidate_cache()
-
-            self._restart_count += 1
-            if self._restart_count > self._max_restarts:
-                self._enter_patience_mode(invalidate_cache)
-                if not self._active:
-                    break
-                continue
-
-            backoff = min(60.0, 2.0**self._restart_count)
-            self._set_status("restarting", f"backoff {backoff:.0f}s")
-            self.log.info(
-                "Restarting dump1090 in %.0fs (attempt %d/%d)",
-                backoff,
-                self._restart_count,
-                self._max_restarts,
-            )
-            self._sleep_while_active(backoff)
+                return
+            self._set_status("error", f"launch failed: {exc}")
+            self.mark_degraded(str(exc))
+            self.log.exception("Failed to launch %s", self._dump1090_bin)
 
     def _launch_dump1090(self) -> None:
+        if not self._active:
+            raise RuntimeError("ADS-B plugin stopped before dump1090 launch")
         if self._enable_bias_tee:
             self._set_bias_tee(True)
+            if not self._active:
+                self._set_bias_tee(False)
+                raise RuntimeError("ADS-B plugin stopped during bias-tee setup")
         cmd = self._build_cmd()
         self.log.debug("Launching: %s", " ".join(cmd))
-        self._process = subprocess.Popen(
-            cmd,
+        group: ManagedProcessGroup
+        group = ManagedProcessGroup(
+            [
+                ProcessSpec(
+                    tuple(cmd),
+                    name="dump1090",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+            ],
+            restart_policy=RestartPolicy(max_restarts=self._restart_limit),
+            on_started=lambda processes, restarted: self._on_process_started(
+                group,
+                processes,
+                restarted,
+            ),
+            on_unexpected_exit=lambda failure: self._on_process_failure(group, failure),
+            on_restart=lambda attempt, delay: self._on_process_restart(
+                group,
+                attempt,
+                delay,
+            ),
+            on_restart_failed=lambda error, attempt: self._on_process_restart_failed(
+                group,
+                error,
+                attempt,
+            ),
+            on_exhausted=lambda failure: self._on_process_exhausted(group, failure),
+        )
+        self._process_group = group
+        try:
+            group.start()
+        except Exception:
+            if self._process_group is group:
+                self._process_group = None
+            raise
+
+    def _on_process_started(
+        self,
+        group: ManagedProcessGroup,
+        processes: tuple[subprocess.Popen[Any], ...],
+        restarted: bool,
+    ) -> None:
+        process = processes[0]
+        if self._process_group is not group or not self._active:
+            raise RuntimeError("stale dump1090 launch completed after plugin stop")
+        self._process = process
+        self._pid = process.pid
+        self._restart_count = group.restart_count if restarted else 0
+        self._patience_active = False
+        self._launch_time = time.monotonic()
+        self._log_reader_thread = self._start_log_reader(process, prefix="dump1090")
+        self._start_thread(lambda: self._parser_loop(process), name="adsb-parser")
+        self._start_thread(lambda: self._health_loop(process), name="adsb-health")
+        self._set_status("running")
+        self.log.info("Started dump1090 (PID %d)", self._pid)
+
+    def _on_process_failure(
+        self,
+        group: ManagedProcessGroup,
+        failure: ProcessFailure,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._set_status(
+            "restarting",
+            f"{failure.stage_name or 'dump1090'}: {failure.reason} (rc={failure.returncode})",
+        )
+        self.mark_degraded(self._last_error or failure.reason)
+        if self._enable_bias_tee:
+            self._set_bias_tee(False)
+        self._release_device_lease()
+
+    def _on_process_restart(
+        self,
+        group: ManagedProcessGroup,
+        attempt: int,
+        delay: float,
+    ) -> None:
+        if self._process_group is not group or not self._active:
+            raise RuntimeError("ADS-B plugin stopped during restart backoff")
+        self._refresh_device_lease()
+        if self._enable_bias_tee:
+            self._set_bias_tee(True)
+        group.replace_specs([self._dump1090_spec()])
+        self._restart_count = attempt
+        self._set_status("restarting", f"backoff {delay:.0f}s")
+
+    def _on_process_restart_failed(
+        self,
+        group: ManagedProcessGroup,
+        error: BaseException,
+        attempt: int,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._restart_count = attempt
+        self._set_status("restarting", f"restart {attempt} failed: {error}")
+        self.mark_degraded(self._last_error or str(error))
+        if self._enable_bias_tee:
+            self._set_bias_tee(False)
+        self._release_device_lease()
+
+    def _on_process_exhausted(
+        self,
+        group: ManagedProcessGroup,
+        failure: ProcessFailure,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._process = None
+        self._pid = None
+        self._launch_time = None
+        self._restart_count = group.restart_count
+        self._patience_active = False
+        self._set_status(
+            "exhausted",
+            f"dump1090 restart budget exhausted after {self._restart_limit} retries: "
+            f"{failure.reason}",
+        )
+        self.mark_degraded(self._last_error or failure.reason)
+        self._publish(
+            events.ADSB_EXHAUSTED,
+            {
+                "max_restarts": self._restart_limit,
+                "reason": failure.reason,
+            },
+        )
+        if self._enable_bias_tee:
+            self._set_bias_tee(False)
+        self._release_device_lease()
+
+    def _dump1090_spec(self) -> ProcessSpec:
+        return ProcessSpec(
+            tuple(self._build_cmd()),
+            name="dump1090",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-        self._pid = self._process.pid
-        self._log_reader_thread = self._start_log_reader(self._process, prefix="dump1090")
-        self._set_status("running")
-        self.log.info("Started dump1090 (PID %d)", self._pid)
+
+    def _refresh_device_lease(self) -> None:
+        from reticulumpi.rtlsdr import invalidate_cache, refresh_device_lease
+
+        invalidate_cache()
+        self._device_lease = refresh_device_lease(
+            getattr(self, "_device_lease", None),
+            self._device_id,
+            self.plugin_name,
+        )
+        self._resolved_index = self._device_lease.index
+
+    def _release_device_lease(self) -> None:
+        lease = getattr(self, "_device_lease", None)
+        self._device_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                self.log.debug("SDR device release failed", exc_info=True)
+
+    def _health_loop(self, process: subprocess.Popen[Any]) -> None:
+        """Detect a live-but-silent decoder and feed one supervisor failure path."""
+
+        launch_time = time.monotonic()
+        last_msg_count = self._total_messages
+        last_msg_time = launch_time
+        while self._active and self._process is process and process.poll() is None:
+            self._sleep_while_active(1.0)
+            if not self._active or self._process is not process:
+                return
+            now = time.monotonic()
+            current_count = self._total_messages
+            if current_count != last_msg_count:
+                last_msg_count = current_count
+                last_msg_time = now
+                continue
+            if (
+                self._wedge_timeout > 0
+                and now - launch_time > self._wedge_grace
+                and now - last_msg_time > self._wedge_timeout
+            ):
+                silence = now - last_msg_time
+                self.log.warning(
+                    "No SBS messages for %.0fs — reporting dump1090 as wedged (PID %s)",
+                    silence,
+                    self._pid,
+                )
+                self._publish(
+                    events.ADSB_WEDGE_DETECTED,
+                    {"pid": self._pid, "silence_seconds": silence},
+                )
+                group = self._process_group
+                if group is not None and group.running:
+                    group.notify_unexpected_eof(0, "SBS feed exceeded wedge timeout")
+                return
 
     def _build_cmd(self) -> list[str]:
         assert self._dump1090_path is not None
@@ -448,32 +533,22 @@ class AdsbRadarPlugin(PluginBase):
         return cmd
 
     def _terminate_process(self) -> None:
-        proc = self._process
+        group = getattr(self, "_process_group", None)
+        self._process_group = None
         self._process = None
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.log.warning("dump1090 did not stop; sending SIGKILL")
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        self.log.warning("dump1090 did not exit after SIGKILL")
-        except Exception:
-            self.log.exception("Error stopping dump1090")
-        finally:
-            if proc.stdout:
-                try:
-                    proc.stdout.close()
-                except OSError:
-                    pass
+        self._pid = None
+        self._launch_time = None
+        if group is not None:
+            group.stop()
 
     def _set_bias_tee(self, on: bool) -> None:
+        lock = getattr(self, "_bias_tee_lock", None)
+        if lock is None:
+            lock = self._bias_tee_lock = threading.Lock()
+        with lock:
+            self._set_bias_tee_locked(on)
+
+    def _set_bias_tee_locked(self, on: bool) -> None:
         if self._rtl_biast_path is None:
             return
         idx = self._resolved_index if self._resolved_index is not None else 0
@@ -546,14 +621,19 @@ class AdsbRadarPlugin(PluginBase):
             self._patience_interval,
         )
 
-        from reticulumpi.rtlsdr import resolve_device
+        from reticulumpi.rtlsdr import refresh_device_lease
 
         while self._active:
             if self._patience_sleep(self._patience_interval):
                 break
             invalidate_cache_fn()
             try:
-                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+                self._device_lease = refresh_device_lease(
+                    getattr(self, "_device_lease", None),
+                    self._device_id,
+                    self.plugin_name,
+                )
+                self._resolved_index = self._device_lease.index
             except RuntimeError:
                 self.log.debug("Patience probe: dongle still absent")
                 continue
@@ -594,48 +674,62 @@ class AdsbRadarPlugin(PluginBase):
 
     # ── SBS parser (TCP to dump1090 port 30003) ──────────────────────
 
-    def _parser_loop(self) -> None:
+    def _parser_loop(self, process: subprocess.Popen[Any] | None = None) -> None:
         """Connect to dump1090's SBS TCP port and parse aircraft messages."""
-        while self._active:
-            sock = None
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5.0)
-                sock.connect(("127.0.0.1", self._sbs_port))
-                sock.settimeout(2.0)
-                self.log.info("Connected to SBS feed on port %d", self._sbs_port)
-                buf = ""
-                while self._active:
-                    try:
-                        data = sock.recv(4096)
-                    except socket.timeout:
-                        continue
-                    if not data:
-                        break
-                    buf += data.decode("utf-8", errors="replace")
-                    if len(buf) > self._MAX_SBS_BUF:
-                        self.log.warning(
-                            "SBS buffer exceeded %d bytes; discarding to resync",
-                            self._MAX_SBS_BUF,
-                        )
-                        buf = ""
-                        continue
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        line = line.strip()
-                        if line:
-                            self._parse_sbs_line(line)
-            except OSError as exc:
-                if self._active:
-                    self.log.debug("SBS connection failed: %s — retrying", exc)
-            finally:
-                if sock:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
-            if self._active:
-                self._sleep_while_active(2.0)
+        process = process or self._process
+        if process is None:
+            return
+        try:
+            while self._active and self._process is process and process.poll() is None:
+                sock = None
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5.0)
+                    sock.connect(("127.0.0.1", self._sbs_port))
+                    sock.settimeout(2.0)
+                    self.log.info("Connected to SBS feed on port %d", self._sbs_port)
+                    buf = ""
+                    while self._active and self._process is process:
+                        try:
+                            data = sock.recv(4096)
+                        except socket.timeout:
+                            continue
+                        if not data:
+                            break
+                        buf += data.decode("utf-8", errors="replace")
+                        if len(buf) > self._MAX_SBS_BUF:
+                            self.log.warning(
+                                "SBS buffer exceeded %d bytes; discarding to resync",
+                                self._MAX_SBS_BUF,
+                            )
+                            buf = ""
+                            continue
+                        while "\n" in buf:
+                            line, buf = buf.split("\n", 1)
+                            line = line.strip()
+                            if line:
+                                self._parse_sbs_line(line)
+                except OSError as exc:
+                    if self._active and self._process is process:
+                        self.log.debug("SBS connection failed: %s — retrying", exc)
+                finally:
+                    if sock:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
+                if self._active and self._process is process:
+                    self._sleep_while_active(2.0)
+        finally:
+            group = self._process_group
+            if (
+                self._active
+                and self._process is process
+                and process.poll() is None
+                and group is not None
+                and group.running
+            ):
+                group.notify_unexpected_eof(0, "ADS-B SBS parser stopped unexpectedly")
 
     def _parse_sbs_line(self, line: str) -> None:
         """Parse one SBS BaseStation CSV line and update aircraft state.

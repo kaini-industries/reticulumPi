@@ -15,8 +15,9 @@ import time
 from typing import Any
 
 from reticulumpi import events
-from reticulumpi._paths import find_repo_asset
+from reticulumpi._paths import find_distribution_asset, find_repo_asset
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.runtime_metrics import record_process_restart
 
 _HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 _DEFAULT_ALLOW_LIST_PATH = "~/.config/reticulumpi/nomadnet_allowed_identities"
@@ -257,6 +258,7 @@ class NomadNetServer(PluginBase):
 
                 if auto_restart and self._restart_count < max_restarts:
                     self._restart_count += 1
+                    record_process_restart()
                     backoff = min(300.0, 30.0 * (2 ** (self._restart_count - 1)))
                     self.log.info(
                         "Restarting NomadNet in %.0fs (attempt %d/%d)",
@@ -337,6 +339,7 @@ class NomadNetServer(PluginBase):
 
                     if auto_restart and self._restart_count < max_restarts:
                         self._restart_count += 1
+                        record_process_restart()
                         backoff = min(300.0, 30.0 * (2 ** (self._restart_count - 1)))
                         self.log.info(
                             "Restarting NomadNet in %.0fs after CPU kill (attempt %d/%d)",
@@ -562,11 +565,20 @@ class NomadNetServer(PluginBase):
         if existing:
             return
 
-        example_dir = find_repo_asset("config", "nomadnet", "pages")
+        example_dir = find_distribution_asset("nomadnet", "pages")
+        if example_dir is None:
+            # Source-checkout compatibility; production wheels carry these
+            # under share/reticulumpi and take the branch above.
+            example_dir = find_repo_asset("config", "nomadnet", "pages")
         if not example_dir or not os.path.isdir(example_dir):
+            self.log.warning("Packaged NomadNet example pages are unavailable")
             return
 
         for mu_file in glob.glob(os.path.join(example_dir, "*.mu")):
             dest = os.path.join(self._pages_dir, os.path.basename(mu_file))
             shutil.copy2(mu_file, dest)
+            with open(dest, "rb") as page:
+                executable = page.read(2) == b"#!"
+            if executable:
+                os.chmod(dest, stat.S_IMODE(os.stat(dest).st_mode) | 0o111)
             self.log.info("Installed example page: %s", os.path.basename(mu_file))

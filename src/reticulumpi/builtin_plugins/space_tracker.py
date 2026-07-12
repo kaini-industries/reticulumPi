@@ -70,6 +70,7 @@ from collections import deque
 from typing import Any
 
 from reticulumpi import events
+from reticulumpi._paths import runtime_cache_path
 from reticulumpi.plugin_base import PluginBase
 
 # Re-export the event names under short local aliases so this module keeps
@@ -406,7 +407,7 @@ class SpaceTrackerPlugin(PluginBase):
 
         # Cache dir
         self._cache_dir = os.path.expanduser(
-            self.config.get("cache_dir", "~/.local/share/reticulumpi/space_tracker")
+            self.config.get("cache_dir", runtime_cache_path("space_tracker"))
         )
         os.makedirs(self._cache_dir, exist_ok=True)
         self._state_path = os.path.join(self._cache_dir, "rate_state.json")
@@ -1039,7 +1040,7 @@ class SpaceTrackerPlugin(PluginBase):
                 "lon": float(lon),
                 "elev_m": float(self._observer_cfg.get("elevation_m", 0)),
             }
-        gps = self.app.get_plugin("gps_telemetry") if hasattr(self.app, "get_plugin") else None
+        gps = self.get_ready_plugin("gps_telemetry") if hasattr(self.app, "get_plugin") else None
         if gps is not None and hasattr(gps, "last_fix"):
             fix = getattr(gps, "last_fix", None)
             if isinstance(fix, dict) and fix.get("lat") is not None and fix.get("lon") is not None:

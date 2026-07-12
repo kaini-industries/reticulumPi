@@ -1,0 +1,30 @@
+# Copy to /etc/reticulumpi/external-artifacts.yaml and replace every path,
+# immutable version label, and digest with values from the reviewed host.
+# Do not execute these programs while inventorying them.
+schema: 1
+artifacts:
+  meshchat:
+    kind: tree
+    version: v0.0.0+git.REPLACE_WITH_REVIEWED_COMMIT
+    path: /srv/reticulumpi-external/meshchat
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  rtl_test:
+    kind: file
+    version: rtl-sdr-REPLACE_WITH_PACKAGE_VERSION
+    path: /usr/bin/rtl_test
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  dump1090:
+    kind: file
+    version: dump1090-REPLACE_WITH_PACKAGE_VERSION
+    path: /usr/bin/dump1090
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  rtl_fm:
+    kind: file
+    version: rtl-sdr-REPLACE_WITH_PACKAGE_VERSION
+    path: /usr/bin/rtl_fm
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  rtl_power:
+    kind: file
+    version: rtl-sdr-REPLACE_WITH_PACKAGE_VERSION
+    path: /usr/bin/rtl_power
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"

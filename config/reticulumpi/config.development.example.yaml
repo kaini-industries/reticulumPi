@@ -1,0 +1,36 @@
+# Developer-only per-user configuration.
+#
+# Do not install this file as /etc/reticulumpi/config.yaml and do not use it
+# with the production systemd units. The production example uses the canonical
+# /var/lib and /var/cache runtime layout.
+
+reticulumpi:
+  reticulum_config_dir: ~/.reticulum
+  use_shared_instance: false
+  identity_path: ~/.config/reticulumpi/identity
+  log_level: 4
+  plugin_paths: []
+
+  # Developer-only source checkouts may resolve optional tools from PATH.
+  # Installed production configurations use mode: required instead.
+  external_artifacts:
+    mode: development
+    manifest_path: null
+
+  plugins:
+    heartbeat_announce:
+      enabled: true
+      interval_seconds: 300
+      app_name: reticulumpi
+      aspects:
+        - node
+        - heartbeat
+      include_telemetry: true
+
+    message_echo:
+      enabled: true
+      storage_path: ~/.local/share/reticulumpi/lxmf
+
+    system_monitor:
+      enabled: true
+      collect_interval_seconds: 60

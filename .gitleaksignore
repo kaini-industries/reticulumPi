@@ -1,0 +1,2 @@
+# Historical non-secret Yggdrasil test fixture; exact fingerprint follows.
+89cdf86b22ec5adfe1c8d1b69c4c96fcb8b384f6:tests/test_yggdrasil_transport.py:generic-api-key:326

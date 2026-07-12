@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 
 log = logging.getLogger("reticulumpi.rtlsdr")
 
@@ -23,9 +24,29 @@ _claim_lock = threading.Lock()
 _claimed: dict[str, str] = {}
 
 
+@dataclass(frozen=True)
+class DeviceLease:
+    """Canonical ownership token for one physical RTL-SDR device."""
+
+    configured: str
+    canonical_id: str
+    index: int
+    caller: str
+
+    def release(self) -> None:
+        _release_canonical(self.canonical_id, self.configured, self.caller)
+
+
 def _cleanup_claims() -> None:
     with _claim_lock:
         _claimed.clear()
+
+
+def get_lease_metrics() -> dict[str, int]:
+    """Return a secret-free snapshot of canonical device claims."""
+
+    with _claim_lock:
+        return {"canonical_claims": len(_claimed)}
 
 
 atexit.register(_cleanup_claims)
@@ -116,15 +137,7 @@ def resolve_device(configured: str, caller: str = "") -> int:
 
     for idx, serial in devices:
         if serial == configured:
-            with _claim_lock:
-                prev = _claimed.get(serial)
-                if prev and prev != caller and caller:
-                    raise RuntimeError(
-                        f"RTL-SDR serial '{serial}' is already claimed by '{prev}' — "
-                        f"only one plugin can use a device at a time"
-                    )
-                if caller:
-                    _claimed[serial] = caller
+            _claim_device(f"serial:{serial}", configured, caller)
             if str(idx) != configured:
                 log.info(
                     "Resolved RTL-SDR serial '%s' → index %d (caller: %s)",
@@ -151,10 +164,64 @@ def resolve_device(configured: str, caller: str = "") -> int:
         and configured not in known_serials
         and (len(configured) != 8 or not devices)
     ):
+        serial_for_index = next((serial for index, serial in devices if index == idx), None)
+        canonical = f"serial:{serial_for_index}" if serial_for_index else f"index:{idx}"
+        _claim_device(canonical, configured, caller)
         return idx
 
     available = ", ".join(f"{i}: SN {s}" for i, s in devices)
     raise RuntimeError(f"RTL-SDR device '{configured}' not found. Available: [{available}]")
+
+
+def _claim_device(canonical: str, configured: str, caller: str) -> None:
+    if not caller:
+        return
+    with _claim_lock:
+        previous = _claimed.get(canonical)
+        if previous and previous != caller:
+            raise RuntimeError(
+                f"RTL-SDR device '{configured}' is already claimed by '{previous}' — "
+                "only one plugin can use a device at a time"
+            )
+        _claimed[canonical] = caller
+
+
+def _canonical_device(configured: str) -> str:
+    devices = enumerate_devices()
+    for index, serial in devices:
+        if configured == serial:
+            return f"serial:{serial}"
+        try:
+            if int(configured) == index and configured == str(index):
+                return f"serial:{serial}"
+        except ValueError:
+            pass
+    try:
+        return f"index:{int(configured)}"
+    except ValueError:
+        return f"serial:{configured}"
+
+
+def claim_device(configured: str, caller: str) -> DeviceLease:
+    """Resolve and claim a device, returning an explicit release token."""
+
+    index = resolve_device(configured, caller=caller)
+    return DeviceLease(configured, _canonical_device(configured), index, caller)
+
+
+def refresh_device_lease(
+    lease: DeviceLease | None,
+    configured: str,
+    caller: str,
+) -> DeviceLease:
+    """Resolve a possibly re-enumerated device and retain one exact claim."""
+
+    index = resolve_device(configured, caller=caller)
+    canonical = _canonical_device(configured)
+    refreshed = DeviceLease(configured, canonical, index, caller)
+    if lease is not None and lease.canonical_id != canonical:
+        _release_canonical(lease.canonical_id, lease.configured, lease.caller)
+    return refreshed
 
 
 def release_device(configured: str, caller: str = "") -> None:
@@ -162,10 +229,17 @@ def release_device(configured: str, caller: str = "") -> None:
 
     Called during plugin stop() to allow another plugin to claim the device.
     """
+    canonical = _canonical_device(configured)
+    _release_canonical(canonical, configured, caller)
+
+
+def _release_canonical(canonical: str, configured: str, caller: str = "") -> None:
+    """Release an exact canonical claim even after USB enumeration changes."""
+
     with _claim_lock:
-        current = _claimed.get(configured)
+        current = _claimed.get(canonical)
         if current == caller or not caller:
-            _claimed.pop(configured, None)
+            _claimed.pop(canonical, None)
             log.debug("Released RTL-SDR device '%s' (caller: %s)", configured, caller or "?")
 
 

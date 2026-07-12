@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import hashlib
 import logging
 import threading
 import time
@@ -17,8 +16,11 @@ from collections import deque
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok, _run_sync
+from reticulumpi.plugin_base import resolve_ready_plugin
 
 from .api_cache import api_cache
+from .keys import get_request_token
+from .query import QueryValidationError, query_float, query_int
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ def _check_send_rate_limit(
 async def handle_lora_diagnostics(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/lora — LoRa diagnostics (traffic, monitored peers, beacon status)."""
     plugin = _get_plugin(request)
-    lora = plugin.app.get_plugin("lora_diagnostics")
+    lora = resolve_ready_plugin(plugin, "lora_diagnostics")
     if not lora or not hasattr(lora, "get_diagnostics"):
         return _ok({"message": "lora_diagnostics plugin not available"})
     return _ok(await _run_sync(lora.get_diagnostics))
@@ -92,7 +94,7 @@ async def handle_lora_announce_mode(
     Modifies rnsd's Reticulum config and restarts rnsd.
     """
     plugin = _get_plugin(request)
-    lora = plugin.app.get_plugin("lora_diagnostics")
+    lora = resolve_ready_plugin(plugin, "lora_diagnostics")
     if not lora or not hasattr(lora, "set_announce_mode"):
         return _error("lora_diagnostics plugin not available", 503)
 
@@ -120,7 +122,7 @@ async def handle_lora_announce_mode(
 async def handle_alerts(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/alerts — alert system status."""
     plugin = _get_plugin(request)
-    alert_sys = plugin.app.get_plugin("alert_system")
+    alert_sys = resolve_ready_plugin(plugin, "alert_system")
     if not alert_sys:
         return _ok({"status": None, "message": "alert_system plugin not available"})
     try:
@@ -134,7 +136,7 @@ async def handle_alerts(request: aiohttp.web.Request) -> aiohttp.web.Response:
 async def handle_files(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/files — shared files from file_transfer plugin."""
     plugin = _get_plugin(request)
-    ft = plugin.app.get_plugin("file_transfer")
+    ft = resolve_ready_plugin(plugin, "file_transfer")
     if not ft or not hasattr(ft, "get_shared_files"):
         return _ok({"files": [], "message": "file_transfer plugin not available"})
     return _ok({"files": ft.get_shared_files()})
@@ -143,7 +145,7 @@ async def handle_files(request: aiohttp.web.Request) -> aiohttp.web.Response:
 async def handle_sensors(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/sensors — latest sensor readings from sensor_framework plugin."""
     plugin = _get_plugin(request)
-    sf = plugin.app.get_plugin("sensor_framework")
+    sf = resolve_ready_plugin(plugin, "sensor_framework")
     if not sf or not hasattr(sf, "get_latest_readings"):
         return _ok({"sensors": {}, "message": "sensor_framework plugin not available"})
     return _ok({"sensors": await _run_sync(sf.get_latest_readings)})
@@ -155,7 +157,7 @@ async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Res
     Query params: sensor (required), limit (default 60).
     """
     plugin = _get_plugin(request)
-    sf = plugin.app.get_plugin("sensor_framework")
+    sf = resolve_ready_plugin(plugin, "sensor_framework")
     if not sf or not hasattr(sf, "get_sensor_history"):
         return _ok({"history": [], "message": "sensor_framework plugin not available"})
 
@@ -164,9 +166,9 @@ async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Res
         return _error("sensor query param is required", 400)
 
     try:
-        limit = min(int(request.query.get("limit", "60")), 500)
-    except (ValueError, TypeError):
-        limit = 60
+        limit = query_int(request.query, "limit", 60, minimum=1, maximum=500)
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
 
     history = await _run_sync(
         sf.get_sensor_history,
@@ -179,7 +181,7 @@ async def handle_sensor_history(request: aiohttp.web.Request) -> aiohttp.web.Res
 async def handle_emergency(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/emergency — recent emergency broadcast messages."""
     plugin = _get_plugin(request)
-    eb = plugin.app.get_plugin("emergency_broadcast")
+    eb = resolve_ready_plugin(plugin, "emergency_broadcast")
     if not eb or not hasattr(eb, "get_messages"):
         return _ok({"messages": [], "message": "emergency_broadcast plugin not available"})
     messages = await _run_sync(eb.get_messages)
@@ -193,7 +195,7 @@ async def handle_emergency(request: aiohttp.web.Request) -> aiohttp.web.Response
 async def handle_nomadnet_auth(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/nomadnet/auth — NomadNet page access control status."""
     plugin = _get_plugin(request)
-    nn = plugin.app.get_plugin("nomadnet_server")
+    nn = resolve_ready_plugin(plugin, "nomadnet_server")
     if not nn or not hasattr(nn, "get_allowed_identities"):
         return _ok({"message": "nomadnet_server plugin not available"})
     protected = nn.get_protected_pages() if hasattr(nn, "get_protected_pages") else []
@@ -210,7 +212,7 @@ async def handle_nomadnet_auth_add(
 ) -> aiohttp.web.Response:
     """POST /api/nomadnet/auth/add — add an identity to the allow list."""
     plugin = _get_plugin(request)
-    nn = plugin.app.get_plugin("nomadnet_server")
+    nn = resolve_ready_plugin(plugin, "nomadnet_server")
     if not nn or not hasattr(nn, "add_allowed_identity"):
         return _error("nomadnet_server plugin not available", 503)
     try:
@@ -234,7 +236,7 @@ async def handle_nomadnet_auth_remove(
 ) -> aiohttp.web.Response:
     """POST /api/nomadnet/auth/remove — remove an identity from the allow list."""
     plugin = _get_plugin(request)
-    nn = plugin.app.get_plugin("nomadnet_server")
+    nn = resolve_ready_plugin(plugin, "nomadnet_server")
     if not nn or not hasattr(nn, "remove_allowed_identity"):
         return _error("nomadnet_server plugin not available", 503)
     try:
@@ -258,7 +260,7 @@ async def handle_meshtastic_status(
 ) -> aiohttp.web.Response:
     """GET /api/meshtastic/status — Meshtastic gateway status and message stats."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw or not hasattr(gw, "get_status"):
         return _ok({"available": False, "message": "meshtastic_gateway plugin not enabled"})
     return _ok(await _run_sync(gw.get_status))
@@ -270,7 +272,7 @@ async def handle_meshtastic_nodes(
 ) -> aiohttp.web.Response:
     """GET /api/meshtastic/nodes — Known Meshtastic mesh nodes."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw or not hasattr(gw, "get_meshtastic_nodes"):
         return _ok({"nodes": [], "message": "meshtastic_gateway plugin not enabled"})
     return _ok({"nodes": await _run_sync(gw.get_meshtastic_nodes)})
@@ -281,7 +283,7 @@ async def handle_meshtastic_device(
 ) -> aiohttp.web.Response:
     """GET /api/meshtastic/device — Meshtastic device hardware and radio info."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw or not hasattr(gw, "get_device_info"):
         return _ok({"available": False, "message": "meshtastic_gateway plugin not enabled"})
     return _ok(await _run_sync(gw.get_device_info))
@@ -292,7 +294,7 @@ async def handle_meshtastic_device_reset(
 ) -> aiohttp.web.Response:
     """POST /api/meshtastic/device/reset — Reboot or USB-reset the Meshtastic device."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw or not hasattr(gw, "reset_device"):
         return _error("meshtastic_gateway plugin not enabled", 503)
 
@@ -308,7 +310,7 @@ async def handle_meshtastic_lora_neighbors(
 ) -> aiohttp.web.Response:
     """GET /api/meshtastic/lora_neighbors — LoRa-only neighbors from the physical radio."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw or not hasattr(gw, "get_lora_neighbors"):
         return _ok({"neighbors": [], "message": "meshtastic_gateway plugin not enabled"})
     return _ok({"neighbors": await _run_sync(gw.get_lora_neighbors)})
@@ -319,7 +321,7 @@ async def handle_meshtastic_channels(
 ) -> aiohttp.web.Response:
     """GET /api/meshtastic/channels — Radio channel configuration (serial mode)."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw or not hasattr(gw, "get_channels"):
         return _ok({"channels": [], "message": "meshtastic_gateway plugin not enabled"})
     channels = await _run_sync(gw.get_channels)
@@ -342,7 +344,7 @@ async def handle_meshtastic_channel_join(
     ``index`` (1-7) is optional; omit to use the first available slot.
     """
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw:
         return _error("meshtastic_gateway plugin not enabled", 503)
 
@@ -393,7 +395,7 @@ async def handle_meshtastic_channel_delete(
 ) -> aiohttp.web.Response:
     """DELETE /api/meshtastic/channels/{index} — Remove a SECONDARY channel."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshtastic_gateway")
+    gw = resolve_ready_plugin(plugin, "meshtastic_gateway")
     if not gw or not hasattr(gw, "delete_channel"):
         return _error("meshtastic_gateway plugin not enabled", 503)
 
@@ -418,7 +420,7 @@ async def handle_meshcore_status(
 ) -> aiohttp.web.Response:
     """GET /api/meshcore/status — MeshCore gateway status and message stats."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshcore_gateway")
+    gw = resolve_ready_plugin(plugin, "meshcore_gateway")
     if not gw or not hasattr(gw, "get_status"):
         return _ok({"available": False, "message": "meshcore_gateway plugin not enabled"})
     return _ok(await _run_sync(gw.get_status))
@@ -430,7 +432,7 @@ async def handle_meshcore_contacts(
 ) -> aiohttp.web.Response:
     """GET /api/meshcore/contacts — Known MeshCore contacts."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshcore_gateway")
+    gw = resolve_ready_plugin(plugin, "meshcore_gateway")
     if not gw or not hasattr(gw, "get_contacts"):
         return _ok({"contacts": [], "message": "meshcore_gateway plugin not enabled"})
     return _ok({"contacts": await _run_sync(gw.get_contacts)})
@@ -441,7 +443,7 @@ async def handle_meshcore_device(
 ) -> aiohttp.web.Response:
     """GET /api/meshcore/device — MeshCore device hardware and firmware info."""
     plugin = _get_plugin(request)
-    gw = plugin.app.get_plugin("meshcore_gateway")
+    gw = resolve_ready_plugin(plugin, "meshcore_gateway")
     if not gw or not hasattr(gw, "get_device_info"):
         return _ok({"available": False, "message": "meshcore_gateway plugin not enabled"})
     return _ok(await _run_sync(gw.get_device_info))
@@ -455,7 +457,7 @@ async def handle_meshcore_observer_status(
 ) -> aiohttp.web.Response:
     """GET /api/meshcore_observer/status — MeshCore observer status and packet stats."""
     plugin = _get_plugin(request)
-    obs = plugin.app.get_plugin("meshcore_observer")
+    obs = resolve_ready_plugin(plugin, "meshcore_observer")
     if not obs or not hasattr(obs, "get_status"):
         return _ok({"available": False, "message": "meshcore_observer plugin not enabled"})
     return _ok({"available": True, **(await _run_sync(obs.get_status))})
@@ -469,7 +471,7 @@ async def handle_mesh_bridge_status(
 ) -> aiohttp.web.Response:
     """GET /api/mesh_bridge/status — Bridge runtime state and counters."""
     plugin = _get_plugin(request)
-    bridge = plugin.app.get_plugin("mesh_bridge")
+    bridge = resolve_ready_plugin(plugin, "mesh_bridge")
     if not bridge or not hasattr(bridge, "get_status"):
         return _ok({"available": False, "message": "mesh_bridge plugin not enabled"})
     status = await _run_sync(bridge.get_status)
@@ -481,7 +483,7 @@ async def handle_mesh_bridge_running(
 ) -> aiohttp.web.Response:
     """POST /api/mesh_bridge/running — Pause or resume the bridge."""
     plugin = _get_plugin(request)
-    bridge = plugin.app.get_plugin("mesh_bridge")
+    bridge = resolve_ready_plugin(plugin, "mesh_bridge")
     if not bridge or not hasattr(bridge, "set_running"):
         return _error("mesh_bridge plugin not available", 503)
     try:
@@ -510,15 +512,15 @@ async def handle_messages(
     Query params: limit, offset, transport, direction, since.
     """
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "get_messages"):
         return _ok({"messages": [], "message": "messaging_hub not enabled"})
 
     try:
-        limit = min(int(request.query.get("limit", "50")), 200)
-        offset = max(int(request.query.get("offset", "0")), 0)
-    except (ValueError, TypeError):
-        return _error("limit and offset must be integers", 400)
+        limit = query_int(request.query, "limit", 50, minimum=1, maximum=200)
+        offset = query_int(request.query, "offset", 0, minimum=0, maximum=1_000_000)
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
 
     transport = request.query.get("transport") or None
     sub_transport = request.query.get("sub_transport")
@@ -552,49 +554,26 @@ async def handle_send_message(
 
     Body: ``{"transport": "lxmf"|"meshtastic", "text": "...", "destination": "..."}``
 
-    Requires a valid session token. Unauthenticated localhost callers are
-    rejected unless ``allow_localhost_send`` is explicitly enabled, so that
-    a compromised local process can't spoof messages under this node's
-    identity. All callers are rate-limited.
+    Requires a valid authenticated session token. Local-service tokens are
+    read-only and no loopback or configuration bypass can authorize mutation.
+    Authenticated callers are rate-limited.
     """
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    token = get_request_token(request)
+    if not token:
+        return _error("Authentication required to send messages", 401)
+
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "send_message"):
         return _error("messaging_hub not enabled", 503)
 
-    # Explicit auth gate: the global middleware bypasses auth for localhost
-    # requests so that internal tooling (NomadNet pages, scripts) can reach
-    # read-only endpoints. Sending radio traffic is not read-only and needs
-    # a stricter check — require a token unless the operator has opted in.
-    has_token = bool(request.get("token"))
-    if not has_token and not plugin.config.get("allow_localhost_send", False):
-        return _error(
-            "Authentication required to send messages. Log in first, or set "
-            "allow_localhost_send=true in the web_dashboard config to permit "
-            "unauthenticated sends from localhost.",
-            401,
-        )
-
-    # Rate limit per-token (or per-remote-IP if unauth-localhost is allowed).
+    # Rate limit per authenticated session token.
     # Defaults: 30 sends/min — enough for interactive use, low enough to
     # keep a misbehaving caller from saturating LoRa airtime.
     rl_cfg = plugin.config.get("send_rate_limit") or {}
     max_sends = int(rl_cfg.get("max_per_window", 30))
     window_s = float(rl_cfg.get("window_seconds", 60))
-    token = request.get("token")
-    if token:
-        rate_key = f"tok:{token}"
-    else:
-        # Multiple local tools (browser, CLI scripts, NomadNet helpers) all
-        # connect from 127.0.0.1 and would otherwise share a single bucket,
-        # so one chatty script could starve the rest. Mix in a short
-        # User-Agent fingerprint so distinct clients get distinct buckets.
-        # Not a security boundary — a malicious local caller can vary UA —
-        # but this is only reached when allow_localhost_send is opted in,
-        # which already trusts the host.
-        ua = request.headers.get("User-Agent", "")
-        ua_tag = hashlib.sha1(ua.encode("utf-8", "replace")).hexdigest()[:8] if ua else "none"
-        rate_key = f"local:{request.remote or 'unknown'}:{ua_tag}"
+    rate_key = f"tok:{token}"
     ok, retry_after = await _run_sync(
         _check_send_rate_limit,
         plugin,
@@ -659,7 +638,7 @@ async def handle_transports(
 ) -> aiohttp.web.Response:
     """GET /api/messages/transports — Available transports."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "get_transports"):
         return _ok({"transports": []})
     loop = asyncio.get_running_loop()
@@ -677,7 +656,7 @@ async def handle_contacts(
         q — optional search string (name or id substring match).
     """
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "get_contacts"):
         return _ok({"contacts": []})
     transport = request.query.get("transport") or None
@@ -728,7 +707,7 @@ async def handle_message_stats(
 ) -> aiohttp.web.Response:
     """GET /api/messages/stats — Message counts by transport and direction."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "get_stats"):
         return _ok({"stats": {}})
     loop = asyncio.get_running_loop()
@@ -741,7 +720,7 @@ async def handle_conversations(
 ) -> aiohttp.web.Response:
     """GET /api/messages/conversations — Conversation summaries."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "get_conversations"):
         return _ok({"conversations": []})
     transport = request.query.get("transport") or None
@@ -764,14 +743,14 @@ async def handle_conversation_messages(
 ) -> aiohttp.web.Response:
     """GET /api/messages/conversation/{contact_id} — Messages for one conversation."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "get_conversation_messages"):
         return _ok({"messages": []})
     contact_id = request.match_info["contact_id"]
     try:
-        limit = min(int(request.query.get("limit", "50")), 200)
-    except (ValueError, TypeError):
-        return _error("limit must be an integer", 400)
+        limit = query_int(request.query, "limit", 50, minimum=1, maximum=200)
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
     before_str = request.query.get("before")
     try:
         before = float(before_str) if before_str else None
@@ -795,16 +774,16 @@ async def handle_message_search(
 ) -> aiohttp.web.Response:
     """GET /api/messages/search — Text search across messages."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "search_messages"):
         return _ok({"messages": []})
     query = request.query.get("q", "").strip()
     if not query:
         return _ok({"messages": []})
     try:
-        limit = min(int(request.query.get("limit", "50")), 200)
-    except (ValueError, TypeError):
-        return _error("limit must be an integer", 400)
+        limit = query_int(request.query, "limit", 50, minimum=1, maximum=200)
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
     transport = request.query.get("transport") or None
     sub_transport = request.query.get("sub_transport")
     loop = asyncio.get_running_loop()
@@ -826,7 +805,7 @@ async def handle_delete_conversation(
 ) -> aiohttp.web.Response:
     """DELETE /api/messages/conversation/{contact_id} — Delete all messages."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "delete_conversation"):
         return _error("messaging_hub not available", 503)
     contact_id = request.match_info["contact_id"]
@@ -845,7 +824,7 @@ async def handle_mark_read(
 ) -> aiohttp.web.Response:
     """POST /api/messages/read — Mark conversation as read."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "mark_read"):
         return _error("messaging_hub not available", 503)
     try:
@@ -868,7 +847,7 @@ async def handle_unread_counts(
 ) -> aiohttp.web.Response:
     """GET /api/messages/unread — Unread counts per contact."""
     plugin = _get_plugin(request)
-    hub = plugin.app.get_plugin("messaging_hub")
+    hub = resolve_ready_plugin(plugin, "messaging_hub")
     if not hub or not hasattr(hub, "get_unread_counts"):
         return _ok({"unread": {}})
     transport = request.query.get("transport") or None
@@ -898,7 +877,7 @@ async def handle_space_snapshot(
     the REST call stays cheap regardless of how many sats are tracked.
     """
     plugin = _get_plugin(request)
-    tracker = plugin.app.get_plugin("space_tracker")
+    tracker = resolve_ready_plugin(plugin, "space_tracker")
     if not tracker or not hasattr(tracker, "get_snapshot"):
         return _ok({"available": False, "message": "space_tracker plugin not enabled"})
     try:
@@ -919,7 +898,7 @@ async def handle_gps_snapshot(
 ) -> aiohttp.web.Response:
     """GET /api/gps — status + last fix + satellites-in-view."""
     plugin = _get_plugin(request)
-    gps = plugin.app.get_plugin("gps_telemetry")
+    gps = resolve_ready_plugin(plugin, "gps_telemetry")
     if not gps or not hasattr(gps, "get_snapshot"):
         return _ok({"available": False, "message": "gps_telemetry plugin not enabled"})
     snap = await _run_sync(gps.get_snapshot)
@@ -933,7 +912,7 @@ async def handle_gps_status(
 ) -> aiohttp.web.Response:
     """GET /api/gps/status — connection + fix presence, without the fix payload."""
     plugin = _get_plugin(request)
-    gps = plugin.app.get_plugin("gps_telemetry")
+    gps = resolve_ready_plugin(plugin, "gps_telemetry")
     if not gps or not hasattr(gps, "get_status"):
         return _ok({"available": False})
     status = await _run_sync(gps.get_status)
@@ -946,7 +925,7 @@ async def handle_gps_satellites(
 ) -> aiohttp.web.Response:
     """GET /api/gps/satellites — just the per-SV sky view."""
     plugin = _get_plugin(request)
-    gps = plugin.app.get_plugin("gps_telemetry")
+    gps = resolve_ready_plugin(plugin, "gps_telemetry")
     if not gps or not hasattr(gps, "get_snapshot"):
         return _ok({"available": False, "satellites": []})
     snap = await _run_sync(gps.get_snapshot)
@@ -967,7 +946,7 @@ async def handle_node_tracker_history(
 ) -> aiohttp.web.Response:
     """GET /api/node_tracker/history — position history for tracked nodes."""
     plugin = _get_plugin(request)
-    tracker = plugin.app.get_plugin("node_location_tracker")
+    tracker = resolve_ready_plugin(plugin, "node_location_tracker")
     if not tracker or not hasattr(tracker, "get_history"):
         return _ok({"history": {}, "message": "Node location tracker not available"})
     nodes_param = request.query.get("nodes", "")
@@ -977,10 +956,25 @@ async def handle_node_tracker_history(
     if len(node_keys) > 10:
         return _error("Maximum 10 nodes per request", 400)
     try:
-        hours = min(float(request.query.get("hours", "24")), 720)
-        limit = min(int(request.query.get("limit", "500")), 2000)
-    except ValueError:
-        return _error("Invalid hours or limit parameter", 400)
+        hours = query_float(
+            request.query,
+            "hours",
+            24.0,
+            minimum=0.01,
+            maximum=720.0,
+            clamp_maximum=True,
+        )
+        limit = query_int(
+            request.query,
+            "limit",
+            500,
+            minimum=1,
+            maximum=2000,
+            clamp_maximum=True,
+        )
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
+    assert hours is not None
     since = time.time() - (hours * 3600)
     try:
         history = await _run_sync(tracker.get_history, node_keys, since, None, limit)
@@ -998,7 +992,7 @@ async def handle_adsb_snapshot(
 ) -> aiohttp.web.Response:
     """GET /api/adsb — current aircraft snapshot."""
     plugin = _get_plugin(request)
-    adsb = plugin.app.get_plugin("adsb_radar")
+    adsb = resolve_ready_plugin(plugin, "adsb_radar")
     if not adsb or not hasattr(adsb, "get_snapshot"):
         return _ok({"available": False, "message": "adsb_radar plugin not enabled"})
     try:
@@ -1015,7 +1009,7 @@ async def handle_ntp_snapshot(
 ) -> aiohttp.web.Response:
     """GET /api/ntp — full NTP/chrony status + sources."""
     plugin = _get_plugin(request)
-    ntp = plugin.app.get_plugin("ntp_server")
+    ntp = resolve_ready_plugin(plugin, "ntp_server")
     if not ntp or not hasattr(ntp, "get_snapshot"):
         return _ok({"available": False, "message": "ntp_server plugin not enabled"})
     try:
@@ -1032,7 +1026,7 @@ async def handle_ntp_sources(
 ) -> aiohttp.web.Response:
     """GET /api/ntp/sources — chrony source list only."""
     plugin = _get_plugin(request)
-    ntp = plugin.app.get_plugin("ntp_server")
+    ntp = resolve_ready_plugin(plugin, "ntp_server")
     if not ntp or not hasattr(ntp, "get_snapshot"):
         return _ok({"available": False, "sources": []})
     try:
@@ -1051,7 +1045,7 @@ async def handle_link_tester_snapshot(
 ) -> aiohttp.web.Response:
     """GET /api/link_tester — status + full history."""
     plugin = _get_plugin(request)
-    lt = plugin.app.get_plugin("lora_link_tester")
+    lt = resolve_ready_plugin(plugin, "lora_link_tester")
     if not lt or not hasattr(lt, "get_history"):
         return _ok({"available": False, "message": "lora_link_tester plugin not enabled"})
     try:
@@ -1066,7 +1060,7 @@ async def handle_link_tester_start(
 ) -> aiohttp.web.Response:
     """POST /api/link_tester/start — start a test run."""
     plugin = _get_plugin(request)
-    lt = plugin.app.get_plugin("lora_link_tester")
+    lt = resolve_ready_plugin(plugin, "lora_link_tester")
     if not lt or not hasattr(lt, "start_test"):
         return _error("lora_link_tester plugin not available", 503)
     try:
@@ -1094,7 +1088,7 @@ async def handle_link_tester_stop(
 ) -> aiohttp.web.Response:
     """POST /api/link_tester/stop — stop current test run."""
     plugin = _get_plugin(request)
-    lt = plugin.app.get_plugin("lora_link_tester")
+    lt = resolve_ready_plugin(plugin, "lora_link_tester")
     if not lt or not hasattr(lt, "stop_test"):
         return _error("lora_link_tester plugin not available", 503)
     return _ok(await _run_sync(lt.stop_test))
@@ -1105,7 +1099,7 @@ async def handle_link_tester_clear(
 ) -> aiohttp.web.Response:
     """POST /api/link_tester/clear — clear history buffer."""
     plugin = _get_plugin(request)
-    lt = plugin.app.get_plugin("lora_link_tester")
+    lt = resolve_ready_plugin(plugin, "lora_link_tester")
     if not lt or not hasattr(lt, "clear_history"):
         return _error("lora_link_tester plugin not available", 503)
     return _ok(await _run_sync(lt.clear_history))
@@ -1118,7 +1112,7 @@ async def handle_weather_alert(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     plugin = _get_plugin(request)
-    wa = plugin.app.get_plugin("weather_alert")
+    wa = resolve_ready_plugin(plugin, "weather_alert")
     if not wa:
         return _error("weather_alert plugin not available", 503)
     return _ok(await _run_sync(wa.get_snapshot))
@@ -1128,7 +1122,7 @@ async def handle_weather_alert_active(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     plugin = _get_plugin(request)
-    wa = plugin.app.get_plugin("weather_alert")
+    wa = resolve_ready_plugin(plugin, "weather_alert")
     if not wa:
         return _error("weather_alert plugin not available", 503)
     snap = await _run_sync(wa.get_snapshot)
@@ -1139,7 +1133,7 @@ async def handle_ais(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     plugin = _get_plugin(request)
-    ais = plugin.app.get_plugin("ais_receiver")
+    ais = resolve_ready_plugin(plugin, "ais_receiver")
     if not ais:
         return _error("ais_receiver plugin not available", 503)
     return _ok(await _run_sync(ais.get_snapshot))
@@ -1149,7 +1143,7 @@ async def handle_acars(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     plugin = _get_plugin(request)
-    acars = plugin.app.get_plugin("acars_decoder")
+    acars = resolve_ready_plugin(plugin, "acars_decoder")
     if not acars:
         return _error("acars_decoder plugin not available", 503)
     return _ok(await _run_sync(acars.get_snapshot))
@@ -1159,7 +1153,7 @@ async def handle_radiosonde(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     plugin = _get_plugin(request)
-    rs = plugin.app.get_plugin("radiosonde_tracker")
+    rs = resolve_ready_plugin(plugin, "radiosonde_tracker")
     if not rs:
         return _error("radiosonde_tracker plugin not available", 503)
     return _ok(await _run_sync(rs.get_snapshot))
@@ -1169,7 +1163,7 @@ async def handle_noaa(
     request: aiohttp.web.Request,
 ) -> aiohttp.web.Response:
     plugin = _get_plugin(request)
-    noaa = plugin.app.get_plugin("noaa_apt_decoder")
+    noaa = resolve_ready_plugin(plugin, "noaa_apt_decoder")
     if not noaa:
         return _error("noaa_apt_decoder plugin not available", 503)
     return _ok(await _run_sync(noaa.get_snapshot))
@@ -1181,7 +1175,7 @@ async def handle_noaa_image(
     import os
 
     plugin = _get_plugin(request)
-    noaa = plugin.app.get_plugin("noaa_apt_decoder")
+    noaa = resolve_ready_plugin(plugin, "noaa_apt_decoder")
     if not noaa:
         return _error("noaa_apt_decoder plugin not available", 503)
     filename = request.match_info.get("filename", "")
@@ -1214,7 +1208,7 @@ async def handle_captive_portal(
 ) -> aiohttp.web.Response:
     """GET /api/captive_portal — Captive portal status."""
     plugin = _get_plugin(request)
-    cp = plugin.app.get_plugin("captive_portal")
+    cp = resolve_ready_plugin(plugin, "captive_portal")
     if not cp or not hasattr(cp, "get_status"):
         return _ok({"available": False, "message": "captive_portal plugin not enabled"})
     status = await _run_sync(cp.get_status)

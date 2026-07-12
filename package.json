@@ -1,0 +1,14 @@
+{
+  "name": "reticulumpi-dashboard-build",
+  "private": true,
+  "scripts": {
+    "build:dashboard": "node tools/build-dashboard.mjs",
+    "check:dashboard": "node tools/build-dashboard.mjs --check",
+    "test:dashboard:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.60.0",
+    "esbuild": "0.25.12"
+  }
+}

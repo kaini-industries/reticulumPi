@@ -1,9 +1,13 @@
 """Tests for the tile proxy endpoint in server.py."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def _make_tile_request(z="10", x="512", y="512", plugin=None):
@@ -34,8 +38,9 @@ class TestCoordinateValidation:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
+        resp_mock.headers = {"Content-Type": "image/png"}
         resp_mock.content = MagicMock()
-        resp_mock.content.read = AsyncMock(return_value=b"\x89PNG data")
+        resp_mock.content.read = AsyncMock(return_value=PNG_SIGNATURE + b"data")
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -48,14 +53,11 @@ class TestCoordinateValidation:
                 "reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
                 return_value=False,
             ),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.makedirs"),
             patch(
-                "reticulumpi.builtin_plugins.web_dashboard.server.tempfile.mkstemp",
-                return_value=(99, "/tmp/tile.tmp"),
+                "reticulumpi.builtin_plugins.web_dashboard.server.store_tile",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.write"),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.close"),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.rename"),
         ):
             resp = asyncio.run(_handle_tile_proxy(req))
             assert resp.status == 200
@@ -123,8 +125,9 @@ class TestCoordinateValidation:
         plugin = req.app["plugin"]
         resp_mock = AsyncMock()
         resp_mock.status = 200
+        resp_mock.headers = {"Content-Type": "image/png"}
         resp_mock.content = MagicMock()
-        resp_mock.content.read = AsyncMock(return_value=b"\x89PNG")
+        resp_mock.content.read = AsyncMock(return_value=PNG_SIGNATURE)
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp_mock)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -137,14 +140,11 @@ class TestCoordinateValidation:
                 "reticulumpi.builtin_plugins.web_dashboard.server.os.path.isfile",
                 return_value=False,
             ),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.makedirs"),
             patch(
-                "reticulumpi.builtin_plugins.web_dashboard.server.tempfile.mkstemp",
-                return_value=(99, "/tmp/t.tmp"),
+                "reticulumpi.builtin_plugins.web_dashboard.server.store_tile",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.write"),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.close"),
-            patch("reticulumpi.builtin_plugins.web_dashboard.server.os.rename"),
         ):
             resp = asyncio.run(_handle_tile_proxy(req))
             assert resp.status == 200
@@ -182,7 +182,7 @@ class TestCacheMiss:
     def test_fetches_upstream_and_caches(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.server import _handle_tile_proxy
 
-        tile_data = b"\x89PNG upstream tile"
+        tile_data = PNG_SIGNATURE + b"upstream tile"
         plugin = MagicMock()
         plugin._tile_session = MagicMock()
         plugin._tile_cache_dir = str(tmp_path)
@@ -192,6 +192,7 @@ class TestCacheMiss:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
+        resp_mock.headers = {"Content-Type": "image/png"}
         resp_mock.content = MagicMock()
         resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
@@ -258,19 +259,23 @@ class TestCacheMiss:
 
 
 class TestCacheSizeEnforcement:
-    def test_skips_write_when_cache_full(self, tmp_path):
+    def test_evicts_oldest_tile_when_cache_is_full(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.server import _handle_tile_proxy
 
-        tile_data = b"\x89PNG tile"
+        tile_data = PNG_SIGNATURE + b"tile"
         plugin = MagicMock()
         plugin._tile_session = MagicMock()
         plugin._tile_cache_dir = str(tmp_path)
         plugin._tile_upstream = "https://tile.example.com/{z}/{x}/{y}.png"
-        plugin._tile_max_bytes = 100
-        plugin._tile_cache_bytes = 100  # Already at limit
+        plugin._tile_max_bytes = len(tile_data)
+        old_tile = tmp_path / "1" / "0" / "0.png"
+        old_tile.parent.mkdir(parents=True)
+        old_tile.write_bytes(b"x" * len(tile_data))
+        plugin._tile_cache_bytes = len(tile_data)
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
+        resp_mock.headers = {"Content-Type": "image/png"}
         resp_mock.content = MagicMock()
         resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
@@ -285,12 +290,40 @@ class TestCacheSizeEnforcement:
         assert resp.body == tile_data
 
         cached_tile = tmp_path / "10" / "512" / "512.png"
-        assert not cached_tile.exists()
+        assert cached_tile.exists()
+        assert not old_tile.exists()
+        assert plugin._tile_cache_bytes == len(tile_data)
+
+    def test_rejects_cache_write_when_one_tile_exceeds_total_budget(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.server import _handle_tile_proxy
+
+        tile_data = PNG_SIGNATURE + b"tile"
+        plugin = MagicMock()
+        plugin._tile_session = MagicMock()
+        plugin._tile_cache_dir = str(tmp_path)
+        plugin._tile_upstream = "https://tile.example.com/{z}/{x}/{y}.png"
+        plugin._tile_max_bytes = len(tile_data) - 1
+        plugin._tile_cache_bytes = 0
+
+        response = AsyncMock()
+        response.status = 200
+        response.headers = {"Content-Type": "image/png"}
+        response.content.read = AsyncMock(return_value=tile_data)
+        context = AsyncMock()
+        context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=False)
+        plugin._tile_session.get = MagicMock(return_value=context)
+
+        result = asyncio.run(_handle_tile_proxy(_make_tile_request("10", "512", "512", plugin)))
+
+        assert result.status == 200
+        assert not (tmp_path / "10" / "512" / "512.png").exists()
+        assert plugin._tile_cache_bytes == 0
 
     def test_writes_when_under_limit(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.server import _handle_tile_proxy
 
-        tile_data = b"\x89PNG tile"
+        tile_data = PNG_SIGNATURE + b"tile"
         plugin = MagicMock()
         plugin._tile_session = MagicMock()
         plugin._tile_cache_dir = str(tmp_path)
@@ -300,6 +333,7 @@ class TestCacheSizeEnforcement:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
+        resp_mock.headers = {"Content-Type": "image/png"}
         resp_mock.content = MagicMock()
         resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
@@ -318,7 +352,7 @@ class TestCacheSizeEnforcement:
     def test_increments_cache_bytes(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.server import _handle_tile_proxy
 
-        tile_data = b"\x89PNG tile data here"
+        tile_data = PNG_SIGNATURE + b"tile data here"
         plugin = MagicMock()
         plugin._tile_session = MagicMock()
         plugin._tile_cache_dir = str(tmp_path)
@@ -328,6 +362,7 @@ class TestCacheSizeEnforcement:
 
         resp_mock = AsyncMock()
         resp_mock.status = 200
+        resp_mock.headers = {"Content-Type": "image/png"}
         resp_mock.content = MagicMock()
         resp_mock.content.read = AsyncMock(return_value=tile_data)
         ctx = AsyncMock()
@@ -352,6 +387,69 @@ class TestNoSession:
 
         with pytest.raises(aiohttp.web.HTTPServiceUnavailable):
             asyncio.run(_handle_tile_proxy(req))
+
+
+@pytest.mark.asyncio
+async def test_proxy_and_prefetch_share_one_concurrent_miss_lock(tmp_path):
+    from reticulumpi.builtin_plugins.web_dashboard.server import _handle_tile_proxy
+    from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import _prefetch_one_tile
+
+    payload = PNG_SIGNATURE + b"shared"
+    read_started = asyncio.Event()
+    release_read = asyncio.Event()
+
+    async def read(_limit):
+        read_started.set()
+        await release_read.wait()
+        return payload
+
+    response = SimpleNamespace(
+        status=200,
+        headers={"Content-Type": "image/png"},
+        content=SimpleNamespace(read=read),
+    )
+
+    class ResponseContext:
+        async def __aenter__(self):
+            return response
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    session = SimpleNamespace(get=MagicMock(side_effect=lambda _url: ResponseContext()))
+    plugin = SimpleNamespace(
+        _tile_session=session,
+        _tile_cache_dir=str(tmp_path),
+        _tile_upstream="https://tile.example.com/{z}/{x}/{y}.png",
+        _tile_max_tile_bytes=1024,
+        _tile_max_bytes=1024,
+        _tile_cache_bytes=0,
+        _tile_locks={},
+    )
+    request = _make_tile_request("1", "0", "0", plugin)
+
+    proxy = asyncio.create_task(_handle_tile_proxy(request))
+    await asyncio.wait_for(read_started.wait(), timeout=1)
+    prefetch = asyncio.create_task(
+        _prefetch_one_tile(
+            plugin,
+            session,
+            plugin._tile_upstream,
+            1,
+            0,
+            0,
+            1024,
+        )
+    )
+    await asyncio.sleep(0)
+    release_read.set()
+
+    proxy_response, prefetch_outcome = await asyncio.gather(proxy, prefetch)
+
+    assert proxy_response.status == 200
+    assert prefetch_outcome == "cached"
+    assert session.get.call_count == 1
+    assert plugin._tile_locks == {}
 
 
 class TestBboxConfigValidation:

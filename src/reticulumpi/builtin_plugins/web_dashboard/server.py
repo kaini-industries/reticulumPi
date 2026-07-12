@@ -4,15 +4,41 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import os
-import tempfile
+import secrets
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.auth import _normalize_ip
+from reticulumpi.builtin_plugins.web_dashboard.assets import (
+    read_static_bytes,
+    read_static_text,
+    render_template,
+    shell_asset_urls,
+    static_content_type,
+)
+from reticulumpi.builtin_plugins.web_dashboard.keys import (
+    AUTH_TOKEN_KEY,
+    LOCAL_API_KEY,
+    PLUGIN_KEY,
+    WS_COMPRESS_KEY,
+    get_app_plugin,
+)
+from reticulumpi.builtin_plugins.web_dashboard.operational_metrics import (
+    record_tile_hit,
+    record_tile_miss,
+    record_tile_reject,
+)
+from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import (
+    PNG_SIGNATURE,
+    _TileLockLease,
+    is_png_content_type,
+    store_tile,
+)
 
 if TYPE_CHECKING:
     from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
@@ -36,17 +62,61 @@ PUBLIC_PATHS = frozenset(
 # through while denying anonymous use of the node as an open OSM proxy.
 PUBLIC_PREFIXES = ("/static/",)
 
-# net-009: When allow_localhost_api is enabled, only these read-only GET
-# endpoints are accessible without authentication.  Keeps the bypass narrow
-# so that internal services (NomadNet pages, scripts) can read status but
-# cannot mutate state.
+# The local-service bearer token is restricted to these read-only GET routes.
+# Internal services (NomadNet pages, scripts) cannot mutate state or upgrade
+# to WebSockets with this credential.
 LOCALHOST_ALLOWED_PATHS = frozenset(
     {
         "/api/status",
-        "/api/health",
-        "/api/nodes",
+        "/api/node",
         "/api/interfaces",
         "/api/version",
+    }
+)
+
+
+def _request_is_secure(request: aiohttp.web.Request, plugin: Any | None = None) -> bool:
+    """Return true for direct HTTPS or an explicitly trusted HTTPS proxy hop."""
+
+    if request.scheme == "https":
+        return True
+    if plugin is None:
+        try:
+            plugin = get_app_plugin(request.app)
+        except (KeyError, TypeError):
+            return False
+    config = getattr(plugin, "config", {})
+    if not isinstance(config, dict):
+        return False
+    proxy = config.get("reverse_proxy", {})
+    if not isinstance(proxy, dict) or not proxy.get("enabled", False):
+        return False
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    if not isinstance(forwarded_proto, str) or forwarded_proto.strip().lower() != "https":
+        return False
+    try:
+        remote = ipaddress.ip_address(_normalize_ip(request.remote or ""))
+    except ValueError:
+        return False
+    for raw_network in proxy.get("trusted_networks", []):
+        try:
+            if remote in ipaddress.ip_network(raw_network, strict=False):
+                return True
+        except (TypeError, ValueError):
+            # Configuration validation rejects these at startup. Keep request
+            # handling fail closed if a test double or runtime mutation bypasses it.
+            continue
+    return False
+
+
+_SENSITIVE_NO_STORE_PATHS = frozenset(
+    {
+        "/api/auth/login",
+        "/api/auth/password",
+        "/auth/login",
+        "/api/auth/logout",
+        "/api/config",
+        "/api/services/restart",
     }
 )
 
@@ -64,18 +134,20 @@ def create_app(plugin: WebDashboardPlugin) -> aiohttp.web.Application:
             compression_middleware,
             security_headers_middleware,
             auth_middleware_factory(plugin),
-        ]
+        ],
+        client_max_size=64 * 1024,
     )
-    app["plugin"] = plugin
-    app["ws_compress"] = plugin.config.get("ws_compress", True)
+    app[PLUGIN_KEY] = plugin
+    app[WS_COMPRESS_KEY] = plugin.config.get("ws_compress", True)
+    app.on_response_prepare.append(_on_response_prepare)
 
     # API and WebSocket routes
     setup_api_routes(app)
     setup_websocket_routes(app)
 
-    # Static files and root redirect
-    static_dir = os.path.join(os.path.dirname(__file__), "static")
-    app.router.add_static("/static/", static_dir, show_index=False)
+    # Package resources are served explicitly so installed wheels do not
+    # depend on a source checkout or on ``__file__`` filesystem layout.
+    app.router.add_get("/static/{asset_path:.*}", _serve_static)
 
     # Serve login.html and index.html directly
     app.router.add_get("/login.html", _serve_login)
@@ -180,29 +252,56 @@ async def security_headers_middleware(
     handler,
 ) -> aiohttp.web.StreamResponse:
     """Add security headers and API version to all responses."""
+    response = await handler(request)
+    _apply_security_headers(request, response)
+    return response
+
+
+def _apply_security_headers(
+    request: aiohttp.web.Request,
+    response: aiohttp.web.StreamResponse,
+) -> None:
+    """Apply headers to normal responses and framework-generated errors alike."""
     from reticulumpi.builtin_plugins.web_dashboard.api import API_VERSION
 
-    response = await handler(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
+        "script-src-attr 'none'; "
         "connect-src 'self' https://api.planespotters.net; "
         "worker-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self'; "
+        "style-src-elem 'self'; "
+        "style-src-attr 'none'; "
         "img-src 'self' data: https://*.tile.openstreetmap.org"
         " https://api.planespotters.net https://*.plnspttrs.net; "
-        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
     )
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     # HSTS only over HTTPS — sending it on plain HTTP is meaningless and could
     # wedge a client if they later downgrade. No preload/includeSubDomains.
-    if request.scheme == "https":
+    if _request_is_secure(request):
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
     if request.path.startswith("/api/"):
         response.headers["Api-Version"] = API_VERSION
-    return response
+    if request.path in _SENSITIVE_NO_STORE_PATHS or request.path.startswith(
+        "/api/services/restart/"
+    ):
+        response.headers["Cache-Control"] = "private, no-store"
+    elif request.path.startswith("/api/") and response.status >= 400:
+        response.headers["Cache-Control"] = "private, no-store"
+    elif request.path.startswith("/static/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+
+
+async def _on_response_prepare(
+    request: aiohttp.web.Request,
+    response: aiohttp.web.StreamResponse,
+) -> None:
+    """Ensure redirects and HTTP exceptions receive the security policy too."""
+    _apply_security_headers(request, response)
 
 
 def auth_middleware_factory(plugin: WebDashboardPlugin):
@@ -222,21 +321,6 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
             if path.startswith(prefix):
                 return await handler(request)
 
-        # Allow localhost requests for internal services (NomadNet pages, scripts).
-        # net-004: normalise remote IP so IPv4-mapped-IPv6 (::ffff:127.0.0.1)
-        # is handled consistently.
-        # net-009: only whitelisted read-only GET paths are allowed.
-        if plugin.config.get("allow_localhost_api", False):
-            normalized_remote = _normalize_ip(request.remote or "")
-            if normalized_remote in ("127.0.0.1", "::1"):
-                if request.method == "GET" and path in LOCALHOST_ALLOWED_PATHS:
-                    return await handler(request)
-                log.debug("Localhost bypass denied: %s %s", request.method, path)
-                raise aiohttp.web.HTTPForbidden(
-                    text='{"ok": false, "error": "Not allowed via localhost bypass", "code": 403}',
-                    content_type="application/json",
-                )
-
         # Extract token from Authorization header or cookie
         token = _extract_token(request)
         if token and plugin._auth.validate_token(token):
@@ -248,7 +332,39 @@ def auth_middleware_factory(plugin: WebDashboardPlugin):
                         text='{"ok": false, "error": "Missing X-Requested-With header", "code": 403}',
                         content_type="application/json",
                     )
-            request["token"] = token
+            request[AUTH_TOKEN_KEY] = token
+            if (
+                plugin._auth.password_change_required
+                and (path.startswith("/api/") or path.startswith("/ws/"))
+                and path not in {"/api/auth/logout", "/api/auth/password", "/api/version"}
+            ):
+                raise aiohttp.web.HTTPPreconditionRequired(
+                    text=(
+                        '{"ok": false, "error": "Password change required", '
+                        '"code": 428, "password_change_required": true}'
+                    ),
+                    content_type="application/json",
+                )
+            return await handler(request)
+
+        # Local service access is deliberately narrower than a dashboard
+        # session: loopback-only, read-only, and limited to a fixed route set.
+        # It is checked *after* normal session auth so authenticated localhost
+        # users can use every dashboard route.
+        local_api = plugin.config.get("local_api", {})
+        local_enabled = bool(local_api.get("enabled")) if isinstance(local_api, dict) else False
+        local_token = getattr(plugin, "_local_api_token", None)
+        normalized_remote = _normalize_ip(request.remote or "")
+        if (
+            local_enabled
+            and local_token
+            and normalized_remote in ("127.0.0.1", "::1")
+            and request.method == "GET"
+            and path in LOCALHOST_ALLOWED_PATHS
+            and token
+            and secrets.compare_digest(token, local_token)
+        ):
+            request[LOCAL_API_KEY] = True
             return await handler(request)
 
         # Not authenticated
@@ -272,30 +388,61 @@ def _extract_token(request: aiohttp.web.Request) -> str | None:
     return request.cookies.get("session")
 
 
-async def _serve_login(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
-    static_dir = os.path.join(os.path.dirname(__file__), "static")
-    return aiohttp.web.FileResponse(os.path.join(static_dir, "login.html"))
+async def _serve_static(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """Serve a validated resource from the installed dashboard package."""
+    path = request.match_info.get("asset_path", "")
+    if path == "version.js":
+        from reticulumpi import __version__
+
+        return aiohttp.web.Response(
+            text=f"var APP_VERSION = {json.dumps(__version__)};\n",
+            content_type="application/javascript",
+            headers={"Cache-Control": "no-cache"},
+        )
+    try:
+        body = read_static_bytes(path)
+        content_type = static_content_type(path)
+    except (FileNotFoundError, ValueError):
+        raise aiohttp.web.HTTPNotFound()
+    return aiohttp.web.Response(body=body, content_type=content_type)
 
 
-async def _serve_spectrum(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
-    static_dir = os.path.join(os.path.dirname(__file__), "static")
-    return aiohttp.web.FileResponse(os.path.join(static_dir, "spectrum.html"))
+async def _serve_login(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    return aiohttp.web.Response(
+        text=render_template("login.html"),
+        content_type="text/html",
+        headers={"Cache-Control": "private, no-cache"},
+    )
+
+
+async def _serve_spectrum(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    return aiohttp.web.Response(
+        text=render_template("spectrum.html"),
+        content_type="text/html",
+        headers={"Cache-Control": "private, no-cache"},
+    )
 
 
 async def _serve_sw(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    plugin = request.app["plugin"]
+    plugin = get_app_plugin(request.app)
     max_entries = int(plugin.config.get("tile_cache_entries", 5000))
-    static_dir = os.path.join(os.path.dirname(__file__), "static")
-    with open(os.path.join(static_dir, "sw.js")) as f:
-        content = f.read()
+    content = read_static_text("sw.js")
     from reticulumpi import __version__
 
-    content = content.replace(
-        "var MAX_ENTRIES = 5000;",
-        f"var MAX_ENTRIES = {max_entries};",
-    ).replace(
-        "var SHELL_CACHE = 'rpi-shell-' + APP_VERSION;",
-        f"var SHELL_CACHE = 'rpi-shell-v{__version__}';",
+    marker = "  /*__RPI_BUILT_ASSETS__*/"
+    if marker not in content:
+        raise aiohttp.web.HTTPInternalServerError(text="Invalid packaged service worker")
+    asset_entries = ",\n".join(f"  {json.dumps(url)}" for url in shell_asset_urls())
+    content = (
+        content.replace(marker, asset_entries)
+        .replace(
+            "var MAX_ENTRIES = 5000;",
+            f"var MAX_ENTRIES = {max_entries};",
+        )
+        .replace(
+            "var SHELL_CACHE = 'rpi-shell-' + APP_VERSION;",
+            f"var SHELL_CACHE = 'rpi-shell-v{__version__}';",
+        )
     )
     return aiohttp.web.Response(
         text=content,
@@ -306,9 +453,10 @@ async def _serve_sw(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
 async def _handle_tile_proxy(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /tiles/{z}/{x}/{y}.png — proxy OSM tiles with local disk cache."""
-    plugin = request.app["plugin"]
+    plugin = get_app_plugin(request.app)
     session = getattr(plugin, "_tile_session", None)
     if not session:
+        record_tile_reject("unavailable")
         raise aiohttp.web.HTTPServiceUnavailable(text="Tile proxy not initialised")
 
     try:
@@ -321,6 +469,7 @@ async def _handle_tile_proxy(request: aiohttp.web.Request) -> aiohttp.web.Respon
         if not (0 <= x_int <= max_coord) or not (0 <= y_int <= max_coord):
             raise ValueError
     except ValueError:
+        record_tile_reject("invalid_request")
         raise aiohttp.web.HTTPBadRequest(text="Invalid tile coordinates")
 
     z = str(z_int)
@@ -331,56 +480,141 @@ async def _handle_tile_proxy(request: aiohttp.web.Request) -> aiohttp.web.Respon
     tile_path = os.path.join(cache_dir, z, x, f"{y}.png")
 
     if os.path.isfile(tile_path):
+        record_tile_hit()
         return aiohttp.web.FileResponse(
             tile_path,
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers={"Cache-Control": "private, max-age=86400"},
         )
 
-    upstream = getattr(plugin, "_tile_upstream", "")
-    url = upstream.replace("{z}", z).replace("{x}", x).replace("{y}", y)
-    url = url.replace("{s}", "a")
+    locks = getattr(plugin, "_tile_locks", None)
+    if not isinstance(locks, dict):
+        locks = plugin._tile_locks = {}
 
-    try:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise aiohttp.web.HTTPBadGateway(text=f"Upstream returned {resp.status}")
-            data = await resp.content.read(512_000)
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        raise aiohttp.web.HTTPGatewayTimeout(text="Upstream tile fetch failed")
+    async with _TileLockLease(locks, tile_path):
+        # A concurrent request may have populated the file while this request
+        # waited, so never fetch or account for the same tile twice.
+        if os.path.isfile(tile_path):
+            record_tile_hit()
+            return aiohttp.web.FileResponse(
+                tile_path,
+                headers={"Cache-Control": "private, max-age=86400"},
+            )
 
-    max_bytes = getattr(plugin, "_tile_max_bytes", 0)
-    cur_bytes = getattr(plugin, "_tile_cache_bytes", 0)
-    if max_bytes <= 0 or cur_bytes + len(data) <= max_bytes:
-        tile_dir = os.path.dirname(tile_path)
-        os.makedirs(tile_dir, exist_ok=True)
+        record_tile_miss()
+        upstream = getattr(plugin, "_tile_upstream", "")
+        url = upstream.replace("{z}", z).replace("{x}", x).replace("{y}", y)
+        url = url.replace("{s}", "a")
+        max_tile_bytes = getattr(plugin, "_tile_max_tile_bytes", 512_000)
+        if not isinstance(max_tile_bytes, int) or max_tile_bytes <= 0:
+            max_tile_bytes = 512_000
+
         try:
-            fd, tmp_path = tempfile.mkstemp(dir=tile_dir, suffix=".tmp")
-            try:
-                os.write(fd, data)
-            finally:
-                os.close(fd)
-            os.rename(tmp_path, tile_path)
-            plugin._tile_cache_bytes = getattr(plugin, "_tile_cache_bytes", 0) + len(data)
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    record_tile_reject("upstream")
+                    raise aiohttp.web.HTTPBadGateway(text=f"Upstream returned {resp.status}")
+                if not is_png_content_type(resp.headers.get("Content-Type", "")):
+                    record_tile_reject("invalid_content")
+                    raise aiohttp.web.HTTPBadGateway(text="Upstream tile is not image/png")
+                data = await resp.content.read(max_tile_bytes + 1)
+                if not isinstance(data, (bytes, bytearray)):
+                    # Response-like test doubles and alternate clients may
+                    # expose only ``read()``; enforce the same post-read cap.
+                    data = await resp.read()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            record_tile_reject("upstream")
+            raise aiohttp.web.HTTPGatewayTimeout(text="Upstream tile fetch failed")
+
+        if len(data) > max_tile_bytes:
+            record_tile_reject("oversize")
+            raise aiohttp.web.HTTPBadGateway(text="Upstream tile exceeds configured size limit")
+        if not data.startswith(PNG_SIGNATURE):
+            record_tile_reject("invalid_content")
+            raise aiohttp.web.HTTPBadGateway(text="Upstream returned invalid tile content")
+
+        try:
+            if not await store_tile(plugin, tile_path, bytes(data)):
+                record_tile_reject("capacity")
         except OSError:
-            pass
+            record_tile_reject("write_error")
 
     return aiohttp.web.Response(
         body=data,
         content_type="image/png",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "private, max-age=86400"},
     )
 
 
 async def _serve_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    plugin = request.app["plugin"]
-    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    plugin = get_app_plugin(request.app)
+    if plugin._auth.password_change_required and request.query.get("password_change") != "required":
+        raise aiohttp.web.HTTPFound("/?password_change=required")
+    html = render_template(
+        "index.html",
+        ready_features=_ready_dashboard_features(plugin),
+    )
     tp = plugin.config.get("tile_proxy", {})
     if tp.get("enabled"):
-        with open(os.path.join(static_dir, "index.html")) as f:
-            html = f.read()
         html = html.replace(
             "</head>",
             '<meta name="rpi-tile-url" content="/tiles/{z}/{x}/{y}.png">\n</head>',
         )
-        return aiohttp.web.Response(text=html, content_type="text/html")
-    return aiohttp.web.FileResponse(os.path.join(static_dir, "index.html"))
+    return aiohttp.web.Response(
+        text=html,
+        content_type="text/html",
+        headers={"Cache-Control": "private, no-cache"},
+    )
+
+
+def _ready_dashboard_features(plugin: Any) -> frozenset[str]:
+    """Resolve built-in feature visibility before the browser's first paint."""
+
+    core = getattr(plugin, "app", None)
+    plugins = getattr(core, "plugins", {})
+    if not isinstance(plugins, dict):
+        plugins = {}
+
+    def ready(name: str) -> bool:
+        getter = getattr(type(core), "get_ready_plugin", None)
+        if callable(getter):
+            return getter(core, name) is not None
+        instance = plugins.get(name)
+        state = getattr(instance, "plugin_state", None)
+        value = getattr(state, "value", state)
+        if value is not None:
+            return value == "ready"
+        return bool(getattr(instance, "_active", False))
+
+    dependencies = {
+        "messages": ("messaging_hub",),
+        "adsb": ("adsb_radar",),
+        "space": ("space_tracker",),
+        "radio": ("fm_receiver",),
+        "mesh": ("network_map", "mesh_telemetry"),
+        "routing": ("connectivity_monitor",),
+        "mesh-bridge": ("mesh_bridge",),
+        "meshtastic": ("meshtastic_gateway",),
+        "meshcore": ("meshcore_gateway", "meshcore_observer"),
+        "gps": ("gps_telemetry",),
+        "ntp": ("ntp_server",),
+        "link-tester": ("lora_link_tester",),
+        "hotspot": ("hotspot_monitor", "captive_portal"),
+        "weather-alert": ("weather_alert",),
+        "ais": ("ais_receiver",),
+        "acars": ("acars_decoder",),
+        "radiosonde": ("radiosonde_tracker",),
+        "noaa": ("noaa_apt_decoder",),
+        "map": (
+            "meshtastic_gateway",
+            "meshcore_gateway",
+            "meshcore_observer",
+            "node_location_tracker",
+            "gps_telemetry",
+            "mesh_telemetry",
+        ),
+    }
+    return frozenset(
+        feature
+        for feature, providers in dependencies.items()
+        if any(ready(provider) for provider in providers)
+    )

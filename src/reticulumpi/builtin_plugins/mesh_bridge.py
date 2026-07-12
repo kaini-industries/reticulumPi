@@ -551,7 +551,7 @@ class MeshBridge(PluginBase):
         bridge_origin: dict,
     ) -> dict[str, Any]:
         """Send via messaging_hub (preferred) or fall back to gateway direct."""
-        hub = self.app.get_plugin("messaging_hub")
+        hub = self.get_ready_plugin("messaging_hub")
         kwargs: dict[str, Any] = {
             "msg_type": msg_type,
             "metadata": {"bridge_origin": bridge_origin},
@@ -567,7 +567,7 @@ class MeshBridge(PluginBase):
                 return hub.send_message(transport, text, destination, **kwargs)
 
             gw_name = f"{transport}_gateway"
-            gw = self.app.get_plugin(gw_name)
+            gw = self.get_ready_plugin(gw_name)
             if gw is None or not hasattr(gw, "send_message"):
                 return {"sent": False, "reason": "no gateway"}
             if transport == "meshtastic":

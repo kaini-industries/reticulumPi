@@ -11,8 +11,10 @@ import functools
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -655,11 +657,55 @@ class TestWebsocketAuth:
         with patch("aiohttp.web.WebSocketResponse", side_effect=capture_ws):
             asyncio.run(websocket_metrics(request))
 
-        # The authenticated WS (second call) should have heartbeat=60.0
-        # First call is for auth failure/max clients, second for success
         assert any(kw.get("heartbeat") == 60.0 for kw in ws_instances)
-
         _ws_clients.clear()
+
+    def test_inbound_frame_size_is_bounded(self):
+        request = _make_ws_request(cookie_token="valid", auth_valid=True)
+        _ws_clients.clear()
+        kwargs_seen = []
+
+        def capture_ws(*args, **kwargs):
+            ws = MagicMock()
+            ws.prepare = AsyncMock()
+            ws.__aiter__ = lambda self: _empty_async_iter()
+            kwargs_seen.append(kwargs)
+            return ws
+
+        with patch("aiohttp.web.WebSocketResponse", side_effect=capture_ws):
+            asyncio.run(websocket_metrics(request))
+
+        assert any(kwargs.get("max_msg_size") == 64 * 1024 for kwargs in kwargs_seen)
+
+
+class TestWebsocketRevocation:
+    def test_logout_closes_only_matching_session_sockets(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        matching = MagicMock()
+        matching.close = AsyncMock()
+        other = MagicMock()
+        other.close = AsyncMock()
+        wsh._ws_tokens.clear()
+        wsh._ws_tokens[matching] = "revoked"
+        wsh._ws_tokens[other] = "still-valid"
+
+        count = asyncio.run(wsh.close_websockets_for_token("revoked"))
+
+        assert count == 1
+        matching.close.assert_awaited_once()
+        other.close.assert_not_called()
+        wsh._ws_tokens.clear()
+
+
+class TestDiffTombstones:
+    def test_removed_plugin_keys_are_emitted(self):
+        from reticulumpi.builtin_plugins.web_dashboard.websocket_handler import (
+            _diff_payload,
+        )
+
+        diff = _diff_payload({"metrics": {"cpu": 1}}, {"metrics": {"cpu": 1}, "gps": {}})
+        assert diff == {"_removed": ["gps"]}
 
 
 # ── Broadcast lifecycle tests ──────────────────────────────────────
@@ -759,6 +805,7 @@ class TestBroadcastDataCollection:
         plugin.app.reticulum = MagicMock()
         plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
         plugin.app.plugins = plugins or {}
+        plugin.app.get_plugin.side_effect = plugin.app.plugins.get
         plugin.app.internet_probe = None
         return plugin
 
@@ -800,7 +847,7 @@ class TestBroadcastDataCollection:
         assert "timestamp" in data
         assert "interfaces" in data["data"]
         assert "plugins" in data["data"]
-        assert "mesh" in data["data"]
+        assert "mesh" not in data["data"]
 
         _ws_clients.clear()
 
@@ -1875,9 +1922,7 @@ class TestBackgroundTaskTracking:
 
         async def run():
             wsh_module._bg_tasks.clear()
-            with patch.object(
-                wsh_module, "_push_to_clients", new_callable=AsyncMock
-            ) as push:
+            with patch.object(wsh_module, "_push_to_clients", new_callable=AsyncMock) as push:
                 _schedule_push("offgrid_mode_changed", {"enabled": True})
                 assert len(wsh_module._bg_tasks) == 1
                 # Drain the scheduled task.
@@ -1903,6 +1948,7 @@ class TestCollectBroadcastDataDirect:
         plugin.app.reticulum = MagicMock()
         plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
         plugin.app.plugins = broadcast_plugins or {}
+        plugin.app.get_plugin.side_effect = plugin.app.plugins.get
         return plugin
 
     @staticmethod
@@ -1919,7 +1965,9 @@ class TestCollectBroadcastDataDirect:
         data, ts, ver = _collect_broadcast_data(plugin, 1, 0, 0)
         assert "plugins" in data
         assert "interfaces" in data
-        assert "mesh" in data
+        assert "mesh" not in data
+        assert ts == 0
+        assert ver == 0
 
     def test_mesh_version_bump_on_new_announces(self):
         network_map = self._mock_broadcast_plugin(
@@ -1969,6 +2017,27 @@ class TestCollectBroadcastDataDirect:
         assert data["mesh"]["alerts_sent"] == 3
         assert "alerts" not in data
 
+    def test_non_ready_plugins_are_reported_but_never_polled(self):
+        starting = self._mock_broadcast_plugin(1, "mesh", {"node_count": 99})
+
+        class LifecycleApp:
+            def __init__(self):
+                self.plugins = {"network_map": starting}
+                self.reticulum = MagicMock()
+                self.reticulum.get_interface_stats.return_value = {"interfaces": []}
+                self.internet_probe = None
+
+            def get_ready_plugin(self, _name):
+                return None
+
+        plugin = SimpleNamespace(app=LifecycleApp(), config={"metrics_interval": 5})
+
+        data, _, _ = _collect_broadcast_data(plugin, 1, 0, 0)
+
+        assert data["plugins"] == {"network_map": {"active": True}}
+        assert "mesh" not in data
+        starting.broadcast_snapshot.assert_not_called()
+
 
 # ── Budget / timeout tests ───────────────────────────────────────
 
@@ -1998,6 +2067,7 @@ class TestCollectBroadcastBudget:
         plugin.app.reticulum = MagicMock()
         plugin.app.reticulum.get_interface_stats.return_value = {"interfaces": []}
         plugin.app.plugins = broadcast_plugins or {}
+        plugin.app.get_plugin.side_effect = plugin.app.plugins.get
         return plugin
 
     def test_skips_expensive_plugins_when_budget_exceeded(self):
@@ -2124,6 +2194,7 @@ class TestHandleWsSpectrumPreset:
     def _make_plugin(self, scanner=None):
         plugin = MagicMock()
         plugin.app.plugins.get.return_value = scanner
+        plugin.app.get_plugin.return_value = scanner
         plugin._auth.validate_token.return_value = True
         return plugin
 
@@ -2159,6 +2230,29 @@ class TestHandleWsSpectrumPreset:
         assert result is not None
         assert result["type"] == "spectrum_preset_error"
         assert "boom" in result["error"]
+
+    def test_starting_scanner_cannot_receive_commands(self):
+        scanner = MagicMock()
+
+        class LifecycleApp:
+            plugins = {"spectrum_scanner": scanner}
+
+            def get_ready_plugin(self, _name):
+                return None
+
+        plugin = SimpleNamespace(
+            app=LifecycleApp(),
+            _auth=SimpleNamespace(validate_token=lambda _token: True),
+        )
+
+        result = _handle_ws_command(
+            {"action": "spectrum_switch_preset", "preset": "aviation"},
+            plugin,
+            token="valid",
+        )
+
+        assert result is None
+        scanner.switch_preset.assert_not_called()
 
 
 class TestHandleWsPingPong:
@@ -2661,7 +2755,7 @@ class TestWarmCacheLifecycle:
         assert wsh._last_hb_summary_ts == 0.0
 
     def test_broadcast_executor_created_with_two_workers(self):
-        """_start_broadcast_task creates ThreadPoolExecutor with max_workers=2."""
+        """Startup creates the bounded daemon broadcast pool with two workers."""
         import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
 
         plugin = MagicMock()
@@ -2705,6 +2799,41 @@ class TestWarmCacheLifecycle:
                 wsh._spectrum_task = None
 
         asyncio.run(run())
+
+    def test_hung_warm_collection_cannot_delay_startup_or_shutdown(self):
+        import reticulumpi.builtin_plugins.web_dashboard.websocket_handler as wsh
+
+        entered = threading.Event()
+        release = threading.Event()
+        plugin = MagicMock()
+        plugin.config = {
+            "metrics_interval": 5,
+            "broadcast_warm_timeout": 0.02,
+            "broadcast_callback_timeout_ms": 20,
+        }
+        plugin.app.event_bus = MagicMock()
+        app = MagicMock()
+        app.__getitem__ = lambda self, key: plugin
+
+        def hung_collect(*_args, **_kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return {}, 0, 0
+
+        async def run():
+            started = time.monotonic()
+            with patch.object(wsh, "_collect_broadcast_data", side_effect=hung_collect):
+                await wsh._start_broadcast_task(app)
+                assert entered.wait(timeout=1)
+                assert time.monotonic() - started < 0.2
+                stopped = time.monotonic()
+                await wsh._stop_broadcast_task(app)
+                assert time.monotonic() - stopped < 0.5
+
+        try:
+            asyncio.run(run())
+        finally:
+            release.set()
 
 
 class TestWarmCacheSummaryLog:
@@ -2870,6 +2999,7 @@ class TestRadioCommands:
     def _make_plugin(self, fm=None):
         plugin = MagicMock()
         plugin.app.plugins = {"fm_receiver": fm} if fm else {}
+        plugin.app.get_plugin.side_effect = plugin.app.plugins.get
         plugin._auth.validate_token.return_value = True
         return plugin
 
@@ -2906,9 +3036,7 @@ class TestRadioCommands:
     def test_tune_missing_frequency(self):
         fm = MagicMock()
         plugin = self._make_plugin(fm)
-        result = _handle_ws_command(
-            {"action": "radio_tune"}, plugin, token="valid"
-        )
+        result = _handle_ws_command({"action": "radio_tune"}, plugin, token="valid")
         assert result["type"] == "radio_error"
         assert "frequency_mhz required" in result["error"]
         fm.tune.assert_not_called()
@@ -2997,9 +3125,7 @@ class TestRadioCommands:
         fm = MagicMock()
         fm.set_gain.return_value = {"gain_db": 20}
         plugin = self._make_plugin(fm)
-        result = _handle_ws_command(
-            {"action": "radio_gain", "gain_db": 20}, plugin, token="valid"
-        )
+        result = _handle_ws_command({"action": "radio_gain", "gain_db": 20}, plugin, token="valid")
         assert result["type"] == "radio_gain"
         assert result["gain_db"] == 20
         fm.set_gain.assert_called_once_with(20.0)
@@ -3008,9 +3134,7 @@ class TestRadioCommands:
         fm = MagicMock()
         fm.set_squelch.return_value = {"level": 5}
         plugin = self._make_plugin(fm)
-        result = _handle_ws_command(
-            {"action": "radio_squelch", "level": 5}, plugin, token="valid"
-        )
+        result = _handle_ws_command({"action": "radio_squelch", "level": 5}, plugin, token="valid")
         assert result["type"] == "radio_squelch"
         fm.set_squelch.assert_called_once_with(5)
 
@@ -3113,9 +3237,7 @@ class TestRadioCommands:
         fm = MagicMock()
         fm.start_recording.return_value = {"error": "Already recording"}
         plugin = self._make_plugin(fm)
-        result = _handle_ws_command(
-            {"action": "radio_record_start"}, plugin, token="valid"
-        )
+        result = _handle_ws_command({"action": "radio_record_start"}, plugin, token="valid")
         assert result["type"] == "radio_error"
         assert "Already recording" in result["error"]
 
@@ -3123,9 +3245,7 @@ class TestRadioCommands:
         fm = MagicMock()
         fm.stop_recording.return_value = {"recording": False, "file": "rec_001.wav"}
         plugin = self._make_plugin(fm)
-        result = _handle_ws_command(
-            {"action": "radio_record_stop"}, plugin, token="valid"
-        )
+        result = _handle_ws_command({"action": "radio_record_stop"}, plugin, token="valid")
         assert result["type"] == "radio_record_stopped"
         assert result["recording"] is False
         fm.stop_recording.assert_called_once()
@@ -3134,9 +3254,7 @@ class TestRadioCommands:
         """Unknown radio_* sub-action returns None when fm_receiver exists."""
         fm = MagicMock()
         plugin = self._make_plugin(fm)
-        result = _handle_ws_command(
-            {"action": "radio_nonexistent"}, plugin, token="valid"
-        )
+        result = _handle_ws_command({"action": "radio_nonexistent"}, plugin, token="valid")
         assert result is None
 
 

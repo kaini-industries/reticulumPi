@@ -138,6 +138,7 @@
     _bindEvents();
     _buildBandSelector();
     _restoreLocals();
+    _setExpanded(_body && !_body.classList.contains('hidden') && !_body.hidden);
     _resolved = true;
     _section.style.display = '';
     return true;
@@ -145,12 +146,12 @@
 
   // -- Event binding --------------------------------------------------------
   function _bindEvents() {
-    if (_toggle) _toggle.addEventListener('click', function () {
-      _expanded = !_expanded;
-      if (_body) _body.classList.toggle('hidden', !_expanded);
-      var chev = _toggle.querySelector('.chevron');
-      if (chev) chev.innerHTML = _expanded ? '&#9662;' : '&#9656;';
-    });
+    if (_toggle && !_toggle.dataset.rpiRadioDisclosureBound) {
+      _toggle.dataset.rpiRadioDisclosureBound = 'true';
+      _toggle.addEventListener('click', function () {
+        _setExpanded(!_expanded);
+      });
+    }
 
     if (_playBtn) _playBtn.addEventListener('click', _onPlayStop);
 
@@ -298,6 +299,21 @@
     }
   }
 
+  function _setExpanded(expanded) {
+    _expanded = !!expanded;
+    if (_body) {
+      _body.classList.toggle('hidden', !_expanded);
+      _body.hidden = !_expanded;
+    }
+    if (_toggle) {
+      _toggle.classList.toggle('open', _expanded);
+      _toggle.setAttribute('aria-expanded', _expanded ? 'true' : 'false');
+      _toggle.title = _expanded ? 'Click to collapse' : 'Click to expand';
+      var chev = _toggle.querySelector('.chevron');
+      if (chev) chev.innerHTML = _expanded ? '&#9662;' : '&#9656;';
+    }
+  }
+
   function _debounce(fn, ms) {
     var t;
     return function () {
@@ -435,6 +451,10 @@
     var found = _findFavorite(_lastData.frequency_mhz);
     _favBtn.innerHTML = found ? '&#9733;' : '&#9734;';
     _favBtn.classList.toggle('radio-fav-active', !!found);
+    _favBtn.setAttribute(
+      'aria-label',
+      found ? 'Remove current frequency from favorites' : 'Add current frequency to favorites'
+    );
   }
 
   function _renderFavorites() {
@@ -1237,5 +1257,6 @@
   }
 
   R.onRadioResponse = _onRadioResponse;
+  R.initRadioFeature = _resolveDom;
   R.updateRadio = update;
 })();

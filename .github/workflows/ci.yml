@@ -3,42 +3,862 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*.*.*"]
   pull_request:
     branches: [main]
 
-jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install ruff
-      - run: ruff check src/ tests/ plugins/
+permissions:
+  contents: read
 
-  test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Audit hash-locked production profiles
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: >-
+            constraints/production-universal-core.txt
+            constraints/production-universal-dashboard-nomadnet.txt
+            constraints/production-universal-all-features.txt
+          require-hashes: true
+          disable-pip: true
+          no-deps: true
+
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Verify committed dashboard build output
+        run: |
+          npm ci
+          npm run check:dashboard
+      - name: Install project tooling
+        run: python -m pip install ".[dev,dashboard]"
+      - run: ruff check src/ tests/ plugins/ tools/
+      - run: ruff format --check src/ tests/ plugins/ tools/
+      - name: Validate documentation and CLI help snapshots
+        run: python tools/check_docs.py
+      - name: Validate shell, YAML, and Compose files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck systemd sudo
+          shellcheck scripts/*.sh docker/entrypoint.sh tools/*.sh
+          bash -n scripts/*.sh docker/entrypoint.sh tools/*.sh
+          find src/reticulumpi/builtin_plugins/web_dashboard/static tools \
+            -type f -name '*.js' -exec node --check {} \;
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          from reticulumpi.config import AppConfig
+
+          for path in [*Path("config").rglob("*.yaml"), *Path("docker").rglob("*.yaml")]:
+              yaml.safe_load(path.read_text())
+              print(path)
+          for path in (
+              Path("config/reticulumpi/config.example.yaml"),
+              Path("config/reticulumpi/config.development.example.yaml"),
+              Path("docker/config.example.yaml"),
+              Path("docker/config.ci.yaml"),
+          ):
+              AppConfig(str(path))
+          PY
+          docker compose -f docker/docker-compose.yml config --quiet
+      - name: Validate privileged policy and systemd units
+        run: |
+          sudo visudo --check
+          test ! -d config/sudoers.d || test -z "$(find config/sudoers.d -type f -print -quit)"
+          id -u reticulumpi >/dev/null 2>&1 || sudo useradd --system --home /var/lib/reticulumpi reticulumpi
+          sudo install -d /opt/reticulumpi/current/.venv/bin /var/lib/reticulumpi
+          sudo ln -sf /usr/bin/python3 /opt/reticulumpi/current/.venv/bin/python
+          sudo ln -sf /bin/true /opt/reticulumpi/current/.venv/bin/reticulumpi
+          sudo ln -sf /bin/true /opt/reticulumpi/current/.venv/bin/rnsd
+          systemd-analyze verify systemd/*.service systemd/*.socket systemd/*.timer
+
+  dashboard-browser:
+    name: Dashboard browser (${{ matrix.browser }})
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        browser: [chromium, firefox, webkit]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: python -m pip install ".[dashboard]"
+      - run: npm ci
+      - name: Install browser runtime
+        run: npx playwright install --with-deps "${{ matrix.browser }}"
+      - name: Run CSP, axe, and responsive gates
+        env:
+          RETICULUMPI_PLAYWRIGHT_OUTPUT: playwright-results
+        run: npx playwright test --project="${{ matrix.browser }}" --grep-invert="@performance"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: playwright-${{ matrix.browser }}-failure
+          path: playwright-results/
+          if-no-files-found: ignore
+
+  dashboard-performance:
+    name: Dashboard slow-LAN performance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: python -m pip install ".[dashboard]"
+      - run: npm ci
+      - name: Install Chromium runtime
+        run: npx playwright install --with-deps chromium
+      - name: Enforce slow-LAN, Web Vitals, main-thread, and frame-rate gates
+        env:
+          RETICULUMPI_PLAYWRIGHT_OUTPUT: playwright-performance-results
+        run: >-
+          npx playwright test tests/browser/performance.spec.mjs
+          --project=chromium --workers=1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: playwright-performance-failure
+          path: playwright-performance-results/
+          if-no-files-found: ignore
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: |
-          pip install -e ".[dev,dashboard]"
-      - name: Run tests with coverage
-        run: |
-          pytest tests/ -v -n auto --cov=reticulumpi --cov-report=term-missing --cov-report=xml
-      - name: Upload coverage
-        if: matrix.python-version == '3.12'
-        uses: actions/upload-artifact@v4
+          cache: pip
+      - run: python -m pip install -e ".[dev,dashboard]"
+      - name: Run parallel test suite
+        run: pytest tests/ -v -n auto
+
+  coverage:
+    name: Serial coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -e ".[dev,dashboard]"
+      # Use a filesystem source root because built-ins are also loaded under
+      # compatibility module names; package-name filtering would cache those
+      # files as untraceable before their canonical imports.
+      - run: pytest tests/ -v -n0 --cov=src/reticulumpi --cov-branch --cov-report=term-missing --cov-report=xml
+      - name: Enforce aggregate, changed-code, and critical-module coverage
+        env:
+          COVERAGE_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.3.2' }}
+        run: >-
+          python tools/check_coverage_gate.py
+          --coverage-xml coverage.xml
+          --repo-root .
+          --release-version "$COVERAGE_RELEASE_VERSION"
+          --github-event "$GITHUB_EVENT_PATH"
+          --github-event-name "$GITHUB_EVENT_NAME"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: coverage.xml
+
+  release-tag-trust:
+    name: Cryptographically verify release tag
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the configured OpenPGP signer
+        env:
+          RELEASE_TAG_PUBLIC_KEY: ${{ vars.RELEASE_TAG_PUBLIC_KEY }}
+          RELEASE_TAG_FINGERPRINT: ${{ vars.RELEASE_TAG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG_PUBLIC_KEY"
+          test -n "$RELEASE_TAG_FINGERPRINT"
+          [[ $GITHUB_REF_NAME =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(command -v git)" = /usr/bin/git
+          test "$(command -v gpg)" = /usr/bin/gpg
+          test "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{}")" = "$GITHUB_SHA"
+          tag_key="$RUNNER_TEMP/reticulumpi-release-tag.asc"
+          tag_keyring="$RUNNER_TEMP/reticulumpi-release-tag-keyring"
+          tag_status="$RUNNER_TEMP/reticulumpi-release-tag.status"
+          printf '%s\n' "$RELEASE_TAG_PUBLIC_KEY" > "$tag_key"
+          chmod 0644 "$tag_key"
+          mkdir -m 0700 "$tag_keyring"
+          cleanup_tag_key() {
+            rm -f "$tag_key" "$tag_status"
+            rm -rf "$tag_keyring"
+          }
+          trap cleanup_tag_key EXIT
+          expected=${RELEASE_TAG_FINGERPRINT//[[:space:]]/}
+          expected=${expected^^}
+          [[ $expected =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]]
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch --with-colons \
+            --import-options show-only --import "$tag_key" |
+            awk -F: '$1 == "fpr" {print toupper($10)}' |
+            grep --fixed-strings --line-regexp "$expected" >/dev/null
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch \
+            --import "$tag_key" >/dev/null 2>&1
+          if ! GNUPGHOME="$tag_keyring" /usr/bin/git \
+            -c gpg.format=openpgp \
+            -c gpg.program=/usr/bin/gpg \
+            verify-tag --raw "$GITHUB_REF_NAME" >"$tag_status" 2>&1; then
+            echo "release tag failed cryptographic verification" >&2
+            exit 1
+          fi
+          awk -v expected="$expected" '
+            $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+              for (field = 3; field <= NF; field++) {
+                if (toupper($field) == expected) found = 1
+              }
+            }
+            END { exit(found ? 0 : 1) }
+          ' "$tag_status" || {
+            echo "release tag was not signed by the configured fingerprint" >&2
+            exit 1
+          }
+
+  package:
+    name: Installed wheel smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install hash-locked release tooling
+        run: >-
+          python -m pip install --require-hashes --only-binary :all:
+          --requirement constraints/production-universal-build.txt
+      - run: python -m build --no-isolation
+      - run: twine check dist/*
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dist
+          format: cyclonedx-json
+          output-file: dist/reticulumpi.cdx.json
+          artifact-name: reticulumpi-sbom.cdx.json
+          upload-release-assets: false
+      - name: Verify CycloneDX SBOM
+        run: python tools/verify_sbom.py dist/reticulumpi.cdx.json
+      - name: Validate signed tag and artifact versions
+        if: github.ref_type == 'tag'
+        run: >-
+          python tools/verify_release_tag.py --require-signature
+          "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz
+      - name: Smoke-test installed wheel with hash-locked runtime dependencies
+        run: >-
+          python scripts/verify_wheel.py dist/*.whl
+          --requirements constraints/production-universal-dashboard-nomadnet.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+
+  recovery-admin:
+    name: Build profile-specific recovery administrators
+    runs-on: ubuntu-24.04
+    needs: package
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Build both recovery packages from the exact validated wheel
+        run: |
+          set -euo pipefail
+          set -- dist/*.whl
+          test "$#" -eq 1
+          wheel=$1
+          wheel_sha256=$(sha256sum "$wheel" | cut -d ' ' -f 1)
+          version=$(python - "$wheel" <<'PY'
+          import email.parser
+          import sys
+          import zipfile
+
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(names) != 1:
+                  raise SystemExit("wheel must contain exactly one METADATA file")
+              metadata = email.parser.BytesParser().parsebytes(archive.read(names[0]))
+          if metadata.get("Name", "").casefold() != "reticulumpi":
+              raise SystemExit("wheel metadata does not identify ReticulumPi")
+          print(metadata["Version"])
+          PY
+          )
+          source_date_epoch=$(git show -s --format=%ct HEAD)
+          mkdir -m 0755 admin-dist admin-runtime
+          : > admin-runtime.SHA256SUMS
+          for profile in \
+            linux-arm64-debian-bookworm-py311 \
+            linux-arm64-ubuntu-noble-py312; do
+            output="admin-dist/reticulumpi-admin_${version}_${profile}_arm64.deb"
+            python tools/build_admin_deb.py \
+              --wheel "$wheel" \
+              --wheel-sha256 "$wheel_sha256" \
+              --runtime-kind site-packages \
+              --runtime-source admin-runtime \
+              --runtime-manifest admin-runtime.SHA256SUMS \
+              --platform-profile "$profile" \
+              --version "$version" \
+              --source-date-epoch "$source_date_epoch" \
+              --output "$output"
+          done
+          test "$(find admin-dist -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 2
+          test "$(find admin-dist -maxdepth 1 -type f -name '*.deb.sha256' | wc -l)" -eq 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: recovery-administrators
+          path: admin-dist/
+          if-no-files-found: error
+
+  container:
+    name: Container build (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    needs: package
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            suffix: amd64
+          - platform: linux/arm64
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build test target
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: test
+          platforms: ${{ matrix.platform }}
+          push: false
+          tags: reticulumpi-test:${{ matrix.suffix }}
+      - name: Build runtime target from the same wheel
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          provenance: mode=max
+          sbom: true
+          tags: reticulumpi:${{ matrix.suffix }}
+      - name: Scan runtime image
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: reticulumpi:${{ matrix.suffix }}
+          fail-build: true
+          severity-cutoff: high
+      - name: Verify minimal runtime, readiness, shutdown, and durable recreation
+        run: >-
+          tools/verify_container_runtime.sh
+          reticulumpi:${{ matrix.suffix }}
+          ${{ matrix.platform }}
+      - name: Export the exact validated runtime image
+        run: |
+          docker save "reticulumpi:${{ matrix.suffix }}" |
+            gzip -9n > "reticulumpi-${{ matrix.suffix }}.tar.gz"
+          sha256sum "reticulumpi-${{ matrix.suffix }}.tar.gz" >
+            "reticulumpi-${{ matrix.suffix }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-image-${{ matrix.suffix }}
+          path: |
+            reticulumpi-${{ matrix.suffix }}.tar.gz
+            reticulumpi-${{ matrix.suffix }}.tar.gz.sha256
+          if-no-files-found: error
+
+  bookworm-systemd:
+    name: ARM64 Bookworm systemd install and rollback
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      needs.package.result == 'success' &&
+      needs['recovery-admin'].result == 'success' &&
+      (github.ref_type != 'tag' || needs['release-tag-trust'].result == 'success')
+    runs-on: ubuntu-24.04
+    needs:
+      - package
+      - recovery-admin
+      - release-tag-trust
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: recovery-administrators
+          path: admin-dist
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+      - name: Install and import the complete hash-locked ARM64 feature profile
+        run: |
+          docker build \
+            --platform linux/arm64 \
+            --file docker/arm64-all-features-ci.Dockerfile \
+            --tag reticulumpi-all-features-ci:${GITHUB_RUN_ID} \
+            .
+          docker run --rm --platform linux/arm64 \
+            reticulumpi-all-features-ci:${GITHUB_RUN_ID}
+      - name: Build the digest-pinned Bookworm systemd fixture
+        run: >-
+          docker build
+          --platform linux/arm64
+          --file docker/systemd-ci.Dockerfile
+          --tag reticulumpi-systemd-ci:${GITHUB_RUN_ID}
+          .
+      - name: Run installation, recovery, and rollback gates under systemd
+        run: |
+          set -euo pipefail
+          containers=()
+          cleanup() {
+            status=$?
+            if (( status != 0 )); then
+              for container in "${containers[@]}"; do
+                docker logs "$container" >&2 || true
+              done
+            fi
+            for container in "${containers[@]}"; do
+              docker rm --force "$container" >/dev/null 2>&1 || true
+            done
+          }
+          trap cleanup EXIT
+          for install_root in /opt/reticulumpi /srv/reticulumpi; do
+            suffix=${install_root#/}
+            suffix=${suffix//\//-}
+            container="reticulumpi-systemd-ci-${suffix}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            containers+=("$container")
+            docker run --detach \
+              --platform linux/arm64 \
+              --name "$container" \
+              --privileged \
+              --cgroupns=host \
+              --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+              --tmpfs /run \
+              --tmpfs /run/lock \
+              "reticulumpi-systemd-ci:${GITHUB_RUN_ID}" >/dev/null
+            docker exec --env RETICULUMPI_CI_INSTALL_ROOT="$install_root" \
+              "$container" tools/verify_bookworm_systemd.sh
+            test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+          done
+
+  noble-systemd:
+    name: ARM64 Ubuntu Noble systemd install and rollback
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      needs.package.result == 'success' &&
+      needs['recovery-admin'].result == 'success' &&
+      (github.ref_type != 'tag' || needs['release-tag-trust'].result == 'success')
+    runs-on: ubuntu-24.04
+    needs:
+      - package
+      - recovery-admin
+      - release-tag-trust
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: recovery-administrators
+          path: admin-dist
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+      - name: Build the digest-pinned Ubuntu Noble systemd fixture
+        run: >-
+          docker build
+          --platform linux/arm64
+          --file docker/noble-systemd-ci.Dockerfile
+          --tag reticulumpi-noble-systemd-ci:${GITHUB_RUN_ID}
+          .
+      - name: Run Noble installation, recovery, and rollback gates under systemd
+        run: |
+          set -euo pipefail
+          containers=()
+          cleanup() {
+            status=$?
+            if (( status != 0 )); then
+              for container in "${containers[@]}"; do
+                docker logs "$container" >&2 || true
+              done
+            fi
+            for container in "${containers[@]}"; do
+              docker rm --force "$container" >/dev/null 2>&1 || true
+            done
+          }
+          trap cleanup EXIT
+          scenarios=(
+            "fresh:/opt/reticulumpi"
+            "fresh:/srv/reticulumpi"
+            "legacy-bridge:/srv/reticulumpi"
+          )
+          for entry in "${scenarios[@]}"; do
+            scenario=${entry%%:*}
+            install_root=${entry#*:}
+            suffix=${install_root#/}
+            suffix=${suffix//\//-}
+            container="reticulumpi-noble-systemd-ci-${scenario}-${suffix}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            containers+=("$container")
+            docker run --detach \
+              --platform linux/arm64 \
+              --name "$container" \
+              --privileged \
+              --cgroupns=host \
+              --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+              --tmpfs /run \
+              --tmpfs /run/lock \
+              "reticulumpi-noble-systemd-ci:${GITHUB_RUN_ID}" >/dev/null
+            docker exec \
+              --env RETICULUMPI_CI_INSTALL_ROOT="$install_root" \
+              --env RETICULUMPI_CI_SCENARIO="$scenario" \
+              "$container" tools/verify_noble_systemd.sh
+            test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+          done
+
+  release-candidate:
+    name: Assemble signed release candidate
+    if: >-
+      github.ref_type == 'tag' &&
+      needs['release-tag-trust'].result == 'success' &&
+      needs['dashboard-performance'].result == 'success' &&
+      needs['bookworm-systemd'].result == 'success' &&
+      needs['noble-systemd'].result == 'success' &&
+      needs['recovery-admin'].result == 'success'
+    needs:
+      - secret-scan
+      - dependency-audit
+      - static-analysis
+      - dashboard-browser
+      - dashboard-performance
+      - test
+      - coverage
+      - release-tag-trust
+      - package
+      - recovery-admin
+      - container
+      - bookworm-systemd
+      - noble-systemd
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: release-input/python
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-image-amd64
+          path: release-input/images/amd64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-image-arm64
+          path: release-input/images/arm64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: recovery-administrators
+          path: release-input/recovery-admin
+      - name: Install pinned Minisign verifier
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign=0.11-1
+          test "$(command -v minisign)" = /usr/bin/minisign
+          test "$(dpkg-query -W -f='${Version}' minisign)" = 0.11-1
+      - name: Validate, bundle, and sign exact release artifacts
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$MINISIGN_SECRET_KEY"
+          test -n "$MINISIGN_PUBLIC_KEY"
+          secret_key="$RUNNER_TEMP/reticulumpi-release.key"
+          public_key="$RUNNER_TEMP/reticulumpi-release.pub"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$secret_key"
+          printf '%s\n' "$MINISIGN_PUBLIC_KEY" > "$public_key"
+          chmod 0600 "$secret_key"
+          chmod 0644 "$public_key"
+          cleanup_key() {
+            rm -f "$secret_key" "$public_key"
+            sudo rm -f /usr/share/reticulumpi/release.pub
+          }
+          trap cleanup_key EXIT
+
+          version=${GITHUB_REF_NAME#v}
+          source_date_epoch=$(git show -s --format=%ct HEAD)
+          set -- release-input/python/*.whl
+          test "$#" -eq 1
+          wheel=$1
+          set -- release-input/python/reticulumpi-*.tar.gz
+          test "$#" -eq 1
+          sdist=$1
+          python tools/verify_release_tag.py --require-signature \
+            "$GITHUB_REF_NAME" "$wheel" "$sdist"
+
+          install_bundle="release-input/reticulumpi-install-arm64-${version}.tar.gz"
+          python -m tools.build_install_bundle \
+            --sdist "$sdist" \
+            --wheel "$wheel" \
+            --output "$install_bundle" \
+            --version "$version" \
+            --signing-key "$secret_key" \
+            --minisign /usr/bin/minisign \
+            --source-date-epoch "$source_date_epoch"
+
+          inner_dir="$RUNNER_TEMP/install-signature-check"
+          mkdir -m 0700 "$inner_dir"
+          tar -xOf "$install_bundle" "reticulumpi-${version}/SHA256SUMS" \
+            > "$inner_dir/SHA256SUMS"
+          tar -xOf "$install_bundle" "reticulumpi-${version}/SHA256SUMS.minisig" \
+            > "$inner_dir/SHA256SUMS.minisig"
+          minisign -Vm "$inner_dir/SHA256SUMS" \
+            -x "$inner_dir/SHA256SUMS.minisig" -p "$public_key"
+
+          python -m tools.prepare_release_assets \
+            --tag "$GITHUB_REF_NAME" \
+            --python-directory release-input/python \
+            --amd64-image-directory release-input/images/amd64 \
+            --arm64-image-directory release-input/images/arm64 \
+            --recovery-admin-directory release-input/recovery-admin \
+            --install-bundle "$install_bundle" \
+            --output-directory release-assets
+          minisign -S -W -s "$secret_key" \
+            -t "ReticulumPi ${version} release asset manifest" \
+            -m release-assets/SHA256SUMS \
+            -x release-assets/SHA256SUMS.minisig
+          minisign -Vm release-assets/SHA256SUMS \
+            -x release-assets/SHA256SUMS.minisig -p "$public_key"
+          (cd release-assets && sha256sum --check --strict SHA256SUMS)
+          test ! -e /usr/share/reticulumpi/release.pub
+          sudo install -d -o root -g root -m 0755 /usr/share/reticulumpi
+          sudo install -o root -g root -m 0644 \
+            "$public_key" /usr/share/reticulumpi/release.pub
+          PYTHONPATH=src python -m reticulumpi.admin_cli install \
+            --bundle "release-assets/$(basename "$install_bundle")" \
+            --install-root /srv/reticulumpi \
+            --dry-run
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-candidate-${{ github.ref_name }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Promote exact signed candidate
+    if: >-
+      github.ref_type == 'tag' &&
+      needs['release-tag-trust'].result == 'success' &&
+      needs['dashboard-performance'].result == 'success' &&
+      needs['bookworm-systemd'].result == 'success' &&
+      needs['noble-systemd'].result == 'success' &&
+      needs['recovery-admin'].result == 'success' &&
+      needs['release-candidate'].result == 'success'
+    needs:
+      - secret-scan
+      - dependency-audit
+      - static-analysis
+      - dashboard-browser
+      - dashboard-performance
+      - test
+      - coverage
+      - release-tag-trust
+      - package
+      - recovery-admin
+      - container
+      - bookworm-systemd
+      - noble-systemd
+      - release-candidate
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-candidate-${{ github.ref_name }}
+          path: release-assets
+      - name: Verify the exact signed candidate after approval
+        env:
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$MINISIGN_PUBLIC_KEY"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign=0.11-1
+          test "$(command -v minisign)" = /usr/bin/minisign
+          test "$(dpkg-query -W -f='${Version}' minisign)" = 0.11-1
+          public_key="$RUNNER_TEMP/reticulumpi-release.pub"
+          printf '%s\n' "$MINISIGN_PUBLIC_KEY" > "$public_key"
+          chmod 0644 "$public_key"
+          trap 'rm -f "$public_key"' EXIT
+          minisign -Vm release-assets/SHA256SUMS \
+            -x release-assets/SHA256SUMS.minisig -p "$public_key"
+          (cd release-assets && sha256sum --check --strict SHA256SUMS)
+      - name: Resolve release metadata
+        id: release-meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Refuse an existing GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +e
+          response=$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>&1)
+          status=$?
+          set -e
+          if (( status == 0 )); then
+            echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [[ $response != *"HTTP 404"* ]]; then
+            echo "could not prove release tag is unpublished" >&2
+            echo "$response" >&2
+            exit 1
+          fi
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push validated per-architecture images and manifest
+        id: images
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version=${GITHUB_REF_NAME#v}
+          tools/publish_validated_images.sh release-assets "$image" "$version"
+      - name: Attest release artifact provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: release-assets/SHA256SUMS
+      - name: Attest wheel SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: release-assets/*.whl
+          sbom-path: release-assets/reticulumpi-${{ steps.release-meta.outputs.version }}.cdx.json
+      - name: Attest published multi-architecture image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ steps.images.outputs.image }}
+          subject-digest: ${{ steps.images.outputs.digest }}
+          push-to-registry: true
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.images.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.images.outputs.digest }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Validated container: \`$IMAGE@$IMAGE_DIGEST\`"
+            echo
+            echo "Verify downloaded assets with \`minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -p release.pub\` and then \`sha256sum --check SHA256SUMS\`."
+          } > "$notes"
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --verify-tag \
+            --generate-notes \
+            --notes-file "$notes" \
+            --title "ReticulumPi ${GITHUB_REF_NAME#v}"

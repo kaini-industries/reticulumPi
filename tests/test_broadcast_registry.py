@@ -29,7 +29,7 @@ def _make_plugin(tier: int, keys, *, delay: float = 0.0, result=None):
 class TestPerTierBudget:
     def test_slow_tier0_does_not_starve_tier1(self):
         """Tier-0 taking a long time should not eat into tier-1's budget."""
-        registry = BroadcastRegistry(metrics_interval=5.0)
+        registry = BroadcastRegistry(metrics_interval=5.0, callback_timeout_ms=4000)
         plugins = {
             "slow_t0": _make_plugin(0, "sys", delay=3.0, result={"cpu": 50}),
             "fast_t1": _make_plugin(1, "mesh", delay=0.0, result={"peers": []}),
@@ -40,7 +40,7 @@ class TestPerTierBudget:
 
     def test_tier1_budget_is_independent(self):
         """Tier-1 plugins get their own budget window, not leftover from tier-0."""
-        registry = BroadcastRegistry(metrics_interval=1.0)
+        registry = BroadcastRegistry(metrics_interval=1.0, callback_timeout_ms=1000)
         plugins = {
             "slow_t0": _make_plugin(0, "sys", delay=0.8, result={"cpu": 50}),
             "t1_a": _make_plugin(1, "a", delay=0.0, result={"x": 1}),
@@ -52,7 +52,7 @@ class TestPerTierBudget:
 
     def test_tier2_gets_own_budget(self):
         """Tier-2 budget starts when tier-2 begins, not from t0."""
-        registry = BroadcastRegistry(metrics_interval=1.0)
+        registry = BroadcastRegistry(metrics_interval=1.0, callback_timeout_ms=1000)
         plugins = {
             "slow_t0": _make_plugin(0, "sys", delay=0.5, result={"cpu": 50}),
             "slow_t1": _make_plugin(1, "mesh", delay=0.5, result={"p": []}),
@@ -101,8 +101,7 @@ class TestFairnessRotation:
         registry = BroadcastRegistry(metrics_interval=0.06)
         keys = [f"k{i}" for i in range(n)]
         plugins = {
-            f"t2_{i}": _make_plugin(2, keys[i], delay=0.05, result={keys[i]: i})
-            for i in range(n)
+            f"t2_{i}": _make_plugin(2, keys[i], delay=0.05, result={keys[i]: i}) for i in range(n)
         }
 
         ran_keys: set[str] = set()
@@ -200,3 +199,26 @@ class TestInstrumentation:
         }
         registry.collect(plugins, cycle_count=0)
         assert registry.last_skipped == 0
+
+
+def test_hung_callback_is_bounded_and_disabled_after_first_timeout(caplog):
+    from reticulumpi.builtin_plugins.web_dashboard.operational_metrics import (
+        get_dashboard_operational_metrics,
+    )
+
+    release = __import__("threading").Event()
+    plugin = _make_plugin(0, "sys")
+    plugin.broadcast_snapshot = MagicMock(side_effect=lambda **_kwargs: release.wait(timeout=2))
+    registry = BroadcastRegistry(metrics_interval=5.0, callback_timeout_ms=20)
+    before = get_dashboard_operational_metrics()["workers"]["broadcast_hung_total"]
+
+    started = time.monotonic()
+    with caplog.at_level("WARNING"):
+        assert registry.collect({"hung": plugin}, cycle_count=0) == {}
+        assert registry.collect({"hung": plugin}, cycle_count=1) == {}
+
+    assert time.monotonic() - started < 0.2
+    assert plugin.broadcast_snapshot.call_count == 1
+    assert "disabled until restart" in caplog.text
+    assert get_dashboard_operational_metrics()["workers"]["broadcast_hung_total"] == before + 1
+    release.set()

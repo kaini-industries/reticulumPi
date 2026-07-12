@@ -105,7 +105,9 @@ After flashing, the device shows up as `/dev/ttyUSB0` or `/dev/ttyACM0`.
 
 ### Reticulum Configuration
 
-Uncomment and edit the `[RNode LoRa Interface]` section in your Reticulum config (`~/.reticulum/config` or `/home/reticulumpi/.reticulum/config`):
+Uncomment and edit the `[RNode LoRa Interface]` section in the production Reticulum config
+(`/var/lib/reticulumpi/.reticulum/config`; a non-service development account may use
+`~/.reticulum/config`):
 
 ```ini
 [[RNode LoRa Interface]]

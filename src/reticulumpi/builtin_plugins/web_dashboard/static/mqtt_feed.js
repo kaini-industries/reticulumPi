@@ -211,7 +211,7 @@
       var cid = _items[i].contact_id;
       if (cid && !seen[cid]) {
         seen[cid] = true;
-        api('/api/messages/read', { method: 'POST', body: { contact_id: cid } });
+        api('/api/messages/read', { method: 'POST', json: { contact_id: cid } });
       }
     }
   }
@@ -249,7 +249,7 @@
     _prependCard(row);
     _renderStats();
     if (_expanded && row.contact_id) {
-      api('/api/messages/read', { method: 'POST', body: { contact_id: row.contact_id } });
+      api('/api/messages/read', { method: 'POST', json: { contact_id: row.contact_id } });
     }
   }
 

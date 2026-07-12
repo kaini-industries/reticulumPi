@@ -1,217 +1,77 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ReticulumPi Update Script
-# Pulls latest code (or rsyncs from source), upgrades dependencies, and restarts.
+# Compatibility entry point for the transactional administrator. This script
+# never pulls a mutable branch or modifies the active virtual environment.
 
-# Auto-detect install directory from this script's location.
-# Works whether installed at /opt/reticulumpi, in-place, or anywhere else.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="$(dirname "$SCRIPT_DIR")"
-SERVICE_USER="reticulumpi"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+BUNDLE="$PROJECT_DIR"
+INSTALL_ROOT="/opt/reticulumpi"
+MODE=--dry-run
 
-if [ ! -f "$INSTALL_DIR/pyproject.toml" ]; then
-    echo "Error: Cannot find reticulumPi project at $INSTALL_DIR"
+usage() {
+    echo "Usage: $0 [--bundle PATH] [--install-root PATH] [--dry-run|--apply]"
+    echo ""
+    echo "The bundle must be a trusted ReticulumPi source directory or wheel."
+    echo "A separately signed, root-owned recovery administrator must already be installed."
+    echo "Updates are staged, validated, and switched atomically by reticulumpi-admin."
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --bundle) BUNDLE="${2:?--bundle requires a path}"; shift 2 ;;
+        --bundle=*) BUNDLE="${1#*=}"; shift ;;
+        --install-root|--install-dir)
+            INSTALL_ROOT="${2:?$1 requires a path}"
+            shift 2
+            ;;
+        --install-root=*|--install-dir=*) INSTALL_ROOT="${1#*=}"; shift ;;
+        --dry-run) MODE=--dry-run; shift ;;
+        --apply) MODE=--apply; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if [ ! -e "$BUNDLE" ]; then
+    echo "Bundle not found: $BUNDLE" >&2
     exit 1
 fi
 
-echo "=== ReticulumPi Update ==="
-echo "Install directory: $INSTALL_DIR"
+is_trusted_admin() {
+    local candidate="$1"
+    local component uid mode permissions
 
-# 1. Update code — git pull if it's a repo, otherwise already up-to-date (in-place)
-if [ -d "$INSTALL_DIR/.git" ]; then
-    echo "[1/5] Pulling latest code..."
-    # Detect the repo owner so we run git as the right user (SSH keys, known_hosts)
-    REPO_OWNER="$(stat -c '%U' "$INSTALL_DIR/.git")"
-    if ! sudo -u "$REPO_OWNER" git -C "$INSTALL_DIR" pull; then
-        echo "Warning: git pull failed. Continuing with local code."
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -x "$candidate" ] || return 1
+    component="$candidate"
+    while true; do
+        uid="$(/usr/bin/stat -c '%u' -- "$component")" || return 1
+        mode="$(/usr/bin/stat -c '%a' -- "$component")" || return 1
+        [ "$uid" -eq 0 ] || return 1
+        permissions=$((8#$mode))
+        (( (permissions & 022) == 0 )) || return 1
+        [ "$component" = / ] && break
+        component="$(/usr/bin/dirname -- "$component")" || return 1
+    done
+}
+
+ADMIN=""
+for candidate in /usr/sbin/reticulumpi-admin /usr/bin/reticulumpi-admin; do
+    if is_trusted_admin "$candidate"; then
+        ADMIN="$candidate"
+        break
     fi
-else
-    echo "[1/5] No git repo — assuming code is already synced."
-fi
-
-# 2. Upgrade all dependencies and reinstall
-echo "[2/5] Upgrading dependencies..."
-
-# Ensure the service user can traverse to the source tree (editable install)
-INSTALL_PARENT="$(dirname "$INSTALL_DIR")"
-if ! sudo -u "$SERVICE_USER" test -x "$INSTALL_PARENT"; then
-    echo "  Fixing permissions: $INSTALL_PARENT needs o+x for $SERVICE_USER"
-    sudo chmod o+x "$INSTALL_PARENT"
-fi
-if ! sudo -u "$SERVICE_USER" test -r "$INSTALL_DIR/src"; then
-    echo "  Fixing permissions: $INSTALL_DIR needs o+rx for $SERVICE_USER"
-    sudo chmod -R o+rX "$INSTALL_DIR/src"
-fi
-
-VENV="$INSTALL_DIR/.venv"
-RNS_VERSION_BEFORE=$(sudo -u "$SERVICE_USER" "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
-sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade pip
-if ! sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade -e "$INSTALL_DIR"; then
-    echo "Error: pip install failed. Check dependencies."
+done
+if [ -z "$ADMIN" ]; then
+    echo "Error: no trusted system reticulumpi-admin is installed." >&2
+    echo "Install the signed ReticulumPi recovery administrator package first;" >&2
+    echo "this launcher never executes administrator code from the release bundle." >&2
     exit 1
 fi
-# Ensure the service user can read installed packages
-sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$VENV"
 
-# Upgrade aiohttp if installed (web dashboard)
-if sudo -u "$SERVICE_USER" "$VENV/bin/pip" show aiohttp &>/dev/null; then
-    echo "  Upgrading aiohttp (web dashboard)..."
-    sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade "aiohttp>=3.9,<4.0"
+if [ "$MODE" = --apply ] && [ "$(id -u)" -ne 0 ]; then
+    echo "Error: --apply must run as root. Use sudo or run --dry-run." >&2
+    exit 1
 fi
-
-# Upgrade rnodeconf if installed
-if sudo -u "$SERVICE_USER" "$VENV/bin/pip" show rnodeconf &>/dev/null; then
-    echo "  Upgrading rnodeconf (LoRa/RNode tools)..."
-    sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade rnodeconf
-fi
-
-# Upgrade NomadNet if installed
-if sudo -u "$SERVICE_USER" "$VENV/bin/pip" show nomadnet &>/dev/null; then
-    echo "  Upgrading NomadNet..."
-    sudo -u "$SERVICE_USER" "$VENV/bin/pip" install --upgrade nomadnet
-fi
-
-# Upgrade MeshChat if installed
-MESHCHAT_DIR="$INSTALL_DIR/meshchat"
-if [ -d "$MESHCHAT_DIR/.git" ]; then
-    echo "  Upgrading MeshChat..."
-    MESHCHAT_OWNER="$(stat -c '%U' "$MESHCHAT_DIR/.git")"
-    MESHCHAT_OLD=$(git -C "$MESHCHAT_DIR" rev-parse HEAD)
-    sudo -u "$MESHCHAT_OWNER" git -C "$MESHCHAT_DIR" pull || echo "  Warning: MeshChat git pull failed."
-    MESHCHAT_NEW=$(git -C "$MESHCHAT_DIR" rev-parse HEAD)
-    sudo -u "$SERVICE_USER" "$MESHCHAT_DIR/.venv/bin/pip" install -r "$MESHCHAT_DIR/requirements.txt"
-    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$MESHCHAT_DIR/.venv"
-    # Rebuild frontend if source changed
-    if [ "$MESHCHAT_OLD" != "$MESHCHAT_NEW" ] && [ -f "$MESHCHAT_DIR/package.json" ]; then
-        echo "  Rebuilding MeshChat frontend..."
-        (cd "$MESHCHAT_DIR" && npm install --omit=dev && npm run build-frontend)
-    fi
-fi
-
-# 3. Update systemd service files if they changed
-echo "[3/5] Updating systemd services..."
-SERVICES_CHANGED=false
-RNSD_SERVICE_CHANGED=false
-for svc in reticulumpi.service rnsd.service rnsd-watchdog.service rnsd-watchdog.timer; do
-    src="$INSTALL_DIR/systemd/$svc"
-    dest="/etc/systemd/system/$svc"
-    if [ -f "$src" ] && [ -f "$dest" ]; then
-        if ! diff -q "$src" "$dest" &>/dev/null; then
-            sudo cp "$src" "$dest"
-            SERVICES_CHANGED=true
-            echo "  Updated $svc"
-            if [ "$svc" = "rnsd.service" ]; then
-                RNSD_SERVICE_CHANGED=true
-            fi
-        fi
-    fi
-done
-if [ "$SERVICES_CHANGED" = true ]; then
-    sudo systemctl daemon-reload
-fi
-
-# Validate: warn if any service file paths are unreachable
-for svc in reticulumpi.service; do
-    dest="/etc/systemd/system/$svc"
-    [ -f "$dest" ] || continue
-    execbin=$(grep -oP '^ExecStart=\K\S+' "$dest" || true)
-    if [ -n "$execbin" ] && [ ! -x "$execbin" ]; then
-        echo "  WARNING: ExecStart binary not found: $execbin"
-        echo "           Service may fail to start. Check $dest"
-    fi
-    rwpaths=$(grep -oP '^ReadWritePaths=\K.*' "$dest" || true)
-    for dir in $rwpaths; do
-        parent=$(dirname "$dir")
-        if [ ! -d "$parent" ] && [ ! -d "$dir" ]; then
-            echo "  WARNING: ReadWritePaths target unreachable: $dir"
-            echo "           Parent directory $parent does not exist."
-        fi
-    done
-done
-
-# 3b. Sync helper scripts to /opt/reticulumpi/scripts/
-OPT_SCRIPTS="/opt/reticulumpi/scripts"
-if [ -d "$OPT_SCRIPTS" ]; then
-    for src in "$INSTALL_DIR"/scripts/*_helper.sh; do
-        [ -f "$src" ] || continue
-        dest="$OPT_SCRIPTS/$(basename "$src")"
-        if [ ! -f "$dest" ] || ! diff -q "$src" "$dest" &>/dev/null; then
-            sudo install -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$src" "$dest"
-            echo "  Updated helper script: $(basename "$src")"
-        fi
-    done
-fi
-
-# 3c. Sync sudoers rules if they changed
-for rule in reticulumpi-services reticulumpi-offline reticulumpi-captive-portal reticulumpi-chrony; do
-    src="$INSTALL_DIR/config/sudoers.d/$rule"
-    dest="/etc/sudoers.d/$rule"
-    [ -f "$src" ] || continue
-    if [ ! -f "$dest" ] || ! diff -q "$src" "$dest" &>/dev/null; then
-        sudo install -m 0440 "$src" "$dest"
-        if sudo visudo -cf "$dest" >/dev/null 2>&1; then
-            echo "  Updated sudoers rule: $rule"
-        else
-            echo "  WARNING: sudoers syntax check failed for $rule — removing"
-            sudo rm -f "$dest"
-        fi
-    fi
-done
-
-# 4. Ensure all ReadWritePaths directories exist (systemd namespace mount fails otherwise)
-echo "[4/5] Pre-creating ReadWritePaths directories..."
-for svc in reticulumpi.service; do
-    dest="/etc/systemd/system/$svc"
-    if [ -f "$dest" ]; then
-        rwpaths=$(grep -oP '^ReadWritePaths=\K.*' "$dest" || true)
-        for dir in $rwpaths; do
-            if [ ! -d "$dir" ]; then
-                echo "  Creating: $dir"
-                sudo mkdir -p "$dir"
-                sudo chown "$SERVICE_USER:$SERVICE_USER" "$dir"
-            fi
-        done
-    fi
-done
-
-# 5. Restart services
-echo "[5/5] Restarting services..."
-
-# Only restart rnsd if something rnsd-relevant changed (service file, RNS package).
-# Unnecessary restarts wipe the in-memory path table, breaking LXMF delivery until
-# peers re-announce (up to 3 hours).
-RNS_VERSION_AFTER=$(sudo -u "$SERVICE_USER" "$VENV/bin/pip" show rns 2>/dev/null | grep '^Version:' || echo "none")
-RNSD_NEEDS_RESTART=false
-if [ "$RNSD_SERVICE_CHANGED" = true ]; then
-    RNSD_NEEDS_RESTART=true
-    echo "  rnsd.service changed — rnsd restart required"
-fi
-if [ "$RNS_VERSION_BEFORE" != "$RNS_VERSION_AFTER" ]; then
-    RNSD_NEEDS_RESTART=true
-    echo "  RNS package updated ($RNS_VERSION_BEFORE -> $RNS_VERSION_AFTER) — rnsd restart required"
-fi
-
-if systemctl is-active --quiet rnsd; then
-    if [ "$RNSD_NEEDS_RESTART" = true ]; then
-        sudo systemctl restart rnsd
-        echo "  Waiting for rnsd shared instance socket..."
-        for i in $(seq 1 60); do
-            ss -xa 2>/dev/null | grep -q "@rns/default" && break
-            sleep 1
-        done
-        if ss -xa 2>/dev/null | grep -q "@rns/default"; then
-            echo "  rnsd ready (${i}s)"
-        else
-            echo "  Warning: rnsd socket not detected after 60s, continuing anyway"
-        fi
-    else
-        echo "  Skipping rnsd restart (no relevant changes)"
-    fi
-fi
-sudo systemctl restart reticulumpi
-
-echo ""
-echo "=== Update complete ==="
-echo "Check status: sudo systemctl status reticulumpi"
-echo "View logs:    journalctl -u reticulumpi -f"
+exec "$ADMIN" upgrade --bundle "$BUNDLE" --install-root "$INSTALL_ROOT" "$MODE"

@@ -1,3 +1,7 @@
+> **Historical / non-normative.** This incident-discussion draft records one former node
+> configuration and software version. Current installation, troubleshooting, and security
+> documentation takes precedence.
+
 ## Summary
 
 I'm unable to establish links to any remote destination through TCP hub connections, despite announces and path resolution working correctly. Link requests leave successfully, but link proofs never arrive back. This affects all remote nodes across multiple hubs, suggesting a routing/forwarding issue rather than a destination-specific problem.

@@ -150,6 +150,18 @@ class TestHandleNodeTrackerHistory:
         assert data["ok"] is False
         tracker.get_history.assert_not_called()
 
+    def test_negative_bounds_return_400_instead_of_unlimited_query(self):
+        tracker = MagicMock()
+        plugin_mock = _make_plugin(tracker)
+
+        for query in ("nodes=a&limit=-1", "nodes=a&hours=-1"):
+            response = asyncio.run(
+                _history_handler(_make_request(query_string=query, plugin_mock=plugin_mock))
+            )
+            assert response.status == 400
+
+        tracker.get_history.assert_not_called()
+
     def test_hours_capped_at_720(self):
         tracker = MagicMock()
         tracker.get_history.return_value = {}
@@ -445,9 +457,7 @@ class TestCheckSendRateLimit:
     def test_second_request_blocked_at_limit_1(self):
         plugin = MagicMock(spec=[])
         # First request: allowed
-        ok1, _ = _check_send_rate_limit(
-            plugin, "key-a", max_per_window=1, window_seconds=60
-        )
+        ok1, _ = _check_send_rate_limit(plugin, "key-a", max_per_window=1, window_seconds=60)
         assert ok1 is True
 
         # Second request: blocked
@@ -459,12 +469,8 @@ class TestCheckSendRateLimit:
 
     def test_different_keys_independent(self):
         plugin = MagicMock(spec=[])
-        ok1, _ = _check_send_rate_limit(
-            plugin, "key-x", max_per_window=1, window_seconds=60
-        )
-        ok2, _ = _check_send_rate_limit(
-            plugin, "key-y", max_per_window=1, window_seconds=60
-        )
+        ok1, _ = _check_send_rate_limit(plugin, "key-x", max_per_window=1, window_seconds=60)
+        ok2, _ = _check_send_rate_limit(plugin, "key-y", max_per_window=1, window_seconds=60)
         assert ok1 is True
         assert ok2 is True
 
@@ -475,7 +481,7 @@ class TestCheckSendRateLimit:
         hub.send_message.return_value = {"sent": True}
         plugin_mock = MagicMock()
         plugin_mock.app.get_plugin.return_value = hub
-        plugin_mock.config = {"allow_localhost_send": True}
+        plugin_mock.config = {}
 
         # Clear any stale rate state from previous test runs
         if hasattr(plugin_mock, "_send_rate_state"):
@@ -491,7 +497,7 @@ class TestCheckSendRateLimit:
             req.match_info = {}
             req.remote = "127.0.0.1"
             req.headers = {"User-Agent": "test-agent"}
-            req.get = lambda k, default=None: None  # no token
+            req.get = lambda k, default=None: "authenticated-token"
 
             async def _json():
                 return {

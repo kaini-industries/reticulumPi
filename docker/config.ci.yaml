@@ -1,0 +1,39 @@
+reticulumpi:
+  external_artifacts:
+    mode: required
+    manifest_path: /config/external-artifacts.yaml
+  reticulum_config_dir: /data/.reticulum
+  use_shared_instance: true
+  identity_path: /data/.config/reticulumpi/identity
+  log_level: 4
+  plugin_paths: []
+
+  plugins:
+    messaging_hub:
+      enabled: true
+      required: true
+      db_path: /data/.local/share/reticulumpi/messaging_hub.db
+      lxmf:
+        enabled: false
+      meshtastic:
+        enabled: false
+      meshcore:
+        enabled: false
+
+    nomadnet_server:
+      enabled: true
+      required: true
+      config_dir: /data/.nomadnet
+      auto_restart: false
+      cpu_check_interval: 5
+
+    web_dashboard:
+      enabled: true
+      required: true
+      host: 0.0.0.0
+      port: 8080
+      secret_dir: /data/.config/reticulumpi/dashboard
+      local_api:
+        enabled: false
+      tile_proxy:
+        enabled: false

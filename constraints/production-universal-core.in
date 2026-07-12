@@ -1,0 +1,6 @@
+# Direct dependencies shared by every qualified production platform tuple.
+# Regenerate the corresponding .txt lock as documented in docs/release-process.md.
+rns>=1.2.5,<2.0
+lxmf>=0.9.4,<2.0
+pyyaml>=6.0,<8.0
+psutil>=5.9

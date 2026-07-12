@@ -130,7 +130,7 @@
       if (f.newest_age_s != null) fhtml += '<span class="rf-item"><span class="ri-label">Newest </span><span class="rf-val">' + formatDuration(f.newest_age_s) + '</span></span>';
       if (f.oldest_age_s != null) fhtml += '<span class="rf-item"><span class="ri-label">Oldest </span><span class="rf-val">' + formatDuration(f.oldest_age_s) + '</span></span>';
       if (f.avg_age_s != null) fhtml += '<span class="rf-item"><span class="ri-label">Avg </span><span class="rf-val">' + formatDuration(f.avg_age_s) + '</span></span>';
-      if (f.expiring_soon > 0) fhtml += '<span class="rf-item" style="color:var(--yellow)"><span class="ri-label">Expiring soon </span><span class="rf-val">' + f.expiring_soon + '</span></span>';
+      if (f.expiring_soon > 0) fhtml += '<span class="rf-item text-warn"><span class="ri-label">Expiring soon </span><span class="rf-val">' + f.expiring_soon + '</span></span>';
       freshEl.innerHTML = fhtml;
     }
 
@@ -180,7 +180,7 @@
 
     var buckets = bucketHops(dist);
     if (buckets.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No path data</div>';
+      el.innerHTML = '<div class="dashboard-empty">No path data</div>';
       return;
     }
 
@@ -197,12 +197,13 @@
       var pctOfTotal = total > 0 ? Math.round(b.count / total * 100) : 0;
       html += '<div class="bar-row">'
         + '<div class="bar-label bar-label-hop">' + b.label + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + b.cls + '" style="width:' + pct + '%"></div></div>'
+        + '<div class="bar-track"><div class="bar-fill ' + b.cls + '" data-rpi-width="' + pct + '"></div></div>'
         + '<div class="bar-count">' + b.count + '</div>'
         + '<div class="bar-pct">' + pctOfTotal + '%</div>'
         + '</div>';
     }
     el.innerHTML = html;
+    R.applyCspDynamicStyles(el);
   }
 
   function renderIfaceChart(dist, total) {
@@ -211,7 +212,7 @@
 
     var keys = Object.keys(dist);
     if (keys.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No path data</div>';
+      el.innerHTML = '<div class="dashboard-empty">No path data</div>';
       return;
     }
 
@@ -242,12 +243,13 @@
 
       html += '<div class="bar-row">'
         + '<div class="bar-label bar-label-iface" title="' + esc(iface) + '">' + esc(shortName) + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + colorCls + '" style="width:' + pct + '%"></div></div>'
+        + '<div class="bar-track"><div class="bar-fill ' + colorCls + '" data-rpi-width="' + pct + '"></div></div>'
         + '<div class="bar-count">' + count + '</div>'
         + '<div class="bar-pct">' + pctOfTotal + '%</div>'
         + '</div>';
     }
     el.innerHTML = html;
+    R.applyCspDynamicStyles(el);
   }
 
   function fetchRoutingTable() {
@@ -277,7 +279,7 @@
 
     var paths = data.paths || [];
     if (paths.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No paths match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="dashboard-empty-cell">No paths match filters</td></tr>';
       renderRoutingPagination(0, 0);
       return;
     }
@@ -287,8 +289,8 @@
       var p = paths[i];
       var hopCls = hopColorClass(p.hops || 0);
       var expCls = '';
-      if (p.expires_in_s != null && p.expires_in_s < 600) expCls = ' style="color:var(--red)"';
-      else if (p.expires_in_s != null && p.expires_in_s < 1800) expCls = ' style="color:var(--yellow)"';
+      if (p.expires_in_s != null && p.expires_in_s < 600) expCls = ' class="text-danger"';
+      else if (p.expires_in_s != null && p.expires_in_s < 1800) expCls = ' class="text-warn"';
 
       html += '<tr>'
         + '<td class="hash-cell" title="' + esc(p.hash || '') + '">' + esc(truncHash(p.hash)) + '</td>'

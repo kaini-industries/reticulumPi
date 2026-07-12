@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import html
 import http.server
-import shutil
 import subprocess
 import threading
 import urllib.parse
@@ -22,14 +21,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from reticulumpi import events
+from reticulumpi.control_client import DEFAULT_CONTROL_SOCKET, request_control
 from reticulumpi.plugin_base import PluginBase
 
 if TYPE_CHECKING:
     pass
 
 _VALID_MODES = ("auto", "always", "off")
-_HELPER_SCRIPT = "/opt/reticulumpi/scripts/captive_portal_helper.sh"
-
 _SPLASH_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -93,8 +91,6 @@ class CaptivePortalPlugin(PluginBase):
         self._ap_ip = self._resolve_ap_ip()
         self._ssid = self._resolve_ssid()
         self._dashboard_url = self._resolve_dashboard_url()
-        self._helper = self._resolve_helper_path()
-
         self._splash_html = _SPLASH_TEMPLATE.format(
             ssid=html.escape(self._ssid),
             dashboard_url=html.escape(self._dashboard_url),
@@ -169,59 +165,43 @@ class CaptivePortalPlugin(PluginBase):
             self._do_deactivate()
 
     def _do_activate(self) -> None:
-        try:
-            self._run_helper(
-                "activate",
-                self._ap_interface,
-                str(self._portal_port),
-                self._ap_ip,
-            )
-            self._portal_active = True
-            self.log.info("Captive portal activated (interface=%s)", self._ap_interface)
-            self.event_bus.publish(
-                events.CAPTIVE_PORTAL_ACTIVATED,
-                {
-                    "interface": self._ap_interface,
-                    "portal_port": self._portal_port,
-                },
-            )
-        except Exception:
-            self.log.exception("Failed to activate captive portal")
+        self._run_helper(
+            "activate",
+            self._ap_interface,
+            str(self._portal_port),
+            self._ap_ip,
+        )
+        self._portal_active = True
+        self.log.info("Captive portal activated (interface=%s)", self._ap_interface)
+        self.event_bus.publish(
+            events.CAPTIVE_PORTAL_ACTIVATED,
+            {
+                "interface": self._ap_interface,
+                "portal_port": self._portal_port,
+            },
+        )
 
     def _do_deactivate(self) -> None:
-        try:
-            self._run_helper("deactivate")
-            self._portal_active = False
-            self.log.info("Captive portal deactivated")
-            self.event_bus.publish(events.CAPTIVE_PORTAL_DEACTIVATED, {})
-        except Exception:
-            self.log.exception("Failed to deactivate captive portal")
+        self._run_helper("deactivate")
+        self._portal_active = False
+        self.log.info("Captive portal deactivated")
+        self.event_bus.publish(events.CAPTIVE_PORTAL_DEACTIVATED, {})
 
     def _cleanup_stale_rules(self) -> None:
-        try:
-            result = self._run_helper("status")
-            if "chain_active=true" in result or "dns_active=true" in result:
-                self.log.warning("Found stale captive portal state — cleaning up")
-                self._run_helper("cleanup")
-        except Exception:
-            self.log.debug("Stale rule check skipped (helper unavailable)")
+        result = self._run_helper("status")
+        if "chain_active=true" in result or "dns_active=true" in result:
+            self.log.warning("Found stale captive portal state — cleaning up")
+            self._run_helper("cleanup")
 
     def _run_helper(self, *args: str) -> str:
-        result = subprocess.run(
-            ["sudo", "-n", self._helper, *args],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        control_socket = self.config.get("control_socket", str(DEFAULT_CONTROL_SOCKET))
+        response = request_control(
+            "captive_portal",
+            list(args),
+            socket_path=control_socket,
+            timeout=20.0,
         )
-        if result.returncode != 0:
-            self.log.error(
-                "Helper '%s' failed (rc=%d): %s",
-                args[0] if args else "?",
-                result.returncode,
-                result.stderr.strip(),
-            )
-            raise RuntimeError(f"captive_portal_helper {args[0]} failed")
-        return result.stdout
+        return str(response.get("output", ""))
 
     # ── HTTP server ───────────────────────────────────────────────────
 
@@ -290,7 +270,7 @@ class CaptivePortalPlugin(PluginBase):
         configured = self.config.get("ap_interface")
         if configured:
             return configured
-        hm = self.app.get_plugin("hotspot_monitor") if hasattr(self.app, "get_plugin") else None
+        hm = self.get_ready_plugin("hotspot_monitor") if hasattr(self.app, "get_plugin") else None
         if hm and hasattr(hm, "get_interface"):
             iface = hm.get_interface()
             if isinstance(iface, str) and iface:
@@ -301,7 +281,7 @@ class CaptivePortalPlugin(PluginBase):
         configured = self.config.get("ap_ip")
         if configured:
             return configured
-        hm = self.app.get_plugin("hotspot_monitor") if hasattr(self.app, "get_plugin") else None
+        hm = self.get_ready_plugin("hotspot_monitor") if hasattr(self.app, "get_plugin") else None
         if hm:
             snap = hm.broadcast_snapshot()
             if snap and snap.get("ip"):
@@ -309,7 +289,7 @@ class CaptivePortalPlugin(PluginBase):
         return self._detect_interface_ip(self._ap_interface)
 
     def _resolve_ssid(self) -> str:
-        hm = self.app.get_plugin("hotspot_monitor") if hasattr(self.app, "get_plugin") else None
+        hm = self.get_ready_plugin("hotspot_monitor") if hasattr(self.app, "get_plugin") else None
         if hm:
             snap = hm.broadcast_snapshot()
             if snap and snap.get("ssid"):
@@ -320,7 +300,7 @@ class CaptivePortalPlugin(PluginBase):
         configured = self.config.get("dashboard_url")
         if configured:
             return configured
-        wd = self.app.get_plugin("web_dashboard") if hasattr(self.app, "get_plugin") else None
+        wd = self.get_ready_plugin("web_dashboard") if hasattr(self.app, "get_plugin") else None
         if wd and hasattr(wd, "get_status"):
             try:
                 status = wd.get_status()
@@ -329,25 +309,10 @@ class CaptivePortalPlugin(PluginBase):
                     # Replace host with AP IP for captive-portal context
                     parsed = urllib.parse.urlparse(url)
                     port = parsed.port or 80
-                    return parsed._replace(
-                        netloc=f"{self._ap_ip}:{port}"
-                    ).geturl()
+                    return parsed._replace(netloc=f"{self._ap_ip}:{port}").geturl()
             except Exception:
                 pass
         return f"http://{self._ap_ip}:8080"
-
-    def _resolve_helper_path(self) -> str:
-        if Path(_HELPER_SCRIPT).is_file():
-            return _HELPER_SCRIPT
-        local = (
-            Path(__file__).resolve().parent.parent.parent.parent
-            / "scripts"
-            / "captive_portal_helper.sh"
-        )
-        if local.is_file():
-            return str(local)
-        found = shutil.which("captive_portal_helper.sh")
-        return found or _HELPER_SCRIPT
 
     def _parse_hostapd_interface(self) -> str:
         try:

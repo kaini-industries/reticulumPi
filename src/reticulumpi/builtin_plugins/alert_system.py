@@ -10,6 +10,7 @@ from typing import Any
 import RNS
 
 from reticulumpi import events
+from reticulumpi.lxmf_compat import create_lxm_router
 from reticulumpi.plugin_base import PluginBase
 
 # Default alert rules
@@ -89,6 +90,7 @@ class AlertSystemPlugin(PluginBase):
         # Initialize LXMF if we have recipients
         self._lxmf_router = None
         self._lxmf_destination = None
+        self._recipient_destinations: dict[bytes, tuple[Any, bool]] = {}
         if self._recipient_hashes:
             self._setup_lxmf()
 
@@ -139,8 +141,6 @@ class AlertSystemPlugin(PluginBase):
 
     def _setup_lxmf(self) -> None:
         try:
-            import LXMF
-
             storage_path = os.path.expanduser(
                 self.config.get("storage_path", "~/.local/share/reticulumpi/alert_lxmf")
             )
@@ -148,13 +148,16 @@ class AlertSystemPlugin(PluginBase):
 
             # Create a separate identity for the alert system
             identity = RNS.Identity()
-            self._lxmf_router = LXMF.LXMRouter(
+            self._lxmf_router = create_lxm_router(
                 identity=identity,
                 storagepath=storage_path,
             )
             display_name = self.config.get("display_name") or f"{self.app.node_name} Alerts"
-            self._lxmf_destination = self._lxmf_router.register_delivery_identity(
-                identity, display_name=display_name
+            self._lxmf_destination = self.manage_destination(
+                self._lxmf_router.register_delivery_identity(
+                    identity,
+                    display_name=display_name,
+                )
             )
             self.log.info(
                 "Alert LXMF destination: %s",
@@ -169,6 +172,8 @@ class AlertSystemPlugin(PluginBase):
 
     def _send_alert(self, message: str, rule_key: str = "") -> None:
         """Send an alert message to all configured recipients."""
+        if not self._active:
+            return
         now = time.time()
         cooldown = self.config.get("cooldown_seconds", 300)
 
@@ -208,30 +213,18 @@ class AlertSystemPlugin(PluginBase):
 
             try:
                 # Warm path before sending if path_warmer is available
-                warmer = self.app.get_plugin("path_warmer")
+                warmer = self.get_ready_plugin("path_warmer")
                 if warmer and hasattr(warmer, "ensure_path"):
                     warmer.ensure_path(recipient_hash)
 
-                # Create destination for recipient
-                dest_identity = RNS.Identity.recall(recipient_hash)
-                if dest_identity is None:
-                    self.log.debug(
-                        "Cannot recall identity for %s — queuing via propagation",
-                        RNS.prettyhexrep(recipient_hash),
-                    )
-
-                dest = RNS.Destination(
-                    dest_identity,
-                    RNS.Destination.OUT,
-                    RNS.Destination.SINGLE,
-                    "lxmf",
-                    "delivery",
-                )
-                dest.hash = recipient_hash
+                destination = self._get_recipient_destination(recipient_hash)
+                if destination is None:
+                    self.log.debug("No managed destination for alert recipient")
+                    continue
 
                 full_message = f"[{self.app.node_name}] {message}"
                 lxm = LXMF.LXMessage(
-                    dest,
+                    destination,
                     self._lxmf_destination,
                     full_message,
                     desired_method=LXMF.LXMessage.OPPORTUNISTIC,
@@ -246,6 +239,39 @@ class AlertSystemPlugin(PluginBase):
                     "Failed to send alert to %s",
                     RNS.prettyhexrep(recipient_hash),
                 )
+
+    def _get_recipient_destination(self, recipient_hash: bytes) -> Any | None:
+        """Return a bounded, lifecycle-owned LXMF destination for a peer."""
+        destination_identity = RNS.Identity.recall(recipient_hash)
+        has_identity = destination_identity is not None
+        with self._lock:
+            if not self._active:
+                return None
+            cached = self._recipient_destinations.get(recipient_hash)
+            if cached is not None and (cached[1] or not has_identity):
+                return cached[0]
+
+            destination = RNS.Destination(
+                destination_identity,
+                RNS.Destination.OUT,
+                RNS.Destination.SINGLE,
+                "lxmf",
+                "delivery",
+            )
+            destination.hash = recipient_hash
+            try:
+                self.manage_destination(destination)
+            except RuntimeError:
+                # PluginBase already undoes a lifecycle-raced acquisition.
+                return None
+            self._recipient_destinations[recipient_hash] = (destination, has_identity)
+
+        if not has_identity:
+            self.log.debug(
+                "Cannot recall identity for %s — queuing via propagation",
+                RNS.prettyhexrep(recipient_hash),
+            )
+        return destination
 
     # --- Event handlers ---
 
@@ -280,7 +306,7 @@ class AlertSystemPlugin(PluginBase):
                 for k in expired_keys:
                     del self._cooldowns[k]
 
-            monitor = self.app.get_plugin("system_monitor")
+            monitor = self.get_ready_plugin("system_monitor")
             if not monitor or not hasattr(monitor, "latest_metrics"):
                 continue
 

@@ -12,20 +12,51 @@ import os
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from reticulumpi import events
+from reticulumpi.migrations import Migration, MigrationTarget
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.runtime_metrics import instrument_sqlite_class, record_sqlite_failure
 
 _DEFAULT_DB_PATH = "~/.local/share/reticulumpi/node_positions.db"
 
 
+@instrument_sqlite_class
 class NodeLocationTrackerPlugin(PluginBase):
     """Tracks and persists mesh node positions over time."""
 
     plugin_name = "node_location_tracker"
     plugin_description = "Records position history for mesh network nodes"
     plugin_version = "1.0.0"
+
+    def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
+        path = Path(os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH)))
+        return (
+            MigrationTarget(
+                "node_location_tracker",
+                path,
+                (
+                    Migration(
+                        1,
+                        "create node position history",
+                        (
+                            """CREATE TABLE IF NOT EXISTS node_positions (
+                                node_key TEXT NOT NULL,
+                                timestamp REAL NOT NULL,
+                                latitude REAL NOT NULL,
+                                longitude REAL NOT NULL,
+                                source TEXT NOT NULL,
+                                name TEXT,
+                                PRIMARY KEY (node_key, timestamp)
+                            )""",
+                            "CREATE INDEX IF NOT EXISTS idx_np_ts ON node_positions(timestamp)",
+                        ),
+                    ),
+                ),
+            ),
+        )
 
     def validate_config(self) -> None:
         interval = self.config.get("sample_interval", 120)
@@ -41,22 +72,16 @@ class NodeLocationTrackerPlugin(PluginBase):
     def start(self) -> None:
         self._sample_interval: int = self.config.get("sample_interval", 120)
         self._min_distance_m: float = float(self.config.get("min_distance_m", 25))
-        self._max_silence_s: float = float(
-            self.config.get("max_silence_minutes", 60)
-        ) * 60
+        self._max_silence_s: float = float(self.config.get("max_silence_minutes", 60)) * 60
         self._retention_days: int = self.config.get("retention_days", 30)
         self._max_rows: int = self.config.get("max_rows", 500000)
-        self._db_path: str = os.path.expanduser(
-            self.config.get("db_path", _DEFAULT_DB_PATH)
-        )
+        self._db_path: str = os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH))
 
         self._last_pos: dict[str, tuple[float, float, float]] = {}
         self._lock = threading.Lock()
         self._no_gateways_logged = False
-        self._write_conn: sqlite3.Connection | None = None
 
         self._init_db()
-        self._open_write_conn()
         self._load_last_positions()
         self._active = True
         self._start_thread(self._poll_loop, name="node-loc-poll")
@@ -70,18 +95,32 @@ class NodeLocationTrackerPlugin(PluginBase):
     def stop(self) -> None:
         self._active = False
         self._join_threads(timeout=5)
-        if self._write_conn is not None:
-            try:
-                self._write_conn.close()
-            except Exception:
-                self.log.debug("Error closing write connection", exc_info=True)
-            self._write_conn = None
+
+    def _connect(self, *, rows: bool = False) -> sqlite3.Connection:
+        """Return a connection owned by the calling thread.
+
+        SQLite connections default to same-thread use.  Polling and pruning
+        run on different workers, so sharing the startup thread's connection
+        caused every background write to fail with ProgrammingError.
+        """
+
+        conn = sqlite3.connect(self._db_path, timeout=5.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            if rows:
+                conn.row_factory = sqlite3.Row
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     def _init_db(self) -> None:
         db_dir = os.path.dirname(self._db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=5.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -96,25 +135,15 @@ class NodeLocationTrackerPlugin(PluginBase):
                     PRIMARY KEY (node_key, timestamp)
                 )"""
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_np_ts "
-                "ON node_positions (timestamp)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_np_ts ON node_positions (timestamp)")
             conn.commit()
         finally:
             conn.close()
 
-    def _open_write_conn(self) -> None:
-        """Open a persistent write connection with WAL mode."""
-        self._write_conn = sqlite3.connect(self._db_path)
-        self._write_conn.execute("PRAGMA journal_mode=WAL")
-        self._write_conn.execute("PRAGMA synchronous=NORMAL")
-
     def _load_last_positions(self) -> None:
         """Populate _last_pos from the most recent position per node."""
         try:
-            conn = sqlite3.connect(self._db_path)
-            conn.row_factory = sqlite3.Row
+            conn = self._connect(rows=True)
             try:
                 rows = conn.execute(
                     "SELECT node_key, latitude, longitude, MAX(timestamp) AS ts "
@@ -133,6 +162,9 @@ class NodeLocationTrackerPlugin(PluginBase):
                     )
             finally:
                 conn.close()
+        except sqlite3.Error as exc:
+            record_sqlite_failure(exc)
+            self.log.debug("Error loading last positions", exc_info=True)
         except Exception:
             self.log.debug("Error loading last positions", exc_info=True)
 
@@ -156,8 +188,8 @@ class NodeLocationTrackerPlugin(PluginBase):
 
     def _collect_positions(self) -> None:
         """Gather positions from gateway plugins and record new ones."""
-        msh_gw = self.app.get_plugin("meshtastic_gateway")
-        mc_gw = self.app.get_plugin("meshcore_gateway")
+        msh_gw = self.get_ready_plugin("meshtastic_gateway")
+        mc_gw = self.get_ready_plugin("meshcore_gateway")
         if msh_gw is None and mc_gw is None:
             if not self._no_gateways_logged:
                 self.log.info("No gateway plugins available — skipping collection")
@@ -175,9 +207,7 @@ class NodeLocationTrackerPlugin(PluginBase):
                     lon = node.get("longitude")
                     name = node.get("long_name")
                     if self._valid_position(lat, lon):
-                        positions.append(
-                            (f"msh:{nid}", float(lat), float(lon), "meshtastic", name)
-                        )
+                        positions.append((f"msh:{nid}", float(lat), float(lon), "meshtastic", name))
             except Exception:
                 self.log.debug("Error reading meshtastic nodes", exc_info=True)
 
@@ -194,9 +224,7 @@ class NodeLocationTrackerPlugin(PluginBase):
                     lon = nb.get("longitude")
                     name = nb.get("long_name")
                     if self._valid_position(lat, lon):
-                        positions.append(
-                            (key, float(lat), float(lon), "meshtastic", name)
-                        )
+                        positions.append((key, float(lat), float(lon), "meshtastic", name))
                         seen_keys.add(key)
             except Exception:
                 self.log.debug("Error reading lora neighbors", exc_info=True)
@@ -211,9 +239,7 @@ class NodeLocationTrackerPlugin(PluginBase):
                     lon = contact.get("longitude")
                     name = contact.get("name")
                     if self._valid_position(lat, lon):
-                        positions.append(
-                            (f"mc:{pk}", float(lat), float(lon), "meshcore", name)
-                        )
+                        positions.append((f"mc:{pk}", float(lat), float(lon), "meshcore", name))
             except Exception:
                 self.log.debug("Error reading meshcore contacts", exc_info=True)
 
@@ -232,15 +258,23 @@ class NodeLocationTrackerPlugin(PluginBase):
                     elapsed = now - last_ts
                     if dist < self._min_distance_m and elapsed < self._max_silence_s:
                         continue
-                self._last_pos[node_key] = (lat, lon, now)
                 to_insert.append((node_key, now, lat, lon, source, name))
 
-        if to_insert and self._write_conn is not None:
-            self._write_conn.executemany(
-                "INSERT OR REPLACE INTO node_positions VALUES (?, ?, ?, ?, ?, ?)",
-                to_insert,
-            )
-            self._write_conn.commit()
+        if to_insert:
+            conn = self._connect()
+            try:
+                with conn:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO node_positions VALUES (?, ?, ?, ?, ?, ?)",
+                        to_insert,
+                    )
+            finally:
+                conn.close()
+            # Do not suppress retries after a failed commit.  The in-memory
+            # deduplication cache is advanced only after durable storage.
+            with self._lock:
+                for node_key, timestamp, lat, lon, _source, _name in to_insert:
+                    self._last_pos[node_key] = (lat, lon, timestamp)
             self.app.event_bus.publish(
                 events.NODE_POSITION_RECORDED,
                 {"count": len(to_insert)},
@@ -248,26 +282,21 @@ class NodeLocationTrackerPlugin(PluginBase):
 
     def _prune(self) -> None:
         """Remove rows older than retention_days and enforce max_rows cap."""
-        if self._write_conn is None:
-            return
         cutoff = time.time() - self._retention_days * 86400
-        conn = self._write_conn
-        conn.execute(
-            "DELETE FROM node_positions WHERE timestamp < ?", (cutoff,)
-        )
-        conn.commit()
-
-        count = conn.execute(
-            "SELECT COUNT(*) FROM node_positions"
-        ).fetchone()[0]
-        if count > self._max_rows:
-            excess = count - self._max_rows
-            conn.execute(
-                "DELETE FROM node_positions WHERE rowid IN "
-                "(SELECT rowid FROM node_positions ORDER BY timestamp ASC LIMIT ?)",
-                (excess,),
-            )
-            conn.commit()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM node_positions WHERE timestamp < ?", (cutoff,))
+                count = conn.execute("SELECT COUNT(*) FROM node_positions").fetchone()[0]
+                if count > self._max_rows:
+                    excess = count - self._max_rows
+                    conn.execute(
+                        "DELETE FROM node_positions WHERE rowid IN "
+                        "(SELECT rowid FROM node_positions ORDER BY timestamp ASC LIMIT ?)",
+                        (excess,),
+                    )
+        finally:
+            conn.close()
 
         # Prune the in-memory last-position cache using the same cutoff so it
         # does not grow unbounded as nodes go stale (the DB prune above only
@@ -297,8 +326,7 @@ class NodeLocationTrackerPlugin(PluginBase):
         if not node_keys:
             return result
 
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
+        conn = self._connect(rows=True)
         try:
             placeholders = ",".join("?" for _ in node_keys)
             if limit_per_node is not None:
@@ -316,7 +344,10 @@ class NodeLocationTrackerPlugin(PluginBase):
                     "ORDER BY node_key, timestamp ASC"
                 )
                 params: list[Any] = [
-                    *node_keys, since, until, limit_per_node,
+                    *node_keys,
+                    since,
+                    until,
+                    limit_per_node,
                 ]
             else:
                 sql = (
@@ -343,17 +374,13 @@ class NodeLocationTrackerPlugin(PluginBase):
 
     def get_summary(self) -> dict[str, Any]:
         """Return a summary of the position database."""
-        conn = sqlite3.connect(self._db_path)
+        conn = self._connect()
         try:
-            total = conn.execute(
-                "SELECT COUNT(*) FROM node_positions"
-            ).fetchone()[0]
-            nodes = conn.execute(
-                "SELECT COUNT(DISTINCT node_key) FROM node_positions"
-            ).fetchone()[0]
-            oldest_row = conn.execute(
-                "SELECT MIN(timestamp) FROM node_positions"
-            ).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM node_positions").fetchone()[0]
+            nodes = conn.execute("SELECT COUNT(DISTINCT node_key) FROM node_positions").fetchone()[
+                0
+            ]
+            oldest_row = conn.execute("SELECT MIN(timestamp) FROM node_positions").fetchone()[0]
         finally:
             conn.close()
 
@@ -392,8 +419,5 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     rlat2 = math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(rlat1) * math.cos(rlat2) * math.sin(dlon / 2) ** 2
-    )
+    a = math.sin(dlat / 2) ** 2 + math.cos(rlat1) * math.cos(rlat2) * math.sin(dlon / 2) ** 2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))

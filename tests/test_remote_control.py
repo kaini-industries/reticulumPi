@@ -153,6 +153,40 @@ def test_handle_status(mock_dest, mock_transport, mock_app, plugin_config, autho
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
+def test_handle_status_uptime_ignores_wall_clock_jump(
+    mock_dest,
+    mock_transport,
+    mock_app,
+    plugin_config,
+    authorized_identity,
+):
+    from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+    import RNS.vendor.umsgpack as umsgpack
+
+    mock_app.get_status.return_value = {"version": "0.3.0", "plugins": {}}
+    plugin = RemoteControlPlugin(mock_app, plugin_config)
+    plugin.start()
+    plugin._start_monotonic = 100.0
+
+    with (
+        patch(
+            "reticulumpi.builtin_plugins.remote_control.time.time",
+            return_value=-9_999_999_999.0,
+        ),
+        patch(
+            "reticulumpi.builtin_plugins.remote_control.time.monotonic",
+            return_value=112.5,
+        ),
+    ):
+        result = plugin._handle_status("/status", None, None, None, authorized_identity, None)
+
+    data = umsgpack.unpackb(result)
+    assert data["data"]["uptime"] == 12.5
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
 def test_handle_metrics_no_monitor(
     mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
 ):
@@ -224,6 +258,81 @@ def test_link_accepts_authorized(mock_dest, mock_transport, mock_app, plugin_con
     mock_link.teardown.assert_not_called()
     assert mock_link in plugin._active_links
     plugin.stop()
+
+
+@patch("RNS.Destination")
+def test_managed_cleanup_owns_destination_ten_handlers_and_links(
+    mock_destination_factory,
+    mock_app,
+    plugin_config,
+    authorized_identity,
+):
+    from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+
+    destination = MagicMock()
+    destination.hash = b"\x10" * 16
+    mock_destination_factory.return_value = destination
+    plugin = RemoteControlPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    resources = plugin.get_lifecycle_metrics()["rns_resources"]
+    assert resources == {"links": 0, "destinations": 1, "request_handlers": 10}
+    assert destination.register_request_handler.call_count == 10
+
+    link = MagicMock()
+    plugin._link_established(link)
+    plugin._remote_identified(link, authorized_identity)
+    assert plugin.get_lifecycle_metrics()["rns_resources"]["links"] == 1
+    assert link in plugin._active_links
+
+    plugin.stop()
+    plugin.cleanup_managed_resources()
+
+    destination.deregister.assert_called_once_with()
+    assert destination.deregister_request_handler.call_count == 10
+    link.teardown.assert_called_once_with()
+    assert plugin.get_lifecycle_metrics()["rns_resources"] == {
+        "links": 0,
+        "destinations": 0,
+        "request_handlers": 0,
+    }
+
+
+@patch("RNS.Destination")
+def test_stopped_authenticated_handler_and_late_link_fail_closed(
+    mock_destination_factory,
+    mock_app,
+    plugin_config,
+    authorized_identity,
+):
+    import RNS.vendor.umsgpack as umsgpack
+
+    from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+
+    destination = MagicMock()
+    destination.hash = b"\x10" * 16
+    mock_destination_factory.return_value = destination
+    plugin = RemoteControlPlugin(mock_app, plugin_config)
+    plugin.start()
+    plugin.stop()
+
+    payload = umsgpack.packb({"name": "sample"})
+    response = plugin._handle_plugin_enable(
+        "/plugin/enable",
+        payload,
+        None,
+        None,
+        authorized_identity,
+        None,
+    )
+    assert umsgpack.unpackb(response) == {"ok": False, "error": "plugin unavailable"}
+    mock_app.enable_plugin.assert_not_called()
+
+    late_link = MagicMock()
+    plugin._link_established(late_link)
+    late_link.teardown.assert_called_once_with()
+    assert plugin.get_lifecycle_metrics()["rns_resources"]["links"] == 0
+    plugin.cleanup_managed_resources()
 
 
 @patch("RNS.Transport")

@@ -37,8 +37,10 @@
   var LS_KEY = 'rpi_lora_region';
 
   // -- Constants ----------------------------------------------------------
+  var WF_HISTORY_ROWS = 256;
   var WF_COLS = 800;
   var WF_ROWS = 256;
+  var _pixelRatio = 1;
 
   // -- DOM handles (resolved lazily on first data tick) --------------------
   var _section = null, _body = null, _toggle = null, _countEl = null;
@@ -121,12 +123,21 @@
     if (!_wfCanvas || !_wfCtx) return false;
     var container = _wfCanvas.parentElement;
     if (!container) return false;
-    var newCols = Math.max(400, Math.min(container.clientWidth, 1920));
+    var ratio = Math.max(1, Math.min(Number(window.devicePixelRatio) || 1, 2));
+    var logicalCols = Math.max(320, Math.min(container.clientWidth || 320, 1920));
+    var logicalRows = Math.max(160, Math.min(_wfCanvas.clientHeight || 256, 640));
+    var newCols = Math.round(logicalCols * ratio);
     newCols = (newCols + 1) & ~1;
-    if (newCols === WF_COLS && _wfCanvas.width === WF_COLS) return false;
+    var newRows = Math.max(1, Math.round(logicalRows * ratio));
+    if (newCols === WF_COLS && newRows === WF_ROWS
+        && _wfCanvas.width === WF_COLS && _wfCanvas.height === WF_ROWS
+        && ratio === _pixelRatio) return false;
+    _pixelRatio = ratio;
     WF_COLS = newCols;
+    WF_ROWS = newRows;
     _wfCanvas.width = WF_COLS;
     _wfCanvas.height = WF_ROWS;
+    _wfCanvas.setAttribute('data-pixel-ratio', String(_pixelRatio));
     _wfCtx.fillStyle = _css.wfBg || '#050810';
     _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
     _needsBulkPaint = true;
@@ -153,8 +164,8 @@
     if (_wfCanvas) {
       _wfCtx = _wfCanvas.getContext('2d');
       _resizeCanvas();
-      _wfCanvas.addEventListener('mousemove', _onHover);
-      _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
+      _wfCanvas.addEventListener('pointermove', _onHover);
+      _wfCanvas.addEventListener('pointerleave', _onHoverLeave);
       var wfParent = _wfCanvas.parentElement;
       if (wfParent && typeof ResizeObserver !== 'undefined') {
         _resizeObs = new ResizeObserver(function () {
@@ -169,7 +180,8 @@
     }
 
     if (_lineEl) {
-      _lineEl.addEventListener('mousedown', _onDragStart);
+      _lineEl.addEventListener('pointerdown', _onDragStart);
+      _lineEl.addEventListener('keydown', _onZoomKeyDown);
     }
     var plotWrap = _body ? _body.querySelector('.lora-spectrum-plot-wrap') : null;
     if (plotWrap) plotWrap.addEventListener('dblclick', _onDoubleClickReset);
@@ -244,15 +256,28 @@
 
   function _onToggleClick() {
     if (!_body) return;
-    _expanded = _body.classList.contains('hidden');
-    _body.classList.toggle('hidden');
-    var chev = _toggle.querySelector('.chevron');
-    if (chev) chev.innerHTML = _expanded ? '&#9662;' : '&#9656;';
+    _setExpanded(_body.classList.contains('hidden'));
     // Collapse/expand preserves state — the waterfall canvas, peak-hold,
     // zoom, and the shared history store all stay intact so reopening
     // resumes where the user left off.  Full-band / zoom-chip is one
     // click away if they want a fresh view.
-    if (_expanded && _lastData) _renderAll(_lastData);
+    if (_expanded && _lastData) {
+      _resizeCanvas();
+      _renderAll(_lastData);
+    }
+  }
+
+  function _setExpanded(expanded) {
+    _expanded = !!expanded;
+    if (_body) {
+      _body.classList.toggle('hidden', !_expanded);
+      _body.hidden = !_expanded;
+    }
+    if (_toggle) {
+      _toggle.classList.toggle('open', _expanded);
+      _toggle.setAttribute('aria-expanded', _expanded ? 'true' : 'false');
+      _toggle.title = _expanded ? 'Click to collapse' : 'Click to expand';
+    }
   }
 
   // -- Region selection ---------------------------------------------------
@@ -991,8 +1016,10 @@
       var row = tail[i];
       if (!row || !row.length) continue;
       var sliced = row.slice(clip.loIdx, clip.hiIdx + 1);
-      SC.paintRowToCanvas(_wfCtx, _wfCanvas, sliced, WF_COLS, WF_ROWS,
-                          _scale.minDb, _scale.maxDb);
+      SC.paintRowToCanvas(
+        _wfCtx, _wfCanvas, sliced, WF_COLS, WF_ROWS,
+        _scale.minDb, _scale.maxDb, WF_HISTORY_ROWS
+      );
     }
     _lastSweepCount = sc;
   }
@@ -1126,7 +1153,9 @@
     var n = clip.hiIdx - clip.loIdx + 1;
     var binIdx = clip.loIdx + Math.min(n - 1, Math.max(0, Math.round(fracX * (n - 1))));
 
-    var rowIdx = Math.min(Math.floor(fracY * WF_ROWS), WF_ROWS - 1);
+    var rowIdx = Math.min(
+      Math.floor(fracY * WF_HISTORY_ROWS), WF_HISTORY_ROWS - 1
+    );
     var rowTs = _store().rowTimestamps[rowIdx];
     var agoSec = (rowTs != null) ? (Date.now() / 1000 - rowTs) : null;
     var ageStr;
@@ -1165,6 +1194,7 @@
   // the hover crosshair.  On release, commit _zoom and re-render.
   function _setZoom(range, silent) {
     _zoom = range;
+    _updateZoomAccessibility();
     _lastOverlaySig = '';  // overlay bounds depend on zoom
     try { localStorage.setItem(_zoomKey(), range ? JSON.stringify(range) : ''); } catch (e) {}
     if (silent) {
@@ -1214,24 +1244,52 @@
         ? full.slice(clip.loIdx, clip.hiIdx + 1)
         : null;
     }
-    SC.paintHistoryToCanvas(_wfCtx, _wfCanvas, sliced, WF_COLS, WF_ROWS,
-                            _scale.minDb, _scale.maxDb);
+    SC.paintHistoryToCanvas(
+      _wfCtx, _wfCanvas, sliced, WF_COLS, WF_ROWS,
+      _scale.minDb, _scale.maxDb, WF_HISTORY_ROWS
+    );
+  }
+
+  function _removeDragListeners() {
+    window.removeEventListener('pointermove', _onDragMove);
+    window.removeEventListener('pointerup', _onDragEnd);
+    window.removeEventListener('pointercancel', _onDragCancel);
+  }
+
+  function _cancelDrag() {
+    if (!_dragState) return;
+    var pointerId = _dragState.pointerId;
+    _dragState = null;
+    _removeDragListeners();
+    if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
+    if (_lineEl && _lineEl.releasePointerCapture && pointerId != null) {
+      try { _lineEl.releasePointerCapture(pointerId); } catch (e) {}
+    }
+    if (_lastData) {
+      _renderLine(_lastData, _clip(_lastData.spectrum || {}, _zoom));
+    }
   }
 
   function _onDragStart(ev) {
     if (!_lineEl || !_lastData) return;
-    if (ev.button !== 0) return;  // left-click only
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
     var rect = _lineEl.getBoundingClientRect();
     var frac = (ev.clientX - rect.left) / rect.width;
     if (frac < 0 || frac > 1) return;
-    _dragState = { startFrac: frac, curFrac: frac };
-    window.addEventListener('mousemove', _onDragMove);
-    window.addEventListener('mouseup', _onDragEnd);
+    _cancelDrag();
+    _dragState = { startFrac: frac, curFrac: frac, pointerId: ev.pointerId };
+    if (_lineEl.setPointerCapture && ev.pointerId != null) {
+      try { _lineEl.setPointerCapture(ev.pointerId); } catch (e) {}
+    }
+    window.addEventListener('pointermove', _onDragMove);
+    window.addEventListener('pointerup', _onDragEnd);
+    window.addEventListener('pointercancel', _onDragCancel);
     ev.preventDefault();
     _renderLine(_lastData, _clip(_lastData.spectrum || {}, _zoom));
   }
   function _onDragMove(ev) {
     if (!_dragState || !_lineEl) return;
+    if (ev.pointerId != null && ev.pointerId !== _dragState.pointerId) return;
     var rect = _lineEl.getBoundingClientRect();
     var frac = (ev.clientX - rect.left) / rect.width;
     if (frac < 0) frac = 0; else if (frac > 1) frac = 1;
@@ -1245,8 +1303,12 @@
   }
   function _onDragEnd(ev) {
     if (!_dragState) return;
-    window.removeEventListener('mousemove', _onDragMove);
-    window.removeEventListener('mouseup', _onDragEnd);
+    if (ev.pointerId != null && ev.pointerId !== _dragState.pointerId) return;
+    var pointerId = _dragState.pointerId;
+    _removeDragListeners();
+    if (_lineEl && _lineEl.releasePointerCapture && pointerId != null) {
+      try { _lineEl.releasePointerCapture(pointerId); } catch (e) {}
+    }
     if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
     var start = _dragState.startFrac, end = _dragState.curFrac;
     _dragState = null;
@@ -1271,6 +1333,69 @@
       return;
     }
     _setZoom([loMhz, hiMhz]);
+  }
+
+  function _onDragCancel(ev) {
+    if (_dragState && ev.pointerId != null && ev.pointerId !== _dragState.pointerId) return;
+    _cancelDrag();
+  }
+
+  function _updateZoomAccessibility() {
+    if (!_lineEl) return;
+    var label = 'LoRa spectrum line plot';
+    var spec = _lastData ? (_lastData.spectrum || {}) : null;
+    if (spec) {
+      var clip = _clip(spec, _zoom);
+      if (clip) {
+        label += _zoom
+          ? ', zoomed from ' + clip.loMhz.toFixed(3) + ' to ' + clip.hiMhz.toFixed(3) + ' MHz'
+          : ', full band from ' + clip.loMhz.toFixed(3) + ' to ' + clip.hiMhz.toFixed(3) + ' MHz';
+      }
+    }
+    _lineEl.setAttribute('aria-label', label);
+  }
+
+  function _onZoomKeyDown(ev) {
+    var spec = _lastData ? (_lastData.spectrum || {}) : null;
+    if (!spec) return;
+    var key = ev.key;
+    var full = _clip(spec, null);
+    var current = _clip(spec, _zoom);
+    if (!full || !current) return;
+    var fullSpan = full.hiMhz - full.loMhz;
+    var span = current.hiMhz - current.loMhz;
+    var center = (current.loMhz + current.hiMhz) / 2;
+    var next = null;
+    var handled = true;
+    if (key === '+' || key === '=' || key === 'Enter') {
+      var minSpan = Math.max((current.binStepKhz || 250) * 2 / 1000, fullSpan / 1024);
+      var zoomSpan = Math.max(minSpan, span / 2);
+      next = [center - zoomSpan / 2, center + zoomSpan / 2];
+    } else if (key === '-') {
+      if (!_zoom) return;
+      var outSpan = Math.min(fullSpan, span * 2);
+      if (outSpan >= fullSpan * 0.999) next = null;
+      else next = [center - outSpan / 2, center + outSpan / 2];
+    } else if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      if (!_zoom) return;
+      var shift = span * 0.1 * (key === 'ArrowLeft' ? -1 : 1);
+      var lo = current.loMhz + shift;
+      var hi = current.hiMhz + shift;
+      if (lo < full.loMhz) { hi += full.loMhz - lo; lo = full.loMhz; }
+      if (hi > full.hiMhz) { lo -= hi - full.hiMhz; hi = full.hiMhz; }
+      next = [lo, hi];
+    } else if (key === 'Escape' || key === 'Home' || key === '0') {
+      next = null;
+    } else {
+      handled = false;
+    }
+    if (!handled) return;
+    ev.preventDefault();
+    if (next) {
+      next[0] = Math.max(full.loMhz, next[0]);
+      next[1] = Math.min(full.hiMhz, next[1]);
+    }
+    _setZoom(next);
   }
 
   function _onPresetClick(ev) {
@@ -1529,7 +1654,7 @@
     var lineColor = isElevated ? '#ffc107' : _css.cyan;
     var fillColor = isElevated ? 'rgba(255,193,7,0.08)' : 'rgba(0,229,255,0.08)';
 
-    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + h + 'px">';
+    var svg = '<svg class="lora-stats-svg" viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h + '">';
     // Fill area
     var fillPts = pts.join(' ')
       + ' ' + (pad + (w - pad * 2)).toFixed(1) + ',' + (h - 5)
@@ -1578,7 +1703,7 @@
     var h = channels.length * barH + 20;
     var pad = 25;
 
-    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + Math.round(h) + 'px">';
+    var svg = '<svg class="lora-stats-svg" viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + Math.round(h) + '">';
     svg += '<text x="' + (w / 2) + '" y="8" fill="' + _css.statText + '" font-size="8" text-anchor="middle">Channel Duty Cycle %</text>';
     for (var i = 0; i < channels.length; i++) {
       var ch = channels[i];
@@ -1618,8 +1743,7 @@
       _chTimelineEl.style.display = '';
       var count = (hist && hist[idx]) ? hist[idx].length : 0;
       _chTimelineEl.innerHTML = '<div class="lora-stats-label">Ch ' + ch.idx
-        + ' Time Series</div><div style="color:' + _css.sublabel
-        + ';font-size:0.7rem">Collecting data (' + count + '/2 samples)...</div>';
+        + ' Time Series</div><div class="lora-collecting">Collecting data (' + count + '/2 samples)...</div>';
       return;
     }
     var entries = hist[idx];
@@ -1638,7 +1762,7 @@
     var span = mx - mn;
     if (span < 3) { mn -= 1.5; mx += 1.5; span = mx - mn; }
 
-    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + h + 'px">';
+    var svg = '<svg class="lora-stats-svg" viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h + '">';
     svg += '<text x="' + (w / 2) + '" y="10" fill="' + _css.statText + '" font-size="8" text-anchor="middle">'
       + 'Ch ' + ch.idx + ' · ' + ch.center_mhz.toFixed(3) + ' MHz · Duty ' + ch.duty_pct.toFixed(1) + '%</text>';
     // Noise floor reference
@@ -1718,10 +1842,7 @@
       _scale.initialized = false;
       _needsBulkPaint = true;
       if (_dragState) {
-        _dragState = null;
-        if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
-        window.removeEventListener('mousemove', _onDragMove);
-        window.removeEventListener('mouseup', _onDragEnd);
+        _cancelDrag();
       }
       _setZoom(null, /*silent=*/true);
       clip = _clip(spec, _zoom);
@@ -1815,10 +1936,8 @@
       _hasReceivedData = true;
       if (_placeholderEl) { _placeholderEl.style.display = 'none'; }
       if (_body && _body.classList.contains('hidden')) {
-        _body.classList.remove('hidden');
-        _expanded = true;
-        var chev = _toggle ? _toggle.querySelector('.chevron') : null;
-        if (chev) chev.innerHTML = '&#9662;';
+        _setExpanded(true);
+        _resizeCanvas();
       }
     }
 
@@ -1828,6 +1947,7 @@
     }
 
     _lastData = data;
+    _updateZoomAccessibility();
     if (_body && _body.classList.contains('hidden')) return;
     _detectRNode(data);
 

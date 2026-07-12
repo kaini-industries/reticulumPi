@@ -209,9 +209,7 @@ class TestCheckLoopThresholds:
                 triggered = True
             if triggered:
                 msg_template = rule.get("message", f"{metric_name} = {{value}}")
-                message = msg_template.format(
-                    value=val, metric=metric_name, threshold=thresh
-                )
+                message = msg_template.format(value=val, metric=metric_name, threshold=thresh)
                 plugin._send_alert(message, rule_key=f"rule:{metric_name}:{oper}:{thresh}")
 
         plugin.stop()

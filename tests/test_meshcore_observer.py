@@ -752,16 +752,52 @@ class TestBugFixes:
     def test_uptime_is_seconds_since_start(self, observer_plugin):
         observer_plugin._public_key = "aa" * 32
         observer_plugin._connected_mqtt = True
-        observer_plugin._start_time = time.time() - 42
+        observer_plugin._start_monotonic = 100.0
         mock_client = MagicMock()
         observer_plugin._mqtt_client = mock_client
 
-        observer_plugin._publish_status()
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.meshcore_observer.time.time",
+                return_value=9_999_999_999.0,
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.meshcore_observer.time.monotonic",
+                return_value=142.0,
+            ),
+        ):
+            observer_plugin._publish_status()
 
         status = json.loads(mock_client.publish.call_args[0][1])
         # Uptime is seconds since start, not a wall-clock epoch.
         assert 40 <= status["uptime"] <= 60
         assert status["uptime"] < 1_000_000
+
+    def test_mqtt_connect_deadline_ignores_wall_clock_jump(self, mock_app, obs_config):
+        plugin = _make_plugin_no_start(mock_app, obs_config)
+        plugin._active = True
+        plugin._connected_mqtt = False
+        plugin._public_key = "aa" * 32
+        plugin._jwt_token = "fixture-token"
+        plugin._refresh_jwt_if_needed = MagicMock()
+        client = MagicMock()
+        _mock_paho.Client.return_value = client
+        _mock_paho_client.Client.return_value = client
+        monotonic_values = iter((0.0, 5.0, 11.0))
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.meshcore_observer.time.time",
+                side_effect=AssertionError("MQTT deadline consulted wall time"),
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.meshcore_observer.time.monotonic",
+                side_effect=lambda: next(monotonic_values),
+            ),
+            patch("reticulumpi.builtin_plugins.meshcore_observer.time.sleep"),
+            pytest.raises(ConnectionError, match="timed out"),
+        ):
+            plugin._connect_mqtt()
 
     def test_packet_json_uses_recv_time_for_all_time_fields(self, observer_plugin):
         observer_plugin._public_key = "aa" * 32

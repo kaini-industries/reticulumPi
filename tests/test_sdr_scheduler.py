@@ -30,9 +30,11 @@ def _cb_pair() -> tuple[MagicMock, MagicMock]:
 
 def _patch_hw():
     """Stub out rtlsdr hardware calls."""
+    lease = MagicMock()
+    lease.index = 0
     return patch.multiple(
         "reticulumpi.rtlsdr",
-        resolve_device=MagicMock(return_value=0),
+        claim_device=MagicMock(return_value=lease),
         release_device=MagicMock(),
     )
 
@@ -275,7 +277,7 @@ class TestBackgroundRoundRobin:
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
-        dongle.bg_last_rotation = time.time() - dongle.bg_slice_seconds - 1
+        dongle.bg_last_rotation = time.monotonic() - dongle.bg_slice_seconds - 1
         dongle.bg_index = 0
         with sched._condition:
             sched._evaluate(SERIAL)
@@ -289,7 +291,7 @@ class TestBackgroundRoundRobin:
         dongle = sched._dongles[SERIAL]
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
-        dongle.bg_last_rotation = time.time()
+        dongle.bg_last_rotation = time.monotonic()
         with sched._condition:
             sched._evaluate(SERIAL)
         yld1.assert_not_called()
@@ -311,6 +313,139 @@ class TestHandoffProtocol:
         preempted_by, label, _ = yld_bg.call_args[0]
         assert preempted_by == "wx"
         assert label == "SAME Alert"
+
+    def test_acquisition_completed_after_stop_releases_exact_lease(self):
+        scheduler = _make_scheduler()
+        order: list[str] = []
+        acquire = MagicMock(side_effect=lambda *_args: order.append("acquire"))
+        yield_cb = MagicMock(side_effect=lambda *_args: order.append("cleanup"), return_value=True)
+        scheduler.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            acquire,
+            yield_cb,
+            continuous=True,
+        )
+        lease = MagicMock()
+        lease.index = 2
+        lease.release.side_effect = lambda: order.append("release")
+        with (
+            patch("reticulumpi.rtlsdr.claim_device", return_value=lease),
+            patch("reticulumpi.sdr_scheduler._USB_SETTLE_DELAY", 0),
+            scheduler._condition,
+        ):
+            scheduler._do_acquire(scheduler._dongles[SERIAL], "ais")
+
+        acquire.assert_called_once_with(SERIAL, 2)
+        yield_cb.assert_called_once_with("", "", None)
+        lease.release.assert_called_once()
+        assert order == ["acquire", "cleanup", "release"]
+        assert scheduler._dongles[SERIAL].current_holder is None
+
+    def test_release_requested_inside_acquire_callback_cancels_stale_grant(self):
+        scheduler = _make_scheduler()
+        scheduler._running = True
+        lease = MagicMock(index=2)
+
+        def acquire(serial, _index):
+            scheduler.dongle_released(serial, "ais")
+
+        yield_cb = MagicMock(return_value=True)
+        scheduler.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            acquire,
+            yield_cb,
+            continuous=True,
+        )
+        with (
+            patch("reticulumpi.rtlsdr.claim_device", return_value=lease),
+            patch("reticulumpi.sdr_scheduler._USB_SETTLE_DELAY", 0),
+            scheduler._condition,
+        ):
+            scheduler._do_acquire(scheduler._dongles[SERIAL], "ais")
+
+        slot = scheduler._dongles[SERIAL].slots["ais"]
+        lease.release.assert_called_once_with()
+        yield_cb.assert_called_once_with("", "", None)
+        assert scheduler._dongles[SERIAL].current_holder is None
+        assert slot.device_lease is None
+        assert slot.is_active is False
+
+    def test_slot_replaced_during_acquire_cannot_receive_stale_lease(self):
+        scheduler = _make_scheduler()
+        scheduler._running = True
+        lease = MagicMock(index=2)
+        replacement_acquire = MagicMock()
+
+        def acquire(serial, _index):
+            scheduler.register(
+                serial,
+                "ais",
+                PRIORITY_BACKGROUND,
+                replacement_acquire,
+                MagicMock(return_value=True),
+                continuous=True,
+            )
+
+        stale_yield = MagicMock(return_value=True)
+        scheduler.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            acquire,
+            stale_yield,
+            continuous=True,
+        )
+        with (
+            patch("reticulumpi.rtlsdr.claim_device", return_value=lease),
+            patch("reticulumpi.sdr_scheduler._USB_SETTLE_DELAY", 0),
+            scheduler._condition,
+        ):
+            scheduler._do_acquire(scheduler._dongles[SERIAL], "ais")
+
+        slot = scheduler._dongles[SERIAL].slots["ais"]
+        lease.release.assert_called_once_with()
+        stale_yield.assert_called_once_with("", "", None)
+        assert slot.acquire_cb is replacement_acquire
+        assert slot.device_lease is None
+        assert scheduler._dongles[SERIAL].current_holder is None
+
+    def test_wall_clock_jump_does_not_rotate_background_slot(self):
+        acquire, yield_cb = _cb_pair()
+        scheduler = _make_scheduler()
+        scheduler._running = True
+        scheduler.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            acquire,
+            yield_cb,
+            continuous=True,
+        )
+        scheduler.register(
+            SERIAL,
+            "acars",
+            PRIORITY_BACKGROUND,
+            *_cb_pair(),
+            continuous=True,
+        )
+        dongle = scheduler._dongles[SERIAL]
+        dongle.current_holder = "ais"
+        dongle.slots["ais"].is_active = True
+        dongle.bg_last_rotation = 100.0
+
+        with (
+            patch("reticulumpi.sdr_scheduler.time.time", return_value=9_999_999.0),
+            patch("reticulumpi.sdr_scheduler.time.monotonic", return_value=101.0),
+            scheduler._condition,
+        ):
+            scheduler._evaluate(SERIAL)
+
+        yield_cb.assert_not_called()
+        assert dongle.current_holder == "ais"
 
 
 class TestIntrospection:
@@ -348,8 +483,132 @@ class TestLifecycle:
     def test_dongle_released_clears_holder(self, sched):
         sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, *_cb_pair(), continuous=True)
         dongle = sched._dongles[SERIAL]
+        lease = MagicMock()
         dongle.current_holder = "ais"
         dongle.slots["ais"].is_active = True
+        dongle.slots["ais"].device_lease = lease
         sched.dongle_released(SERIAL, "ais")
         assert dongle.current_holder is None
         assert dongle.slots["ais"].is_active is False
+        assert dongle.slots["ais"].device_lease is None
+        lease.release.assert_called_once_with()
+
+    def test_suspend_releases_lease_and_blocks_reacquisition(self, sched):
+        acquire, yield_cb = _cb_pair()
+        sched.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            acquire,
+            yield_cb,
+            continuous=True,
+        )
+        dongle = sched._dongles[SERIAL]
+        lease = MagicMock()
+        dongle.current_holder = "ais"
+        dongle.slots["ais"].is_active = True
+        dongle.slots["ais"].device_lease = lease
+
+        sched.suspend(SERIAL, "ais")
+        with sched._condition:
+            sched._evaluate(SERIAL)
+
+        assert dongle.current_holder is None
+        assert dongle.slots["ais"].suspended is True
+        lease.release.assert_called_once_with()
+        acquire.assert_not_called()
+
+    def test_resume_requires_current_registration_and_only_restores_eligibility(self, sched):
+        acquire, yield_cb = _cb_pair()
+        sched.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            acquire,
+            yield_cb,
+            continuous=True,
+        )
+        token = sched.suspend(SERIAL, "ais")
+        assert token is not None
+        assert sched.resume(SERIAL, "ais", registration_id=token) is True
+        assert acquire.call_count == 0
+
+        sched.unregister(SERIAL, "ais")
+        sched.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            acquire,
+            yield_cb,
+            continuous=True,
+        )
+        sched.suspend(SERIAL, "ais")
+        assert sched.resume(SERIAL, "ais", registration_id=token) is False
+
+    def test_stale_generation_cannot_release_new_holder(self, sched):
+        sched.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            *_cb_pair(),
+            continuous=True,
+        )
+        dongle = sched._dongles[SERIAL]
+        slot = dongle.slots["ais"]
+        lease = MagicMock()
+        dongle.current_holder = "ais"
+        slot.is_active = True
+        slot.device_lease = lease
+        current_generation = dongle.generation
+        slot.allocation_generation = current_generation
+
+        sched.dongle_released(
+            SERIAL,
+            "ais",
+            generation=current_generation - 1,
+        )
+
+        assert dongle.current_holder == "ais"
+        assert slot.device_lease is lease
+        lease.release.assert_not_called()
+
+        sched.dongle_released(
+            SERIAL,
+            "ais",
+            generation=current_generation,
+        )
+        assert dongle.current_holder is None
+        lease.release.assert_called_once_with()
+
+    def test_other_registration_does_not_invalidate_active_allocation_release(self, sched):
+        sched.register(
+            SERIAL,
+            "ais",
+            PRIORITY_BACKGROUND,
+            *_cb_pair(),
+            continuous=True,
+        )
+        dongle = sched._dongles[SERIAL]
+        slot = dongle.slots["ais"]
+        lease = MagicMock()
+        dongle.current_holder = "ais"
+        slot.is_active = True
+        slot.device_lease = lease
+        slot.allocation_generation = dongle.generation
+        allocation_generation = slot.allocation_generation
+
+        sched.register(
+            SERIAL,
+            "acars",
+            PRIORITY_BACKGROUND,
+            *_cb_pair(),
+            continuous=True,
+        )
+        sched.dongle_released(
+            SERIAL,
+            "ais",
+            generation=allocation_generation,
+        )
+
+        assert dongle.current_holder is None
+        lease.release.assert_called_once_with()

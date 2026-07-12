@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from reticulumpi.builtin_plugins.captive_portal import CaptivePortalPlugin, _SPLASH_TEMPLATE
+from reticulumpi.control_client import ControlError
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ def _mock_hostapd(tmp_path):
 
 
 def _make_plugin(mock_app, config=None, internet=False):
-    """Create a CaptivePortalPlugin with subprocess calls mocked out."""
+    """Create a CaptivePortalPlugin with control-broker calls mocked out."""
     probe = MagicMock()
     probe.is_online = internet
     mock_app.internet_probe = probe
@@ -60,18 +61,16 @@ def _make_plugin(mock_app, config=None, internet=False):
     cfg = {"mode": "auto", "portal_port": 9999, **(config or {})}
 
     with (
-        patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp,
+        patch("reticulumpi.builtin_plugins.captive_portal.request_control") as mock_control,
         patch.object(CaptivePortalPlugin, "_start_http_server"),
     ):
-        mock_sp.run.return_value = MagicMock(
-            returncode=0,
-            stdout="chain_active=false\ndns_active=false\nstate_file=false\n",
-            stderr="",
-        )
+        mock_control.return_value = {
+            "ok": True,
+            "output": "chain_active=false\ndns_active=false\nstate_file=false\n",
+        }
         plugin = CaptivePortalPlugin(mock_app, cfg)
-        plugin._helper = "/fake/helper.sh"
         plugin.start()
-    return plugin, mock_sp
+    return plugin, mock_control
 
 
 # ---------------------------------------------------------------------------
@@ -260,15 +259,15 @@ class TestHTTPHandler:
 
 class TestActivationLifecycle:
     def test_auto_mode_activates_when_offline(self, mock_app):
-        plugin, mock_sp = _make_plugin(mock_app, internet=False)
+        plugin, mock_control = _make_plugin(mock_app, internet=False)
         assert plugin._portal_active is True
-        calls = [c for c in mock_sp.run.call_args_list if "activate" in str(c)]
+        calls = [c for c in mock_control.call_args_list if "activate" in str(c)]
         assert len(calls) >= 1
 
     def test_auto_mode_inactive_when_online(self, mock_app):
-        plugin, mock_sp = _make_plugin(mock_app, internet=True)
+        plugin, mock_control = _make_plugin(mock_app, internet=True)
         assert plugin._portal_active is False
-        activate_calls = [c for c in mock_sp.run.call_args_list if "activate" in str(c)]
+        activate_calls = [c for c in mock_control.call_args_list if "activate" in str(c)]
         assert len(activate_calls) == 0
 
     def test_always_mode_activates_when_online(self, mock_app):
@@ -286,8 +285,10 @@ class TestActivationLifecycle:
     def test_stop_deactivates(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=False)
         assert plugin._portal_active is True
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
-            mock_sp.run.return_value = MagicMock(returncode=0, stdout="deactivated\n", stderr="")
+        with patch(
+            "reticulumpi.builtin_plugins.captive_portal.request_control",
+            return_value={"ok": True, "output": "deactivated"},
+        ):
             plugin.stop()
         assert plugin._portal_active is False
 
@@ -301,16 +302,20 @@ class TestInternetEvents:
     def test_on_internet_available_deactivates_auto(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=False)
         assert plugin._portal_active is True
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
-            mock_sp.run.return_value = MagicMock(returncode=0, stdout="deactivated\n", stderr="")
+        with patch(
+            "reticulumpi.builtin_plugins.captive_portal.request_control",
+            return_value={"ok": True, "output": "deactivated"},
+        ):
             plugin.on_internet_available()
         assert plugin._portal_active is False
 
     def test_on_internet_lost_activates_auto(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
         assert plugin._portal_active is False
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
-            mock_sp.run.return_value = MagicMock(returncode=0, stdout="activated\n", stderr="")
+        with patch(
+            "reticulumpi.builtin_plugins.captive_portal.request_control",
+            return_value={"ok": True, "output": "activated"},
+        ):
             plugin.on_internet_lost()
         assert plugin._portal_active is True
 
@@ -334,32 +339,31 @@ class TestInternetEvents:
 
 class TestHelperCommands:
     def test_activate_calls_helper_with_correct_args(self, mock_app):
-        plugin, mock_sp = _make_plugin(mock_app, internet=False)
-        calls = mock_sp.run.call_args_list
+        plugin, mock_control = _make_plugin(mock_app, internet=False)
+        calls = mock_control.call_args_list
         activate_call = [c for c in calls if "activate" in str(c)]
         assert len(activate_call) >= 1
-        args = activate_call[-1][0][0]
-        assert args[0] == "sudo"
-        assert args[1] == "-n"
-        assert "activate" in args
-        assert "wlan0" in args
-        assert "9999" in args
-        assert "10.0.0.1" in args
+        call = activate_call[-1]
+        assert call.args[0] == "captive_portal"
+        assert call.args[1] == ["activate", "wlan0", "9999", "10.0.0.1"]
+        assert call.kwargs["timeout"] == 20.0
 
     def test_deactivate_calls_helper(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=False)
         assert plugin._portal_active is True
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp2:
-            mock_sp2.run.return_value = MagicMock(returncode=0, stdout="deactivated\n", stderr="")
+        with patch(
+            "reticulumpi.builtin_plugins.captive_portal.request_control",
+            return_value={"ok": True, "output": "deactivated"},
+        ) as mock_control:
             plugin._deactivate()
-            deactivate_calls = [c for c in mock_sp2.run.call_args_list if "deactivate" in str(c)]
+            deactivate_calls = [c for c in mock_control.call_args_list if "deactivate" in str(c)]
             assert len(deactivate_calls) >= 1
         assert plugin._portal_active is False
 
     def test_cleanup_called_on_start(self, mock_app):
         """start() always runs cleanup first for crash recovery."""
-        plugin, mock_sp = _make_plugin(mock_app, internet=True)
-        status_calls = [c for c in mock_sp.run.call_args_list if "status" in str(c)]
+        plugin, mock_control = _make_plugin(mock_app, internet=True)
+        status_calls = [c for c in mock_control.call_args_list if "status" in str(c)]
         assert len(status_calls) >= 1
 
     def test_cleanup_removes_stale_state(self, mock_app):
@@ -377,19 +381,17 @@ class TestHelperCommands:
         )
 
         with (
-            patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp,
+            patch("reticulumpi.builtin_plugins.captive_portal.request_control") as mock_control,
             patch.object(CaptivePortalPlugin, "_start_http_server"),
         ):
-            mock_sp.run.return_value = MagicMock(
-                returncode=0,
-                stdout="chain_active=true\ndns_active=true\nstate_file=true\n",
-                stderr="",
-            )
+            mock_control.return_value = {
+                "ok": True,
+                "output": "chain_active=true\ndns_active=true\nstate_file=true\n",
+            }
             plugin = CaptivePortalPlugin(mock_app, {"mode": "off", "portal_port": 9999})
-            plugin._helper = "/fake/helper.sh"
             plugin.start()
 
-            cleanup_calls = [c for c in mock_sp.run.call_args_list if "cleanup" in str(c)]
+            cleanup_calls = [c for c in mock_control.call_args_list if "cleanup" in str(c)]
             assert len(cleanup_calls) == 1
 
 
@@ -486,18 +488,9 @@ class TestResolution:
             mock_sp.TimeoutExpired = subprocess.TimeoutExpired
             assert CaptivePortalPlugin._detect_interface_ip("wlan0") == "10.0.0.1"
 
-    def test_resolve_helper_path_fallback(self, mock_app, tmp_path):
+    def test_plugin_has_no_runtime_helper_path(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
-        with (
-            patch("reticulumpi.builtin_plugins.captive_portal.Path") as mock_path_cls,
-            patch("reticulumpi.builtin_plugins.captive_portal.shutil") as mock_shutil,
-        ):
-            mock_path_cls.return_value.is_file.return_value = False
-            mock_path_cls.side_effect = None
-            mock_path_cls.return_value.resolve.return_value.parent = tmp_path
-            mock_shutil.which.return_value = None
-            path = plugin._resolve_helper_path()
-            assert path == "/opt/reticulumpi/scripts/captive_portal_helper.sh"
+        assert not hasattr(plugin, "_helper")
 
 
 # ---------------------------------------------------------------------------
@@ -506,29 +499,76 @@ class TestResolution:
 
 
 class TestHelperErrors:
-    def test_run_helper_failure_raises(self, mock_app):
+    def test_run_helper_uses_control_broker_when_available(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
-            mock_sp.run.return_value = MagicMock(returncode=1, stdout="", stderr="iptables failed")
-            with pytest.raises(RuntimeError, match="captive_portal_helper"):
+        with patch(
+            "reticulumpi.builtin_plugins.captive_portal.request_control",
+            return_value={"ok": True, "output": "activated"},
+        ) as request:
+            assert plugin._run_helper("activate", "wlan0", "8080", "10.0.0.1") == "activated"
+        request.assert_called_once_with(
+            "captive_portal",
+            ["activate", "wlan0", "8080", "10.0.0.1"],
+            socket_path="/run/reticulumpi/control.sock",
+            timeout=20.0,
+        )
+
+    def test_run_helper_failure_raises_without_subprocess_fallback(self, mock_app):
+        plugin, _ = _make_plugin(mock_app, internet=True)
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.captive_portal.request_control",
+                side_effect=ControlError("broker unavailable"),
+            ),
+            patch("reticulumpi.builtin_plugins.captive_portal.subprocess.run") as run,
+        ):
+            with pytest.raises(ControlError, match="broker unavailable"):
                 plugin._run_helper("activate", "wlan0", "9999", "10.0.0.1")
+        run.assert_not_called()
 
     def test_run_helper_timeout(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
-            import subprocess as sp_mod
-
-            mock_sp.run.side_effect = sp_mod.TimeoutExpired(cmd="helper", timeout=15)
-            with pytest.raises(sp_mod.TimeoutExpired):
+        with patch(
+            "reticulumpi.builtin_plugins.captive_portal.request_control",
+            side_effect=TimeoutError("broker timeout"),
+        ):
+            with pytest.raises(TimeoutError, match="broker timeout"):
                 plugin._run_helper("activate", "wlan0", "9999", "10.0.0.1")
 
-    def test_activate_failure_logs_not_crashes(self, mock_app):
+    def test_activate_failure_propagates_and_keeps_state_inactive(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
         assert plugin._portal_active is False
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp:
-            mock_sp.run.return_value = MagicMock(returncode=1, stdout="", stderr="denied")
-            plugin._activate()
-            assert plugin._portal_active is False
+        with patch(
+            "reticulumpi.builtin_plugins.captive_portal.request_control",
+            side_effect=ControlError("denied"),
+        ):
+            with pytest.raises(ControlError, match="denied"):
+                plugin._activate()
+        assert plugin._portal_active is False
+
+    def test_start_fails_when_broker_cannot_verify_stale_rules(self, mock_app):
+        mock_app.internet_probe = MagicMock(is_online=True)
+        plugin = CaptivePortalPlugin(
+            mock_app,
+            {
+                "mode": "off",
+                "portal_port": 9999,
+                "ap_interface": "wlan0",
+                "ap_ip": "10.0.0.1",
+                "ssid": "Test",
+                "dashboard_url": "http://10.0.0.1:8080",
+            },
+        )
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.captive_portal.request_control",
+                side_effect=ControlError("broker unavailable"),
+            ),
+            patch.object(plugin, "_start_http_server") as start_http,
+        ):
+            with pytest.raises(ControlError, match="broker unavailable"):
+                plugin.start()
+        start_http.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -540,17 +580,15 @@ class TestIdempotency:
     def test_double_activate_is_noop(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=False)
         assert plugin._portal_active is True
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp2:
-            mock_sp2.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("reticulumpi.builtin_plugins.captive_portal.request_control") as mock_control:
             plugin._activate()
-            assert mock_sp2.run.call_count == 0
+            mock_control.assert_not_called()
         assert plugin._portal_active is True
 
     def test_double_deactivate_is_noop(self, mock_app):
         plugin, _ = _make_plugin(mock_app, internet=True)
         assert plugin._portal_active is False
-        with patch("reticulumpi.builtin_plugins.captive_portal.subprocess") as mock_sp2:
-            mock_sp2.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("reticulumpi.builtin_plugins.captive_portal.request_control") as mock_control:
             plugin._deactivate()
-            assert mock_sp2.run.call_count == 0
+            mock_control.assert_not_called()
         assert plugin._portal_active is False

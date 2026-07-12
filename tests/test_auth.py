@@ -51,9 +51,7 @@ class TestVerifyPasswordV1Format:
         salt = b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10"
         password = "test123"
         # Compute expected hash
-        dk = hashlib.scrypt(
-            password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32
-        )
+        dk = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
         stored_hash = f"scrypt:{salt.hex()}:{dk.hex()}"
         assert verify_password(password, stored_hash) is True
         assert verify_password("test124", stored_hash) is False

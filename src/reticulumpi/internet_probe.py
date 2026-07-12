@@ -51,6 +51,7 @@ class InternetProbe:
         self._lock = threading.Lock()
         self._is_online: bool | None = None
         self._consecutive_failures: int = 0
+        self._generation: int = 0
         self._wan_ip: str | None = None
         self._lan_ip: str | None = None
         self._stop_event = threading.Event()
@@ -96,8 +97,10 @@ class InternetProbe:
         with self._lock:
             self._force_offline = enabled
             self._consecutive_failures = 0
+            self._generation += 1
+            generation = self._generation
         if enabled:
-            self._set_state(False)
+            self._set_state(False, expected_generation=generation)
         else:
             self._wake_event.set()
 
@@ -123,11 +126,13 @@ class InternetProbe:
     @staticmethod
     def _detect_lan_ip() -> str | None:
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(1.0)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
+            # Keep ownership scoped even when connect() or getsockname()
+            # fails.  Relying on the success-path close leaked a descriptor
+            # during startup on hosts without a usable route.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(1.0)
+                sock.connect(("8.8.8.8", 80))
+                ip = sock.getsockname()[0]
             return ip if ip and ip != "0.0.0.0" else None
         except (OSError, socket.timeout):
             return None
@@ -179,12 +184,17 @@ class InternetProbe:
             self._run_check()
 
     def _run_check(self) -> None:
+        with self._lock:
+            generation = self._generation
         reachable = self.probe_once()
 
         # Hold lock through the entire state-transition decision so
         # concurrent set_force_offline() calls cannot slip between
         # reading was_online and deciding to transition.
         with self._lock:
+            if generation != self._generation:
+                # A newer force-offline transition supersedes this result.
+                return
             was_online = self._is_online
             force = self._force_offline
             if reachable:
@@ -200,20 +210,24 @@ class InternetProbe:
             )
 
         if should_go_online:
-            self._set_state(True)
+            self._set_state(True, expected_generation=generation)
             log.info("Internet connectivity restored")
         elif should_go_offline:
-            self._set_state(False)
+            self._set_state(False, expected_generation=generation)
             log.warning(
                 "Internet connectivity lost (%d consecutive failures)",
                 consecutive,
             )
 
-    def _set_state(self, online: bool) -> None:
+    def _set_state(self, online: bool, *, expected_generation: int | None = None) -> None:
         lan_ip = self._detect_lan_ip()
         wan_ip = self._detect_wan_ip() if online else None
 
         with self._lock:
+            if expected_generation is not None and expected_generation != self._generation:
+                return
+            if online and self._force_offline:
+                return
             if self._is_online == online:
                 return
             self._is_online = online

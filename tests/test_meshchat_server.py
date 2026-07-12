@@ -1,6 +1,10 @@
 """Tests for the MeshChat Server plugin."""
 
 import os
+import runpy
+import sys
+from importlib.resources import files
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -51,7 +55,97 @@ def _make_plugin(mock_app, config):
     return MeshChatServer(mock_app, config)
 
 
+class _JumpingMonotonicClock:
+    """Advance enough on every read to expire test deadlines immediately."""
+
+    def __init__(self):
+        self.value = 0.0
+
+    def monotonic(self):
+        self.value += 20.0
+        return self.value
+
+    @staticmethod
+    def time():
+        raise AssertionError("launcher deadline consulted wall time")
+
+
+def _patched_launcher_downloader(fake_rns):
+    launcher_path = files("reticulumpi").joinpath("data/meshchat_launcher.pydata")
+    launcher = runpy.run_path(str(launcher_path), run_name="reticulumpi_meshchat_test")
+    launcher["_apply_patches"].__globals__["time"] = _JumpingMonotonicClock()
+
+    class Downloader:
+        async def download(self):  # pragma: no cover - replaced by launcher
+            raise AssertionError("launcher patch was not installed")
+
+        def on_failed(self, _request_receipt=None):
+            return None
+
+    meshchat = SimpleNamespace(NomadnetDownloader=Downloader, nomadnet_cached_links={})
+    with patch.dict(sys.modules, {"RNS": fake_rns, "database": None}):
+        launcher["_apply_patches"](meshchat)
+    return Downloader
+
+
 class TestValidateConfig:
+    def test_packaged_launcher_is_available(self):
+        launcher = files("reticulumpi").joinpath("data/meshchat_launcher.pydata")
+        assert launcher.is_file()
+
+    @pytest.mark.asyncio
+    async def test_packaged_path_deadline_ignores_wall_clock_jump(self):
+        fake_rns = MagicMock()
+        fake_rns.Transport.has_path.return_value = False
+        downloader_type = _patched_launcher_downloader(fake_rns)
+        failures = []
+        downloader = downloader_type()
+        downloader.destination_hash = b"\xaa" * 16
+        downloader.path = "/page/index.mu"
+        downloader.on_download_failure = failures.append
+
+        await downloader.download(path_lookup_timeout=15)
+
+        assert failures and "Could not find path" in failures[0]
+
+    @pytest.mark.asyncio
+    async def test_packaged_link_deadline_ignores_wall_clock_jump(self):
+        class FakeDestination:
+            OUT = 1
+            SINGLE = 2
+
+            def __init__(self, *_args):
+                pass
+
+        class FakeLink:
+            PENDING = 0
+            ACTIVE = 2
+            ESTABLISHMENT_TIMEOUT_PER_HOP = 0
+
+            def __init__(self, _destination, established_callback=None):
+                self.status = self.PENDING
+                self.teardown_reason = 1
+
+        fake_rns = MagicMock()
+        fake_rns.Transport.has_path.return_value = True
+        fake_rns.Transport.hops_to.return_value = 1
+        fake_rns.Identity.recall.return_value = object()
+        fake_rns.Destination = FakeDestination
+        fake_rns.Link = FakeLink
+        downloader_type = _patched_launcher_downloader(fake_rns)
+        failures = []
+        downloader = downloader_type()
+        downloader.destination_hash = b"\xbb" * 16
+        downloader.path = "/page/index.mu"
+        downloader.app_name = "nomadnetwork"
+        downloader.aspects = ("node",)
+        downloader.link_established = MagicMock()
+        downloader.on_download_failure = failures.append
+
+        await downloader.download(link_establishment_timeout=1)
+
+        assert failures and "failed after" in failures[0]
+
     def test_raises_when_meshchat_not_found(self, mock_app, tmp_path):
         config = {
             "enabled": True,
@@ -113,6 +207,15 @@ class TestValidateConfig:
         plugin = _make_plugin(mock_app, meshchat_config)
         assert plugin.plugin_name == "meshchat_server"
 
+    def test_required_artifact_policy_rejects_storage_inside_install(
+        self, mock_app, meshchat_config
+    ):
+        mock_app.config = SimpleNamespace(external_artifact_policy=SimpleNamespace(required=True))
+        meshchat_config["storage_dir"] = os.path.join(meshchat_config["install_dir"], "storage")
+
+        with pytest.raises(ValueError, match="outside the immutable install tree"):
+            _make_plugin(mock_app, meshchat_config)
+
 
 class TestStart:
     def test_launches_subprocess_with_launcher(self, mock_app, meshchat_config):
@@ -127,7 +230,7 @@ class TestStart:
             plugin.start()
 
         args = mock_popen.call_args[0][0]
-        assert args[1].endswith("meshchat_launcher.py")
+        assert args[1].endswith("meshchat_launcher.pydata")
         assert "--headless" in args
         assert "--host" in args
         assert "--port" in args
@@ -142,6 +245,10 @@ class TestStart:
         assert env["MESHCHAT_DIR"] == meshchat_config["install_dir"]
         assert env["MESHCHAT_LINK_TIMEOUT"] == "75"
         assert env["MESHCHAT_PATH_LOOKUP_TIMEOUT"] == "15"
+        assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+        assert mock_popen.call_args.kwargs["cwd"] == os.path.join(
+            meshchat_config["install_dir"], "storage"
+        )
 
         # Cleanup
         plugin._active = False
@@ -332,3 +439,30 @@ class TestHealthMonitor:
             plugin._active = False
 
         assert plugin._active is False
+
+    def test_stability_window_ignores_wall_clock_jump(self, mock_app, meshchat_config):
+        meshchat_config["auto_restart"] = False
+        plugin = _make_plugin(mock_app, meshchat_config)
+        crashed = MagicMock()
+        crashed.poll.return_value = 1
+        crashed.returncode = 1
+        plugin._active = True
+        plugin._process = crashed
+        plugin._consecutive_failures = 4
+        plugin._last_start_monotonic = 100.0
+        plugin._stability_threshold = 60.0
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.meshchat_server.time.time",
+                return_value=-9_999_999_999.0,
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.meshchat_server.time.monotonic",
+                return_value=161.0,
+            ),
+            patch.object(plugin, "_sleep_while_active", return_value=None),
+        ):
+            plugin._health_monitor()
+
+        assert plugin._consecutive_failures == 0

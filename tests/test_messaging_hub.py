@@ -1,6 +1,7 @@
 """Tests for the messaging_hub plugin."""
 
 import time
+from contextlib import closing
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -64,7 +65,7 @@ def hub_with_lxmf(mock_app, tmp_path):
     mock_identity.hash = b"\x01" * 16
 
     with (
-        patch("LXMF.LXMRouter") as mock_router_cls,
+        patch("reticulumpi.builtin_plugins.messaging_hub.create_lxm_router") as mock_router_cls,
         patch("RNS.Identity", return_value=mock_identity),
         patch.object(_RNS.Transport, "register_announce_handler"),
         patch.object(_RNS.Transport, "deregister_announce_handler"),
@@ -111,6 +112,23 @@ class TestTransportAdapter:
 
 
 class TestMessageStore:
+    def test_constructor_closes_connections_when_initialization_fails(self, tmp_path):
+        write_conn = MagicMock()
+        read_conn = MagicMock()
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.messaging_hub.sqlite3.connect",
+                side_effect=[write_conn, read_conn],
+            ),
+            patch.object(MessageStore, "_create_tables", side_effect=RuntimeError("broken DB")),
+            pytest.raises(RuntimeError, match="broken DB"),
+        ):
+            MessageStore(str(tmp_path / "broken.db"))
+
+        read_conn.close.assert_called_once_with()
+        write_conn.close.assert_called_once_with()
+
     def test_store_and_retrieve(self, store):
         msg_id = store.store(
             transport="lxmf",
@@ -740,7 +758,9 @@ class TestMessageStore:
         s1 = MessageStore(db)
         import sqlite3
 
-        with sqlite3.connect(db) as conn:
+        # sqlite3.Connection's context manager commits or rolls back but does
+        # not close the connection, so wrap it explicitly for warning-strict CI.
+        with closing(sqlite3.connect(db)) as conn:
             # Insert a legacy-format broadcast row directly to simulate
             # pre-upgrade data that the new code can't bucket by channel.
             conn.execute(
@@ -1304,7 +1324,7 @@ class TestLXMFAdapter:
         mock_identity.hash = b"\x02" * 16
 
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
+            patch("reticulumpi.builtin_plugins.messaging_hub.create_lxm_router") as mock_router_cls,
             patch("RNS.Identity", return_value=mock_identity),
             patch.object(_RNS.Transport, "register_announce_handler"),
         ):
@@ -1337,7 +1357,7 @@ class TestLXMFAdapter:
         mock_identity.hash = b"\x02" * 16
 
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
+            patch("reticulumpi.builtin_plugins.messaging_hub.create_lxm_router") as mock_router_cls,
             patch("LXMF.LXMessage"),
             patch("RNS.Identity", return_value=mock_identity),
             patch.object(_RNS.Identity, "recall") as mock_recall,
@@ -1376,7 +1396,7 @@ class TestLXMFAdapter:
         mock_identity.hash = b"\x02" * 16
 
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
+            patch("reticulumpi.builtin_plugins.messaging_hub.create_lxm_router") as mock_router_cls,
             patch("RNS.Identity", return_value=mock_identity),
             patch.object(_RNS.Identity, "recall", return_value=None),
             patch.object(_RNS.Transport, "request_path"),
@@ -1405,7 +1425,7 @@ class TestLXMFAdapter:
         mock_identity.hash = b"\x02" * 16
 
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
+            patch("reticulumpi.builtin_plugins.messaging_hub.create_lxm_router") as mock_router_cls,
             patch("RNS.Identity", return_value=mock_identity),
             patch.object(_RNS.Transport, "register_announce_handler"),
         ):
@@ -1436,7 +1456,7 @@ class TestLXMFAdapter:
         mock_identity.hash = b"\x02" * 16
 
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
+            patch("reticulumpi.builtin_plugins.messaging_hub.create_lxm_router") as mock_router_cls,
             patch("RNS.Identity", return_value=mock_identity),
             patch.object(_RNS.Transport, "register_announce_handler"),
         ):
@@ -1479,18 +1499,19 @@ class TestLXMFNameResolution:
         mock_identity.hash = b"\x02" * 16
 
         patches = [
-            patch("LXMF.LXMRouter"),
+            patch("reticulumpi.builtin_plugins.messaging_hub.create_lxm_router"),
             patch("RNS.Identity", return_value=mock_identity),
             patch.object(_RNS.Transport, "register_announce_handler"),
         ]
-        for p in patches:
+        mock_router_factory = patches[0].start()
+        for p in patches[1:]:
             p.start()
 
         mock_router = MagicMock()
         mock_dest = MagicMock()
         mock_dest.hash = b"\x02" * 16
         mock_router.register_delivery_identity.return_value = mock_dest
-        __import__("LXMF").LXMRouter.return_value = mock_router
+        mock_router_factory.return_value = mock_router
 
         adapter = LXMFAdapter(hub)
         adapter.start()
@@ -2420,6 +2441,21 @@ class TestOutboundQueueEvents:
         assert requeued >= 4
         assert sent + requeued + expired == 5
 
+    def test_budget_expired_items_update_persistent_status(self, hub_plugin):
+        adapter = self._queueable_adapter()
+        hub_plugin.register_adapter(adapter)
+        first = hub_plugin.send_message("test", "fresh", "dest-x")
+        second = hub_plugin.send_message("test", "expired", "dest-x")
+        queue = hub_plugin._outbound_queues["test"]
+        queue[1]["queued_at"] = time.time() - hub_plugin._outbound_max_age_s - 1
+        hub_plugin._drain_time_budget_s = 0.0
+
+        _sent, _requeued, expired = hub_plugin._drain_outbound_queue("test")
+
+        assert expired == 1
+        assert hub_plugin._store.get_message(first["msg_id"])["status"] == "queued"
+        assert hub_plugin._store.get_message(second["msg_id"])["status"] == "expired"
+
 
 class TestRetryableReasons:
     """Verify _is_retryable_reason correctly identifies queueable failures."""
@@ -2559,6 +2595,9 @@ class TestQueueRecoveryOnRestart:
 
         q = hub2._outbound_queues.get("test", deque())
         assert len(q) == 0
+        expired = hub2._store.get_messages(limit=10)
+        assert len(expired) == 1
+        assert expired[0]["status"] == "expired"
         hub2.stop()
 
     def test_recover_respects_per_transport_limit(self, mock_app, tmp_path):

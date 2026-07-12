@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import secrets
 import threading
 import time
 from typing import Any
@@ -24,6 +26,8 @@ class FileTransferPlugin(PluginBase):
     plugin_version = "1.0.0"
     plugin_description = "File transfer between nodes over Reticulum"
 
+    _ACCESS_POLICIES = {"deny", "allowlist", "open"}
+
     def validate_config(self) -> None:
         max_size = self.config.get("max_file_size_mb", 50)
         if not isinstance(max_size, (int, float)) or max_size < 1:
@@ -32,6 +36,18 @@ class FileTransferPlugin(PluginBase):
         allowed = self.config.get("allowed_identities", [])
         if not isinstance(allowed, list):
             raise ValueError("allowed_identities must be a list")
+        policy = self.config.get("access_policy")
+        if policy is not None and policy not in self._ACCESS_POLICIES:
+            raise ValueError("access_policy must be deny, allowlist, or open")
+        for identity_hash in allowed:
+            if not isinstance(identity_hash, str):
+                raise ValueError("allowed_identities entries must be hex strings")
+            try:
+                decoded = bytes.fromhex(identity_hash.replace("<", "").replace(">", ""))
+            except ValueError as exc:
+                raise ValueError("allowed_identities entries must be valid hex") from exc
+            if not decoded:
+                raise ValueError("allowed_identities entries cannot be empty")
 
     def start(self) -> None:
         self._active = True
@@ -39,6 +55,8 @@ class FileTransferPlugin(PluginBase):
         self._transfers_completed = 0
         self._transfers_failed = 0
         self._current_transfers: dict[str, dict[str, Any]] = {}
+        self._links: dict[Any, Any] = {}
+        self._authorized_links: set[Any] = set()
 
         self._shared_dir = os.path.expanduser(
             self.config.get("shared_dir", "~/.local/share/reticulumpi/shared_files")
@@ -48,26 +66,41 @@ class FileTransferPlugin(PluginBase):
         self._max_size = self.config.get("max_file_size_mb", 50) * 1024 * 1024
 
         # Parse allowed identities
-        self._allowed_hashes: set[bytes] | None = None
+        self._allowed_hashes: set[bytes] = set()
         allowed = self.config.get("allowed_identities", [])
-        if allowed:
-            self._allowed_hashes = set()
-            for hex_hash in allowed:
-                try:
-                    self._allowed_hashes.add(
-                        bytes.fromhex(hex_hash.replace("<", "").replace(">", ""))
-                    )
-                except ValueError:
-                    self.log.warning("Invalid identity hash: %s", hex_hash)
+        for hex_hash in allowed:
+            self._allowed_hashes.add(bytes.fromhex(hex_hash.replace("<", "").replace(">", "")))
+
+        configured_policy = self.config.get("access_policy")
+        self._legacy_access_policy = (
+            configured_policy is None and "allowed_identities" in self.config
+        )
+        if configured_policy is not None:
+            self._access_policy = configured_policy
+        elif allowed:
+            self._access_policy = "allowlist"
+        elif "allowed_identities" in self.config:
+            # Compatibility for legacy configurations whose empty list meant
+            # unrestricted access.  Make the migration visible rather than
+            # silently changing existing deployments.
+            self._access_policy = "open"
+            self.log.critical(
+                "Legacy file_transfer allowed_identities is empty: access is OPEN. "
+                "Set access_policy explicitly; new configurations default to deny."
+            )
+        else:
+            self._access_policy = "deny"
 
         # Create file transfer destination
-        self.destination = RNS.Destination(
-            self.identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            "reticulumpi",
-            "node",
-            "filetransfer",
+        self.destination = self.manage_destination(
+            RNS.Destination(
+                self.identity,
+                RNS.Destination.IN,
+                RNS.Destination.SINGLE,
+                "reticulumpi",
+                "node",
+                "filetransfer",
+            )
         )
 
         self.destination.set_link_established_callback(self._link_established)
@@ -76,9 +109,11 @@ class FileTransferPlugin(PluginBase):
         self.destination.register_request_handler(
             "/list", self._handle_list, allow=RNS.Destination.ALLOW_ALL
         )
+        self.manage_request_handler(self.destination, "/list")
         self.destination.register_request_handler(
             "/info", self._handle_info, allow=RNS.Destination.ALLOW_ALL
         )
+        self.manage_request_handler(self.destination, "/info")
 
         self.log.info(
             "File transfer active at %s (shared: %s, max: %dMB)",
@@ -89,6 +124,13 @@ class FileTransferPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        with self._lock:
+            self._links.clear()
+            self._authorized_links.clear()
+        # PluginBase cleanup owns links, request handlers, and destination in
+        # reverse acquisition order. The attribute is cleared now so stopped
+        # code cannot accidentally reuse the destination while cleanup runs.
+        self.destination = None
         self._join_threads()
 
     def get_status(self) -> dict[str, Any]:
@@ -100,6 +142,7 @@ class FileTransferPlugin(PluginBase):
                 "transfers_failed": self._transfers_failed,
                 "active_transfers": len(self._current_transfers),
                 "shared_files": len(self._list_shared_files()),
+                "access_policy": getattr(self, "_access_policy", "deny"),
             }
 
     def get_shared_files(self) -> list[dict[str, Any]]:
@@ -110,28 +153,116 @@ class FileTransferPlugin(PluginBase):
 
     def _link_established(self, link: Any) -> None:
         """Accept incoming link for file transfer."""
+        if not self._active:
+            link.teardown()
+            return
         self.log.info("File transfer link from %s", link)
 
-        # Configure resource acceptance
-        link.set_resource_strategy(RNS.Link.ACCEPT_APP)
+        # Resource callbacks alone are not authentication.  Start closed and
+        # open only after the link has proven an allowed identity.
+        link.set_resource_strategy(RNS.Link.ACCEPT_NONE)
         link.set_resource_callback(self._resource_callback)
         link.set_resource_started_callback(self._resource_started)
         link.set_resource_concluded_callback(self._resource_concluded)
 
-        # If we have allowed identities, authenticate
-        if self._allowed_hashes is not None:
+        if self._access_policy == "deny":
+            self.log.warning("Rejecting file-transfer link: access policy is deny")
+            link.teardown()
+            return
+
+        try:
+            self.manage_link(link)
+        except RuntimeError:
+            link.teardown()
+            return
+
+        key = self._link_key(link)
+        with self._lock:
+            if not self._active:
+                should_close = True
+            else:
+                should_close = False
+                self._links[key] = link
+        if should_close:
+            link.teardown()
+            return
+
+        link.set_link_closed_callback(self._link_closed)
+        if self._access_policy == "open":
+            with self._lock:
+                if self._active and self._links.get(key) is link:
+                    self._authorized_links.add(key)
+                    authorized = True
+                else:
+                    authorized = False
+            if not authorized:
+                link.teardown()
+                return
+            link.set_resource_strategy(RNS.Link.ACCEPT_APP)
+        else:
             link.set_remote_identified_callback(self._check_identity)
 
     def _check_identity(self, link: Any, identity: Any) -> None:
-        if self._allowed_hashes and identity.hash not in self._allowed_hashes:
+        identity_hash = getattr(identity, "hash", None)
+        if (
+            not self._active
+            or self._access_policy != "allowlist"
+            or identity_hash not in self._allowed_hashes
+        ):
             self.log.warning(
                 "Rejecting file transfer from unauthorized identity: %s",
-                RNS.prettyhexrep(identity.hash),
+                RNS.prettyhexrep(identity_hash) if identity_hash is not None else "unknown",
             )
             link.teardown()
+            return
+        key = self._link_key(link)
+        with self._lock:
+            if self._active and self._links.get(key) is link:
+                self._authorized_links.add(key)
+                authorized = True
+            else:
+                authorized = False
+        if not authorized:
+            link.teardown()
+            return
+        link.set_resource_strategy(RNS.Link.ACCEPT_APP)
+        self.log.info("Authorized file-transfer identity %s", RNS.prettyhexrep(identity_hash))
+
+    def _link_closed(self, link: Any) -> None:
+        key = self._link_key(link)
+        with self._lock:
+            self._links.pop(key, None)
+            self._authorized_links.discard(key)
+
+    @staticmethod
+    def _link_key(link_or_id: Any) -> Any:
+        link_id = getattr(link_or_id, "link_id", link_or_id)
+        if isinstance(link_id, bytearray):
+            return bytes(link_id)
+        return link_id
+
+    def _is_authorized_link(self, link_or_id: Any) -> bool:
+        if not self._active or self._access_policy == "deny":
+            return False
+        key = self._link_key(link_or_id)
+        with self._lock:
+            return key in self._links and key in self._authorized_links
+
+    def _is_authorized_request(self, link_id: Any, remote_identity: Any) -> bool:
+        if not self._is_authorized_link(link_id):
+            return False
+        if self._access_policy == "allowlist":
+            return (
+                remote_identity is not None
+                and getattr(remote_identity, "hash", None) in self._allowed_hashes
+            )
+        return self._access_policy == "open"
 
     def _resource_callback(self, resource: Any) -> bool:
         """Decide whether to accept an incoming resource."""
+        if not self._is_authorized_link(getattr(resource, "link", None)):
+            self.log.warning("Rejecting resource from unauthorized link")
+            return False
         # Check size
         if resource.size > self._max_size:
             self.log.warning(
@@ -161,6 +292,12 @@ class FileTransferPlugin(PluginBase):
         return False
 
     def _resource_started(self, resource: Any) -> None:
+        if not self._is_authorized_link(getattr(resource, "link", None)):
+            self.log.warning("Ignoring resource start from unauthorized link")
+            cancel = getattr(resource, "cancel", None)
+            if callable(cancel):
+                cancel()
+            return
         transfer_id = str(id(resource))
         with self._lock:
             self._current_transfers[transfer_id] = {
@@ -175,30 +312,35 @@ class FileTransferPlugin(PluginBase):
         with self._lock:
             self._current_transfers.pop(transfer_id, None)
 
-        if resource.status == RNS.Resource.COMPLETE:
-            with self._lock:
-                self._transfers_completed += 1
+        if not self._is_authorized_link(getattr(resource, "link", None)):
+            self.log.warning("Discarding resource conclusion from unauthorized link")
+            return
 
-            # Save the received data
+        if resource.status == RNS.Resource.COMPLETE:
             try:
                 data = resource.data.read() if hasattr(resource.data, "read") else resource.data
-                if isinstance(data, bytes):
-                    filename = self._safe_filename(resource)
-                    filepath = os.path.join(self._shared_dir, filename)
-                    with open(filepath, "wb") as f:
-                        f.write(data)
-                    self.log.info("File received: %s (%d bytes)", filename, len(data))
-
-                    self.event_bus.publish(
-                        events.FILE_RECEIVED,
-                        {
-                            "filename": filename,
-                            "size": len(data),
-                            "path": filepath,
-                        },
-                    )
+                if not isinstance(data, bytes):
+                    raise TypeError("received resource did not contain bytes")
+                if len(data) > self._max_size:
+                    raise ValueError("received resource exceeds configured size limit")
+                filename, filepath = self._store_received_file(resource, data)
             except Exception:
                 self.log.exception("Error saving received file")
+                with self._lock:
+                    self._transfers_failed += 1
+                return
+
+            with self._lock:
+                self._transfers_completed += 1
+            self.log.info("File received: %s (%d bytes)", filename, len(data))
+            self.event_bus.publish(
+                events.FILE_RECEIVED,
+                {
+                    "filename": filename,
+                    "size": len(data),
+                    "path": filepath,
+                },
+            )
         else:
             with self._lock:
                 self._transfers_failed += 1
@@ -217,6 +359,8 @@ class FileTransferPlugin(PluginBase):
     ) -> Any:
         import RNS.vendor.umsgpack as umsgpack
 
+        if not self._is_authorized_request(link_id, remote_identity):
+            return umsgpack.packb({"ok": False, "error": "unauthorized"})
         files = self._list_shared_files()
         return umsgpack.packb({"ok": True, "data": files})
 
@@ -231,13 +375,17 @@ class FileTransferPlugin(PluginBase):
     ) -> Any:
         import RNS.vendor.umsgpack as umsgpack
 
+        if not self._is_authorized_request(link_id, remote_identity):
+            return umsgpack.packb({"ok": False, "error": "unauthorized"})
         if not isinstance(data, bytes):
             return umsgpack.packb({"ok": False, "error": "filename required"})
         try:
             req = umsgpack.unpackb(data)
-            filename = req.get("name") if isinstance(req, dict) else str(req)
+            filename = req.get("name") if isinstance(req, dict) else None
         except Exception:
             return umsgpack.packb({"ok": False, "error": "invalid request"})
+        if not isinstance(filename, str) or not filename or len(filename) > 255:
+            return umsgpack.packb({"ok": False, "error": "invalid filename"})
 
         # Prevent path traversal — basename + boundary check
         safe_name = os.path.basename(filename)
@@ -329,3 +477,66 @@ class FileTransferPlugin(PluginBase):
             name = f"received_{int(time.time())}_{resource.size}b"
 
         return name
+
+    def _store_received_file(self, resource: Any, data: bytes) -> tuple[str, str]:
+        """Durably publish received bytes without following or replacing links."""
+
+        preferred = self._safe_filename(resource)
+        base, extension = os.path.splitext(preferred)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = os.open(self._shared_dir, directory_flags)
+        temporary_name = f".reticulumpi-upload-{secrets.token_hex(16)}.tmp"
+        temporary_fd: int | None = None
+        published_name: str | None = None
+        try:
+            file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            file_flags |= getattr(os, "O_NOFOLLOW", 0)
+            temporary_fd = os.open(
+                temporary_name,
+                file_flags,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            view = memoryview(data)
+            while view:
+                written = os.write(temporary_fd, view)
+                if written <= 0:
+                    raise OSError("short write while persisting received file")
+                view = view[written:]
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = None
+
+            for counter in range(10_000):
+                candidate = preferred if counter == 0 else f"{base}_{counter}{extension}"
+                try:
+                    os.link(
+                        temporary_name,
+                        candidate,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    continue
+                published_name = candidate
+                break
+            if published_name is None:
+                raise OSError(errno.EEXIST, "could not reserve a unique received filename")
+            os.fsync(directory_fd)
+            os.unlink(temporary_name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except BaseException:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            os.close(directory_fd)
+
+        return published_name, os.path.join(self._shared_dir, published_name)

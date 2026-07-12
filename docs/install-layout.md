@@ -1,179 +1,197 @@
-# Install Layout & File Flow
+# Installation Layout
 
-How files move from a fresh `git clone` through `bootstrap.sh` to a running system.
+This document describes the supported production filesystem contract. A Git checkout is a
+build input, never a runtime installation and never a root-executed update source.
 
-## 1. Clone the Repo
+## Supported baseline
 
-```bash
-cd ~
-git clone https://github.com/user/reticulumPi.git
-```
+- Raspberry Pi 5 with a 64-bit ARM64 userspace
+- Raspberry Pi OS/Debian Bookworm with Python 3.11, or Ubuntu 24.04 LTS Noble with Python 3.12
+- Dedicated `reticulumpi` system account with `/usr/sbin/nologin`
+- Default install root `/srv/reticulumpi`; custom roots such as `/opt/reticulumpi` are
+  supported when passed consistently to bootstrap and `reticulumpi-admin`
 
-This creates `~/reticulumPi/` — a full git repo owned by the current user. This is the **source directory**.
+Production in-place and service-user-owned code installations are rejected.
+Every existing custom-root ancestor, including the final root when it already exists, must be
+root-owned and not writable by group or other. A nonexistent root is accepted only below the
+nearest existing ancestor that satisfies the same rule; `/home/<user>` and other user-controlled
+trees are therefore never production roots.
 
-## 2. Run Bootstrap
+## Filesystem contract
 
-```bash
-# Default install (copies to /opt/reticulumpi):
-sudo bash scripts/bootstrap.sh --with-nomadnet
-
-# Custom install directory:
-sudo bash scripts/bootstrap.sh --install-dir /srv/reticulumpi --with-nomadnet
-
-# In-place install (run directly from the cloned repo):
-sudo bash scripts/bootstrap.sh --install-dir . --with-nomadnet
-```
-
-## 3. Path Resolution
-
-Bootstrap resolves three key paths:
-
-| Variable | Value | Source |
-|---|---|---|
-| `SCRIPT_DIR` | `/home/pi/reticulumPi/scripts` | Physical location of the script |
-| `PROJECT_DIR` | `/home/pi/reticulumPi` | Parent of `scripts/` |
-| `INSTALL_DIR` | `/opt/reticulumpi` (default) | `--install-dir` argument or default |
-
-## 4. Copy Decision
-
-Bootstrap takes one of three branches depending on the relationship between `PROJECT_DIR` and `INSTALL_DIR`:
-
-### Branch A: In-place install (`INSTALL_DIR` equals `PROJECT_DIR`)
-
-Triggered by `--install-dir .` (or any path that resolves to the repo itself).
-
-**Nothing is copied.** The cloned repo becomes the install directory. Ownership is transferred to the `reticulumpi` service user. The calling user loses write access (they'd need `sudo` to edit files afterward).
-
-### Branch B: Git repo already exists at `INSTALL_DIR`
-
-Triggered when someone previously ran `git clone` directly into `/opt/reticulumpi`.
-
-Runs `git pull` to update in place. No rsync.
-
-### Branch C: rsync copy (default)
-
-The most common path. Copies everything from the source repo to `INSTALL_DIR`, **excluding**:
-
-- `.git/` — no version control history in the deployed copy
-- `.venv/` — will be created fresh for the service user
-- `__pycache__/`, `*.pyc` — stale bytecode from the dev machine
-- `.ruff_cache/` — linter cache
-
-After rsync, ownership is set to `reticulumpi:reticulumpi`.
-
-**Result after this step:**
-
-| Location | Contents | Owner | Has `.git`? |
-|---|---|---|---|
-| `~/reticulumPi/` | Full repo + git history | `pi:pi` | Yes |
-| `/opt/reticulumpi/` | Same files, minus dev artifacts | `reticulumpi:reticulumpi` | No |
-
-## 5. Python Venv
-
-A virtual environment is created at `$INSTALL_DIR/.venv/`, owned by `reticulumpi`:
-
-```bash
-sudo -u reticulumpi python3 -m venv "$INSTALL_DIR/.venv"
-sudo -u reticulumpi "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR"
-```
-
-The `-e` (editable) install means Python links back to `$INSTALL_DIR/src/reticulumpi/` rather than copying into `site-packages`. This is why `update.sh` can sync new code without re-running `pip install`.
-
-## 6. Config Files
-
-Example configs are copied into system locations on first run only (won't overwrite existing files):
-
-```
-$INSTALL_DIR/config/reticulumpi/config.example.yaml
-    -> /etc/reticulumpi/config.yaml
-
-$INSTALL_DIR/config/reticulum/config.example
-    -> /home/reticulumpi/.reticulum/config
-
-$INSTALL_DIR/config/nomadnet/pages/*.mu
-    -> /home/reticulumpi/.nomadnet/storage/pages/*.mu
-```
-
-## 7. Systemd Service Files
-
-Source service files in the repo hardcode `/opt/reticulumpi`. Bootstrap templates them with `sed`, replacing that path with whatever `INSTALL_DIR` actually is:
-
-```bash
-sed "s|/opt/reticulumpi|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/reticulumpi.service" \
-    > /etc/systemd/system/reticulumpi.service
-```
-
-If you used the default `/opt/reticulumpi`, the sed is a no-op. If you used `--install-dir /srv/reticulumpi`, the installed service files would reference `/srv/reticulumpi/.venv/bin/...`.
-
-## Final Directory Layout
-
-After a default bootstrap (`--with-nomadnet`), the filesystem looks like this:
-
-```
-~/reticulumPi/                              <- user's git repo (untouched after bootstrap)
-|-- .git/
-|-- scripts/
-|-- src/
-|-- ...
-
-/opt/reticulumpi/                           <- deployed copy (owned by reticulumpi)
-|-- .venv/                                  <- fresh venv with rns, lxmf, nomadnet
-|-- scripts/
-|-- src/
-|-- systemd/                                <- source templates (still say /opt/reticulumpi)
-|-- config/                                 <- example configs (templates)
-|-- ...
-(no .git, no __pycache__, no .ruff_cache)
+```text
+/srv/reticulumpi/
+  current -> releases/0.2.5
+  releases/<version>/
+    .venv/                    root-owned immutable Python environment
+    RELEASE                   installed release identifier
 
 /etc/reticulumpi/
-|-- config.yaml                             <- app config (plugins, identity, log level)
+  config.yaml                 root:reticulumpi, 0640
+  install.json                release/features/rollback manifest
 
-/home/reticulumpi/                          <- service user's home (data + runtime config)
-|-- .reticulum/config                       <- Reticulum network config (interfaces, transport)
-|-- .nomadnet/storage/pages/*.mu            <- NomadNet served pages
-|-- .nomadnet-tui/                          <- TUI browse-only config (created by nomadnet-tui.sh)
-|-- .config/reticulumpi/identity            <- node identity file (created at first run)
-|-- .local/share/reticulumpi/lxmf/          <- LXMF message storage (created at runtime)
+/var/lib/reticulumpi/         service HOME and reticulumpi-owned durable state
+  .reticulum/                 Reticulum configuration and transport state
+  .config/reticulumpi/        identity, dashboard hash/token/session files
+  .local/share/reticulumpi/   plugin identities, databases, and durable content
+  .local/state/               XDG state for supporting libraries
+  .nomadnet/                  optional NomadNet daemon content
+  .nomadnet-tui/              optional browse-only NomadNet TUI state
+  runtime-overrides.yaml      allowlisted controls (`internet.force_offline` only)
 
-/etc/systemd/system/
-|-- reticulumpi.service                     <- templated with actual INSTALL_DIR
-|-- rnsd.service                            <- templated with actual INSTALL_DIR
+/var/cache/reticulumpi/       XDG cache root (tiles, TLEs, disposable downloads)
+/var/backups/reticulumpi/     root-only verified backups, newest three retained
+  admin/                      root-only administration evidence, mode 0700
+    transaction.json          recoverable journal, mode 0600
+    captive_portal.active     atomic privileged-helper state marker
+/run/reticulumpi/             runtime files
+  ready                       whole-application readiness marker
+  dashboard-ready             listener-bound Dashboard readiness marker
+
+/usr/libexec/reticulumpi/     root-owned reviewed privileged helpers
+/etc/systemd/system/          rendered units and feature-specific drop-ins
 ```
 
-## Updating
+Both `reticulumpi.service` and `rnsd.service` receive this environment:
 
-### If `INSTALL_DIR` is a git repo (Branch B or in-place install)
+```text
+HOME=/var/lib/reticulumpi
+XDG_CONFIG_HOME=/var/lib/reticulumpi/.config
+XDG_DATA_HOME=/var/lib/reticulumpi/.local/share
+XDG_STATE_HOME=/var/lib/reticulumpi/.local/state
+XDG_CACHE_HOME=/var/cache/reticulumpi
+```
+
+systemd creates the state and cache roots as `reticulumpi:reticulumpi` mode `0750`; the
+services run with `UMask=0077`, so newly created identities, databases, and supporting
+directories are private unless code deliberately applies a narrower shared mode.
+The transaction journal is deliberately outside this service-owned tree and outside every state
+root replaced during rollback, so the service cannot unlink it and restore cannot discard the
+only interruption evidence.
+
+An old service home is a **legacy migration input only**, never a 0.3 runtime target.
+During an N-1 upgrade the administrator inspects the installed unit's `Environment=HOME`,
+XDG/state variables, `WorkingDirectory`, `ExecStart` executable root, and `--config` path
+before using the passwd home fallback. It detects the former `.reticulum`,
+`.config/reticulumpi`, `.local/share/reticulumpi`, `.nomadnet`, and `.nomadnet-tui`
+trees there, migrates verified copies into the canonical state root, and leaves rollback
+evidence. Services are not granted write access to the legacy home.
+
+The service cannot modify `/etc/reticulumpi/config.yaml`, its code, virtual environment, or
+privileged helpers. Runtime controls write only the schema-validated override file under
+`/var/lib/reticulumpi`.
+
+Forced-offline transitions never swap the system configuration. The broker installs or
+removes a same-directory, fsynced runtime overlay atomically; the only accepted payload is:
+
+```yaml
+internet:
+  force_offline: true
+```
+
+Firewall simulation and overlay state are reported separately. The historical
+`--with-profile` option is accepted as a compatibility no-op; the narrow overlay is now
+always coupled to `on`/`off`.
+
+## Bootstrap compatibility launcher
+
+`scripts/bootstrap.sh` performs no installation logic itself. It translates supported legacy
+flags to `reticulumpi-admin install` or `upgrade`; the administrator owns release creation,
+backups, unit/helper rendering, atomic switch, readiness, and rollback. Bootstrap defaults to
+dry-run and never installs OS packages, copies mutable source into production, writes sudoers
+rules, imports bundle Python, searches `PATH`, or executes an administrator from `current`.
+An installed unit or canonical configuration without `install.json` identifies the mutable legacy
+layout, so bootstrap deliberately routes that first transition through `upgrade` and retains a
+complete `rollback --to legacy` checkpoint.
+
+Both compatibility launchers accept only a fixed `/usr/sbin/reticulumpi-admin` or
+`/usr/bin/reticulumpi-admin` whose file and path components are root-owned and not writable by
+group or other. The first install therefore requires the independently signed recovery-
+administrator package from the release channel. The launcher fails closed when it is absent;
+the candidate bundle cannot bootstrap the privileged code that verifies that same bundle.
 
 ```bash
-sudo bash /opt/reticulumpi/scripts/update.sh
+bash scripts/bootstrap.sh --with-dashboard --dry-run
+sudo bash scripts/bootstrap.sh --with-dashboard --apply --start
+sudo bash scripts/bootstrap.sh --apply --install-dir /srv/reticulumpi --with-nomadnet
 ```
 
-`update.sh` auto-detects its install directory from its own location. If it finds a `.git` directory, it runs `git pull`, upgrades pip dependencies, re-templates service files if they changed, and restarts services.
+The following privilege-bearing options are opt-in:
 
-### If `INSTALL_DIR` is an rsync copy (Branch C, the default)
+- `--with-captive-portal`
+- `--with-offline-tools`
+- `--with-chrony-control`
 
-The deployed copy at `/opt/reticulumpi` has no `.git`, so `update.sh` cannot pull new code on its own. The workflow is:
+NomadNet selects the packaged extra and `shared-rnsd` unit. MeshChat, node naming, hardware
+groups, and external I2P/Yggdrasil/signal packages are explicit operator steps rather than
+installer mutations.
 
-1. Pull changes in your source repo: `cd ~/reticulumPi && git pull`
-2. Run update from the source repo: `sudo bash scripts/update.sh`
+## Transactional administrator
 
-Or manually rsync then run update from the install dir:
+All mutating commands default to dry-run behavior unless `--apply` is supplied. Applying
+requires root and one exclusive maintenance lock.
+
+After read-only platform, signature, manifest, dependency-profile, and disk-space validation,
+the administrator first copies untrusted release inputs through no-follow descriptors into a
+private mode-`0700` transaction snapshot and verifies Minisign and hashes only there. It never
+reopens the external artifact. It then writes the root-only `preparing` transaction journal before
+creating the release directory, virtual environment, or package installation. Configuration and durable
+path preparation occurs only after the complete state backup and managed-file snapshots are
+verified and the journal advances to `backed_up`.
 
 ```bash
-sudo rsync -a --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
-    ~/reticulumPi/ /opt/reticulumpi/
-sudo chown -R reticulumpi:reticulumpi /opt/reticulumpi
-sudo bash /opt/reticulumpi/scripts/update.sh
+reticulumpi-admin install --bundle reticulumpi-install-arm64-0.3.0.tar.gz \
+  --feature dashboard --dry-run
+sudo reticulumpi-admin install --bundle reticulumpi-install-arm64-0.3.0.tar.gz \
+  --feature dashboard --apply --start
+reticulumpi-admin status --json
+reticulumpi-admin doctor
 ```
 
-## Security Model
+An apply operation first enforces one complete supported tuple: Linux/ARM64 plus either
+Raspberry Pi OS/Debian Bookworm and Python 3.11, or Ubuntu Noble 24.04 and Python 3.12.
+It selects the signed `core`, `dashboard-nomadnet`, or `all-features` hash lock, installs that
+profile with `--require-hashes`, installs the wheel with `--no-deps`, creates a new release
+environment, and runs `pip check`,
+backs up configuration and durable state, records a transaction journal, atomically switches
+the `current` symlink, then checks application readiness. The verified transaction snapshot
+includes `/etc/reticulumpi` and the complete canonical `/var/lib/reticulumpi` tree. Every
+copied tree is symlink-free and its file
+hashes, modes, owners, and groups are verified; SQLite files use the SQLite backup API. A
+switch failure reverses every state-root replacement before the old release is restarted.
 
-The `reticulumpi` system user:
+The administrator removes `/run/reticulumpi/ready` and, when selected,
+`/run/reticulumpi/dashboard-ready` before activation. The release must then
+remain systemd-active and create a fresh, service-owned readiness marker within the shared
+120-second startup deadline. The Dashboard marker is written only after the aiohttp listener
+binds and is removed on bind failure, TLS fail-close, stop-before-ready, and normal stop.
+SHA-256 hashes for all pre-existing conventional plugin
+identity files and the configured primary identity are recorded before and after activation;
+any missing or changed identity rolls the transaction back. A newly enabled plugin may
+create a new identity, which is retained and recorded after activation.
 
-- Has `/usr/sbin/nologin` as its shell (no SSH/interactive login)
-- Owns only `/opt/reticulumpi` (code), `/home/reticulumpi` (data), `/etc/reticulumpi` (config), `/var/lib/reticulumpi` (runtime)
-- Has hardware groups only: `dialout`, `gpio`, `spi`, `i2c`
-- Systemd sandboxing: `ProtectSystem=strict`, `ProtectHome=read-only`, `NoNewPrivileges=yes`, `PrivateTmp=yes`
-- Only specific directories listed in `ReadWritePaths` are writable at runtime
+Wheel-only upgrades require an existing system configuration and signed sibling dependency
+profiles; source and ARM64 install bundles also render units and install root-owned helpers.
+Interrupted apply and rollback journals are recovered automatically before the next mutation.
+Recovery uses the verified backup, durable managed-file snapshots, prior pointer/manifest,
+identity hashes, and exact prior service states; missing evidence fails closed.
 
-The dev user's home directory is never accessed by the running services.
+## systemd contract
+
+The application receives 120 seconds to start and 60 seconds to stop; its internal cleanup
+budget is shorter than the systemd deadline. Optional services are expressed as drop-ins,
+not unconditional base-unit dependencies. `ProtectSystem=strict`, `ProtectHome=true`,
+`PrivateTmp`, resource controls, and `ReadWritePaths` limited to `/var/lib/reticulumpi` and
+`/var/cache/reticulumpi` constrain runtime mutation.
+
+Inspect the rendered result after installation:
+
+```bash
+systemd-analyze verify /etc/systemd/system/reticulumpi.service
+systemctl cat reticulumpi.service
+sudo -u reticulumpi test ! -w /etc/reticulumpi/config.yaml
+sudo -u reticulumpi test ! -w /srv/reticulumpi/current
+```
+
+See [Upgrade and Rollback](upgrade-and-rollback.md) for transaction recovery and
+[Security Model](security-model.md) for ownership rationale.

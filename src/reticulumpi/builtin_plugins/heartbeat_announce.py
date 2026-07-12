@@ -20,12 +20,14 @@ class HeartbeatAnnounce(PluginBase):
         app_name = self.config.get("app_name", "reticulumpi")
         aspects = self.config.get("aspects", ["node", "heartbeat"])
 
-        self.destination = RNS.Destination(
-            self.identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            app_name,
-            *aspects,
+        self.destination = self.manage_destination(
+            RNS.Destination(
+                self.identity,
+                RNS.Destination.IN,
+                RNS.Destination.SINGLE,
+                app_name,
+                *aspects,
+            )
         )
 
         self._active = True

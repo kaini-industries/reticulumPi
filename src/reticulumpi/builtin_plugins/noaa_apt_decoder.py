@@ -18,6 +18,12 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.signal_plugin_base import SignalPluginBase
+from reticulumpi.process_supervisor import (
+    ManagedProcessGroup,
+    ProcessFailure,
+    ProcessSpec,
+    RestartPolicy,
+)
 from reticulumpi.sdr_scheduler import PRIORITY_SCHEDULED
 
 _DEFAULT_SATELLITES: dict[str, float] = {
@@ -80,6 +86,9 @@ class NOAAAPTDecoder(SignalPluginBase):
         self._last_error: str | None = None
         self._recording_file: str | None = None
         self._rtl_process: subprocess.Popen | None = None
+        self._capture_failed = threading.Event()
+        self._capture_state_lock = threading.Lock()
+        self._capture_lease_released = True
 
         os.makedirs(self._image_dir, exist_ok=True)
         os.makedirs(self._recording_dir, exist_ok=True)
@@ -177,10 +186,16 @@ class NOAAAPTDecoder(SignalPluginBase):
 
         rtl_fm = shutil.which("rtl_fm")
         sox = shutil.which("sox")
+        missing = []
         if not rtl_fm:
+            missing.append("rtl_fm")
+        if not sox:
+            missing.append("sox")
+        if missing:
             self._status = "unavailable"
-            self._last_error = "rtl_fm not found on PATH"
-            return
+            self._last_error = f"Missing: {', '.join(missing)}"
+            self._update_snapshot_cache()
+            raise RuntimeError(self._last_error)
 
         freq_hz = int(current["freq_mhz"] * 1_000_000)
         sat_safe = current["satellite"].replace(" ", "-")
@@ -197,6 +212,9 @@ class NOAAAPTDecoder(SignalPluginBase):
         self._recording_file = wav_path
         self._status = "recording"
         self._stats["total_captures"] += 1
+        self._capture_failed.clear()
+        with self._capture_state_lock:
+            self._capture_lease_released = False
 
         rtl_cmd = [
             rtl_fm,
@@ -217,51 +235,81 @@ class NOAAAPTDecoder(SignalPluginBase):
             rtl_cmd.extend(["-g", str(self._gain)])
         rtl_cmd.append("-")
 
-        if sox:
-            sox_cmd = [
-                sox,
-                "-t",
-                "raw",
-                "-r",
-                "48000",
-                "-e",
-                "signed",
-                "-b",
-                "16",
-                "-c",
-                "1",
-                "-",
-                wav_path,
-            ]
-            self.log.debug(
-                "Launching: %s | %s",
-                " ".join(rtl_cmd),
-                " ".join(sox_cmd),
-            )
-            rtl_proc = subprocess.Popen(
-                rtl_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            self._process = subprocess.Popen(
-                sox_cmd,
-                stdin=rtl_proc.stdout,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            if rtl_proc.stdout:
-                rtl_proc.stdout.close()
-            self._rtl_process = rtl_proc
-        else:
-            self.log.error("sox not found — cannot record WAV for APT decode")
+        sox_cmd = [
+            sox,
+            "-t",
+            "raw",
+            "-r",
+            "48000",
+            "-e",
+            "signed",
+            "-b",
+            "16",
+            "-c",
+            "1",
+            "-",
+            wav_path,
+        ]
+        self.log.debug(
+            "Launching: %s | %s",
+            " ".join(rtl_cmd),
+            " ".join(sox_cmd),
+        )
+        group = ManagedProcessGroup(
+            [
+                ProcessSpec(
+                    tuple(rtl_cmd),
+                    name="rtl_fm",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ),
+                ProcessSpec(
+                    tuple(sox_cmd),
+                    name="sox",
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                ),
+            ],
+            # Restarting a recorder against the same WAV path can truncate or
+            # corrupt the capture.  Fail the pass atomically instead.
+            restart_policy=RestartPolicy(enabled=False),
+            on_started=self._on_capture_started,
+            on_unexpected_exit=self._on_capture_failure,
+        )
+        self._process_group = group
+        try:
+            group.start()
+        except Exception:
+            self._capture_failed.set()
+            self._process_group = None
+            self._rtl_process = None
+            self._process = None
+            self._current_pass = None
+            self._recording_file = None
             self._status = "error"
-            self._last_error = "sox not installed"
+            self._last_error = "APT capture pipeline failed to launch"
+            with self._capture_state_lock:
+                self._capture_lease_released = True
             self._update_snapshot_cache()
-            return
+            raise
 
-        self._pid = self._process.pid
-
-        self._start_thread(self._monitor_pass, name="noaa-monitor")
+        try:
+            self._start_thread(self._monitor_pass, name="noaa-monitor")
+        except BaseException:
+            self._capture_failed.set()
+            group.stop()
+            self._process_group = None
+            self._rtl_process = None
+            self._process = None
+            self._current_pass = None
+            self._recording_file = None
+            self._status = "error"
+            self._last_error = "APT capture monitor failed to start"
+            self._stats["failed_decodes"] += 1
+            with self._capture_state_lock:
+                self._capture_lease_released = True
+            self._update_snapshot_cache()
+            raise
 
         try:
             self.event_bus.publish(
@@ -283,7 +331,53 @@ class NOAAAPTDecoder(SignalPluginBase):
             wav_name,
         )
 
+    def _on_capture_started(
+        self,
+        processes: tuple[subprocess.Popen[Any], ...],
+        _restarted: bool,
+    ) -> None:
+        rtl_process, recorder_process = processes
+        self._rtl_process = rtl_process
+        self._process = recorder_process
+        self._pid = recorder_process.pid
+        self._status = "recording"
+        self._last_error = None
+        self._start_stderr_reader(rtl_process, prefix="rtl_fm")
+        self._start_stderr_reader(recorder_process, prefix="sox")
+
+    def _on_capture_failure(self, failure: ProcessFailure) -> None:
+        if self._capture_failed.is_set():
+            return
+        self._capture_failed.set()
+        self._status = "error"
+        self._last_error = (
+            f"APT capture failed in {failure.stage_name or 'pipeline'}: "
+            f"{failure.reason} (rc={failure.returncode})"
+        )
+        self._stats["failed_decodes"] += 1
+        self.mark_degraded(self._last_error)
+        # ManagedProcessGroup invokes this hook only after the complete
+        # pipeline has terminated.  Keep the direct-call path equally safe,
+        # then release immediately instead of retaining the dongle until LOS.
+        self._kill_subprocess()
+        self._release_capture_lease(suspend=True)
+        self._update_snapshot_cache()
+
+    def _release_capture_lease(self, *, suspend: bool = False) -> None:
+        with self._capture_state_lock:
+            if self._capture_lease_released:
+                return
+            self._capture_lease_released = True
+        self._dongle_active = False
+        self._release_dongle(suspend=suspend)
+
     def _kill_subprocess(self) -> None:
+        if not self._active or not self._dongle_active:
+            self._capture_failed.set()
+        if self._process_group is not None:
+            self._rtl_process = None
+            super()._kill_subprocess()
+            return
         rtl = self._rtl_process
         self._rtl_process = None
         super()._kill_subprocess()
@@ -324,12 +418,22 @@ class NOAAAPTDecoder(SignalPluginBase):
             self._update_snapshot_cache()
             self._sleep_while_active(5.0)
 
+        # Always stop the complete process group before returning its lease.
+        # This also closes the small race where a recorder failure is observed
+        # just as the scheduled pass reaches LOS.
         self._kill_subprocess()
+        if self._capture_failed.is_set():
+            if self._dongle_active:
+                self._release_capture_lease(suspend=True)
+            else:
+                with self._capture_state_lock:
+                    self._capture_lease_released = True
+            self._current_pass = None
+            self._recording_file = None
+            self._update_snapshot_cache()
+            return
 
-        sched = getattr(self.app, "sdr_scheduler", None)
-        if sched and self._dongle_serial:
-            sched.dongle_released(self._dongle_serial, self.plugin_name)
-        self._dongle_active = False
+        self._release_capture_lease()
 
         self._status = "decoding"
         self._update_snapshot_cache()

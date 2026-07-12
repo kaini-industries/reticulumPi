@@ -2,15 +2,18 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+src/reticulumpi/_version.py
 dist/
 build/
 
 # Virtual environment
 .venv/
+node_modules/
 
 # Testing
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # IDE

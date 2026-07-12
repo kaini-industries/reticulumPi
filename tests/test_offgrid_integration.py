@@ -139,9 +139,10 @@ def test_startup_offline_delivers_on_internet_lost(mock_identity, mock_rns, tmp_
     fake_probe = MagicMock()
     fake_probe.is_online = False
 
-    with patch("reticulumpi.app.InternetProbe", return_value=fake_probe), patch(
-        "RNS.Transport"
-    ) as mock_transport:
+    with (
+        patch("reticulumpi.app.InternetProbe", return_value=fake_probe),
+        patch("RNS.Transport") as mock_transport,
+    ):
         mock_transport.interfaces = []
         app.start()
 
@@ -259,7 +260,11 @@ def test_tcp_rapid_toggle_recovery(mock_subprocess, tmp_path):
 
     # Phase 1: Go offline — trigger TCP disable (stabilization expired)
     plugin._internet_available = False
-    plugin._on_stabilization_expired()
+    with patch(
+        "reticulumpi.builtin_plugins.transport_monitor.request_control",
+        return_value={"ok": True},
+    ):
+        plugin._on_stabilization_expired()
 
     # Verify TCP was disabled
     content = config_file.read_text()
@@ -301,13 +306,17 @@ def test_tcp_rapid_toggle_recovery(mock_subprocess, tmp_path):
 
 
 def test_config_persist_failure_returns_false(tmp_path):
-    """set_internet_force_offline returns False when _persist raises OSError."""
+    """Runtime override persistence failure is reported without losing state."""
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("reticulumpi:\n  log_level: 4\n")
 
     config = AppConfig(str(cfg_file))
 
-    with patch.object(config, "_persist", side_effect=OSError("disk full")):
+    with patch.object(
+        config,
+        "_persist_runtime_overrides",
+        side_effect=OSError("disk full"),
+    ):
         result = config.set_internet_force_offline(True)
 
     # In-memory state was updated
@@ -315,3 +324,4 @@ def test_config_persist_failure_returns_false(tmp_path):
 
     # But persistence failed
     assert result is False
+    assert config.last_persistence_reason == "write_failed"

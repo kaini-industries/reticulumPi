@@ -1,11 +1,13 @@
 """Tests for the config module."""
 
+import os
 import socket
 import threading
 
 import yaml
+import pytest
 
-from reticulumpi.config import AppConfig
+from reticulumpi.config import AppConfig, ConfigError
 
 
 def test_default_config():
@@ -25,10 +27,9 @@ def test_load_from_file(tmp_config):
     assert config.plugins["heartbeat_announce"]["interval_seconds"] == 5
 
 
-def test_missing_config_file_uses_defaults():
-    config = AppConfig("/nonexistent/path/config.yaml")
-    assert config.use_shared_instance is True
-    assert config.plugins == {}
+def test_explicit_missing_config_file_is_fatal():
+    with pytest.raises(ConfigError, match="Config file not found"):
+        AppConfig("/nonexistent/path/config.yaml")
 
 
 def test_identity_path_expansion(tmp_config):
@@ -92,26 +93,31 @@ def test_set_internet_force_offline_persists(tmp_path):
     result = config.set_internet_force_offline(True)
     assert result is True
     assert config.offgrid_mode is True
-    with open(str(cfg), "r") as f:
+    with open(config.runtime_overrides_path, "r") as f:
         raw = yaml.safe_load(f)
-    assert raw["reticulumpi"]["internet"]["force_offline"] is True
+    assert raw["internet"]["force_offline"] is True
+    assert "internet" not in yaml.safe_load(cfg.read_text())["reticulumpi"]
+    assert os.stat(config.runtime_overrides_path).st_mode & 0o777 == 0o600
 
 
-def test_persist_skips_on_corrupt_yaml(tmp_path):
+def test_runtime_persist_does_not_rewrite_corrupt_primary_config(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("reticulumpi:\n  log_level: 4\n")
     config = AppConfig(str(cfg))
     cfg.write_text("{{{invalid yaml")
     result = config.set_internet_force_offline(True)
-    assert result is True  # corrupt YAML skips persist but no OSError raised
+    assert result is True
     assert cfg.read_text() == "{{{invalid yaml"
+    with open(config.runtime_overrides_path) as fh:
+        assert yaml.safe_load(fh)["internet"]["force_offline"] is True
 
 
 def test_persist_no_config_path():
     config = AppConfig()
     result = config.set_internet_force_offline(True)
-    assert result is True  # no config path means _persist is a no-op (no OSError)
+    assert result is False
     assert config.offgrid_mode is True
+    assert config.last_persistence_reason == "no_override_path"
 
 
 def test_set_internet_force_offline_returns_false_on_oserror(tmp_path):
@@ -120,10 +126,92 @@ def test_set_internet_force_offline_returns_false_on_oserror(tmp_path):
     config = AppConfig(str(cfg))
     from unittest.mock import patch
 
-    with patch.object(config, "_persist", side_effect=OSError("read-only filesystem")):
+    with patch.object(
+        config,
+        "_persist_runtime_overrides",
+        side_effect=OSError("read-only filesystem"),
+    ):
         result = config.set_internet_force_offline(True)
     assert result is False
     assert config.offgrid_mode is True  # in-memory state still updated
+    assert config.last_persistence_reason == "write_failed"
+
+
+def test_runtime_override_fails_closed_when_directory_open_fails(tmp_path):
+    from unittest.mock import patch
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    config = AppConfig(str(cfg))
+    real_open = os.open
+
+    def fail_directory_open(path, flags, *args):
+        if os.fspath(path) == os.fspath(tmp_path):
+            raise OSError("directory handle unavailable")
+        return real_open(path, flags, *args)
+
+    with patch("reticulumpi.config.os.open", side_effect=fail_directory_open):
+        assert config.set_internet_force_offline(True) is False
+
+    assert config.offgrid_mode is True
+    assert config.last_persistence_reason == "write_failed"
+    assert list(tmp_path.glob(".reticulumpi_*.tmp")) == []
+
+
+def test_runtime_override_fails_closed_when_directory_fsync_fails(tmp_path):
+    from unittest.mock import patch
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    config = AppConfig(str(cfg))
+    real_open = os.open
+    real_fsync = os.fsync
+    directory_fds: set[int] = set()
+
+    def capture_directory_open(path, flags, *args):
+        descriptor = real_open(path, flags, *args)
+        if os.fspath(path) == os.fspath(tmp_path):
+            directory_fds.add(descriptor)
+        return descriptor
+
+    def fail_directory_fsync(descriptor):
+        if descriptor in directory_fds:
+            raise OSError("directory fsync unavailable")
+        return real_fsync(descriptor)
+
+    with (
+        patch("reticulumpi.config.os.open", side_effect=capture_directory_open),
+        patch("reticulumpi.config.os.fsync", side_effect=fail_directory_fsync),
+    ):
+        assert config.set_internet_force_offline(True) is False
+
+    assert config.offgrid_mode is True
+    assert config.last_persistence_reason == "write_failed"
+    assert list(tmp_path.glob(".reticulumpi_*.tmp")) == []
+
+
+def test_runtime_override_loaded_on_restart(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    first = AppConfig(str(cfg))
+    assert first.set_internet_force_offline(True) is True
+
+    second = AppConfig(str(cfg))
+    assert second.offgrid_mode is True
+
+
+def test_runtime_override_rejects_unknown_keys(tmp_path):
+    import pytest
+
+    from reticulumpi.config import ConfigError
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("reticulumpi:\n  log_level: 4\n")
+    override = tmp_path / "override.yaml"
+    override.write_text("plugins:\n  web_dashboard:\n    password: exposed\n")
+
+    with pytest.raises(ConfigError, match="Unsupported runtime override keys"):
+        AppConfig(str(cfg), runtime_overrides_path=str(override))
 
 
 def test_set_internet_force_offline_thread_safe(tmp_path):

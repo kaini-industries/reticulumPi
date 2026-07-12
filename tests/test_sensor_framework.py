@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from contextlib import closing
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -168,7 +169,7 @@ def test_sqlite_storage(mock_dest, mock_app, tmp_path):
 
     # Verify it was stored
     db_path = config["storage"]["path"]
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         rows = list(conn.execute("SELECT * FROM sensor_readings"))
     assert len(rows) == 1
     assert rows[0][1] == "test_sensor"
@@ -176,6 +177,29 @@ def test_sqlite_storage(mock_dest, mock_app, tmp_path):
     assert rows[0][3] == 22.5
 
     plugin.stop()
+
+
+@patch("RNS.Destination")
+def test_sqlite_setup_failure_closes_connection(mock_dest, mock_app, tmp_path):
+    from reticulumpi.builtin_plugins import sensor_framework
+
+    connection = MagicMock()
+    connection.execute.side_effect = sqlite3.OperationalError("setup failed")
+    config = {
+        "sensors": [],
+        "storage": {
+            "type": "sqlite",
+            "path": str(tmp_path / "broken.db"),
+        },
+    }
+    plugin = sensor_framework.SensorFrameworkPlugin(mock_app, config)
+
+    with patch.object(sensor_framework.sqlite3, "connect", return_value=connection):
+        with pytest.raises(sqlite3.OperationalError, match="setup failed"):
+            plugin.start()
+
+    connection.close.assert_called_once_with()
+    assert plugin._db is None
 
 
 @patch("RNS.Destination")

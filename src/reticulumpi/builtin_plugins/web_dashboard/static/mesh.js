@@ -55,7 +55,7 @@
       var pct = f.max > 0 ? Math.round(f.points / f.max * 100) : 0;
       h += '<div class="reach-factor">'
         + '<span class="reach-factor-name">' + (names[key] || key) + '</span>'
-        + '<span class="reach-factor-bar"><span class="reach-factor-fill" style="width:' + pct + '%"></span></span>'
+        + '<span class="reach-factor-bar"><span class="reach-factor-fill" data-rpi-width="' + pct + '"></span></span>'
         + '<span class="reach-factor-val">' + f.points + '/' + f.max + '</span>'
         + '<span class="reach-factor-detail">' + esc(f.detail || '') + '</span>'
         + '</div>';
@@ -203,6 +203,7 @@
         var td = document.createElement('td');
         td.colSpan = 7;
         td.innerHTML = buildNodeDetailHTML(node);
+        R.applyCspDynamicStyles(td);
         detailTr.appendChild(td);
         tbody.appendChild(detailTr);
       }
@@ -393,7 +394,7 @@
     if (!el) return;
     var keys = Object.keys(breakdown);
     if (keys.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No data</div>';
+      el.innerHTML = '<div class="dashboard-empty">No data</div>';
       return;
     }
     // Sort by count descending
@@ -420,12 +421,13 @@
       var colorCls = clsMap[key] || 'ac-other';
       html += '<div class="bar-row">'
         + '<div class="bar-label bar-label-app">' + label + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + colorCls + '" style="width:' + pct + '%"></div></div>'
+        + '<div class="bar-track"><div class="bar-fill ' + colorCls + '" data-rpi-width="' + pct + '"></div></div>'
         + '<div class="bar-count">' + fmtK(count) + '</div>'
         + '<div class="bar-pct">' + pctOfTotal + '%</div>'
         + '</div>';
     }
     el.innerHTML = html;
+    R.applyCspDynamicStyles(el);
   }
 
   function renderMeshHopChart(dist) {
@@ -448,7 +450,7 @@
     // Filter empty buckets
     buckets = buckets.filter(function(b) { return b.count > 0; });
     if (buckets.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem">No data</div>';
+      el.innerHTML = '<div class="dashboard-empty">No data</div>';
       return;
     }
     var html = '';
@@ -458,12 +460,13 @@
       var pctOfTotal = total > 0 ? Math.round(b.count / total * 100) : 0;
       html += '<div class="bar-row">'
         + '<div class="bar-label bar-label-hop">' + b.label + '</div>'
-        + '<div class="bar-track"><div class="bar-fill ' + b.cls + '" style="width:' + pct + '%"></div></div>'
+        + '<div class="bar-track"><div class="bar-fill ' + b.cls + '" data-rpi-width="' + pct + '"></div></div>'
         + '<div class="bar-count">' + fmtK(b.count) + '</div>'
         + '<div class="bar-pct">' + pctOfTotal + '%</div>'
         + '</div>';
     }
     el.innerHTML = html;
+    R.applyCspDynamicStyles(el);
   }
 
   function cacheMeshPeers(peers) {

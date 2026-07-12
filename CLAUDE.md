@@ -7,10 +7,11 @@ Plugin-based Reticulum mesh networking node for Raspberry Pi 5 (ARM64, 4 cores).
 Core orchestrator `src/reticulumpi/app.py` (`ReticulumPiApp`) initializes Reticulum, loads
 plugins via `plugin_loader.py`, starts them in dependency order, manages shutdown in reverse.
 
-Inter-plugin communication: `event_bus.py` (thread-safe pub/sub, ~127 event types in `events.py`).
+Inter-plugin communication uses thread-safe publish/subscribe in `event_bus.py`. The current
+constant-to-name catalog is generated in `docs/generated-code-reference.md`.
 
 Two plugin base classes:
-- `PluginBase` (`plugin_base.py`) -- all 42 plugins inherit from this
+- `PluginBase` (`plugin_base.py`) -- all discoverable plugins ultimately inherit from this
 - `SignalPluginBase` (`signal_plugin_base.py`) -- RTL-SDR signal plugins, adds dongle scheduling
 
 Dashboard: `builtin_plugins/web_dashboard/` -- aiohttp backend + vanilla JS frontend (no build step).
@@ -35,7 +36,8 @@ Debug (no parallelism): `.venv/bin/pytest tests/test_foo.py -v -n0`
 - **Hardware library mocking:** Plugins importing optional deps (meshtastic, paho-mqtt, sgp4,
   pyserial) need `sys.modules` patching BEFORE import. See `tests/test_meshtastic_gateway.py`
   lines 16-55 for the canonical pattern.
-- **Version lives in TWO files:** `pyproject.toml:7` and `src/reticulumpi/__init__.py:3`.
+- **Version comes only from SCM:** signed `vMAJOR.MINOR.PATCH` tags feed `setuptools-scm`,
+  which generates the installed `_version.py`; follow `docs/release-process.md`.
   Both must be updated together.
 - **Secrets:** `.env` and `*.identity` files are secrets -- never commit.
 - **Reticulum config format:** Interface sections use double brackets `[[Name]]` under `[interfaces]`.
@@ -45,15 +47,16 @@ Debug (no parallelism): `.venv/bin/pytest tests/test_foo.py -v -n0`
 
 ## Code Style
 
-- Ruff enforces style. Line length 100, target Python 3.9+.
+- Ruff enforces style. Line length 100, target Python 3.11+.
 - Plugin filenames are snake_case matching `plugin_name`.
 - Event constants: UPPER_SNAKE_CASE in `events.py` (append-only by convention).
 
 ## Key Directories
 
 - `src/reticulumpi/` -- core modules ([details](src/reticulumpi/CLAUDE.md))
-- `src/reticulumpi/builtin_plugins/` -- 42 plugins ([details](src/reticulumpi/builtin_plugins/CLAUDE.md))
-- `tests/` -- 70 test files ([details](tests/CLAUDE.md))
+- `src/reticulumpi/builtin_plugins/` -- built-ins listed in the generated code reference
+  ([details](src/reticulumpi/builtin_plugins/CLAUDE.md))
+- `tests/` -- automated regression suite ([details](tests/CLAUDE.md))
 - `scripts/` -- bootstrap.sh, update.sh, offline simulation
 - `config/` -- example YAML configs, Reticulum config templates, systemd units
 - `docs/` -- plugin-development.md, api-reference.md, install-layout.md

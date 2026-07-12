@@ -13,7 +13,8 @@ import os
 import struct
 import threading
 from collections import deque
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,6 +26,7 @@ from reticulumpi.builtin_plugins.fm_receiver import (
     _STATE_FILENAME,
     FMReceiver,
 )
+from reticulumpi.process_supervisor import ProcessFailure
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +45,9 @@ def _make_plugin(config: dict | None = None) -> FMReceiver:
     plugin = FMReceiver(_make_app(), config or {})
     plugin._state_lock = threading.Lock()
     plugin._stream_lock = threading.Lock()
+    plugin._process_lock = threading.RLock()
     plugin._process = None
+    plugin._process_group = None
     plugin._pid = None
     plugin._restart_count = 0
     plugin._rtl_fm_path = "/usr/bin/rtl_fm"
@@ -52,6 +56,9 @@ def _make_plugin(config: dict | None = None) -> FMReceiver:
     plugin._playing = False
     plugin._resolved_index = 0
     plugin._supervisor_alive = False
+    plugin._supervisor_generation = 0
+    plugin._device_lease = None
+    plugin._dongle_generation = None
     plugin._signal_rms = 0.0
     plugin._signal_db = -90.0
     plugin._dead_zone_warning = None
@@ -66,6 +73,7 @@ def _make_plugin(config: dict | None = None) -> FMReceiver:
     plugin._recording_file = None
     plugin._recording_path = None
     plugin._recording_start_ts = None
+    plugin._recording_start_monotonic = None
     plugin._recording_bytes = 0
     plugin._recording_label = None
     plugin._rec_lock = threading.Lock()
@@ -813,6 +821,35 @@ class TestRecording:
         assert wav_files[0].stat().st_size == 44
         p.stop_recording()
 
+    def test_recording_duration_and_limit_ignore_wall_clock_jumps(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        p = _make_plugin({"max_recording_seconds": 10})
+        p._playing = True
+        clock = {"wall": 1_000.0, "monotonic": 100.0}
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.fm_receiver.time.time",
+                side_effect=lambda: clock["wall"],
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.fm_receiver.time.monotonic",
+                side_effect=lambda: clock["monotonic"],
+            ),
+        ):
+            assert p.start_recording()["recording"] is True
+
+            clock["wall"] = 9_999_999_999.0
+            clock["monotonic"] = 105.0
+            assert p.get_snapshot()["recording"]["duration_seconds"] == 5.0
+            p._write_recording_chunk(b"\x00\x00")
+            assert p._recording is True
+
+            clock["wall"] = -9_999_999_999.0
+            clock["monotonic"] = 111.0
+            p._write_recording_chunk(b"\x00\x00")
+            assert p._recording is False
+
     def test_stop_recording_patches_header(self, tmp_path, monkeypatch):
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         p = _make_plugin()
@@ -1000,3 +1037,542 @@ class TestRecording:
         time.sleep(0.01)
         p._write_recording_chunk(b"\x00" * 10)
         assert p._recording is False
+
+
+class TestManagedLifecycle:
+    def test_standalone_start_and_stop_own_one_device_lease(self):
+        p = _make_plugin()
+        p.app.sdr_scheduler = None
+        lease = SimpleNamespace(index=4, release=MagicMock())
+        with (
+            patch("reticulumpi.rtlsdr.refresh_device_lease", return_value=lease) as refresh,
+            patch.object(p, "_load_favorites"),
+            patch.object(p, "_load_state"),
+            patch.object(p, "_join_threads"),
+            patch.object(p, "_notify_clients_stopped"),
+        ):
+            p.start()
+            assert p._process_group is None
+            assert p._device_lease is lease
+            assert p._resolved_index == 4
+            assert p._dongle_active is True
+            p.stop()
+
+        refresh.assert_called_once_with(None, "0", "fm_receiver")
+        lease.release.assert_called_once_with()
+        assert p._device_lease is None
+        assert p._status == "stopped"
+
+    def test_scheduler_start_registers_and_stop_unregisters(self):
+        p = _make_plugin()
+        scheduler = MagicMock()
+        p.app.sdr_scheduler = scheduler
+        with (
+            patch.object(p, "_load_favorites"),
+            patch.object(p, "_load_state"),
+            patch.object(p, "_join_threads"),
+            patch.object(p, "_notify_clients_stopped"),
+        ):
+            p.start()
+            p.stop()
+
+        scheduler.register.assert_called_once()
+        assert scheduler.register.call_args.kwargs["continuous"] is True
+        scheduler.unregister.assert_called_once_with("0", "fm_receiver")
+
+    def test_status_reports_a_live_managed_process(self):
+        p = _make_plugin()
+        process = MagicMock(pid=4242)
+        process.poll.return_value = None
+        p._process = process
+        p._pid = process.pid
+        p._active = True
+        p._playing = True
+        status = p.get_status()
+        assert status["running"] is True
+        assert status["pid"] == 4242
+
+    def test_play_and_live_control_changes_use_the_supervisor(self):
+        p = _make_plugin()
+        p._dongle_active = True
+        p._resolved_index = 0
+        with patch.object(p, "_start_supervisor") as start:
+            assert p.play()["status"] == "starting"
+        start.assert_called_once_with()
+
+        with (
+            patch.object(p, "_persist_state"),
+            patch.object(p, "_restart_playback") as restart,
+        ):
+            assert p.set_gain(20.0) == {"gain_db": 20.0}
+            assert p.set_squelch(7) == {"squelch_level": 7}
+        assert restart.call_count == 2
+
+    def test_scheduler_acquire_uses_generation_and_resumes_playback(self):
+        p = _make_plugin()
+
+        class Scheduler:
+            def get_generation(self, serial):
+                assert serial == "serial-1"
+                return 17
+
+        p.app.sdr_scheduler = Scheduler()
+        p._was_playing_before_yield = True
+        with patch.object(p, "play", return_value={"playing": True}) as play:
+            p._on_scheduler_acquire("serial-1", 3)
+        assert p._dongle_generation == 17
+        assert p._resolved_index == 3
+        assert p._dongle_active is True
+        play.assert_called_once_with()
+
+    def test_scheduler_yield_stops_active_playback_and_recording(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._recording = True
+        p._dongle_generation = 8
+        with (
+            patch.object(p, "_stop_recording_internal") as stop_recording,
+            patch.object(p, "_invalidate_supervisor") as invalidate,
+            patch.object(p, "_terminate_process") as terminate,
+            patch.object(p, "_notify_clients_stopped") as notify,
+        ):
+            assert p._on_scheduler_yield("adsb", "ADS-B", 123.0) is True
+        stop_recording.assert_called_once_with("preempted")
+        invalidate.assert_called_once_with()
+        terminate.assert_called_once_with()
+        notify.assert_called_once_with()
+        assert p._dongle_generation is None
+        assert p._status == "paused"
+
+
+class TestManagedSupervisor:
+    def test_start_and_invalidate_supervisor_without_preexisting_lock(self):
+        p = _make_plugin()
+        del p._process_lock
+        targets = []
+        with patch.object(
+            p, "_start_thread", side_effect=lambda target, **_kwargs: targets.append(target)
+        ):
+            p._start_supervisor()
+        assert p._supervisor_generation == 1
+        assert p._supervisor_alive is True
+        assert len(targets) == 1
+
+        del p._process_lock
+        p._invalidate_supervisor()
+        assert p._supervisor_generation == 2
+        assert p._supervisor_alive is False
+
+    def test_restart_playback_only_relaunches_when_all_guards_are_ready(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        with (
+            patch.object(p, "_invalidate_supervisor") as invalidate,
+            patch.object(p, "_terminate_process") as terminate,
+            patch.object(p, "_notify_clients_stopped") as notify,
+            patch.object(p, "_start_supervisor") as start,
+        ):
+            p._restart_playback()
+        invalidate.assert_called_once_with()
+        terminate.assert_called_once_with()
+        notify.assert_called_once_with()
+        start.assert_called_once_with()
+        assert p._restart_count == 0
+
+    def test_supervisor_loop_uses_current_generation_and_clears_alive_flag(self):
+        p = _make_plugin()
+        p._supervisor_generation = 9
+        with patch.object(p, "_supervisor_loop_inner") as inner:
+            p._supervisor_loop()
+        inner.assert_called_once_with(9)
+        assert p._supervisor_alive is False
+
+    def test_missing_binary_degrades_and_releases_sdr(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        with (
+            patch("reticulumpi.builtin_plugins.fm_receiver.shutil.which", return_value=None),
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_release_sdr_after_failure") as release,
+        ):
+            p._supervisor_loop_inner()
+        degraded.assert_called_once_with("rtl_fm not found on PATH")
+        release.assert_called_once_with()
+        assert p._playing is False
+        assert p._status == "unavailable"
+
+    def test_stale_generation_does_not_launch(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        p._supervisor_generation = 3
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.fm_receiver.shutil.which", return_value="/bin/rtl_fm"
+            ),
+            patch.object(p, "_launch_rtl_fm") as launch,
+        ):
+            p._supervisor_loop_inner(2)
+        launch.assert_not_called()
+
+    def test_launch_failure_degrades_stops_playback_and_releases_sdr(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        p._supervisor_generation = 3
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.fm_receiver.shutil.which", return_value="/bin/rtl_fm"
+            ),
+            patch.object(p, "_launch_rtl_fm", side_effect=OSError("USB vanished")),
+            patch.object(p, "_terminate_process") as terminate,
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_release_sdr_after_failure") as release,
+        ):
+            p._supervisor_loop_inner(3)
+        terminate.assert_called_once_with()
+        degraded.assert_called_once_with("USB vanished")
+        release.assert_called_once_with()
+        assert p._playing is False
+
+    def test_generation_change_during_launch_failure_suppresses_stale_error(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        p._supervisor_generation = 3
+
+        def stale_failure(_generation):
+            p._supervisor_generation = 4
+            raise OSError("old launch failed")
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.fm_receiver.shutil.which", return_value="/bin/rtl_fm"
+            ),
+            patch.object(p, "_launch_rtl_fm", side_effect=stale_failure),
+            patch.object(p, "_terminate_process") as terminate,
+            patch.object(p, "mark_degraded") as degraded,
+        ):
+            p._supervisor_loop_inner(3)
+        terminate.assert_not_called()
+        degraded.assert_not_called()
+
+    def test_launch_builds_group_and_clears_it_when_start_fails(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        del p._process_lock
+        group = MagicMock()
+        group.start.side_effect = RuntimeError("cannot fork")
+        with patch(
+            "reticulumpi.builtin_plugins.fm_receiver.ManagedProcessGroup",
+            return_value=group,
+        ) as constructor:
+            with pytest.raises(RuntimeError, match="cannot fork"):
+                p._launch_rtl_fm()
+        assert p._process_group is None
+        spec = constructor.call_args.args[0][0]
+        assert spec.name == "rtl_fm"
+        assert spec.argv[0] == "/usr/bin/rtl_fm"
+        assert constructor.call_args.kwargs["restart_policy"].enabled is False
+
+    def test_launch_rejects_stale_generation_before_start(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        p._supervisor_generation = 5
+        group = MagicMock()
+        with patch(
+            "reticulumpi.builtin_plugins.fm_receiver.ManagedProcessGroup",
+            return_value=group,
+        ):
+            p._launch_rtl_fm(4)
+        group.start.assert_not_called()
+        assert p._process_group is None
+
+    def test_launch_does_not_publish_group_after_playback_stops(self):
+        p = _make_plugin()
+        p._active = False
+        p._playing = True
+        p._dongle_active = True
+        group = MagicMock()
+        with patch(
+            "reticulumpi.builtin_plugins.fm_receiver.ManagedProcessGroup",
+            return_value=group,
+        ):
+            p._launch_rtl_fm()
+        group.start.assert_not_called()
+        assert p._process_group is None
+
+    def test_process_started_publishes_process_and_reader_resources(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        group = MagicMock(restart_count=2)
+        process = MagicMock(pid=4321)
+        p._process_group = group
+        with (
+            patch.object(p, "_start_stderr_reader") as stderr_reader,
+            patch.object(p, "_start_thread") as start_thread,
+        ):
+            p._on_process_started(group, (process,), restarted=True)
+        stderr_reader.assert_called_once_with(process, prefix="rtl_fm")
+        start_thread.assert_called_once()
+        assert p._process is process
+        assert p._pid == 4321
+        assert p._restart_count == 2
+        assert p._status == "playing"
+
+    def test_process_started_rejects_stale_group(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        with pytest.raises(RuntimeError, match="stale"):
+            p._on_process_started(MagicMock(), (MagicMock(),), restarted=False)
+
+    def test_failure_restart_and_restart_failure_update_health(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        p.app.sdr_scheduler = None
+        group = MagicMock()
+        p._process_group = group
+        failure = ProcessFailure(0, "rtl_fm", 7, "crashed", 1.0)
+        lease = SimpleNamespace(index=6)
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_release_standalone_lease") as release,
+        ):
+            p._on_process_failure(group, failure)
+            assert p._status == "restarting"
+            assert "crashed" in p._last_error
+            degraded.assert_called_once()
+            release.assert_called_once_with()
+
+        with (
+            patch("reticulumpi.rtlsdr.invalidate_cache") as invalidate,
+            patch("reticulumpi.rtlsdr.refresh_device_lease", return_value=lease),
+        ):
+            p._on_process_restart(group, 2, 4.0)
+        invalidate.assert_called_once_with()
+        group.replace_specs.assert_called_once()
+        assert p._resolved_index == 6
+        assert p._restart_count == 2
+
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_release_standalone_lease") as release,
+        ):
+            p._on_process_restart_failed(group, RuntimeError("again"), 3)
+        degraded.assert_called_once()
+        release.assert_called_once_with()
+        assert p._restart_count == 3
+        assert "restart 3 failed" in p._last_error
+
+    def test_restart_rejects_a_stale_group(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        with pytest.raises(RuntimeError, match="stopped"):
+            p._on_process_restart(MagicMock(), 1, 1.0)
+
+    def test_exhaustion_stops_playback_notifies_clients_and_releases_sdr(self):
+        p = _make_plugin()
+        group = MagicMock(restart_count=5)
+        p._process_group = group
+        p._playing = True
+        failure = ProcessFailure(0, "rtl_fm", 1, "EOF", 1.0)
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_notify_clients_stopped") as notify,
+            patch.object(p, "_release_sdr_after_failure") as release,
+        ):
+            p._on_process_exhausted(group, failure)
+        degraded.assert_called_once()
+        notify.assert_called_once_with()
+        release.assert_called_once_with()
+        assert p._playing is False
+        assert p._restart_count == 5
+        assert p._pid is None
+
+    def test_stale_callbacks_leave_current_process_state_untouched(self):
+        p = _make_plugin()
+        current = MagicMock()
+        p._process_group = current
+        stale = MagicMock()
+        failure = ProcessFailure(0, "rtl_fm", 1, "EOF", 1.0)
+        p._on_process_failure(stale, failure)
+        p._on_process_restart_failed(stale, RuntimeError("ignored"), 2)
+        p._on_process_exhausted(stale, failure)
+        assert p._process_group is current
+        assert p._status == "stopped"
+
+
+class TestManagedSdrCleanup:
+    def test_scheduler_failure_releases_during_backoff_and_reacquires_before_restart(self):
+        class Scheduler:
+            def __init__(self):
+                self.calls = []
+
+            def suspend(self, serial, caller, *, generation):
+                self.calls.append(("suspend", serial, caller, generation))
+                return 73
+
+            def resume(self, serial, caller, *, registration_id):
+                self.calls.append(("resume", serial, caller, registration_id))
+                return True
+
+        p = _make_plugin()
+        scheduler = Scheduler()
+        p.app.sdr_scheduler = scheduler
+        p._active = True
+        p._playing = True
+        p._dongle_active = True
+        p._dongle_generation = 12
+        group = MagicMock(restart_count=0)
+        p._process_group = group
+        failure = ProcessFailure(0, "rtl_fm", 1, "EOF", 1.0)
+
+        with patch.object(p, "_start_thread") as start_thread:
+            p._on_process_failure(group, failure)
+
+        assert scheduler.calls == [("suspend", "0", p.plugin_name, 12)]
+        assert p._dongle_active is False
+        assert p._process_group is None
+        assert p._playing is False
+        retry_worker = start_thread.call_args.args[0]
+        with patch.object(p._stop_event, "wait", return_value=False):
+            retry_worker()
+        assert scheduler.calls[-1] == ("resume", "0", p.plugin_name, 73)
+
+        with patch.object(p, "_start_supervisor"):
+            p._on_scheduler_acquire("0", 4)
+        assert p._playing is True
+        assert p._restart_count == 1
+
+        replacement_group = MagicMock(restart_count=0)
+        replacement_process = MagicMock(pid=4404)
+        p._process_group = replacement_group
+        with (
+            patch.object(p, "_start_stderr_reader"),
+            patch.object(p, "_start_thread"),
+        ):
+            p._on_process_started(replacement_group, (replacement_process,), restarted=False)
+        assert p._restart_count == 1
+
+    def test_standalone_lease_release_is_idempotent_and_isolates_errors(self):
+        p = _make_plugin()
+        lease = MagicMock()
+        p._device_lease = lease
+        p._release_standalone_lease()
+        lease.release.assert_called_once_with()
+        p._release_standalone_lease()
+
+        broken = MagicMock()
+        broken.release.side_effect = OSError("USB gone")
+        p._device_lease = broken
+        p._release_standalone_lease()
+        assert p._device_lease is None
+
+    @pytest.mark.parametrize("mode", ["suspend", "release", "legacy"])
+    def test_scheduler_failure_release_uses_best_available_generation_api(self, mode):
+        p = _make_plugin()
+        p._dongle_generation = 22
+
+        if mode == "suspend":
+
+            class Scheduler:
+                def __init__(self):
+                    self.calls = []
+
+                def suspend(self, serial, caller, *, generation):
+                    self.calls.append(("suspend", serial, caller, generation))
+
+        elif mode == "release":
+
+            class Scheduler:
+                def __init__(self):
+                    self.calls = []
+
+                def dongle_released(self, serial, caller, *, generation):
+                    self.calls.append(("release", serial, caller, generation))
+
+        else:
+            scheduler = SimpleNamespace(dongle_released=MagicMock())
+            p.app.sdr_scheduler = scheduler
+            p._release_sdr_after_failure()
+            scheduler.dongle_released.assert_called_once_with("0", "fm_receiver")
+            assert p._dongle_active is False
+            return
+
+        scheduler = Scheduler()
+        p.app.sdr_scheduler = scheduler
+        p._release_sdr_after_failure()
+        assert scheduler.calls[0][1:] == ("0", "fm_receiver", 22)
+        assert p._dongle_generation is None
+        assert p._dongle_active is False
+
+    def test_failure_without_scheduler_releases_standalone_lease(self):
+        p = _make_plugin()
+        p.app.sdr_scheduler = None
+        with patch.object(p, "_release_standalone_lease") as release:
+            p._release_sdr_after_failure()
+        release.assert_called_once_with()
+        assert p._dongle_active is False
+
+
+class TestManagedAudioReader:
+    def test_audio_eof_is_reported_to_current_running_group(self):
+        p = _make_plugin()
+        p._active = True
+        p._playing = True
+        p._volume = 1.0
+        stream = MagicMock()
+        stream.read.side_effect = [b"\x01\x00" * 8, b""]
+        process = MagicMock(stdout=stream)
+        group = MagicMock(running=True)
+        p._process = process
+        p._process_group = group
+        with (
+            patch.object(p, "_update_signal_level") as update,
+            patch.object(p, "_push_audio_chunk") as push,
+        ):
+            p._audio_reader_loop(process)
+        update.assert_called_once()
+        push.assert_called_once()
+        group.notify_unexpected_eof.assert_called_once_with(
+            0,
+            "rtl_fm audio stream reached EOF",
+        )
+
+    def test_audio_reader_without_a_process_returns_cleanly(self):
+        p = _make_plugin()
+        p._process = None
+        p._audio_reader_loop()
+
+    def test_terminate_without_preexisting_lock_stops_managed_group(self):
+        p = _make_plugin()
+        del p._process_lock
+        group = MagicMock()
+        p._process_group = group
+        p._process = MagicMock()
+        p._pid = 99
+        p._terminate_process()
+        group.stop.assert_called_once_with()
+        assert p._process_group is None
+        assert p._process is None
+        assert p._pid is None

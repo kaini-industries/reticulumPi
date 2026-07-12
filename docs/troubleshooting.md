@@ -17,14 +17,14 @@ sudo journalctl -u reticulumpi --no-pager -n 100
 sudo journalctl -u reticulumpi -f
 
 # Network interfaces and peer count
-sudo -u reticulumpi /opt/reticulumpi/.venv/bin/rnstatus
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/rnstatus
 
 # Validate config without starting
-sudo -u reticulumpi /opt/reticulumpi/.venv/bin/reticulumpi --check \
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/reticulumpi --check \
   --config /etc/reticulumpi/config.yaml
 
 # List discovered plugins
-sudo -u reticulumpi /opt/reticulumpi/.venv/bin/reticulumpi --list-plugins
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/reticulumpi --list-plugins
 ```
 
 ---
@@ -39,16 +39,22 @@ sudo -u reticulumpi /opt/reticulumpi/.venv/bin/reticulumpi --list-plugins
 
 **Fix:**
 ```bash
-# Create all required directories
-sudo -u reticulumpi mkdir -p \
-  /home/reticulumpi/.config/reticulumpi \
-  /home/reticulumpi/.local/share/reticulumpi \
-  /home/reticulumpi/.reticulum \
-  /home/reticulumpi/.nomadnet \
-  /home/reticulumpi/.nomadnet-tui
+# Create the two service-owned writable roots
+sudo install -d -o reticulumpi -g reticulumpi -m 0750 \
+  /var/lib/reticulumpi \
+  /var/cache/reticulumpi
 
-# If MeshChat is installed, also ensure its storage dir exists:
-sudo -u reticulumpi mkdir -p /opt/reticulumpi/meshchat/storage
+# Create conventional durable-state subdirectories
+sudo -u reticulumpi mkdir -p \
+  /var/lib/reticulumpi/.config/reticulumpi \
+  /var/lib/reticulumpi/.local/share/reticulumpi \
+  /var/lib/reticulumpi/.local/state \
+  /var/lib/reticulumpi/.reticulum \
+  /var/lib/reticulumpi/.nomadnet \
+  /var/lib/reticulumpi/.nomadnet-tui
+
+# If a separately managed MeshChat checkout is configured under durable state:
+sudo -u reticulumpi mkdir -p /var/lib/reticulumpi/meshchat/storage
 
 # Restart
 sudo systemctl restart reticulumpi
@@ -62,13 +68,8 @@ The current service file lists these writable paths:
 
 | Path | Purpose |
 |------|---------|
-| `/var/lib/reticulumpi` | General data storage |
-| `/home/reticulumpi/.reticulum` | Reticulum config + path table |
-| `/home/reticulumpi/.config/reticulumpi` | Dashboard secret, identity, web certs |
-| `/home/reticulumpi/.local/share/reticulumpi` | LXMF identities, SQLite databases |
-| `/home/reticulumpi/.nomadnet` | NomadNet daemon data |
-| `/home/reticulumpi/.nomadnet-tui` | NomadNet TUI data |
-| `/opt/reticulumpi/meshchat/storage` | MeshChat database + LXMF router |
+| `/var/lib/reticulumpi` | HOME, Reticulum state, identities, databases, and NomadNet data |
+| `/var/cache/reticulumpi` | Disposable tiles, TLEs, and other caches |
 
 If a plugin needs to write to a path not in this list, it will get `sqlite3.OperationalError: attempt to write a readonly database` or `PermissionError: [Errno 13] Permission denied`. The fix is to add the path to `ReadWritePaths` in `/etc/systemd/system/reticulumpi.service` and run `sudo systemctl daemon-reload && sudo systemctl restart reticulumpi`.
 
@@ -80,8 +81,9 @@ If a plugin needs to write to a path not in this list, it will get `sqlite3.Oper
 
 **Fix:**
 ```bash
-cd /opt/reticulumpi
-sudo -u reticulumpi .venv/bin/pip install .
+sudo reticulumpi-admin doctor
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/python -c \
+  "import reticulumpi; print(reticulumpi.__version__)"
 sudo systemctl restart reticulumpi
 ```
 
@@ -89,10 +91,15 @@ sudo systemctl restart reticulumpi
 
 **Symptom:** Logs show "Configuration error" or "Invalid config".
 
+An explicitly selected configuration file is mandatory. If `--config PATH` is supplied (as it
+is by the production systemd unit), a missing file aborts startup instead of silently starting
+with defaults. Restore `/etc/reticulumpi/config.yaml` from a verified backup and confirm it is a
+regular `root:reticulumpi` `0640` file before restarting.
+
 **Fix:**
 ```bash
 # Validate and see the exact error
-sudo -u reticulumpi /opt/reticulumpi/.venv/bin/reticulumpi --check \
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/reticulumpi --check \
   --config /etc/reticulumpi/config.yaml
 ```
 
@@ -110,7 +117,7 @@ Common config mistakes:
 
 **Possible causes:**
 
-1. **No interfaces configured** -- check `~/.reticulum/config` has at least one interface enabled
+1. **No interfaces configured** -- check `/var/lib/reticulumpi/.reticulum/config` has at least one interface enabled
 2. **AutoInterface not discovering** -- ensure you're on the same LAN/subnet, IPv6 multicast must be allowed
 3. **TCP hub unreachable** -- verify the hub hostname resolves and port is open:
    ```bash
@@ -163,7 +170,8 @@ dmesg | tail -20    # check for USB disconnect messages
 
 ### Can't Access Dashboard
 
-1. **Check it's running:** `curl http://127.0.0.1:8080/api/node` from the Pi itself
+1. **Check it's running:** `systemctl status reticulumpi` and `ss -tlnp | grep 8080`
+   (`/api/node` requires a dashboard session or configured local-service Bearer token)
 2. **Check bind address:** Default is `127.0.0.1` (loopback only). Set `host: "0.0.0.0"` to access from other devices
 3. **Check port:** Default 8080. Verify with `ss -tlnp | grep 8080`
 4. **Check firewall:** `sudo ufw allow 8080` (if using ufw)
@@ -176,23 +184,20 @@ There are three ways to reset the dashboard password:
 
 ```bash
 # Delete the auto-generated secret
-sudo -u reticulumpi rm ~/.config/reticulumpi/dashboard_secret
+sudo -u reticulumpi rm /var/lib/reticulumpi/.config/reticulumpi/dashboard_secret
 
-# Restart -- a new password will be generated and printed to logs
+# Restart -- a new password is written to a protected bootstrap file
 sudo systemctl restart reticulumpi
 
-# Find the new password in the journal
-sudo journalctl -u reticulumpi -g "password" --no-pager -n 20
-
-# Or check the temp file (if /tmp is accessible)
-sudo cat /tmp/reticulumpi-initial-password
+# Read it as root; plaintext passwords are never logged
+sudo cat /var/lib/reticulumpi/.config/reticulumpi/dashboard_password.txt
 ```
 
 **Option 2: Set a specific password via hash**
 
 ```bash
 # Generate a hash interactively (prompts twice for confirmation)
-/opt/reticulumpi/.venv/bin/reticulumpi --hash-password
+/srv/reticulumpi/current/.venv/bin/reticulumpi --hash-password
 
 # Add to config
 sudo nano /etc/reticulumpi/config.yaml
@@ -202,22 +207,16 @@ sudo nano /etc/reticulumpi/config.yaml
 sudo systemctl restart reticulumpi
 ```
 
-**Option 3: Set via environment variable (one-shot)**
-
-```bash
-# Set password via env var (takes precedence over hash file and config)
-sudo systemctl set-environment RETICULUMPI_DASHBOARD_PASSWORD=mynewpassword
-sudo systemctl restart reticulumpi
-
-# Clear the env var after login and set a permanent hash
-sudo systemctl unset-environment RETICULUMPI_DASHBOARD_PASSWORD
-```
-
 **Password storage details:**
-- Hash file: `~/.config/reticulumpi/dashboard_secret` (mode 0600)
+- Hash file: `/var/lib/reticulumpi/.config/reticulumpi/dashboard_secret` (mode 0600)
 - Algorithm: scrypt with n=16384, r=8, p=2 (32-byte derived key)
 - Format: `scrypt:<salt_hex>:<n>:<r>:<p>:<hash_hex>`
-- Priority: env `RETICULUMPI_DASHBOARD_PASSWORD_HASH` > env `RETICULUMPI_DASHBOARD_PASSWORD` > config `password_hash` > config `password` > auto-generated hash file
+- Preferred source: root-owned `password_hash` in `/etc/reticulumpi/config.yaml`, then the
+  auto-generated hash/bootstrap flow. Legacy plaintext environment/config inputs are deprecated
+  and emit a critical warning; do not use them for new deployments. During an upgrade, every
+  credential-bearing systemd drop-in—including hash overrides and opaque `EnvironmentFile=`
+  references—is backed up and removed. Rollback restores it; continued environment-based
+  automation requires an explicit post-upgrade review and reprovisioning step.
 
 ### "Too Many Login Attempts" (429)
 
@@ -240,7 +239,11 @@ ss -tn | grep :8080 | wc -l
 
 ### Content-Security-Policy Warnings in Browser Console
 
-If you see CSP warnings about inline scripts or styles with hashes that don't match your code, they're likely from **browser extensions**. Verify by testing in an incognito/private window with extensions disabled.
+The dashboard intentionally disallows inline scripts, inline event handlers, and inline style
+attributes. Record the violated directive, blocked URL, page, browser version, and dashboard
+version. If the console identifies a ReticulumPi page or asset, report it as a dashboard bug.
+If it identifies a browser-extension URL, reproduce in an incognito/private window with
+extensions disabled before reporting it.
 
 ---
 
@@ -264,17 +267,17 @@ sudo journalctl -u reticulumpi -g "plugin_name" --no-pager -n 50
 
 ### NomadNet Won't Start
 
-1. **Check it's installed:** `sudo -u reticulumpi /opt/reticulumpi/.venv/bin/python -c "import nomadnet"`
+1. **Check it's installed:** `sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/python -c "import nomadnet"`
 2. **Check shared instance:** `use_shared_instance: true` MUST be set when NomadNet is enabled
 3. **Check rnsd is running:** `sudo systemctl status rnsd`
 4. **PATH issue:** The plugin falls back to the venv, but check:
    ```bash
-   sudo -u reticulumpi /opt/reticulumpi/.venv/bin/which nomadnet
+   sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/which nomadnet
    ```
 
 ### MeshChat Won't Start
 
-1. **Check it's installed:** `ls /opt/reticulumpi/meshchat/`
+1. **Check the configured external checkout:** `ls /var/lib/reticulumpi/meshchat/`
 2. **Check shared instance:** Same as NomadNet -- `use_shared_instance: true` required
 3. **Port conflict:** Default port 8000. Check: `ss -tlnp | grep 8000`
 4. **Node version:** MeshChat requires Node.js for frontend build
@@ -290,7 +293,7 @@ ls /dev/ttyUSB* /dev/ttyACM*
 groups reticulumpi    # should include 'dialout'
 
 # Test with meshtastic CLI
-sudo -u reticulumpi /opt/reticulumpi/.venv/bin/meshtastic --info
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/meshtastic --info
 ```
 
 **MQTT mode:**
@@ -340,7 +343,7 @@ nc -zv mqtt.meshtastic.org 1883
 
 1. **SQLite databases growing:** Check sizes:
    ```bash
-   du -sh /home/reticulumpi/.local/share/reticulumpi/*.db
+   du -sh /var/lib/reticulumpi/.local/share/reticulumpi/*.db
    ```
 2. **Reduce retention:**
    ```yaml
@@ -365,14 +368,16 @@ nc -zv mqtt.meshtastic.org 1883
 df -h /
 
 # Check ReticulumPi data
-du -sh /home/reticulumpi/.local/share/reticulumpi/
-du -sh /home/reticulumpi/.nomadnet/
-du -sh /home/reticulumpi/.reticulum/
+du -sh /var/lib/reticulumpi/.local/share/reticulumpi/
+du -sh /var/lib/reticulumpi/.nomadnet/
+du -sh /var/lib/reticulumpi/.reticulum/
+du -sh /var/cache/reticulumpi/
 ```
 
 SQLite databases can be compacted:
 ```bash
-sudo -u reticulumpi sqlite3 /home/reticulumpi/.local/share/reticulumpi/network_map.db "VACUUM;"
+sudo -u reticulumpi sqlite3 \
+  /var/lib/reticulumpi/.local/share/reticulumpi/network_map.db "VACUUM;"
 ```
 
 ---
@@ -424,16 +429,24 @@ sudo -u reticulumpi sqlite3 /home/reticulumpi/.local/share/reticulumpi/network_m
 
 ### Update Script Fails
 
-```bash
-# Run manually to see errors
-sudo bash scripts/update.sh
+If the launcher reports that no trusted system administrator is installed, obtain and install
+the independently signed ReticulumPi recovery-administrator package. Do not set `PYTHONPATH`, run
+`python -m reticulumpi.admin_cli` from the candidate, or copy an administrator out of the bundle;
+those paths execute code before the bundle has been authenticated.
 
-# Common fix: reset any local changes that conflict
-cd /opt/reticulumpi
-sudo -u reticulumpi git status
-sudo -u reticulumpi git stash
-sudo bash scripts/update.sh
+```bash
+# Inspect a trusted bundle without changing the system
+bash scripts/update.sh --bundle /path/to/release --dry-run
+
+# Check installed state and any interrupted transaction
+reticulumpi-admin status --json
+reticulumpi-admin doctor
+sudo cat /var/backups/reticulumpi/admin/transaction.json
 ```
+
+The updater does not run `git pull` or resolve local checkout conflicts. Update the source
+checkout separately, review it, then pass it as a bundle. If activation failed, run
+`reticulumpi-admin rollback --dry-run` before applying rollback.
 
 ### Service Won't Restart After Update
 
@@ -454,10 +467,10 @@ sudo journalctl -u reticulumpi -f
 
 ```bash
 # Check if a destination is known
-sudo -u reticulumpi /opt/reticulumpi/.venv/bin/rnpath <destination_hash>
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/rnpath <destination_hash>
 
 # Request a path
-sudo -u reticulumpi /opt/reticulumpi/.venv/bin/rnpath -r <destination_hash>
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/rnpath -r <destination_hash>
 ```
 
 ### Check Transport Status

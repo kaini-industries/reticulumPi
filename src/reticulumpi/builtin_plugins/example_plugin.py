@@ -42,12 +42,14 @@ class ExamplePlugin(PluginBase):
         # Create a Reticulum destination for this plugin
         app_name = self.config.get("app_name", "reticulumpi")
         aspect = self.config.get("aspect", "example")
-        self.destination = RNS.Destination(
-            self.identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            app_name,
-            aspect,
+        self.destination = self.manage_destination(
+            RNS.Destination(
+                self.identity,
+                RNS.Destination.IN,
+                RNS.Destination.SINGLE,
+                app_name,
+                aspect,
+            )
         )
 
         # Register a callback for incoming packets
@@ -104,7 +106,7 @@ class ExamplePlugin(PluginBase):
                 self.log.info("Received from %s: %s", sender, content[:100])
 
                 # Example: read metrics from another plugin
-                monitor = self.app.get_plugin("system_monitor")
+                monitor = self.get_ready_plugin("system_monitor")
                 if monitor and hasattr(monitor, "latest_metrics"):
                     cpu = monitor.latest_metrics.get("cpu_percent", "?")
                     self.log.debug("Current CPU usage: %s%%", cpu)

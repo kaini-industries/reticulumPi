@@ -146,7 +146,9 @@ def _make_mock_mesh_interface():
 def _create_started_plugin(mock_app, config):
     """Create and start a MeshtasticGateway with all mocks active."""
     with (
-        patch("LXMF.LXMRouter") as mock_router_cls,
+        patch(
+            "reticulumpi.builtin_plugins.meshtastic_gateway.create_lxm_router"
+        ) as mock_router_cls,
         patch("RNS.Identity") as mock_identity_cls,
         patch.object(_RNS.Transport, "register_announce_handler"),
         patch.object(_RNS.Transport, "deregister_announce_handler"),
@@ -170,6 +172,14 @@ def _create_started_plugin(mock_app, config):
         plugin._join_threads()
 
 
+def _quiesce_plugin_workers(plugin):
+    """Stop real background probes before asserting synthetic callback state."""
+
+    plugin._active = False
+    plugin._join_threads()
+    plugin._active = True
+
+
 @pytest.fixture
 def gateway_plugin(mock_app, gw_config):
     """Create a serial-mode MeshtasticGateway plugin, started and stopped."""
@@ -185,7 +195,7 @@ def mqtt_gateway_plugin(mock_app, mqtt_gw_config):
 def _make_plugin_no_start(mock_app, config):
     """Construct a MeshtasticGateway without calling start() — for config validation tests."""
     with (
-        patch("LXMF.LXMRouter"),
+        patch("reticulumpi.builtin_plugins.meshtastic_gateway.create_lxm_router"),
         patch("RNS.Identity"),
         patch.object(_RNS.Transport, "register_announce_handler"),
         patch.object(_RNS.Transport, "deregister_announce_handler"),
@@ -211,7 +221,7 @@ class TestValidateConfig:
             importlib.reload(mg)
 
             with (
-                patch("LXMF.LXMRouter"),
+                patch("reticulumpi.builtin_plugins.meshtastic_gateway.create_lxm_router"),
                 patch("RNS.Identity"),
                 patch.object(_RNS.Transport, "register_announce_handler"),
                 patch.object(_RNS.Transport, "deregister_announce_handler"),
@@ -315,7 +325,7 @@ class TestValidateConfigMqtt:
         """ValueError when paho-mqtt is not importable."""
         with patch.dict(sys.modules, {"paho": None, "paho.mqtt": None, "paho.mqtt.client": None}):
             with (
-                patch("LXMF.LXMRouter"),
+                patch("reticulumpi.builtin_plugins.meshtastic_gateway.create_lxm_router"),
                 patch("RNS.Identity"),
                 patch.object(_RNS.Transport, "register_announce_handler"),
                 patch.object(_RNS.Transport, "deregister_announce_handler"),
@@ -332,6 +342,33 @@ class TestValidateConfigMqtt:
 
 
 class TestStart:
+    def test_api_v2_waits_for_device_and_tracks_loss_recovery(self, gateway_plugin):
+        from reticulumpi.plugin_base import PluginHealth, PluginState
+
+        gateway_plugin._active = False
+        gateway_plugin._join_threads()
+        gateway_plugin.mark_starting()
+        gateway_plugin._connected = False
+        gateway_plugin._mesh_interface = None
+        iface = _make_mock_mesh_interface()
+
+        assert gateway_plugin.plugin_lifecycle_api == 2
+        assert gateway_plugin.plugin_state == PluginState.STARTING
+
+        with patch.object(gateway_plugin, "_create_serial_interface", return_value=iface):
+            gateway_plugin._connect_mesh_device()
+
+        assert gateway_plugin.plugin_state == PluginState.READY
+        assert gateway_plugin.plugin_health == PluginHealth.HEALTHY
+
+        gateway_plugin._on_mesh_disconnect(interface=iface)
+        assert gateway_plugin.plugin_state == PluginState.READY
+        assert gateway_plugin.plugin_health == PluginHealth.DEGRADED
+
+        gateway_plugin._on_mesh_connect(interface=iface)
+        assert gateway_plugin.plugin_state == PluginState.READY
+        assert gateway_plugin.plugin_health == PluginHealth.HEALTHY
+
     def test_start_initializes_state(self, gateway_plugin):
         assert gateway_plugin._active is True
         # Connection thread may or may not have connected yet (mock succeeds instantly)
@@ -352,7 +389,9 @@ class TestStart:
     def test_start_parses_recipients(self, mock_app, gw_config):
         gw_config["lxmf_recipients"] = ["aa" * 16, "bb" * 16]
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
+            patch(
+                "reticulumpi.builtin_plugins.meshtastic_gateway.create_lxm_router"
+            ) as mock_router_cls,
             patch("RNS.Identity") as mock_id_cls,
             patch.object(_RNS.Transport, "register_announce_handler"),
             patch.object(_RNS.Transport, "deregister_announce_handler"),
@@ -516,7 +555,9 @@ class TestLxmfToMesh:
     def test_channel_from_config(self, mock_app, gw_config):
         gw_config["meshtastic_channel"] = 3
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
+            patch(
+                "reticulumpi.builtin_plugins.meshtastic_gateway.create_lxm_router"
+            ) as mock_router_cls,
             patch("RNS.Identity") as mock_id_cls,
             patch.object(_RNS.Transport, "register_announce_handler"),
             patch.object(_RNS.Transport, "deregister_announce_handler"),
@@ -535,6 +576,12 @@ class TestLxmfToMesh:
             plugin = MeshtasticGateway(mock_app, gw_config)
             plugin.start()
             try:
+                # The real connection/watchdog workers are irrelevant to this
+                # unit assertion and can race the synthetic interface below by
+                # observing that /dev/ttyUSB0 is absent on the test host.
+                plugin._active = False
+                plugin._join_threads()
+                plugin._active = True
                 mock_iface = _make_mock_mesh_interface()
                 plugin._connected = True
                 plugin._mesh_interface = mock_iface
@@ -995,6 +1042,8 @@ class TestConnectionManagement:
         assert gateway_plugin._connected is False
 
     def test_on_mesh_disconnect_records_time(self, gateway_plugin):
+        gateway_plugin._active = False
+        gateway_plugin._join_threads()
         iface = _make_mock_mesh_interface()
         gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = True
@@ -1020,6 +1069,7 @@ class TestConnectionManagement:
 
     def test_on_mesh_connect_ignores_none_interface(self, gateway_plugin):
         """Pubsub event with interface=None must not falsely connect."""
+        _quiesce_plugin_workers(gateway_plugin)
         iface = _make_mock_mesh_interface()
         gateway_plugin._mesh_interface = iface
         gateway_plugin._connected = False
@@ -1138,9 +1188,7 @@ class TestGracefulDeviceShutdown:
             active_during_shutdown.append(gateway_plugin._active)
 
         gateway_plugin._reboot_device_on_stop = True
-        with patch.object(
-            gateway_plugin, "_graceful_device_shutdown", side_effect=capture_active
-        ):
+        with patch.object(gateway_plugin, "_graceful_device_shutdown", side_effect=capture_active):
             gateway_plugin.stop()
         assert active_during_shutdown == [True]
 
@@ -1219,6 +1267,7 @@ class TestRateLimiting:
         """Messages faster than the rate limit are dropped."""
         gw_config["max_messages_per_minute"] = 6  # 1 per 10 seconds
         for plugin in _create_started_plugin(mock_app, gw_config):
+            _quiesce_plugin_workers(plugin)
             mock_iface = _make_mock_mesh_interface()
             plugin._connected = True
             plugin._mesh_interface = mock_iface
@@ -1240,6 +1289,7 @@ class TestRateLimiting:
         """Messages are allowed after the rate interval passes."""
         gw_config["max_messages_per_minute"] = 60  # 1 per second
         for plugin in _create_started_plugin(mock_app, gw_config):
+            _quiesce_plugin_workers(plugin)
             mock_iface = _make_mock_mesh_interface()
             plugin._connected = True
             plugin._mesh_interface = mock_iface
@@ -1262,6 +1312,7 @@ class TestRateLimiting:
 
     def test_no_rate_limit_when_zero(self, gateway_plugin):
         """max_messages_per_minute=0 means unlimited."""
+        _quiesce_plugin_workers(gateway_plugin)
         mock_iface = _make_mock_mesh_interface()
         gateway_plugin._connected = True
         gateway_plugin._mesh_interface = mock_iface
@@ -2162,6 +2213,23 @@ class TestSerialOpenTimeout:
         with patch.object(probe_plugin, "_close_leaked_serial_fd") as mock_cleanup:
             probe_plugin._open_serial_interface_with_timeout()
             mock_cleanup.assert_called_once()
+
+    def test_abandoned_worker_cap_refuses_new_constructor(self, probe_plugin):
+        from reticulumpi.builtin_plugins.meshtastic_gateway import (
+            _MAX_ABANDONED_SERIAL_THREADS,
+        )
+
+        abandoned = []
+        for index in range(_MAX_ABANDONED_SERIAL_THREADS):
+            worker = MagicMock(name=f"abandoned-{index}")
+            worker.is_alive.return_value = True
+            abandoned.append(worker)
+        probe_plugin._abandoned_serial_threads = abandoned
+        _mock_meshtastic_serial.SerialInterface.reset_mock()
+
+        assert probe_plugin._open_serial_interface_with_timeout() is None
+        _mock_meshtastic_serial.SerialInterface.assert_not_called()
+        assert probe_plugin.plugin_health.value == "degraded"
 
 
 # ---------------------------------------------------------------------------

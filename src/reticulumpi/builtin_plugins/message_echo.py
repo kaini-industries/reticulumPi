@@ -7,6 +7,7 @@ import LXMF
 import RNS
 import RNS.vendor.umsgpack as umsgpack
 
+from reticulumpi.lxmf_compat import create_lxm_router
 from reticulumpi.plugin_base import PluginBase
 
 
@@ -22,6 +23,9 @@ class MessageEcho(PluginBase):
 
     def start(self) -> None:
         self._lock = threading.Lock()
+        self._announce_sub = None
+        self.lxmf_router = None
+        self.local_lxmf_destination = None
         default_storage = "~/.local/share/reticulumpi/lxmf"
         storage_path = os.path.expanduser(self.config.get("storage_path", default_storage))
         os.makedirs(storage_path, exist_ok=True)
@@ -37,10 +41,12 @@ class MessageEcho(PluginBase):
             self._echo_identity.to_file(identity_path)
             self.log.info("Created new Echo identity at %s", identity_path)
 
-        self.lxmf_router = LXMF.LXMRouter(storagepath=storage_path)
-        self.local_lxmf_destination = self.lxmf_router.register_delivery_identity(
-            self._echo_identity,
-            display_name=self.config.get("display_name") or f"{self.app.node_name} Echo",
+        self.lxmf_router = create_lxm_router(storagepath=storage_path)
+        self.local_lxmf_destination = self.manage_destination(
+            self.lxmf_router.register_delivery_identity(
+                self._echo_identity,
+                display_name=self.config.get("display_name") or f"{self.app.node_name} Echo",
+            )
         )
         self.lxmf_router.register_delivery_callback(self._handle_message)
 
@@ -59,13 +65,16 @@ class MessageEcho(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        self.announce_dispatcher.unsubscribe(self._announce_sub)
-        self.lxmf_router.register_delivery_callback(None)
+        if self._announce_sub is not None:
+            self.announce_dispatcher.unsubscribe(self._announce_sub)
+            self._announce_sub = None
+        if self.lxmf_router is not None:
+            self.lxmf_router.register_delivery_callback(None)
         self._join_threads()
 
     def _handle_message(self, message: LXMF.LXMessage) -> None:
         # Warm path before reply if path_warmer is available (outside lock to avoid blocking)
-        warmer = self.app.get_plugin("path_warmer")
+        warmer = self.get_ready_plugin("path_warmer")
         if warmer and hasattr(warmer, "ensure_path"):
             try:
                 warmer.ensure_path(message.source_hash)

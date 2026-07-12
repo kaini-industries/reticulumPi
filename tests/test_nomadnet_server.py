@@ -712,6 +712,8 @@ class TestExamplePages:
             plugin._install_example_pages()
             # Should have installed at least index.mu
             assert os.path.exists(os.path.join(pages_dir, "index.mu"))
+            assert os.access(os.path.join(pages_dir, "status.mu"), os.X_OK)
+            assert os.access(os.path.join(pages_dir, "network.mu"), os.X_OK)
 
     def test_does_not_overwrite_existing(self, mock_app, nomadnet_config, tmp_path):
         config_dir = str(tmp_path / "nomadnet")
@@ -832,8 +834,21 @@ class TestProcessGroupIsolation:
 
 def _make_stat_line(pid, pgid, utime, stime):
     """Build a realistic /proc/<pid>/stat line."""
-    fields_after = ["S", "1", str(pgid), "0", "0", "0", "0",
-                    "0", "0", "0", "0", str(utime), str(stime)]
+    fields_after = [
+        "S",
+        "1",
+        str(pgid),
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        str(utime),
+        str(stime),
+    ]
     while len(fields_after) < 30:
         fields_after.append("0")
     return f"{pid} (nomadnet) " + " ".join(fields_after)
@@ -1018,9 +1033,7 @@ class TestCpuRunawayDetection:
         assert plugin._cpu_violations == 0
 
     def test_terminate_triggered_after_threshold(self, mock_app, nomadnet_config):
-        plugin = self._setup_plugin(
-            mock_app, nomadnet_config, cpu_violation_count=2
-        )
+        plugin = self._setup_plugin(mock_app, nomadnet_config, cpu_violation_count=2)
         plugin._cpu_violations = 2
 
         with patch.object(plugin, "_terminate_process") as mock_term:
@@ -1032,9 +1045,7 @@ class TestCpuRunawayDetection:
         assert plugin._cpu_violations == 0
 
     def test_grace_period_skips_checks(self, mock_app, nomadnet_config):
-        plugin = self._setup_plugin(
-            mock_app, nomadnet_config, cpu_grace_period=60
-        )
+        plugin = self._setup_plugin(mock_app, nomadnet_config, cpu_grace_period=60)
         plugin._launch_time = time.monotonic() - 10
 
         within_grace = time.monotonic() - plugin._launch_time < 60
@@ -1045,10 +1056,7 @@ class TestCpuRunawayDetection:
         plugin._restart_count = 3
         plugin._launch_time = time.monotonic() - 601
 
-        if (
-            plugin._restart_count > 0
-            and time.monotonic() - plugin._launch_time > 600
-        ):
+        if plugin._restart_count > 0 and time.monotonic() - plugin._launch_time > 600:
             plugin._restart_count = 0
 
         assert plugin._restart_count == 0
@@ -1056,7 +1064,7 @@ class TestCpuRunawayDetection:
     def test_exponential_backoff_formula(self, mock_app, nomadnet_config):
         expected = [30.0, 60.0, 120.0, 240.0, 300.0]
         for i, want in enumerate(expected):
-            backoff = min(300.0, 30.0 * (2 ** i))
+            backoff = min(300.0, 30.0 * (2**i))
             assert backoff == want
 
 

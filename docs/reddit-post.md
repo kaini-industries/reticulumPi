@@ -1,3 +1,7 @@
+> **Historical / non-normative.** This one-off community-post draft contains old public
+> endpoints, versions, and deployment assumptions. Do not use it as configuration or
+> security guidance; current installation and security documentation takes precedence.
+
 **Title:** New public transport node — ReticulumPi (107.208.177.42:4242) + seeking help with link establishment
 
 Hey everyone! I've set up a Raspberry Pi 5 as a public Reticulum transport node. If you'd like to peer directly:

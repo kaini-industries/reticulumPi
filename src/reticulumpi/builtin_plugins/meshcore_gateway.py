@@ -191,9 +191,7 @@ class MeshCoreGateway(PluginBase):
             for task in pending:
                 task.cancel()
             if pending:
-                loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True)
-                )
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.close()
 
     def _run_async(self, coro: Any, timeout: float = 15) -> Any:

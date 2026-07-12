@@ -77,11 +77,33 @@ def test_empty_yaml_uses_defaults(tmp_path):
     assert config.plugins == {}
 
 
-def test_missing_reticulumpi_section_warns(tmp_path, caplog):
+def test_missing_reticulumpi_section_is_rejected(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("some_other_key:\n  value: true\n")
-    config = AppConfig(str(cfg))
-    assert "missing 'reticulumpi:' section" in caplog.text
-    # Should fall back to defaults
-    assert config.log_level == 4
-    assert config.plugins == {}
+    with pytest.raises(ConfigError, match="missing the required 'reticulumpi:' section"):
+        AppConfig(str(cfg))
+
+
+def test_non_mapping_config_root_is_rejected(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("- not\n- a\n- mapping\n")
+
+    with pytest.raises(ConfigError, match="Config root.*must be a mapping"):
+        AppConfig(str(cfg))
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("internet: offline", "internet must be a mapping"),
+        ("internet:\n    force_offline: 1", "force_offline must be a boolean"),
+        ("thread_budget: 0", "thread_budget must be a positive integer"),
+        ("plugins:\n    broken: true", "plugin configurations must be mappings"),
+    ],
+)
+def test_nested_config_shapes_are_validated(tmp_path, body, message):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"reticulumpi:\n  {body}\n")
+
+    with pytest.raises(ConfigError, match=message):
+        AppConfig(str(cfg))

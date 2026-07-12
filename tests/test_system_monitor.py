@@ -20,9 +20,7 @@ _mock_psutil = MagicMock()
 _mock_psutil.cpu_percent.return_value = 25.0
 _mock_psutil.virtual_memory.return_value = MagicMock(percent=45.0)
 _mock_psutil.disk_usage.return_value = MagicMock(percent=60.0)
-_mock_psutil.sensors_temperatures.return_value = {
-    "cpu_thermal": [MagicMock(current=55.0)]
-}
+_mock_psutil.sensors_temperatures.return_value = {"cpu_thermal": [MagicMock(current=55.0)]}
 
 
 class TestCollectMetrics:
@@ -56,27 +54,21 @@ class TestCollectMetrics:
 class TestReadCpuTemp:
     def test_cpu_thermal(self):
         mock = MagicMock()
-        mock.sensors_temperatures.return_value = {
-            "cpu_thermal": [MagicMock(current=55.0)]
-        }
+        mock.sensors_temperatures.return_value = {"cpu_thermal": [MagicMock(current=55.0)]}
         with patch.dict(sys.modules, {"psutil": mock}):
             result = SystemMonitor._read_cpu_temp()
         assert result == 55.0
 
     def test_cpu_thermal_dash(self):
         mock = MagicMock()
-        mock.sensors_temperatures.return_value = {
-            "cpu-thermal": [MagicMock(current=60.0)]
-        }
+        mock.sensors_temperatures.return_value = {"cpu-thermal": [MagicMock(current=60.0)]}
         with patch.dict(sys.modules, {"psutil": mock}):
             result = SystemMonitor._read_cpu_temp()
         assert result == 60.0
 
     def test_fallback_sensor(self):
         mock = MagicMock()
-        mock.sensors_temperatures.return_value = {
-            "coretemp": [MagicMock(current=42.0)]
-        }
+        mock.sensors_temperatures.return_value = {"coretemp": [MagicMock(current=42.0)]}
         with patch.dict(sys.modules, {"psutil": mock}):
             result = SystemMonitor._read_cpu_temp()
         assert result == 42.0

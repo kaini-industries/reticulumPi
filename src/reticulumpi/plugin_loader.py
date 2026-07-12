@@ -75,10 +75,11 @@ class PluginLoader:
                         continue
                     if attr.plugin_name in found:
                         log.warning(
-                            "Duplicate plugin name '%s' from %s (overrides previous)",
+                            "Duplicate plugin name '%s' from %s ignored; first definition wins",
                             attr.plugin_name,
                             filepath,
                         )
+                        continue
                     found[attr.plugin_name] = attr
                     log.info("Discovered plugin: %s (from %s)", attr.plugin_name, filepath)
 

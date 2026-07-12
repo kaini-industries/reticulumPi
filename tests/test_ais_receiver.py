@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.ais_receiver import AISReceiver, _ship_type_desc
@@ -38,6 +38,40 @@ def _make_plugin(config: dict | None = None) -> AISReceiver:
     plugin._process = None
     plugin._pid = None
     return plugin
+
+
+class TestManagedDecoderLifecycle:
+    def test_launch_and_eof_use_managed_group(self):
+        plugin = _make_plugin({"decoder_bin": "rtl_ais"})
+        process = MagicMock(pid=1401, stdout=[])
+        managed = MagicMock(restart_count=0, running=True)
+
+        def construct(specs, **kwargs):
+            managed.specs = specs
+            managed.options = kwargs
+            managed.start.side_effect = lambda: kwargs["on_started"]((process,), False)
+            return managed
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.ais_receiver.shutil.which",
+                return_value="/usr/bin/rtl_ais",
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.ais_receiver.ManagedProcessGroup",
+                side_effect=construct,
+            ),
+            patch.object(plugin, "_start_stderr_reader"),
+            patch.object(plugin, "_start_thread"),
+        ):
+            plugin._launch_subprocess(5)
+
+        assert managed.specs[0].name == "rtl_ais"
+        assert plugin._process_group is managed
+        assert plugin._process is process
+        assert managed.options["restart_policy"].enabled is False
+        plugin._parser_loop(process)
+        managed.notify_unexpected_eof.assert_called_once_with(0, "AIS decoder stdout ended")
 
 
 def _position_msg(

@@ -17,6 +17,11 @@ from reticulumpi.builtin_plugins.web_dashboard.api import (
     _run_sync,
 )
 from reticulumpi.builtin_plugins.web_dashboard.api_cache import api_cache
+from reticulumpi.builtin_plugins.web_dashboard.query import (
+    QueryValidationError,
+    query_int,
+)
+from reticulumpi.plugin_base import resolve_ready_plugin
 
 
 @api_cache(ttl=10, stale=30, max_entries=20)
@@ -32,7 +37,7 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
         app: Filter by app_name
     """
     plugin = _get_plugin(request)
-    network_map = plugin.app.get_plugin("network_map")
+    network_map = resolve_ready_plugin(plugin, "network_map")
     local_services = _collect_local_services(plugin.app)
 
     if not network_map or not hasattr(network_map, "get_known_nodes"):
@@ -53,18 +58,10 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
         return _ok({"nodes": nodes, "local_services": local_services})
 
     try:
-        page = max(1, int(request.query.get("page", 1)))
-    except (ValueError, TypeError):
-        page = 1
-    try:
-        per_page = int(request.query.get("per_page", 25))
-    except (ValueError, TypeError):
-        per_page = 25
-    # Clamp: 0 means "all" (legacy compat), otherwise max 200
-    if per_page < 0:
-        per_page = 25
-    elif per_page > 200 and per_page != 0:
-        per_page = 200
+        page = query_int(request.query, "page", 1, minimum=1, maximum=1_000_000)
+        per_page = query_int(request.query, "per_page", 25, minimum=0, maximum=200)
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
 
     # If per_page=0, return full list for legacy callers
     if per_page == 0:
@@ -97,7 +94,7 @@ async def handle_mesh_nodes(request: aiohttp.web.Request) -> aiohttp.web.Respons
 async def handle_mesh_summary(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/mesh/summary — aggregate mesh stats for the summary strip."""
     plugin = _get_plugin(request)
-    network_map = plugin.app.get_plugin("network_map")
+    network_map = resolve_ready_plugin(plugin, "network_map")
     if not network_map or not hasattr(network_map, "get_mesh_summary"):
         return _ok(
             {
@@ -117,7 +114,7 @@ async def handle_mesh_summary(request: aiohttp.web.Request) -> aiohttp.web.Respo
 async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/mesh/telemetry — peer metrics from mesh_telemetry plugin."""
     plugin = _get_plugin(request)
-    telemetry = plugin.app.get_plugin("mesh_telemetry")
+    telemetry = resolve_ready_plugin(plugin, "mesh_telemetry")
     if not telemetry or not hasattr(telemetry, "get_peer_metrics"):
         return _ok({"peers": [], "message": "mesh_telemetry plugin not available"})
     return _ok({"peers": await _run_sync(telemetry.get_peer_metrics)})
@@ -126,7 +123,7 @@ async def handle_mesh_telemetry(request: aiohttp.web.Request) -> aiohttp.web.Res
 async def handle_transport(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/transport — transport hub health and fallback status."""
     plugin = _get_plugin(request)
-    mon = plugin.app.get_plugin("transport_monitor")
+    mon = resolve_ready_plugin(plugin, "transport_monitor")
     if not mon or not hasattr(mon, "get_hub_health"):
         return _ok(
             {
@@ -163,7 +160,7 @@ async def handle_transport(request: aiohttp.web.Request) -> aiohttp.web.Response
 async def handle_connectivity(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/connectivity — connectivity diagnostics and health."""
     plugin = _get_plugin(request)
-    conn_mon = plugin.app.get_plugin("connectivity_monitor")
+    conn_mon = resolve_ready_plugin(plugin, "connectivity_monitor")
     if not conn_mon or not hasattr(conn_mon, "get_health"):
         return _ok({"issues": [], "message": "connectivity_monitor plugin not available"})
     return _ok(await _run_sync(conn_mon.get_health))
@@ -183,7 +180,7 @@ async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
         search: Hex prefix filter on destination hash
     """
     plugin = _get_plugin(request)
-    conn_mon = plugin.app.get_plugin("connectivity_monitor")
+    conn_mon = resolve_ready_plugin(plugin, "connectivity_monitor")
     if not conn_mon or not hasattr(conn_mon, "get_routing_data"):
         return _ok(
             {
@@ -199,15 +196,11 @@ async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
             }
         )
 
-    # Parse query parameters
-    def _int_param(name: str, default: int) -> int:
-        try:
-            return int(request.query.get(name, default))
-        except (ValueError, TypeError):
-            return default
-
-    page = _int_param("page", 1)
-    per_page = _int_param("per_page", 100)
+    try:
+        page = query_int(request.query, "page", 1, minimum=1, maximum=1_000_000)
+        per_page = query_int(request.query, "per_page", 100, minimum=0, maximum=500)
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
     sort = request.query.get("sort", "hops")
     order = request.query.get("order", "asc")
     iface_filter = request.query.get("interface", "")
@@ -216,11 +209,18 @@ async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
     min_hops_raw = request.query.get("min_hops")
     max_hops_raw = request.query.get("max_hops")
     try:
-        min_hops = int(min_hops_raw) if min_hops_raw is not None else None
-        max_hops = int(max_hops_raw) if max_hops_raw is not None else None
-    except (ValueError, TypeError):
-        min_hops = None
-        max_hops = None
+        min_hops = (
+            query_int(request.query, "min_hops", 0, minimum=0, maximum=128)
+            if min_hops_raw is not None
+            else None
+        )
+        max_hops = (
+            query_int(request.query, "max_hops", 128, minimum=0, maximum=128)
+            if max_hops_raw is not None
+            else None
+        )
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
 
     data = await _run_sync(
         conn_mon.get_routing_data,
@@ -239,7 +239,7 @@ async def handle_routing(request: aiohttp.web.Request) -> aiohttp.web.Response:
 async def handle_path_warming(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/path_warming — path warmer stats."""
     plugin = _get_plugin(request)
-    warmer = plugin.app.get_plugin("path_warmer")
+    warmer = resolve_ready_plugin(plugin, "path_warmer")
     if not warmer or not hasattr(warmer, "get_warming_stats"):
         return _ok({"message": "path_warmer plugin not available"})
     return _ok(await _run_sync(warmer.get_warming_stats))
@@ -248,7 +248,7 @@ async def handle_path_warming(request: aiohttp.web.Request) -> aiohttp.web.Respo
 async def handle_transport_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """GET /api/transport_health — transport node health data."""
     plugin = _get_plugin(request)
-    th = plugin.app.get_plugin("transport_health")
+    th = resolve_ready_plugin(plugin, "transport_health")
     if not th or not hasattr(th, "get_transport_nodes"):
         return _ok({"nodes": [], "summary": {}, "message": "transport_health plugin not available"})
     nodes = await _run_sync(th.get_transport_nodes)
@@ -272,7 +272,7 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
     plugin = _get_plugin(request)
 
     # Gather data from plugins
-    network_map = plugin.app.get_plugin("network_map")
+    network_map = resolve_ready_plugin(plugin, "network_map")
     if not network_map or not hasattr(network_map, "get_known_nodes"):
         return _ok(
             {
@@ -283,14 +283,14 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
         )
 
     # Path table from connectivity_monitor
-    conn_mon = plugin.app.get_plugin("connectivity_monitor")
+    conn_mon = resolve_ready_plugin(plugin, "connectivity_monitor")
     path_table: list = []
     if conn_mon and hasattr(conn_mon, "get_routing_data"):
         routing = await _run_sync(conn_mon.get_routing_data, per_page=500)
         path_table = routing.get("paths", [])
 
     # Transport node health
-    th = plugin.app.get_plugin("transport_health")
+    th = resolve_ready_plugin(plugin, "transport_health")
     transport_nodes: list = []
     if th and hasattr(th, "get_transport_nodes"):
         transport_nodes = await _run_sync(th.get_transport_nodes)
@@ -307,17 +307,14 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
                 except ValueError:
                     pass
         if hasattr(network_map, "get_nodes_by_hashes"):
-            nodes = await _run_sync(
-                network_map.get_nodes_by_hashes, raw_hashes
-            )
+            nodes = await _run_sync(network_map.get_nodes_by_hashes, raw_hashes)
         else:
             all_nodes = await _run_sync(network_map.get_known_nodes)
             hash_set = {h.hex() for h in raw_hashes}
             nodes = [
                 n
                 for n in all_nodes
-                if n.get("destination_hash", "").lower().strip("<>")
-                in hash_set
+                if n.get("destination_hash", "").lower().strip("<>") in hash_set
             ]
         scored = score_all_nodes(nodes, path_table, transport_nodes)
         return _ok(
@@ -361,14 +358,12 @@ async def handle_reachability(request: aiohttp.web.Request) -> aiohttp.web.Respo
     }
 
     # Support both legacy 'limit' and new 'per_page' + 'page' params
+    per_page_name = "per_page" if "per_page" in request.query else "limit"
     try:
-        per_page = int(request.query.get("per_page", request.query.get("limit", 50)))
-    except (ValueError, TypeError):
-        per_page = 50
-    try:
-        page = max(1, int(request.query.get("page", 1)))
-    except (ValueError, TypeError):
-        page = 1
+        per_page = query_int(request.query, per_page_name, 50, minimum=0, maximum=200)
+        page = query_int(request.query, "page", 1, minimum=1, maximum=1_000_000)
+    except QueryValidationError as exc:
+        return _error(str(exc), 400)
 
     if per_page > 0:
         pages = max(1, (total + per_page - 1) // per_page)
@@ -480,7 +475,7 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
     plugin = _get_plugin(request)
 
     def _enrich_and_score() -> dict:
-        network_map = plugin.app.get_plugin("network_map")
+        network_map = resolve_ready_plugin(plugin, "network_map")
         if network_map and hasattr(network_map, "get_node_by_hash"):
             for p in paths:
                 h = p.get("hash", "")
@@ -490,9 +485,7 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
                         p["app_name"] = node.get("app_name", "")
                         p["app_data"] = node.get("app_data_str", "")
                         p["aspects"] = node.get("aspects", "")
-                        p["announce_count"] = node.get(
-                            "announce_count", 0
-                        )
+                        p["announce_count"] = node.get("announce_count", 0)
                         p["first_seen"] = node.get("first_seen")
                 except (ValueError, TypeError):
                     pass
@@ -504,12 +497,12 @@ async def handle_paths(request: aiohttp.web.Request) -> aiohttp.web.Response:
                     score_all_nodes,
                 )
 
-                conn_mon = plugin.app.get_plugin("connectivity_monitor")
+                conn_mon = resolve_ready_plugin(plugin, "connectivity_monitor")
                 path_table: list = []
                 if conn_mon and hasattr(conn_mon, "get_routing_data"):
                     routing = conn_mon.get_routing_data(per_page=500)
                     path_table = routing.get("paths", [])
-                th = plugin.app.get_plugin("transport_health")
+                th = resolve_ready_plugin(plugin, "transport_health")
                 transport_nodes = (
                     th.get_transport_nodes() if th and hasattr(th, "get_transport_nodes") else []
                 )

@@ -14,6 +14,13 @@ If you discover a security vulnerability in ReticulumPi, please report it respon
 
 We aim to acknowledge reports within 48 hours and provide a fix within 7 days for critical issues.
 
+## Active Upgrade Advisory
+
+Operators upgrading from 0.2.4 or older must complete the
+[0.2.5 security bridge advisory](docs/security-advisory-0.2.5.md). It covers removal of
+service-owned sudo helpers and obsolete rules, dashboard password rotation after possible
+journal exposure, immediate session invalidation, and the protected bootstrap/change flow.
+
 ## Security Model
 
 ### Network Security
@@ -36,8 +43,8 @@ The web dashboard (`web_dashboard` plugin) implements:
 | **Password hashing** | scrypt (N=2^14, r=8, p=2, dklen=32) |
 | **Session tokens** | 64-character hex (256 bits of entropy via `secrets.token_hex`) |
 | **Rate limiting** | 5 failed logins per IP per 60 seconds |
-| **Session management** | Configurable timeout (default 24h), max 5 sessions, LRU eviction |
-| **CSP headers** | `default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'` |
+| **Session management** | SQLite-backed sessions, bounded count, timeout, and socket revocation |
+| **CSP headers** | Same-origin scripts/styles, `script-src-attr 'none'`, `style-src-attr 'none'`, and no `unsafe-inline` allowance |
 | **Security headers** | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` |
 | **Config sanitization** | Passwords and hashes stripped from `/api/config` response |
 | **Input validation** | Length limits on all POST body fields |
@@ -45,10 +52,16 @@ The web dashboard (`web_dashboard` plugin) implements:
 
 **Default bind address:** `127.0.0.1` (loopback only). You must explicitly set `host: 0.0.0.0` to expose the dashboard on the network. When doing so, SSL is strongly recommended.
 
+Local programs do not receive anonymous trust merely because they connect over loopback.
+When `local_api.enabled` is set, the dashboard creates a mode-`0600` Bearer token. That
+token is limited to fixed read-only status endpoints, loopback clients, and non-WebSocket
+requests. A reverse proxy must authenticate normally; never forward the local token.
+
 ### Plugin Security
 
 - **Remote Control** (`remote_control` plugin) requires explicit identity whitelisting via `allowed_identities` config
-- **File Transfer** (`file_transfer` plugin) supports identity whitelisting via `allowed_identities`
+- **File Transfer** defaults to `access_policy: deny`. `allowlist` requires an authenticated
+  link identity, while `open` must be selected explicitly.
 - **NomadNet Auth** supports per-page access control via identity lists
 - **Meshtastic Gateway** supports both `meshtastic_allow_list` and `lxmf_allow_list` for message filtering
 
@@ -56,7 +69,8 @@ The web dashboard (`web_dashboard` plugin) implements:
 
 - Node identities are persistent Ed25519 key pairs stored as files
 - Each LXMF plugin maintains its own identity (no shared keys between services)
-- Identity files should have restrictive permissions (the bootstrap script sets these)
+- Identity files are durably written as mode `0600`; `reticulumpi-admin` verifies the
+  production ownership boundary
 - Use `reticulumpi --backup-identity` / `--restore-identity` for safe key management
 
 ## Best Practices
@@ -67,7 +81,9 @@ The web dashboard (`web_dashboard` plugin) implements:
    ```bash
    reticulumpi --hash-password
    ```
-   Or set the `RETICULUMPI_DASHBOARD_PASSWORD_HASH` environment variable.
+   Store the result as `password_hash` in the root-owned
+   `/etc/reticulumpi/config.yaml`. Do not place Dashboard credentials in systemd drop-ins or
+   `EnvironmentFile=` files; upgrades remove those legacy fragments after backing them up.
 
 2. **Enable SSL** when exposing the dashboard beyond localhost:
    ```yaml
@@ -90,9 +106,10 @@ The web dashboard (`web_dashboard` plugin) implements:
    reticulumpi --backup-identity /safe/location/identity.bak
    ```
 
-5. **Keep dependencies updated**:
+5. **Apply a trusted, reviewed release bundle**:
    ```bash
-   sudo bash scripts/update.sh
+   bash scripts/update.sh --bundle /path/to/release --dry-run
+   sudo bash scripts/update.sh --bundle /path/to/release --apply
    ```
 
 6. **Review systemd sandboxing** -- the service file uses `ProtectSystem`, `ProtectHome`, `ReadWritePaths`, and other hardening directives
@@ -123,4 +140,6 @@ ReticulumPi's security depends on these upstream projects:
 - [aiohttp](https://docs.aiohttp.org/) -- web server (dashboard only)
 - [psutil](https://github.com/giampaolo/psutil) -- system metrics
 
-Keep all dependencies updated. The `scripts/update.sh` script handles this automatically.
+Production updates use tested release constraints and never follow a mutable branch. See
+[the security model](docs/security-model.md) and
+[upgrade/rollback guide](docs/upgrade-and-rollback.md).

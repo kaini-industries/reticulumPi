@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from reticulumpi.event_bus import EventBus
+from reticulumpi.runtime_metrics import get_runtime_metrics
 
 
 @pytest.fixture
@@ -123,9 +124,7 @@ def _db_rows(db_path, node_key=None):
                 (node_key,),
             ).fetchall()
         else:
-            rows = conn.execute(
-                "SELECT * FROM node_positions ORDER BY timestamp"
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM node_positions ORDER BY timestamp").fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -138,6 +137,22 @@ class TestLifecycle:
         assert plugin._active is True
         plugin.stop()
         assert plugin._active is False
+
+    def test_connection_setup_failure_closes_handle(self, mock_app, base_config):
+        from reticulumpi.builtin_plugins import node_location_tracker
+
+        plugin = _make_plugin(mock_app, base_config)
+        plugin._db_path = base_config["db_path"]
+        connection = MagicMock()
+        connection.execute.side_effect = sqlite3.OperationalError("pragma failed")
+
+        before = get_runtime_metrics()["sqlite_failures_total"]
+        with patch.object(node_location_tracker.sqlite3, "connect", return_value=connection):
+            with pytest.raises(sqlite3.OperationalError, match="pragma failed"):
+                plugin._connect()
+
+        connection.close.assert_called_once_with()
+        assert get_runtime_metrics()["sqlite_failures_total"] == before + 1
 
     def test_db_schema_created(self, mock_app, base_config):
         plugin = _make_plugin(mock_app, base_config)
@@ -214,9 +229,7 @@ class TestPositionRecording:
         plugin.stop()
 
     def test_skips_zero_zero_position(self, mock_app, base_config):
-        msh_gw = _mock_meshtastic_gateway(
-            nodes=[_meshtastic_node("!zeroed", 0.0, 0.0, "ZeroNode")]
-        )
+        msh_gw = _mock_meshtastic_gateway(nodes=[_meshtastic_node("!zeroed", 0.0, 0.0, "ZeroNode")])
         mock_app.get_plugin = MagicMock(
             side_effect=lambda name: {
                 "meshtastic_gateway": msh_gw,
@@ -476,9 +489,7 @@ class TestGetHistory:
             ("mc:beta", now - 5400, 51.50, -0.12, "meshcore", "BetaB"),
             ("mc:beta", now - 2700, 51.51, -0.13, "meshcore", "BetaB"),
         ]
-        conn.executemany(
-            "INSERT INTO node_positions VALUES (?, ?, ?, ?, ?, ?)", entries
-        )
+        conn.executemany("INSERT INTO node_positions VALUES (?, ?, ?, ?, ?, ?)", entries)
         conn.commit()
         conn.close()
         return now
@@ -499,9 +510,7 @@ class TestGetHistory:
             assert "latitude" in entry
             assert "longitude" in entry
 
-        result_filtered = plugin.get_history(
-            ["msh:!a1"], since=now - 4000, until=now - 1000
-        )
+        result_filtered = plugin.get_history(["msh:!a1"], since=now - 4000, until=now - 1000)
         assert len(result_filtered["msh:!a1"]) == 2
 
         result_absent = plugin.get_history(["msh:!missing"], since=now - 8000)
@@ -514,9 +523,7 @@ class TestGetHistory:
         plugin.start()
         now = self._populate(base_config["db_path"])
 
-        result = plugin.get_history(
-            ["msh:!a1"], since=now - 8000, limit_per_node=2
-        )
+        result = plugin.get_history(["msh:!a1"], since=now - 8000, limit_per_node=2)
         assert len(result["msh:!a1"]) == 2
 
         # Regression guard: must return the NEWEST 2 rows (now-3600, now-1800),

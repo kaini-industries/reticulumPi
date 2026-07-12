@@ -7,13 +7,16 @@ import re
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import RNS
 import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi import events
+from reticulumpi.migrations import Migration, MigrationTarget
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.runtime_metrics import instrument_sqlite_class
 
 
 class SensorDriver:
@@ -51,15 +54,12 @@ class DS18B20Driver(SensorDriver):
         self._address = sensor_config.get("address", "")
         if not self._ADDRESS_RE.match(self._address):
             raise ValueError(
-                f"Invalid DS18B20 address '{self._address}': "
-                "must match XX-XXXXXXXXXXXX (hex)"
+                f"Invalid DS18B20 address '{self._address}': must match XX-XXXXXXXXXXXX (hex)"
             )
         raw_path = f"/sys/bus/w1/devices/{self._address}/temperature"
         self._path = os.path.realpath(raw_path)
         if not self._path.startswith(self._W1_PREFIX):
-            raise ValueError(
-                f"DS18B20 path escapes /sys/bus/w1/devices/: {self._path}"
-            )
+            raise ValueError(f"DS18B20 path escapes /sys/bus/w1/devices/: {self._path}")
 
     def read(self) -> dict[str, Any]:
         try:
@@ -280,6 +280,7 @@ DRIVERS: dict[str, type[SensorDriver]] = {
 }
 
 
+@instrument_sqlite_class
 class SensorFrameworkPlugin(PluginBase):
     """Config-driven sensor reading with SQLite logging and mesh broadcast.
 
@@ -293,6 +294,37 @@ class SensorFrameworkPlugin(PluginBase):
     plugin_description = "Config-driven sensor reading, logging, and mesh broadcast"
     broadcast_tier = 2
     broadcast_keys = "sensors"
+
+    def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
+        storage = self.config.get("storage", {})
+        if not isinstance(storage, dict) or storage.get("type", "sqlite") != "sqlite":
+            return ()
+        path = Path(
+            os.path.expanduser(storage.get("path", "~/.local/share/reticulumpi/sensor_data.db"))
+        )
+        return (
+            MigrationTarget(
+                "sensor_framework",
+                path,
+                (
+                    Migration(
+                        1,
+                        "create sensor reading history",
+                        (
+                            """CREATE TABLE IF NOT EXISTS sensor_readings (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                sensor_name TEXT NOT NULL,
+                                reading_name TEXT NOT NULL,
+                                value REAL NOT NULL,
+                                timestamp REAL NOT NULL
+                            )""",
+                            "CREATE INDEX IF NOT EXISTS idx_readings_sensor_time "
+                            "ON sensor_readings(sensor_name, timestamp)",
+                        ),
+                    ),
+                ),
+            ),
+        )
 
     def validate_config(self) -> None:
         sensors = self.config.get("sensors", [])
@@ -324,6 +356,16 @@ class SensorFrameworkPlugin(PluginBase):
             raise ValueError(f"storage.type must be sqlite, csv, or none (got '{storage_type}')")
 
     def start(self) -> None:
+        try:
+            self._start()
+        except BaseException:
+            try:
+                self.stop()
+            except Exception:
+                self.log.exception("Error cleaning up partial sensor-framework startup")
+            raise
+
+    def _start(self) -> None:
         self._active = True
         self._readings_count = 0
         self._last_readings: dict[str, dict[str, Any]] = {}
@@ -346,22 +388,27 @@ class SensorFrameworkPlugin(PluginBase):
             )
             os.makedirs(os.path.dirname(db_path), exist_ok=True)
             self._db = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
-            self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA synchronous=NORMAL")
-            self._db.execute("""
-                CREATE TABLE IF NOT EXISTS sensor_readings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sensor_name TEXT NOT NULL,
-                    reading_name TEXT NOT NULL,
-                    value REAL NOT NULL,
-                    timestamp REAL NOT NULL
-                )
-            """)
-            self._db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_readings_sensor_time
-                ON sensor_readings(sensor_name, timestamp)
-            """)
-            self._db.commit()
+            try:
+                self._db.execute("PRAGMA journal_mode=WAL")
+                self._db.execute("PRAGMA synchronous=NORMAL")
+                self._db.execute("""
+                    CREATE TABLE IF NOT EXISTS sensor_readings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sensor_name TEXT NOT NULL,
+                        reading_name TEXT NOT NULL,
+                        value REAL NOT NULL,
+                        timestamp REAL NOT NULL
+                    )
+                """)
+                self._db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_readings_sensor_time
+                    ON sensor_readings(sensor_name, timestamp)
+                """)
+                self._db.commit()
+            except BaseException:
+                self._db.close()
+                self._db = None
+                raise
         elif storage_type == "csv":
             self._csv_path = os.path.expanduser(
                 storage.get("path", "~/.local/share/reticulumpi/sensor_data.csv")
@@ -372,13 +419,15 @@ class SensorFrameworkPlugin(PluginBase):
         self._broadcast_dest = None
         broadcast = self.config.get("broadcast", {})
         if broadcast.get("enabled", False):
-            self._broadcast_dest = RNS.Destination(
-                self.identity,
-                RNS.Destination.IN,
-                RNS.Destination.SINGLE,
-                "reticulumpi",
-                "node",
-                "sensors",
+            self._broadcast_dest = self.manage_destination(
+                RNS.Destination(
+                    self.identity,
+                    RNS.Destination.IN,
+                    RNS.Destination.SINGLE,
+                    "reticulumpi",
+                    "node",
+                    "sensors",
+                )
             )
 
         # Start read loop
@@ -403,11 +452,11 @@ class SensorFrameworkPlugin(PluginBase):
         for _, driver in self._drivers:
             try:
                 driver.close()
-            except OSError:
-                pass
+            except Exception:
+                self.log.debug("Error closing sensor driver", exc_info=True)
         self._drivers.clear()
         # Close DB
-        if self._db:
+        if getattr(self, "_db", None):
             try:
                 self._db.close()
             except OSError:

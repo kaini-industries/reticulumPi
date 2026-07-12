@@ -115,9 +115,10 @@ class GpsTelemetry(PluginBase):
         self._msgs_received = 0
         self._sentences_parsed = 0
         self._parse_errors = 0
-        self._last_msg_time = 0.0
+        self._last_msg_monotonic = 0.0
+        self._last_fix_monotonic = 0.0
         self._reconnect_failures = 0
-        self._start_time = time.time()
+        self._start_monotonic = time.monotonic()
 
         self._active = True
         if self._source == "gpsd":
@@ -157,7 +158,10 @@ class GpsTelemetry(PluginBase):
         if lock is None:
             return {"active": False, "connected": False}
         with lock:
-            last_age = time.time() - self._last_msg_time if self._last_msg_time else None
+            now = time.monotonic()
+            last_msg = getattr(self, "_last_msg_monotonic", 0.0)
+            started = getattr(self, "_start_monotonic", now)
+            last_age = max(0.0, now - last_msg) if last_msg else None
             return {
                 "active": self._active,
                 "connected": self._connected,
@@ -170,7 +174,7 @@ class GpsTelemetry(PluginBase):
                 "reconnect_failures": self._reconnect_failures,
                 "have_fix": self._have_fix,
                 "satellites_in_view_count": len(self._satellites_in_view),
-                "uptime": time.time() - self._start_time,
+                "uptime": max(0.0, now - started),
             }
 
     def get_snapshot(self) -> dict[str, Any]:
@@ -278,25 +282,26 @@ class GpsTelemetry(PluginBase):
             return
         self._sentences_parsed += 1
         now = time.time()
+        observed_at = time.monotonic()
         kind = type(msg).__name__
 
         try:
             if kind == "RMC":
-                self._apply_rmc(msg, now)
+                self._apply_rmc(msg, now, observed_at)
             elif kind == "GGA":
-                self._apply_gga(msg, now)
+                self._apply_gga(msg, now, observed_at)
             elif kind == "GSA":
                 self._apply_gsa(msg)
             elif kind == "GSV":
                 self._apply_gsv(msg)
             elif kind == "VTG":
-                self._apply_vtg(msg, now)
+                self._apply_vtg(msg, now, observed_at)
         except Exception:
             self._parse_errors += 1
 
     # ── Sentence handlers ───────────────────────────────────────────────
 
-    def _apply_rmc(self, msg: Any, now: float) -> None:
+    def _apply_rmc(self, msg: Any, now: float, observed_at: float) -> None:
         if getattr(msg, "status", None) != "A":
             return
         lat = _decimal_or_none(getattr(msg, "latitude", None))
@@ -340,7 +345,8 @@ class GpsTelemetry(PluginBase):
             fix.setdefault("pdop", None)
             fix.setdefault("vdop", None)
             self.last_fix = fix
-            self._last_msg_time = now
+            self._last_msg_monotonic = observed_at
+            self._last_fix_monotonic = observed_at
             first_fix = not self._have_fix
             self._have_fix = True
 
@@ -355,7 +361,7 @@ class GpsTelemetry(PluginBase):
             },
         )
 
-    def _apply_gga(self, msg: Any, now: float) -> None:
+    def _apply_gga(self, msg: Any, now: float, observed_at: float) -> None:
         alt = _decimal_or_none(getattr(msg, "altitude", None))
         hdop = _decimal_or_none(getattr(msg, "horizontal_dil", None))
         quality = _int_or_none(getattr(msg, "gps_qual", None))
@@ -381,7 +387,7 @@ class GpsTelemetry(PluginBase):
             fix.setdefault("timestamp", now)
             if "lat" in fix and "lon" in fix:
                 self.last_fix = fix
-            self._last_msg_time = now
+            self._last_msg_monotonic = observed_at
 
     def _apply_gsa(self, msg: Any) -> None:
         fix_type = _int_or_none(getattr(msg, "mode_fix_type", None))
@@ -446,7 +452,7 @@ class GpsTelemetry(PluginBase):
                 # list in _gsv_accum; next msg_num==1 will reset it.
                 self._satellites_in_view = [s for t in combined for s in combined[t]]
 
-    def _apply_vtg(self, msg: Any, now: float) -> None:
+    def _apply_vtg(self, msg: Any, now: float, observed_at: float) -> None:
         speed_kn = _decimal_or_none(getattr(msg, "spd_over_grnd_kts", None))
         heading = _decimal_or_none(getattr(msg, "true_track", None))
         with self._lock:
@@ -459,7 +465,7 @@ class GpsTelemetry(PluginBase):
             if heading is not None and fix.get("heading_deg") is None:
                 fix["heading_deg"] = heading
             self.last_fix = fix
-            self._last_msg_time = now
+            self._last_msg_monotonic = observed_at
 
     # ── gpsd TCP read loop ───────────────────────────────────────────────
 
@@ -550,7 +556,14 @@ class GpsTelemetry(PluginBase):
             with self._lock:
                 if not self._have_fix or self.last_fix is None:
                     continue
-                age = time.time() - float(self.last_fix.get("timestamp", 0))
+                observed_at = getattr(self, "_last_fix_monotonic", 0.0)
+                if not observed_at:
+                    # In-memory legacy/test state has no safe conversion from
+                    # an epoch timestamp to a monotonic value. Start its age
+                    # window now rather than spuriously declaring it stale.
+                    self._last_fix_monotonic = time.monotonic()
+                    continue
+                age = max(0.0, time.monotonic() - observed_at)
                 if age <= self._fix_stale_seconds:
                     continue
                 self._have_fix = False

@@ -397,7 +397,7 @@ class MeshtasticResponder(PluginBase):
         if self._own_node_id:
             return node_id == self._own_node_id
         try:
-            gw = self.app.get_plugin("meshtastic_gateway")
+            gw = self.get_ready_plugin("meshtastic_gateway")
             if gw and hasattr(gw, "get_status"):
                 status = gw.get_status()
                 resolved = status.get("node_id") or ""
@@ -520,7 +520,7 @@ class MeshtasticResponder(PluginBase):
         if self._own_meshcore_key:
             return from_key == self._own_meshcore_key
         try:
-            gw = self.app.get_plugin("meshcore_gateway")
+            gw = self.get_ready_plugin("meshcore_gateway")
             if gw is None:
                 return False
             # Use public accessor; meshcore_gateway exposes get_device_handle()
@@ -538,7 +538,7 @@ class MeshtasticResponder(PluginBase):
     def _send_reply(self, text: str, destination_id: str) -> None:
         """Send a reply through the Meshtastic gateway."""
         try:
-            gw = self.app.get_plugin("meshtastic_gateway")
+            gw = self.get_ready_plugin("meshtastic_gateway")
             if not gw or not hasattr(gw, "send_message"):
                 self.log.warning("Cannot send reply — meshtastic_gateway plugin not available")
                 return
@@ -557,7 +557,7 @@ class MeshtasticResponder(PluginBase):
     def _send_meshcore_reply(self, text: str, destination: str | None) -> None:
         """Send a reply through the MeshCore gateway."""
         try:
-            gw = self.app.get_plugin("meshcore_gateway")
+            gw = self.get_ready_plugin("meshcore_gateway")
             if not gw or not hasattr(gw, "send_message"):
                 self.log.warning("Cannot send reply — meshcore_gateway plugin not available")
                 return
@@ -645,7 +645,7 @@ class MeshtasticResponder(PluginBase):
     def _cmd_nodes(self, _args: str = "") -> str:
         """Show known Meshtastic node count and a few recent entries."""
         try:
-            gw = self.app.get_plugin("meshtastic_gateway")
+            gw = self.get_ready_plugin("meshtastic_gateway")
             if not gw or not hasattr(gw, "get_meshtastic_nodes"):
                 return "Gateway unavailable."
             nodes = gw.get_meshtastic_nodes()

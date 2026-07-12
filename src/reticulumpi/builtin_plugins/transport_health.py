@@ -6,10 +6,14 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import closing
+from pathlib import Path
 from typing import Any
 
 from reticulumpi import events
+from reticulumpi.migrations import Migration, MigrationTarget
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.runtime_metrics import instrument_sqlite_class
 
 # Defaults
 _DEFAULT_CHECK_INTERVAL = 60
@@ -20,6 +24,7 @@ _DEFAULT_DEGRADED_PCT = 80
 _DEFAULT_CRITICAL_PATHS = 5
 
 
+@instrument_sqlite_class
 class TransportHealthPlugin(PluginBase):
     """Tracks reliability of transport (relay) nodes in the mesh.
 
@@ -34,6 +39,39 @@ class TransportHealthPlugin(PluginBase):
     plugin_description = "Monitors reliability of transport/relay nodes"
     broadcast_tier = 1
     broadcast_keys = "transport_health"
+
+    def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
+        path = Path(os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH)))
+        statements = (
+            """CREATE TABLE IF NOT EXISTS transport_nodes (
+                hash TEXT PRIMARY KEY,
+                first_seen REAL,
+                last_seen REAL,
+                paths_via INTEGER,
+                max_paths_via INTEGER,
+                total_appearances INTEGER,
+                total_checks INTEGER,
+                availability_pct REAL,
+                interface TEXT,
+                status TEXT,
+                node_name TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS transport_node_history (
+                hash TEXT,
+                timestamp REAL,
+                paths_via INTEGER,
+                status TEXT,
+                PRIMARY KEY (hash, timestamp)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_history_ts ON transport_node_history(timestamp)",
+        )
+        return (
+            MigrationTarget(
+                "transport_health",
+                path,
+                (Migration(1, "adopt transport health schema", statements),),
+            ),
+        )
 
     def validate_config(self) -> None:
         interval = self.config.get("check_interval", _DEFAULT_CHECK_INTERVAL)
@@ -323,7 +361,7 @@ class TransportHealthPlugin(PluginBase):
         """
         via_map: dict[str, dict[str, Any]] = {}
         try:
-            conn_mon = self.app.get_plugin("connectivity_monitor")
+            conn_mon = self.get_ready_plugin("connectivity_monitor")
             if not conn_mon or not hasattr(conn_mon, "get_routing_data"):
                 return via_map
 
@@ -347,7 +385,7 @@ class TransportHealthPlugin(PluginBase):
     def _resolve_node_name(self, hex_hash: str) -> str:
         """Try to get a human-readable name from network_map."""
         try:
-            net_map = self.app.get_plugin("network_map")
+            net_map = self.get_ready_plugin("network_map")
             if not net_map or not hasattr(net_map, "get_known_nodes"):
                 return ""
             for node in net_map.get_known_nodes():
@@ -362,7 +400,7 @@ class TransportHealthPlugin(PluginBase):
     # --- SQLite ---
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self._db_path) as conn:
+        with closing(sqlite3.connect(self._db_path)) as conn, conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("""
@@ -395,7 +433,7 @@ class TransportHealthPlugin(PluginBase):
 
     def _load_from_db(self) -> None:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            with closing(sqlite3.connect(self._db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 for row in conn.execute("SELECT * FROM transport_nodes"):
                     self._transport_nodes[row["hash"]] = {
@@ -426,7 +464,7 @@ class TransportHealthPlugin(PluginBase):
         try:
             with self._lock:
                 snapshot = list(self._transport_nodes.values())
-            with sqlite3.connect(self._db_path) as conn:
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
                 for record in snapshot:
                     conn.execute(
                         """
@@ -457,7 +495,7 @@ class TransportHealthPlugin(PluginBase):
         try:
             with self._lock:
                 snapshot = list(self._transport_nodes.values())
-            with sqlite3.connect(self._db_path) as conn:
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
                 for record in snapshot:
                     if record.get("paths_via", 0) > 0 or record["status"] != "new":
                         conn.execute(
@@ -481,7 +519,7 @@ class TransportHealthPlugin(PluginBase):
         cutoff = time.time() - (retention * 3600)
         max_rows = self.config.get("max_history_rows", 500_000)
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
                 conn.execute(
                     "DELETE FROM transport_node_history WHERE timestamp < ?",
                     (cutoff,),

@@ -32,8 +32,9 @@ class MeshTelemetryPlugin(PluginBase):
 
     def start(self) -> None:
         self._active = True
-        self._start_time = time.time()
+        self._start_monotonic = time.monotonic()
         self._peer_metrics: dict[bytes, dict[str, Any]] = {}
+        self._peer_last_seen_monotonic: dict[bytes, float] = {}
         self._peers_lock = threading.Lock()
         self._broadcast_cache: tuple[float, list] | None = None
         self._broadcast_cache_ttl = 5.0
@@ -41,12 +42,14 @@ class MeshTelemetryPlugin(PluginBase):
         app_name = self.config.get("app_name", "reticulumpi")
         aspects = self.config.get("aspects", ["node", "telemetry"])
 
-        self.destination = RNS.Destination(
-            self.identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            app_name,
-            *aspects,
+        self.destination = self.manage_destination(
+            RNS.Destination(
+                self.identity,
+                RNS.Destination.IN,
+                RNS.Destination.SINGLE,
+                app_name,
+                *aspects,
+            )
         )
 
         aspect_str = ".".join([app_name] + aspects)
@@ -120,6 +123,7 @@ class MeshTelemetryPlugin(PluginBase):
             metrics = {"raw": str(metrics)}
 
         metrics["last_seen"] = time.time()
+        observed_at = time.monotonic()
 
         hops = None
         try:
@@ -130,6 +134,7 @@ class MeshTelemetryPlugin(PluginBase):
 
         with self._peers_lock:
             self._peer_metrics[destination_hash] = metrics
+            self._peer_last_seen_monotonic[destination_hash] = observed_at
 
         self.event_bus.publish(
             events.NODE_METRICS_RECEIVED,
@@ -163,14 +168,21 @@ class MeshTelemetryPlugin(PluginBase):
 
     def _evict_stale_peers(self, ttl: float) -> None:
         """Remove peer entries not seen within *ttl* seconds."""
-        now = time.time()
+        now = time.monotonic()
         stale_keys: list[bytes] = []
         with self._peers_lock:
-            for key, data in self._peer_metrics.items():
-                if now - data.get("last_seen", 0) > ttl:
+            for key in self._peer_metrics:
+                last_seen = self._peer_last_seen_monotonic.get(key)
+                if last_seen is None:
+                    # Entries should always be inserted through
+                    # record_peer_metrics(). Preserve any legacy in-memory
+                    # entry for one full TTL instead of converting wall time.
+                    self._peer_last_seen_monotonic[key] = now
+                elif max(0.0, now - last_seen) > ttl:
                     stale_keys.append(key)
             for key in stale_keys:
                 del self._peer_metrics[key]
+                self._peer_last_seen_monotonic.pop(key, None)
         if stale_keys:
             self.log.debug("Evicted %d stale peer(s) from telemetry", len(stale_keys))
 
@@ -183,15 +195,17 @@ class MeshTelemetryPlugin(PluginBase):
             ["cpu_percent", "cpu_temp", "memory_percent", "disk_percent"],
         )
 
+        now = time.monotonic()
+        started = getattr(self, "_start_monotonic", now)
         payload: dict[str, Any] = {
             "name": self.app.node_name,
             "v": self.plugin_version,
-            "uptime": int(time.time() - self._get_app_start_time()),
+            "uptime": int(max(0.0, now - started)),
             "plugins": len(self.app.plugins),
         }
 
         # Read from system_monitor if available
-        monitor = self.app.get_plugin("system_monitor")
+        monitor = self.get_ready_plugin("system_monitor")
         if monitor and hasattr(monitor, "latest_metrics"):
             m = monitor.latest_metrics
             for key in include:
@@ -200,7 +214,7 @@ class MeshTelemetryPlugin(PluginBase):
                     short = _SHORT_KEYS.get(key, key)
                     payload[short] = m[key]
 
-        gps = self.app.get_plugin("gps_telemetry")
+        gps = self.get_ready_plugin("gps_telemetry")
         if gps and hasattr(gps, "last_fix") and gps.last_fix:
             fix = gps.last_fix
             if fix.get("lat") is not None and fix.get("lon") is not None:
@@ -208,10 +222,6 @@ class MeshTelemetryPlugin(PluginBase):
                 payload["lon"] = round(fix["lon"], 5)
 
         return umsgpack.packb(payload)
-
-    def _get_app_start_time(self) -> float:
-        """Return the recorded start time of this plugin."""
-        return getattr(self, "_start_time", time.time())
 
 
 # Short key mapping to minimize announce payload size

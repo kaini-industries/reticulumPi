@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 # Plugin lifecycle
+PLUGIN_STARTING = "plugin.starting"
 PLUGIN_STARTED = "plugin.started"
 PLUGIN_STOPPED = "plugin.stopped"
 PLUGIN_CRASHED = "plugin.crashed"
 PLUGIN_STOPPING = "plugin.stopping"
+PLUGIN_BLOCKED = "plugin.blocked"
 
 # Mesh network
 NODE_DISCOVERED = "node.discovered"
