@@ -107,7 +107,6 @@ jobs:
           docker compose -f docker/docker-compose.yml config --quiet
       - name: Validate privileged policy and systemd units
         run: |
-          sudo visudo --check
           test ! -d config/sudoers.d || test -z "$(find config/sudoers.d -type f -print -quit)"
           id -u reticulumpi >/dev/null 2>&1 || sudo useradd --system --home /var/lib/reticulumpi reticulumpi
           sudo install -d /opt/reticulumpi/current/.venv/bin /var/lib/reticulumpi

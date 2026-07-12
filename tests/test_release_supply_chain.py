@@ -119,10 +119,18 @@ def test_ci_pins_security_actions_and_runs_supply_chain_gates():
         in source
     )
     assert "systemd-analyze verify" in source
-    assert "visudo --check" in source
+    assert "sudo visudo --check" not in source
     assert "node --check" in source
     assert "tools/verify_sbom.py" in source
     assert "provenance: mode=max" in source
+
+    privileged_step = next(
+        step
+        for step in workflow["jobs"]["static-analysis"]["steps"]
+        if step.get("name") == "Validate privileged policy and systemd units"
+    )
+    assert "test ! -d config/sudoers.d" in privileged_step["run"]
+    assert "find config/sudoers.d -type f -print -quit" in privileged_step["run"]
 
     package_steps = workflow["jobs"]["package"]["steps"]
     prepare_sbom = next(
