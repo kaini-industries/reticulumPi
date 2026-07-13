@@ -3,29 +3,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0a111c">
   <title>ReticulumPi Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=50">
-  <link rel="stylesheet" href="/static/vendor/leaflet.css">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="{{ASSET:dashboard.css}}">
 </head>
-<body>
-  <div id="internet-status-banner" class="offline-banner" style="display:none">Internet Unavailable — some features are limited</div>
-  <div id="weather-alert-banner" class="weather-alert-banner" style="display:none"></div>
-  <div id="firmware-hang-banner" class="firmware-hang-banner" style="display:none"></div>
-  <div id="stale-banner" class="stale-banner" style="display:none">
+<body data-ready-features="{{READY_FEATURES}}">
+  <a class="skip-link" href="#main-content">Skip to dashboard content</a>
+  <div id="internet-status-banner" class="offline-banner csp-initial-hidden" role="status" aria-live="polite">Internet Unavailable — some features are limited</div>
+  <div id="weather-alert-banner" class="weather-alert-banner csp-initial-hidden" role="alert" aria-live="assertive"></div>
+  <div id="firmware-hang-banner" class="firmware-hang-banner csp-initial-hidden" role="alert" aria-live="assertive"></div>
+  <div id="stale-banner" class="stale-banner csp-initial-hidden" role="status" aria-live="polite">
     <span>Dashboard data may be outdated</span>
     <button id="stale-refresh-btn" class="stale-refresh-btn">Refresh</button>
   </div>
-  <div class="dashboard">
+  <main class="dashboard" id="main-content" tabindex="-1">
     <!-- Header -->
-    <div class="header">
+    <header class="header">
       <div class="header-top">
         <h1 id="node-name"></h1>
         <div class="header-actions">
           <div class="offgrid-toggle" id="offgrid-toggle" title="Off Grid Mode — disable all internet activity">
             <span class="offgrid-label">Off Grid</span>
-            <label class="toggle-switch"><input type="checkbox" id="offgrid-switch"><span class="toggle-slider"></span></label>
+            <label class="toggle-switch"><span class="sr-only">Enable off-grid mode</span><input type="checkbox" id="offgrid-switch"><span class="toggle-slider" aria-hidden="true"></span></label>
           </div>
-          <a href="/spectrum.html" target="_blank" class="nav-link" id="spectrum-nav-link">Spectrum</a>
+          <a href="/spectrum.html" target="_blank" class="nav-link" id="spectrum-nav-link" hidden>Spectrum</a>
           <button id="logout-btn">Logout</button>
         </div>
       </div>
@@ -61,7 +63,7 @@
           </div>
         </div>
       </div>
-    </div>
+    </header>
 
     <!-- Failed plugins alert -->
     <div id="failed-alert" class="alert hidden">
@@ -73,7 +75,7 @@
       <div class="metric-card">
         <div class="label">CPU</div>
         <div class="metric-body">
-          <div class="metric-ring" id="ring-cpu" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="metric-ring" id="ring-cpu"><span class="ring-inner"></span></div>
           <div class="value" id="m-cpu">--<span class="unit">%</span></div>
         </div>
         <div class="metric-spark" id="spark-cpu"></div>
@@ -81,7 +83,7 @@
       <div class="metric-card">
         <div class="label">Temperature</div>
         <div class="metric-body">
-          <div class="metric-ring" id="ring-temp" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="metric-ring" id="ring-temp"><span class="ring-inner"></span></div>
           <div class="value" id="m-temp">--<span class="unit">&deg;C</span></div>
         </div>
         <div class="metric-spark" id="spark-temp"></div>
@@ -89,7 +91,7 @@
       <div class="metric-card">
         <div class="label">Memory</div>
         <div class="metric-body">
-          <div class="metric-ring" id="ring-mem" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="metric-ring" id="ring-mem"><span class="ring-inner"></span></div>
           <div class="value" id="m-mem">--<span class="unit">%</span></div>
         </div>
         <div class="metric-spark" id="spark-mem"></div>
@@ -97,7 +99,7 @@
       <div class="metric-card">
         <div class="label">Disk</div>
         <div class="metric-body">
-          <div class="metric-ring" id="ring-disk" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="metric-ring" id="ring-disk"><span class="ring-inner"></span></div>
           <div class="value" id="m-disk">--<span class="unit">%</span></div>
         </div>
         <div class="metric-spark" id="spark-disk"></div>
@@ -105,7 +107,7 @@
       <div class="metric-card" id="card-ws-latency">
         <div class="label">WS Latency</div>
         <div class="metric-body">
-          <div class="metric-ring" id="ring-ws-latency" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="metric-ring" id="ring-ws-latency"><span class="ring-inner"></span></div>
           <div class="value" id="m-ws-latency">--<span class="unit">ms</span></div>
         </div>
         <div class="metric-spark" id="spark-ws-latency"></div>
@@ -113,7 +115,7 @@
       <div class="metric-card" id="card-ws-msgrate">
         <div class="label">Msg Rate</div>
         <div class="metric-body">
-          <div class="metric-ring" id="ring-ws-msgrate" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="metric-ring" id="ring-ws-msgrate"><span class="ring-inner"></span></div>
           <div class="value" id="m-ws-msgrate">--<span class="unit">/s</span></div>
         </div>
         <div class="metric-spark" id="spark-ws-msgrate"></div>
@@ -121,7 +123,7 @@
       <div class="metric-card" id="card-ws-clients">
         <div class="label">WS Clients</div>
         <div class="metric-body">
-          <div class="metric-ring" id="ring-ws-clients" style="--pct:0; --ring-color: var(--green);"><span class="ring-inner"></span></div>
+          <div class="metric-ring" id="ring-ws-clients"><span class="ring-inner"></span></div>
           <div class="value" id="m-ws-clients">--</div>
         </div>
         <div class="metric-spark" id="spark-ws-clients"></div>
@@ -129,12 +131,12 @@
     </div>
 
     <!-- Wi-Fi Hotspot (collapsed by default) -->
-    <div class="section svc-hotspot awaiting-data" id="hotspot-section" style="display:none">
-      <div class="section-header collapsible" id="hotspot-toggle" title="Click to expand">
+    <section class="section svc-hotspot awaiting-data {{FEATURE:hotspot}}" id="hotspot-section" aria-label="Wi-Fi Hotspot">
+      <button type="button" class="section-header collapsible" id="hotspot-toggle" aria-expanded="false" aria-controls="hotspot-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Wi-Fi Hotspot <span class="svc-tag svc-tag-hotspot">AP</span></span>
         <span class="count" id="hotspot-status"></span>
-      </div>
-      <div class="section-body hidden" id="hotspot-body">
+      </button>
+      <div class="section-body hidden" id="hotspot-body" hidden>
         <div class="hotspot-overview">
           <div class="connectivity-indicators">
             <span class="conn-indicator" id="hi-status">Status: --</span>
@@ -143,21 +145,22 @@
             <span class="conn-indicator" id="hi-security">Security: --</span>
             <span class="conn-indicator" id="hi-ip">IP: --</span>
             <span class="conn-indicator" id="hi-clients">Clients: --</span>
-            <span class="conn-indicator" id="hi-portal-status" style="display:none">Portal: --</span>
-            <span class="conn-indicator" id="hi-portal-mode" style="display:none">Mode: --</span>
-            <span class="conn-indicator" id="hi-portal-requests" style="display:none">Requests: --</span>
+            <span class="conn-indicator csp-initial-hidden" id="hi-portal-status">Portal: --</span>
+            <span class="conn-indicator csp-initial-hidden" id="hi-portal-mode">Mode: --</span>
+            <span class="conn-indicator csp-initial-hidden" id="hi-portal-requests">Requests: --</span>
           </div>
         </div>
-        <div class="table-scroll" id="hotspot-clients-wrap" style="display:none">
+        <div class="table-scroll csp-initial-hidden" id="hotspot-clients-wrap">
           <table class="data-table">
+            <caption class="sr-only">Wi-Fi Hotspot data</caption>
             <thead>
-              <tr><th>Client</th><th>IP</th><th>Connected</th><th>Traffic</th></tr>
+              <tr><th scope="col">Client</th><th scope="col">IP</th><th scope="col">Connected</th><th scope="col">Traffic</th></tr>
             </thead>
             <tbody id="hotspot-clients-table"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- ═══════════ Messages ═══════════ -->
     <div class="service-group service-group-msg">
@@ -165,13 +168,13 @@
     </div>
 
     <!-- LXMF Messages -->
-    <div class="section" id="msg-lxmf-section">
-      <div class="section-header collapsible" id="msg-lxmf-toggle" title="Click to expand">
+    <section class="section {{FEATURE:messages}}" id="msg-lxmf-section" aria-label="LXMF Messages">
+      <button type="button" class="section-header collapsible" id="msg-lxmf-toggle" aria-expanded="false" aria-controls="msg-lxmf-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> LXMF</span>
         <span class="count" id="msg-lxmf-count"></span>
         <span class="msg-unread-total" id="msg-lxmf-unread-total"></span>
-      </div>
-      <div class="section-body hidden" id="msg-lxmf-body">
+      </button>
+      <div class="section-body hidden" id="msg-lxmf-body" hidden>
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
@@ -203,22 +206,22 @@
                   <input type="text" class="rt-input msg-dest-input" id="msg-lxmf-dest-input" autocomplete="off" spellcheck="false" placeholder="Select destination…" />
                   <div class="msg-dest-list" id="msg-lxmf-dest-list"></div>
                 </div>
-                <input type="text" id="msg-lxmf-lxmf-raw" class="rt-input" placeholder="Destination hash (32 hex chars)…" style="display:none" />
+                <input type="text" id="msg-lxmf-lxmf-raw" class="rt-input csp-initial-hidden" placeholder="Destination hash (32 hex chars)…" />
               </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Meshtastic Messages -->
-    <div class="section" id="msg-lora-section">
-      <div class="section-header collapsible" id="msg-lora-toggle" title="Click to expand">
+    <section class="section {{FEATURE:messages}}" id="msg-lora-section" aria-label="Meshtastic Messages">
+      <button type="button" class="section-header collapsible" id="msg-lora-toggle" aria-expanded="false" aria-controls="msg-lora-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Meshtastic</span>
         <span class="count" id="msg-lora-count"></span>
         <span class="msg-unread-total" id="msg-lora-unread-total"></span>
-      </div>
-      <div class="section-body hidden" id="msg-lora-body">
+      </button>
+      <div class="section-body hidden" id="msg-lora-body" hidden>
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
@@ -240,7 +243,8 @@
                 <button id="msg-lora-send-btn" class="msg-send-btn" disabled>Send</button>
               </div>
               <div class="msg-compose-meta">
-                <span class="msg-channel-wrap" id="msg-lora-channel-wrap" style="display:none">
+                <span class="msg-channel-wrap csp-initial-hidden" id="msg-lora-channel-wrap">
+                  <label class="sr-only" for="msg-lora-channel-select">Meshtastic channel</label>
                   <select id="msg-lora-channel-select" class="rt-select rt-select-sm"></select>
                 </span>
                 <button type="button" class="msg-gps-btn" id="msg-lora-gps-btn" title="Insert current GPS location">&#128205; GPS</button>
@@ -259,16 +263,16 @@
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Meshcore Messages -->
-    <div class="section" id="msg-meshcore-section">
-      <div class="section-header collapsible" id="msg-meshcore-toggle" title="Click to expand">
+    <section class="section {{FEATURE:messages}}" id="msg-meshcore-section" aria-label="MeshCore Messages">
+      <button type="button" class="section-header collapsible" id="msg-meshcore-toggle" aria-expanded="false" aria-controls="msg-meshcore-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Meshcore</span>
         <span class="count" id="msg-meshcore-count"></span>
         <span class="msg-unread-total" id="msg-meshcore-unread-total"></span>
-      </div>
-      <div class="section-body hidden" id="msg-meshcore-body">
+      </button>
+      <div class="section-body hidden" id="msg-meshcore-body" hidden>
         <div class="msg-layout">
           <div class="msg-sidebar">
             <div class="msg-sidebar-toolbar">
@@ -305,15 +309,15 @@
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Mesh Bridge (Meshtastic ↔ MeshCore) -->
-    <div class="section" id="mesh-bridge-section" style="display:none;">
-      <div class="section-header collapsible" id="mesh-bridge-section-toggle" title="Click to expand">
+    <section class="section {{FEATURE:mesh-bridge}}" id="mesh-bridge-section" aria-label="Mesh Bridge">
+      <button type="button" class="section-header collapsible" id="mesh-bridge-section-toggle" aria-expanded="false" aria-controls="mesh-bridge-section-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Mesh Bridge</span>
         <span class="mesh-bridge-status-pill" id="mesh-bridge-status-pill">—</span>
-      </div>
-      <div class="section-body hidden" id="mesh-bridge-section-body">
+      </button>
+      <div class="section-body hidden" id="mesh-bridge-section-body" hidden>
         <div class="mesh-bridge-content">
           <div id="mesh-bridge-auto-pause-banner" class="mesh-bridge-banner hidden">
             <span id="mesh-bridge-auto-pause-reason">Paused automatically</span>
@@ -321,15 +325,15 @@
           </div>
           <div class="mesh-bridge-controls">
             <label class="rt-switch">
-              <input type="checkbox" id="mesh-bridge-toggle">
-              <span class="rt-switch-slider"></span>
+              <input type="checkbox" id="mesh-bridge-toggle" aria-labelledby="mesh-bridge-toggle-label">
+              <span class="rt-switch-slider" aria-hidden="true"></span>
             </label>
             <span id="mesh-bridge-toggle-label">Relaying</span>
           </div>
           <div class="mesh-bridge-stats" id="mesh-bridge-stats"></div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- ═══════════ Reticulum Network ═══════════ -->
     <div class="service-group service-group-rns">
@@ -337,31 +341,32 @@
     </div>
 
     <!-- Network Interfaces -->
-    <div class="section svc-reticulum awaiting-data" id="interfaces-section">
-      <div class="section-header">
+    <section class="section svc-reticulum awaiting-data" id="interfaces-section" aria-label="Reticulum Interfaces">
+      <h2 class="section-header">
         <span>Network Interfaces <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="iface-count"></span><span class="freshness"></span>
-      </div>
+      </h2>
       <div id="restart-banner" class="restart-banner hidden">
         <span>Configuration changed — restart required to apply.</span>
         <button id="restart-btn" class="restart-btn">Restart Services</button>
       </div>
       <div class="table-wrap">
         <table class="data-table">
+          <caption class="sr-only">Reticulum Interfaces data</caption>
           <thead>
-            <tr><th>Enabled</th><th>Name</th><th>Type</th><th>Status</th><th>Traffic</th></tr>
+            <tr><th scope="col">Enabled</th><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Traffic</th></tr>
           </thead>
           <tbody id="interfaces-table"></tbody>
         </table>
       </div>
-    </div>
+    </section>
 
     <!-- Connectivity Health -->
-    <div class="section svc-reticulum awaiting-data" id="connectivity-section">
-      <div class="section-header">
+    <section class="section svc-reticulum awaiting-data" id="connectivity-section" aria-label="Connectivity">
+      <h2 class="section-header">
         <span>Connectivity Health <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="connectivity-status"></span><span class="freshness"></span>
-      </div>
+      </h2>
       <div id="connectivity-content" class="connectivity-grid">
         <div class="connectivity-indicators" id="connectivity-indicators">
           <span class="conn-indicator" id="ci-rnsd" title="rnsd shared instance">rnsd: --</span>
@@ -372,14 +377,14 @@
         </div>
         <div id="connectivity-issues" class="connectivity-issues"></div>
       </div>
-    </div>
+    </section>
 
     <!-- Routing -->
-    <div class="section svc-reticulum awaiting-data" id="routing-section">
-      <div class="section-header">
+    <section class="section svc-reticulum awaiting-data {{FEATURE:routing}}" id="routing-section" aria-label="Routing">
+      <h2 class="section-header">
         <span>Routing <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="routing-status"></span><span class="freshness"></span>
-      </div>
+      </h2>
       <div class="routing-content">
         <!-- Transport identity / uptime bar -->
         <div class="routing-identity" id="routing-identity"></div>
@@ -433,8 +438,11 @@
         </div>
         <div class="hidden" id="routing-table-wrapper">
           <div class="routing-filters">
+            <label class="sr-only" for="rt-search">Search destination hashes</label>
             <input type="text" id="rt-search" placeholder="Search hash..." class="rt-input">
+            <label class="sr-only" for="rt-iface-filter">Filter paths by interface</label>
             <select id="rt-iface-filter" class="rt-select"><option value="">All interfaces</option></select>
+            <label class="sr-only" for="rt-hops-filter">Filter paths by hop count</label>
             <select id="rt-hops-filter" class="rt-select">
               <option value="">All hops</option>
               <option value="1">1 hop</option>
@@ -443,16 +451,17 @@
               <option value="4">4+ hops</option>
             </select>
           </div>
-          <div class="table-scroll" style="max-height:500px;overflow-y:auto">
+          <div class="table-scroll scroll-max-500">
             <table class="data-table">
+              <caption class="sr-only">Routing data</caption>
               <thead>
                 <tr>
-                  <th class="sortable" data-rt-sort="hash">Destination</th>
-                  <th class="sortable" data-rt-sort="hops">Hops</th>
-                  <th class="sortable" data-rt-sort="via">Next Hop</th>
-                  <th>Interface</th>
-                  <th class="sortable" data-rt-sort="timestamp">Age</th>
-                  <th class="sortable" data-rt-sort="expires">Expires</th>
+                  <th scope="col" class="sortable" data-rt-sort="hash">Destination</th>
+                  <th scope="col" class="sortable" data-rt-sort="hops">Hops</th>
+                  <th scope="col" class="sortable" data-rt-sort="via">Next Hop</th>
+                  <th scope="col">Interface</th>
+                  <th scope="col" class="sortable" data-rt-sort="timestamp">Age</th>
+                  <th scope="col" class="sortable" data-rt-sort="expires">Expires</th>
                 </tr>
               </thead>
               <tbody id="routing-table-body"></tbody>
@@ -461,57 +470,59 @@
           <div class="routing-pagination" id="routing-pagination"></div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Transport Health -->
-    <div class="section svc-reticulum awaiting-data" id="transport-section">
-      <div class="section-header">
+    <section class="section svc-reticulum awaiting-data" id="transport-section" aria-label="Transport Hubs">
+      <h2 class="section-header">
         <span>Transport Hubs <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="transport-count"></span><span class="freshness"></span>
-      </div>
-      <div id="pool-status" style="display:none;"></div>
+      </h2>
+      <div id="pool-status" class="csp-initial-hidden"></div>
       <div class="table-wrap">
         <table class="data-table">
+          <caption class="sr-only">Transport Hubs data</caption>
           <thead>
-            <tr><th>Hub</th><th>Host</th><th>Status</th><th>Throughput</th></tr>
+            <tr><th scope="col">Hub</th><th scope="col">Host</th><th scope="col">Status</th><th scope="col">Throughput</th></tr>
           </thead>
           <tbody id="transport-table"></tbody>
         </table>
       </div>
-    </div>
+    </section>
 
     <!-- LoRa Nodes -->
-    <div class="section svc-reticulum awaiting-data" id="lora-section">
-      <div class="section-header">
+    <section class="section svc-reticulum awaiting-data" id="lora-section" aria-label="LoRa Radio">
+      <h2 class="section-header">
         <span>LoRa Nodes <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="lora-count"></span><span class="freshness"></span>
-      </div>
+      </h2>
       <div id="lora-radio-info"></div>
       <div class="table-scroll">
         <table class="data-table">
+          <caption class="sr-only">LoRa Radio data</caption>
           <thead>
             <tr>
-              <th>Reach</th>
-              <th>Node</th>
-              <th>Name</th>
-              <th>App</th>
-              <th>Hops</th>
-              <th>Signal</th>
-              <th>Last Seen</th>
-              <th>Announces</th>
+              <th scope="col">Reach</th>
+              <th scope="col">Node</th>
+              <th scope="col">Name</th>
+              <th scope="col">App</th>
+              <th scope="col">Hops</th>
+              <th scope="col">Signal</th>
+              <th scope="col">Last Seen</th>
+              <th scope="col">Announces</th>
             </tr>
           </thead>
           <tbody id="lora-table"></tbody>
         </table>
       </div>
-    </div>
+    </section>
 
     <!-- Mesh Network -->
-    <div class="section svc-reticulum awaiting-data" id="mesh-section">
-      <div class="section-header">
+    <section class="section svc-reticulum awaiting-data {{FEATURE:mesh}}" id="mesh-section" aria-label="Mesh Nodes">
+      <h2 class="section-header">
         <span>Mesh Network <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="mesh-count"></span><span class="freshness"></span>
-      </div>
+      </h2>
 
       <!-- Summary Strip -->
       <div class="mesh-summary-strip" id="mesh-summary">
@@ -559,92 +570,95 @@
       <!-- Node Table -->
       <div class="table-scroll">
         <table class="data-table">
+          <caption class="sr-only">Mesh Nodes data</caption>
           <thead>
             <tr>
-              <th class="sortable" data-sort="score">Reach<span class="sort-arrow"></span></th>
-              <th>Node</th>
-              <th>Name</th>
-              <th>App</th>
-              <th class="sortable" data-sort="hops">Hops<span class="sort-arrow"></span></th>
-              <th class="sortable" data-sort="last_seen">Last Seen<span class="sort-arrow"></span></th>
-              <th class="sortable" data-sort="announce_count">Announces<span class="sort-arrow"></span></th>
+              <th scope="col" class="sortable" data-sort="score">Reach<span class="sort-arrow"></span></th>
+              <th scope="col">Node</th>
+              <th scope="col">Name</th>
+              <th scope="col">App</th>
+              <th scope="col" class="sortable" data-sort="hops">Hops<span class="sort-arrow"></span></th>
+              <th scope="col" class="sortable" data-sort="last_seen">Last Seen<span class="sort-arrow"></span></th>
+              <th scope="col" class="sortable" data-sort="announce_count">Announces<span class="sort-arrow"></span></th>
             </tr>
           </thead>
           <tbody id="mesh-table"></tbody>
         </table>
       </div>
-      <div id="mesh-show-more" class="show-more-btn" style="display:none"></div>
-    </div>
+      <div id="mesh-show-more" class="show-more-btn csp-initial-hidden"></div>
+    </section>
 
     <!-- Peer Telemetry (collapsed by default) -->
-    <div class="section svc-reticulum" id="telemetry-section">
-      <div class="section-header collapsible" id="telemetry-toggle" title="Click to expand">
+    <section class="section svc-reticulum {{FEATURE:mesh}}" id="telemetry-section" aria-label="Peer Telemetry">
+      <button type="button" class="section-header collapsible" id="telemetry-toggle" aria-expanded="false" aria-controls="telemetry-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Peer Telemetry <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="telemetry-count"></span>
-      </div>
-      <div class="section-body hidden" id="telemetry-body">
+      </button>
+      <div class="section-body hidden" id="telemetry-body" hidden>
         <div class="metrics-grid" id="peer-metrics-grid"></div>
-        <button id="peer-show-more" class="show-more-btn" style="display:none">Show all</button>
+        <button id="peer-show-more" class="show-more-btn csp-initial-hidden">Show all</button>
       </div>
-    </div>
+    </section>
 
     <!-- Shared Files (collapsed by default) -->
-    <div class="section svc-reticulum" id="files-section">
-      <div class="section-header collapsible" id="files-toggle" title="Click to expand">
+    <section class="section svc-reticulum" id="files-section" aria-label="Shared Files">
+      <button type="button" class="section-header collapsible" id="files-toggle" aria-expanded="false" aria-controls="files-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Shared Files <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="files-count"></span>
-      </div>
-      <div class="section-body hidden" id="files-body">
+      </button>
+      <div class="section-body hidden" id="files-body" hidden>
         <div class="table-wrap">
           <table class="data-table">
+            <caption class="sr-only">Shared Files data</caption>
             <thead>
-              <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+              <tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Modified</th></tr>
             </thead>
             <tbody id="files-table"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Alerts (collapsed by default) -->
-    <div class="section svc-reticulum" id="alerts-section">
-      <div class="section-header collapsible" id="alerts-toggle" title="Click to expand">
+    <section class="section svc-reticulum" id="alerts-section" aria-label="Alerts">
+      <button type="button" class="section-header collapsible" id="alerts-toggle" aria-expanded="false" aria-controls="alerts-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Alerts <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="alerts-count"></span>
-      </div>
-      <div class="section-body hidden" id="alerts-body">
+      </button>
+      <div class="section-body hidden" id="alerts-body" hidden>
         <div id="alerts-info" class="config-content">No alerts configured</div>
       </div>
-    </div>
+    </section>
 
     <!-- Sensors (collapsed by default) -->
-    <div class="section svc-reticulum" id="sensors-section">
-      <div class="section-header collapsible" id="sensors-toggle" title="Click to expand">
+    <section class="section svc-reticulum" id="sensors-section" aria-label="Sensors">
+      <button type="button" class="section-header collapsible" id="sensors-toggle" aria-expanded="false" aria-controls="sensors-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Sensors <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="sensors-count"></span><span class="freshness"></span>
-      </div>
-      <div class="section-body hidden" id="sensors-body">
+      </button>
+      <div class="section-body hidden" id="sensors-body" hidden>
         <div class="metrics-grid" id="sensors-grid"></div>
       </div>
-    </div>
+    </section>
 
     <!-- Emergency Broadcasts (collapsed by default) -->
-    <div class="section svc-reticulum" id="emergency-section">
-      <div class="section-header collapsible" id="emergency-toggle" title="Click to expand">
+    <section class="section svc-reticulum" id="emergency-section" aria-label="Emergency Broadcasts">
+      <button type="button" class="section-header collapsible" id="emergency-toggle" aria-expanded="false" aria-controls="emergency-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Emergency Broadcasts <span class="svc-tag svc-tag-rns">RNS</span></span>
         <span class="count" id="emergency-count"></span>
-      </div>
-      <div class="section-body hidden" id="emergency-body">
+      </button>
+      <div class="section-body hidden" id="emergency-body" hidden>
         <div class="table-wrap">
           <table class="data-table">
+            <caption class="sr-only">Emergency Broadcasts data</caption>
             <thead>
-              <tr><th>Priority</th><th>Message</th><th>Origin</th><th>Time</th><th>TTL</th></tr>
+              <tr><th scope="col">Priority</th><th scope="col">Message</th><th scope="col">Origin</th><th scope="col">Time</th><th scope="col">TTL</th></tr>
             </thead>
             <tbody id="emergency-table"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- ═══════════ Meshtastic ═══════════ -->
     <div class="service-group service-group-msh">
@@ -652,64 +666,66 @@
     </div>
 
     <!-- Meshtastic Gateway -->
-    <div class="section svc-meshtastic awaiting-data" id="meshtastic-section">
-      <div class="section-header">
+    <section class="section svc-meshtastic awaiting-data {{FEATURE:meshtastic}}" id="meshtastic-section" aria-label="Meshtastic">
+      <h2 class="section-header">
         <span>Meshtastic Gateway <span class="svc-tag svc-tag-msh">MSH</span></span>
         <span class="count" id="meshtastic-status"></span>
-      </div>
+      </h2>
       <div class="meshtastic-overview" id="meshtastic-overview"></div>
       <div id="meshtastic-device-info"></div>
-      <div id="meshtastic-lora-neighbors" style="display:none">
+      <div id="meshtastic-lora-neighbors" class="csp-initial-hidden">
         <div class="msh-subsection-header">LoRa Neighbors</div>
         <div class="table-scroll">
           <table class="data-table">
+            <caption class="sr-only">Meshtastic data 1</caption>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>ID</th>
-                <th>Hardware</th>
-                <th class="sortable" data-sort="lora-hops_away">Hops<span class="sort-arrow"></span></th>
-                <th class="sortable" data-sort="lora-snr">SNR<span class="sort-arrow"></span></th>
-                <th class="sortable" data-sort="lora-last_heard">Last Heard<span class="sort-arrow"></span></th>
+                <th scope="col">Name</th>
+                <th scope="col">ID</th>
+                <th scope="col">Hardware</th>
+                <th scope="col" class="sortable" data-sort="lora-hops_away">Hops<span class="sort-arrow"></span></th>
+                <th scope="col" class="sortable" data-sort="lora-snr">SNR<span class="sort-arrow"></span></th>
+                <th scope="col" class="sortable" data-sort="lora-last_heard">Last Heard<span class="sort-arrow"></span></th>
               </tr>
             </thead>
             <tbody id="lora-neighbors-table"></tbody>
           </table>
         </div>
-        <button id="lora-neighbors-show-more" class="show-more-btn" style="display:none">Show all</button>
+        <button id="lora-neighbors-show-more" class="show-more-btn csp-initial-hidden">Show all</button>
       </div>
-      <div id="meshtastic-mqtt-nodes-header" class="msh-subsection-header" style="display:none">MQTT Nodes</div>
+      <div id="meshtastic-mqtt-nodes-header" class="msh-subsection-header csp-initial-hidden">MQTT Nodes</div>
       <div class="table-scroll">
         <table class="data-table">
+          <caption class="sr-only">Meshtastic data 2</caption>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>ID</th>
-              <th>Hardware</th>
-              <th class="sortable" data-sort="snr">SNR<span class="sort-arrow"></span></th>
-              <th class="sortable" data-sort="last_heard">Last Heard<span class="sort-arrow"></span></th>
+              <th scope="col">Name</th>
+              <th scope="col">ID</th>
+              <th scope="col">Hardware</th>
+              <th scope="col" class="sortable" data-sort="snr">SNR<span class="sort-arrow"></span></th>
+              <th scope="col" class="sortable" data-sort="last_heard">Last Heard<span class="sort-arrow"></span></th>
             </tr>
           </thead>
           <tbody id="meshtastic-nodes-table"></tbody>
         </table>
       </div>
-      <button id="meshtastic-show-more" class="show-more-btn" style="display:none">Show all</button>
-    </div>
+      <button id="meshtastic-show-more" class="show-more-btn csp-initial-hidden">Show all</button>
+    </section>
 
     <!-- MQTT Feed (read-only activity log) -->
-    <div class="section svc-meshtastic" id="mqtt-feed-section" style="display:none">
-      <div class="section-header collapsible" id="mqtt-feed-toggle" title="Click to expand">
+    <section class="section svc-meshtastic {{FEATURE:messages}}" id="mqtt-feed-section" aria-label="MQTT Feed">
+      <button type="button" class="section-header collapsible" id="mqtt-feed-toggle" aria-expanded="false" aria-controls="mqtt-feed-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> MQTT Feed <span class="svc-tag svc-tag-msh">MSH</span></span>
         <span class="count" id="mqtt-feed-count"></span>
-      </div>
-      <div class="section-body hidden" id="mqtt-feed-body">
+      </button>
+      <div class="section-body hidden" id="mqtt-feed-body" hidden>
         <div class="mqtt-feed-stats" id="mqtt-feed-stats"></div>
         <div class="mqtt-feed-filters">
           <input type="text" id="mqtt-feed-search" class="rt-input" placeholder="Filter by sender or text...">
         </div>
         <div class="mqtt-feed-list" id="mqtt-feed-list"></div>
       </div>
-    </div>
+    </section>
 
     <!-- ═══════════ MeshCore ═══════════ -->
     <div class="service-group service-group-mc">
@@ -717,30 +733,31 @@
     </div>
 
     <!-- MeshCore Gateway -->
-    <div class="section svc-meshcore awaiting-data" id="meshcore-section">
-      <div class="section-header">
+    <section class="section svc-meshcore awaiting-data {{FEATURE:meshcore}}" id="meshcore-section" aria-label="MeshCore">
+      <h2 class="section-header">
         <span>MeshCore Gateway <span class="svc-tag svc-tag-mc">MC</span></span>
         <span class="count" id="meshcore-status"></span>
-      </div>
+      </h2>
       <div class="meshcore-overview" id="meshcore-overview"></div>
       <div id="meshcore-device-info"></div>
       <div id="meshcore-observer-info"></div>
       <div class="table-scroll">
         <table class="data-table">
+          <caption class="sr-only">MeshCore data</caption>
           <thead>
             <tr>
-              <th class="sortable" data-sort="name">Name<span class="sort-arrow"></span></th>
-              <th>Public Key</th>
-              <th>Type</th>
-              <th class="sortable" data-sort="out_path_len">Hops<span class="sort-arrow"></span></th>
-              <th class="sortable" data-sort="last_advert">Last Advert<span class="sort-arrow"></span></th>
+              <th scope="col" class="sortable" data-sort="name">Name<span class="sort-arrow"></span></th>
+              <th scope="col">Public Key</th>
+              <th scope="col">Type</th>
+              <th scope="col" class="sortable" data-sort="out_path_len">Hops<span class="sort-arrow"></span></th>
+              <th scope="col" class="sortable" data-sort="last_advert">Last Advert<span class="sort-arrow"></span></th>
             </tr>
           </thead>
           <tbody id="meshcore-contacts-table"></tbody>
         </table>
       </div>
-      <button id="meshcore-show-more" class="show-more-btn" style="display:none">Show all</button>
-    </div>
+      <button id="meshcore-show-more" class="show-more-btn csp-initial-hidden">Show all</button>
+    </section>
 
     <!-- ═══════════ Infrastructure ═══════════ -->
     <div class="service-group service-group-infra">
@@ -748,11 +765,11 @@
     </div>
 
     <!-- NTP / Time Sync -->
-    <div class="section svc-ntp awaiting-data" id="ntp-section" style="display:none">
-      <div class="section-header">
+    <section class="section svc-ntp awaiting-data {{FEATURE:ntp}}" id="ntp-section" aria-label="Network Time">
+      <h2 class="section-header">
         <span>Time Sync <span class="svc-tag svc-tag-ntp">NTP</span></span>
         <span class="count" id="ntp-status"></span>
-      </div>
+      </h2>
       <div class="metrics-grid" id="ntp-metrics">
         <div class="metric-card"><div class="label">Sync</div><div class="value" id="m-ntp-sync">--</div></div>
         <div class="metric-card"><div class="label">Stratum</div><div class="value" id="m-ntp-stratum">--</div></div>
@@ -763,14 +780,15 @@
         <summary>Chrony Sources</summary>
         <div class="table-scroll">
           <table class="data-table">
+            <caption class="sr-only">Network Time data</caption>
             <thead>
-              <tr><th>St</th><th>Name</th><th>Stratum</th><th>Poll</th><th>Reach</th><th>Last Rx</th><th>Offset</th></tr>
+              <tr><th scope="col">St</th><th scope="col">Name</th><th scope="col">Stratum</th><th scope="col">Poll</th><th scope="col">Reach</th><th scope="col">Last Rx</th><th scope="col">Offset</th></tr>
             </thead>
             <tbody id="ntp-sources-table"></tbody>
           </table>
         </div>
       </details>
-    </div>
+    </section>
 
     <!-- ═══════════ GPS ═══════════ -->
     <div class="service-group service-group-gps">
@@ -778,44 +796,45 @@
     </div>
 
     <!-- GPS Telemetry -->
-    <div class="section svc-gps awaiting-data" id="gps-section" style="display:none">
-      <div class="section-header">
+    <section class="section svc-gps awaiting-data {{FEATURE:gps}}" id="gps-section" aria-label="GPS">
+      <h2 class="section-header">
         <span>GPS Telemetry <span class="svc-tag svc-tag-gps">GPS</span></span>
         <span class="count" id="gps-status"></span>
-      </div>
+      </h2>
       <div class="gps-overview" id="gps-overview"></div>
       <div class="gps-visuals">
         <div class="gps-map-wrap"><div id="gps-map"></div></div>
         <div class="gps-sky-wrap">
-          <svg id="gps-sky" viewBox="-115 -115 230 230" xmlns="http://www.w3.org/2000/svg"></svg>
+          <svg id="gps-sky" viewBox="-115 -115 230 230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="GPS satellite sky plot"></svg>
         </div>
       </div>
       <details class="space-details">
         <summary>Satellites in View</summary>
         <div class="table-scroll">
           <table class="data-table">
+            <caption class="sr-only">GPS data</caption>
             <thead>
               <tr>
-                <th class="sortable" data-sort="gps-prn">PRN<span class="sort-arrow"></span></th>
-                <th class="sortable" data-sort="gps-elevation">Elevation<span class="sort-arrow"></span></th>
-                <th class="sortable" data-sort="gps-azimuth">Azimuth<span class="sort-arrow"></span></th>
-                <th class="sortable" data-sort="gps-snr">SNR<span class="sort-arrow"></span></th>
-                <th class="sortable" data-sort="gps-in_use">Used<span class="sort-arrow"></span></th>
+                <th scope="col" class="sortable" data-sort="gps-prn">PRN<span class="sort-arrow"></span></th>
+                <th scope="col" class="sortable" data-sort="gps-elevation">Elevation<span class="sort-arrow"></span></th>
+                <th scope="col" class="sortable" data-sort="gps-azimuth">Azimuth<span class="sort-arrow"></span></th>
+                <th scope="col" class="sortable" data-sort="gps-snr">SNR<span class="sort-arrow"></span></th>
+                <th scope="col" class="sortable" data-sort="gps-in_use">Used<span class="sort-arrow"></span></th>
               </tr>
             </thead>
             <tbody id="gps-sats-table"></tbody>
           </table>
         </div>
       </details>
-    </div>
+    </section>
 
     <!-- Node Tracker -->
-    <div class="section svc-meshtastic" id="node-tracker-section" style="display:none">
-      <div class="section-header collapsible" id="node-tracker-toggle" title="Click to expand">
+    <section class="section svc-meshtastic csp-initial-hidden" id="node-tracker-section" aria-label="Node Tracker">
+      <button type="button" class="section-header collapsible" id="node-tracker-toggle" aria-expanded="false" aria-controls="node-tracker-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Node Tracker <span class="svc-tag svc-tag-msh">MSH</span> <span class="svc-tag svc-tag-mc">MC</span></span>
         <span class="count" id="node-tracker-count"></span>
-      </div>
-      <div class="section-body hidden" id="node-tracker-body">
+      </button>
+      <div class="section-body hidden" id="node-tracker-body" hidden>
         <div class="nt-controls">
           <div class="nt-search-wrap">
             <input type="text" id="node-tracker-search" class="rt-input" placeholder="Search nodes by name or ID..." autocomplete="off">
@@ -828,27 +847,28 @@
         <div class="nt-chips" id="node-tracker-chips"></div>
         <div class="table-scroll">
           <table class="data-table">
+            <caption class="sr-only">Node Tracker data</caption>
             <thead>
               <tr>
-                <th>Status</th>
-                <th>Name</th>
-                <th>ID</th>
-                <th>Position</th>
-                <th>Last Heard</th>
+                <th scope="col">Status</th>
+                <th scope="col">Name</th>
+                <th scope="col">ID</th>
+                <th scope="col">Position</th>
+                <th scope="col">Last Heard</th>
               </tr>
             </thead>
             <tbody id="node-tracker-table-body"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Node Map -->
-    <div class="section awaiting-data" id="map-section">
-      <div class="section-header collapsible" id="map-toggle" title="Click to collapse">
+    <section class="section awaiting-data" id="map-section" aria-label="Node Map">
+      <button type="button" class="section-header collapsible open" id="map-toggle" aria-expanded="true" aria-controls="map-body" title="Click to collapse">
         <span><span class="chevron">&#9656;</span> Node Map</span>
         <span class="count" id="map-count"></span>
-      </div>
+      </button>
       <div id="map-body">
         <div class="map-controls">
           <button class="mesh-tab" id="map-show-all" title="Show all nodes with position">All Nodes</button>
@@ -864,23 +884,23 @@
           <button class="mesh-tab" id="map-center-gps" title="Center on GPS location">My Location</button>
           <span class="map-stats" id="map-stats"></span>
         </div>
-        <div id="map-container" style="height: 450px; width: 100%;"></div>
+        <div id="map-container" class="map-primary"></div>
       </div>
-    </div>
+    </section>
 
     <!-- Space Tracker (satellites, launches, space weather) -->
-    <div class="section" id="space-section" style="display:none">
-      <div class="section-header collapsible" id="space-toggle" title="Click to expand">
+    <section class="section {{FEATURE:space}}" id="space-section" aria-label="Space Tracker">
+      <button type="button" class="section-header collapsible" id="space-toggle" aria-expanded="false" aria-controls="space-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Space Tracker</span>
         <span class="count" id="space-count"></span>
-      </div>
-      <div class="section-body hidden" id="space-body">
+      </button>
+      <div class="section-body hidden" id="space-body" hidden>
 
         <!-- Band 1: Status Strip (sky dome, Kp gauge, launch hero) -->
         <div class="space-band space-band-status">
           <div class="space-panel space-skydome-panel">
             <div class="space-panel-label">Sky Dome <span class="space-panel-sub" id="space-sat-count">--</span></div>
-            <svg id="space-skydome" class="space-skydome" viewBox="0 0 240 240" preserveAspectRatio="xMidYMid meet"></svg>
+            <svg id="space-skydome" class="space-skydome" viewBox="0 0 240 240" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Satellite sky dome"></svg>
             <div class="space-skydome-meta">
               <span id="space-overhead-names" class="space-muted-line"></span>
               <span id="space-groups-sub" class="space-muted-line"></span>
@@ -889,7 +909,7 @@
 
           <div class="space-panel space-kp-panel">
             <div class="space-panel-label">Geomagnetic Activity</div>
-            <svg id="space-kp-gauge" class="space-kp-gauge" viewBox="0 0 220 140" preserveAspectRatio="xMidYMid meet"></svg>
+            <svg id="space-kp-gauge" class="space-kp-gauge" viewBox="0 0 220 140" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Geomagnetic Kp activity gauge"></svg>
             <div class="space-kp-readout">
               <span class="space-kp-value" id="space-kp">--</span>
               <span class="space-kp-label" id="space-kp-band">&nbsp;</span>
@@ -914,7 +934,7 @@
               <span class="space-muted-line" id="space-next-pass-when"></span>
             </span>
           </div>
-          <svg id="space-timeline" class="space-timeline" preserveAspectRatio="none"></svg>
+          <svg id="space-timeline" class="space-timeline" preserveAspectRatio="none" role="img" aria-label="Upcoming satellite pass timeline"></svg>
         </div>
 
         <!-- Band 3: World Map + collapsible tables -->
@@ -926,14 +946,16 @@
               <div class="space-table-wrap">
                 <div class="space-table-heading">Upcoming Launches</div>
                 <table class="data-table">
-                  <thead><tr><th>T-</th><th>Name</th><th>Provider</th><th>Pad</th></tr></thead>
+                  <caption class="sr-only">Space Tracker data 1</caption>
+                  <thead><tr><th scope="col">T-</th><th scope="col">Name</th><th scope="col">Provider</th><th scope="col">Pad</th></tr></thead>
                   <tbody id="space-launch-table"></tbody>
                 </table>
               </div>
               <div class="space-table-wrap">
                 <div class="space-table-heading">Upcoming Passes</div>
                 <table class="data-table">
-                  <thead><tr><th>AOS (T-)</th><th>Satellite</th><th>Max El</th><th>Dir</th><th>Dur</th></tr></thead>
+                  <caption class="sr-only">Space Tracker data 2</caption>
+                  <thead><tr><th scope="col">AOS (T-)</th><th scope="col">Satellite</th><th scope="col">Max El</th><th scope="col">Dir</th><th scope="col">Dur</th></tr></thead>
                   <tbody id="space-pass-table"></tbody>
                 </table>
               </div>
@@ -945,48 +967,49 @@
         </div>
 
       </div>
-    </div>
+    </section>
 
     <!-- ADS-B Radar (aircraft tracker via RTL-SDR + dump1090) -->
-    <div class="section" id="adsb-section" style="display:none">
-      <div class="section-header collapsible" id="adsb-toggle" title="Click to expand">
+    <section class="section {{FEATURE:adsb}}" id="adsb-section" aria-label="ADS-B Radar">
+      <button type="button" class="section-header collapsible" id="adsb-toggle" aria-expanded="false" aria-controls="adsb-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> ADS-B Radar</span>
         <span class="count" id="adsb-count"></span>
-      </div>
-      <div class="section-body hidden" id="adsb-body">
+      </button>
+      <div class="section-body hidden" id="adsb-body" hidden>
         <div class="adsb-stats" id="adsb-stats"></div>
         <div class="map-controls">
           <button class="mesh-tab" id="adsb-center-receiver" title="Center on receiver location">Center on Receiver</button>
         </div>
-        <div id="adsb-map-container" class="adsb-map" style="height:400px; width:100%;"></div>
+        <div id="adsb-map-container" class="adsb-map"></div>
         <div class="adsb-table-wrap">
           <table class="data-table" id="adsb-table">
+            <caption class="sr-only">ADS-B Radar data</caption>
             <thead>
               <tr>
-                <th data-sort="callsign" class="sortable">Callsign<span class="sort-arrow"></span></th>
-                <th data-sort="icao" class="sortable">ICAO<span class="sort-arrow"></span></th>
-                <th data-sort="altitude" class="sortable sort-desc">Alt (ft)<span class="sort-arrow"></span></th>
-                <th data-sort="ground_speed" class="sortable">Speed (kts)<span class="sort-arrow"></span></th>
-                <th data-sort="track" class="sortable">Track<span class="sort-arrow"></span></th>
-                <th data-sort="squawk" class="sortable">Squawk<span class="sort-arrow"></span></th>
-                <th data-sort="distance_nm" class="sortable">Dist (nm)<span class="sort-arrow"></span></th>
-                <th data-sort="last_seen" class="sortable">Last Seen<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="callsign" class="sortable">Callsign<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="icao" class="sortable">ICAO<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="altitude" class="sortable sort-desc">Alt (ft)<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="ground_speed" class="sortable">Speed (kts)<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="track" class="sortable">Track<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="squawk" class="sortable">Squawk<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="distance_nm" class="sortable">Dist (nm)<span class="sort-arrow"></span></th>
+                <th scope="col" data-sort="last_seen" class="sortable">Last Seen<span class="sort-arrow"></span></th>
               </tr>
             </thead>
             <tbody id="adsb-table-body"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- FM/AM Radio Receiver -->
-    <div class="section" id="radio-section" style="display:none">
-      <div class="section-header collapsible" id="radio-toggle">
-        <span><span class="chevron">&#9656;</span> FM/AM Radio <span class="radio-lock-icon" id="radio-lock-icon" style="display:none">&#128274;</span></span>
+    <section class="section {{FEATURE:radio}}" id="radio-section" aria-label="FM and AM Radio">
+      <button type="button" class="section-header collapsible" id="radio-toggle" aria-expanded="false" aria-controls="radio-body">
+        <span><span class="chevron">&#9656;</span> FM/AM Radio <span class="radio-lock-icon csp-initial-hidden" id="radio-lock-icon">&#128274;</span></span>
         <span class="count" id="radio-status-badge"></span>
-      </div>
-      <div class="section-body hidden" id="radio-body">
-        <div class="radio-preemption-banner" id="radio-preemption-banner" style="display:none"></div>
+      </button>
+      <div class="section-body hidden" id="radio-body" hidden>
+        <div class="radio-preemption-banner csp-initial-hidden" id="radio-preemption-banner"></div>
         <div class="radio-lock-row" id="radio-lock-row">
           <label class="radio-lock-toggle"><input type="checkbox" id="radio-lock-cb" /><span>Lock dongle</span></label>
         </div>
@@ -999,14 +1022,15 @@
           <div class="radio-dead-zone-warning hidden" id="radio-dead-zone">E4000 L-band gap — signal may be unreliable</div>
           <div class="radio-feedback hidden" id="radio-feedback"></div>
           <div class="radio-freq-input-row">
+            <label class="sr-only" for="radio-freq-input">Frequency in megahertz</label>
             <input type="number" id="radio-freq-input" class="radio-freq-input"
                    step="0.025" min="52" max="2200" placeholder="MHz" />
-            <button id="radio-freq-go" class="radio-btn radio-btn-sm">Go</button>
-            <button id="radio-fav-btn" class="radio-btn radio-btn-sm radio-fav-btn">&#9734;</button>
+            <button id="radio-freq-go" class="radio-btn radio-btn-sm" aria-label="Tune to frequency">Go</button>
+            <button id="radio-fav-btn" class="radio-btn radio-btn-sm radio-fav-btn" aria-label="Add current frequency to favorites">&#9734;</button>
           </div>
         </div>
 
-        <svg id="radio-dial-svg" class="radio-dial" viewBox="0 0 400 28" preserveAspectRatio="none"></svg>
+        <svg id="radio-dial-svg" class="radio-dial" viewBox="0 0 400 28" preserveAspectRatio="none" role="img" aria-label="Radio frequency tuning dial"></svg>
 
         <div class="radio-mode-bar" id="radio-mode-bar">
           <button data-mode="wbfm" class="radio-mode-btn active">WFM</button>
@@ -1020,18 +1044,18 @@
 
         <div class="radio-controls">
           <div class="radio-control-row">
-            <label class="radio-control-label">Gain</label>
+            <label class="radio-control-label" for="radio-gain">Gain</label>
             <input type="range" id="radio-gain" class="radio-slider" min="0" max="50" step="0.5" value="0" />
             <label class="radio-auto-label"><input type="checkbox" id="radio-gain-auto" checked /> Auto</label>
             <span class="radio-value" id="radio-gain-value">auto</span>
           </div>
           <div class="radio-control-row">
-            <label class="radio-control-label">Squelch</label>
+            <label class="radio-control-label" for="radio-squelch">Squelch</label>
             <input type="range" id="radio-squelch" class="radio-slider" min="0" max="500" step="1" value="0" />
             <span class="radio-value" id="radio-squelch-value">0</span>
           </div>
           <div class="radio-control-row">
-            <label class="radio-control-label">Volume</label>
+            <label class="radio-control-label" for="radio-volume">Volume</label>
             <input type="range" id="radio-volume" class="radio-slider" min="0" max="100" step="1" value="75" />
             <span class="radio-value" id="radio-volume-value">75%</span>
           </div>
@@ -1051,25 +1075,25 @@
             </div>
             <div class="radio-vu-meter">
               <label class="radio-meter-label">Audio</label>
-              <canvas id="radio-vu-canvas" width="140" height="20"></canvas>
+              <canvas id="radio-vu-canvas" width="140" height="20" role="img" aria-label="Live radio audio level"></canvas>
               <span class="radio-value radio-vu-dbfs" id="radio-vu-dbfs">--</span>
             </div>
           </div>
         </div>
         <div class="radio-signal-sparkline" id="radio-signal-sparkline"></div>
 
-        <canvas id="radio-fft-canvas" class="radio-fft-canvas" width="400" height="48"></canvas>
+        <canvas id="radio-fft-canvas" class="radio-fft-canvas" width="400" height="48" role="img" aria-label="Live radio audio spectrum"></canvas>
 
         <div class="radio-presets" id="radio-presets"></div>
 
-        <div class="radio-favorites" id="radio-favorites" style="display:none">
+        <div class="radio-favorites csp-initial-hidden" id="radio-favorites">
           <div class="radio-favorites-header">
             <span>Favorites</span>
           </div>
           <div class="radio-favorites-list" id="radio-favorites-list"></div>
         </div>
 
-        <div class="radio-recordings" id="radio-recordings" style="display:none">
+        <div class="radio-recordings csp-initial-hidden" id="radio-recordings">
           <div class="radio-recordings-header">
             <span>Recordings</span>
           </div>
@@ -1077,15 +1101,15 @@
         </div>
 
       </div>
-    </div>
+    </section>
 
     <!-- LoRa Link Tester -->
-    <div class="section" id="link-tester-section" style="display:none">
-      <div class="section-header collapsible" id="link-tester-toggle" title="Click to expand">
+    <section class="section {{FEATURE:link-tester}}" id="link-tester-section" aria-label="LoRa Link Tester">
+      <button type="button" class="section-header collapsible" id="link-tester-toggle" aria-expanded="false" aria-controls="link-tester-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> LoRa Link Tester</span>
         <span class="link-tester-pill" id="link-tester-pill">--</span>
-      </div>
-      <div class="section-body hidden" id="link-tester-body">
+      </button>
+      <div class="section-body hidden" id="link-tester-body" hidden>
         <div class="lt-controls">
           <label class="lt-label">Target
             <input type="text" id="link-tester-target" class="lt-input" placeholder="!abcd1234" spellcheck="false">
@@ -1100,187 +1124,212 @@
         <div id="link-tester-summary" class="lt-summary">No data yet</div>
         <div class="lt-chart-wrap">
           <div class="lt-chart-label">Round-Trip Time</div>
-          <svg id="link-tester-rtt-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart"></svg>
+          <svg id="link-tester-rtt-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart" role="img" aria-label="LoRa link round-trip time chart" aria-describedby="link-tester-summary link-tester-log-caption"></svg>
         </div>
         <div class="lt-chart-wrap">
           <div class="lt-chart-label">Signal Quality</div>
-          <svg id="link-tester-signal-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart"></svg>
+          <svg id="link-tester-signal-chart" viewBox="0 0 800 200" preserveAspectRatio="none" class="lt-chart" role="img" aria-label="LoRa link signal quality chart" aria-describedby="link-tester-summary link-tester-log-caption"></svg>
         </div>
         <div class="lt-log-wrap">
           <table class="data-table lt-log">
-            <thead><tr><th>#</th><th>Time</th><th>RTT</th><th>RSSI</th><th>SNR</th><th>Status</th></tr></thead>
+            <caption class="sr-only" id="link-tester-log-caption">LoRa link test results</caption>
+            <thead><tr><th scope="col">#</th><th scope="col">Time</th><th scope="col">RTT</th><th scope="col">RSSI</th><th scope="col">SNR</th><th scope="col">Status</th></tr></thead>
             <tbody id="link-tester-log-body"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Weather Alerts (SAME) -->
-    <div class="section awaiting-data" id="weather-alert-section" style="display:none">
-      <div class="section-header collapsible" id="weather-alert-toggle" title="Click to expand">
+    <section class="section awaiting-data {{FEATURE:weather-alert}}" id="weather-alert-section" aria-label="Weather Alerts">
+      <button type="button" class="section-header collapsible" id="weather-alert-toggle" aria-expanded="false" aria-controls="weather-alert-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Weather Alerts <span class="svc-tag svc-tag-wx">SAME</span></span>
         <span class="count" id="weather-alert-status"></span>
-      </div>
-      <div class="section-body hidden" id="weather-alert-body">
+      </button>
+      <div class="section-body hidden" id="weather-alert-body" hidden>
         <div class="metric-summary" id="weather-alert-stats"></div>
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>Areas</th></tr></thead>
+            <caption class="sr-only">Weather Alerts data</caption>
+            <thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">Severity</th><th scope="col">Areas</th></tr></thead>
             <tbody id="weather-alert-table"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- AIS Vessel Tracking -->
-    <div class="section awaiting-data" id="ais-section" style="display:none">
-      <div class="section-header collapsible" id="ais-toggle" title="Click to expand">
+    <section class="section awaiting-data {{FEATURE:ais}}" id="ais-section" aria-label="AIS Vessels">
+      <button type="button" class="section-header collapsible" id="ais-toggle" aria-expanded="false" aria-controls="ais-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> AIS Vessels <span class="svc-tag svc-tag-ais">AIS</span></span>
         <span class="svc-status" id="ais-status"></span> <span class="count" id="ais-count">0</span>
-      </div>
-      <div class="section-body hidden" id="ais-body">
+      </button>
+      <div class="section-body hidden" id="ais-body" hidden>
         <div class="metric-summary" id="ais-stats"></div>
         <div class="table-scroll" id="ais-table-wrap">
           <table class="data-table">
-            <thead><tr><th data-sort="name">Name</th><th data-sort="mmsi">MMSI</th><th data-sort="ship_type_desc">Type</th><th data-sort="sog_knots">Speed</th><th data-sort="cog_deg">Course</th><th>Status</th><th data-sort="last_seen">Last Seen</th></tr></thead>
+            <caption class="sr-only">AIS Vessels data</caption>
+            <thead><tr><th scope="col" data-sort="name">Name</th><th scope="col" data-sort="mmsi">MMSI</th><th scope="col" data-sort="ship_type_desc">Type</th><th scope="col" data-sort="sog_knots">Speed</th><th scope="col" data-sort="cog_deg">Course</th><th scope="col">Status</th><th scope="col" data-sort="last_seen">Last Seen</th></tr></thead>
             <tbody id="ais-table"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- ACARS Messages -->
-    <div class="section awaiting-data" id="acars-section" style="display:none">
-      <div class="section-header collapsible" id="acars-toggle" title="Click to expand">
+    <section class="section awaiting-data {{FEATURE:acars}}" id="acars-section" aria-label="ACARS Messages">
+      <button type="button" class="section-header collapsible" id="acars-toggle" aria-expanded="false" aria-controls="acars-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> ACARS Messages <span class="svc-tag svc-tag-acars">ACARS</span></span>
         <span class="svc-status" id="acars-status"></span> <span class="count" id="acars-count">0</span>
-      </div>
-      <div class="section-body hidden" id="acars-body">
+      </button>
+      <div class="section-body hidden" id="acars-body" hidden>
         <div class="metric-summary" id="acars-stats"></div>
-        <div class="table-scroll" style="max-height:400px">
+        <div class="table-scroll scroll-max-400">
           <table class="data-table">
-            <thead><tr><th>Time</th><th>Flight</th><th>Tail</th><th>Freq</th><th>Label</th><th>Text</th></tr></thead>
+            <caption class="sr-only">ACARS Messages data</caption>
+            <thead><tr><th scope="col">Time</th><th scope="col">Flight</th><th scope="col">Tail</th><th scope="col">Freq</th><th scope="col">Label</th><th scope="col">Text</th></tr></thead>
             <tbody id="acars-table"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Radiosonde Tracker -->
-    <div class="section awaiting-data" id="radiosonde-section" style="display:none">
-      <div class="section-header collapsible" id="radiosonde-toggle" title="Click to expand">
+    <section class="section awaiting-data {{FEATURE:radiosonde}}" id="radiosonde-section" aria-label="Radiosonde Tracker">
+      <button type="button" class="section-header collapsible" id="radiosonde-toggle" aria-expanded="false" aria-controls="radiosonde-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Radiosonde Tracker <span class="svc-tag svc-tag-sonde">Sonde</span></span>
         <span class="count" id="radiosonde-status"></span>
-      </div>
-      <div class="section-body hidden" id="radiosonde-body">
+      </button>
+      <div class="section-body hidden" id="radiosonde-body" hidden>
         <div class="radiosonde-cards" id="radiosonde-cards"></div>
         <div class="radiosonde-next" id="radiosonde-next"></div>
-        <canvas id="radiosonde-chart" class="radiosonde-chart" width="600" height="200"></canvas>
+        <canvas id="radiosonde-chart" class="radiosonde-chart" width="600" height="200" role="img" aria-label="Radiosonde altitude and signal history"></canvas>
         <div class="table-scroll" id="radiosonde-history-wrap">
           <table class="data-table">
-            <thead><tr><th>ID</th><th>Type</th><th>Max Alt</th><th>Frames</th><th>Duration</th></tr></thead>
+            <caption class="sr-only">Radiosonde Tracker data</caption>
+            <thead><tr><th scope="col">ID</th><th scope="col">Type</th><th scope="col">Max Alt</th><th scope="col">Frames</th><th scope="col">Duration</th></tr></thead>
             <tbody id="radiosonde-history"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- NOAA APT Satellite Images -->
-    <div class="section awaiting-data" id="noaa-section" style="display:none">
-      <div class="section-header collapsible" id="noaa-toggle" title="Click to expand">
+    <section class="section awaiting-data {{FEATURE:noaa}}" id="noaa-section" aria-label="NOAA Satellite Images">
+      <button type="button" class="section-header collapsible" id="noaa-toggle" aria-expanded="false" aria-controls="noaa-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> NOAA Satellite Images <span class="svc-tag svc-tag-noaa">APT</span></span>
         <span class="count" id="noaa-status"></span>
-      </div>
-      <div class="section-body hidden" id="noaa-body">
-        <div class="noaa-progress" id="noaa-progress" style="display:none"></div>
+      </button>
+      <div class="section-body hidden" id="noaa-body" hidden>
+        <div class="noaa-progress csp-initial-hidden" id="noaa-progress"></div>
         <div class="metric-summary" id="noaa-stats"></div>
         <div class="noaa-gallery" id="noaa-gallery"></div>
         <div class="noaa-passes" id="noaa-passes"></div>
       </div>
-    </div>
+    </section>
 
     <!-- Plugins (collapsed by default) -->
-    <div class="section" id="plugins-section">
-      <div class="section-header collapsible" id="plugins-toggle" title="Click to expand">
+    <section class="section" id="plugins-section" aria-label="Plugins">
+      <button type="button" class="section-header collapsible" id="plugins-toggle" aria-expanded="false" aria-controls="plugins-body" title="Click to expand">
         <span><span class="chevron">&#9656;</span> Plugins</span>
         <span class="count" id="plugin-count"></span>
-      </div>
-      <div class="section-body hidden" id="plugins-body">
+      </button>
+      <div class="section-body hidden" id="plugins-body" hidden>
         <div class="table-wrap">
           <table class="data-table">
+            <caption class="sr-only">Plugins data</caption>
             <thead>
-              <tr><th>Name</th><th>Version</th><th>Status</th><th>Address</th><th>Details</th></tr>
+              <tr><th scope="col">Name</th><th scope="col">Version</th><th scope="col">Status</th><th scope="col">Address</th><th scope="col">Details</th></tr>
             </thead>
             <tbody id="plugins-table"></tbody>
           </table>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Config (collapsible) -->
-    <div class="section">
-      <div class="section-header">
+    <section class="section" aria-label="Configuration">
+      <h2 class="section-header">
         <span>Configuration</span>
         <button class="config-toggle" id="config-toggle">Show</button>
-      </div>
+      </h2>
       <div class="config-content hidden" id="config-content">Loading...</div>
-    </div>
-  </div>
+    </section>
+  </main>
 
   <!-- Channel management dialog -->
-  <div class="dialog-overlay" id="channel-dialog-overlay" style="display:none">
+  <dialog class="dialog-overlay" id="channel-dialog-overlay" aria-labelledby="channel-dialog-title">
     <div class="dialog">
       <div class="dialog-header">
-        <span>Meshtastic Channels</span>
-        <button class="dialog-close" id="channel-dialog-close">&times;</button>
+        <h2 id="channel-dialog-title">Meshtastic Channels</h2>
+        <button type="button" class="dialog-close" id="channel-dialog-close" aria-label="Close channel manager">&times;</button>
       </div>
       <div class="dialog-body">
         <div id="channel-list" class="channel-list"></div>
         <div class="channel-join-form">
           <div class="channel-join-heading">Join a channel</div>
+          <label class="sr-only" for="channel-join-url">Meshtastic channel URL</label>
           <input type="text" id="channel-join-url" class="rt-input" placeholder="Meshtastic URL (https://meshtastic.org/e/#...)" />
           <div class="channel-join-or">- or -</div>
           <div class="channel-join-row">
+            <label class="sr-only" for="channel-join-name">Channel name</label>
             <input type="text" id="channel-join-name" class="rt-input" placeholder="Channel name" maxlength="11" />
+            <label class="sr-only" for="channel-join-psk">Channel pre-shared key</label>
             <input type="text" id="channel-join-psk" class="rt-input" placeholder="PSK (default: default)" />
           </div>
           <div class="channel-join-actions">
             <button id="channel-join-btn" class="msg-send-btn">Join</button>
-            <span class="msg-feedback" id="channel-join-feedback"></span>
+            <span class="msg-feedback" id="channel-join-feedback" role="status" aria-live="polite"></span>
           </div>
         </div>
       </div>
     </div>
-  </div>
+  </dialog>
 
-  <!-- errlog.js must load before app.js -- defer preserves order, so it catches app.js eval-time errors. -->
-  <script defer src="/static/errlog.js?v=1"></script>
-  <script defer src="/static/app.js?v=40"></script>
-  <script defer src="/static/messages_panel.js?v=8"></script>
-  <script defer src="/static/messages_lxmf.js?v=1"></script>
-  <script defer src="/static/mqtt_feed.js?v=1"></script>
-  <script defer src="/static/messages_meshtastic_lora.js?v=1"></script>
-  <script defer src="/static/messages_meshcore.js?v=1"></script>
-  <script defer src="/static/mesh_bridge_panel.js?v=1"></script>
-  <script defer src="/static/mesh.js?v=23"></script>
-  <script defer src="/static/lora.js?v=23"></script>
-  <script defer src="/static/routing.js?v=23"></script>
-  <script defer src="/static/meshtastic.js?v=25"></script>
-  <script defer src="/static/node_tracker.js?v=4"></script>
-  <script defer src="/static/meshcore.js?v=3"></script>
-  <script defer src="/static/vendor/leaflet.js"></script>
-  <script defer src="/static/map.js?v=10"></script>
-  <script defer src="/static/gps.js?v=3"></script>
-  <script defer src="/static/space.js?v=2"></script>
-  <script defer src="/static/adsb.js?v=1"></script>
-  <script defer src="/static/radio.js?v=1"></script>
-  <script defer src="/static/ntp.js?v=1"></script>
-  <script defer src="/static/link_tester.js?v=1"></script>
-  <script defer src="/static/hotspot.js?v=1"></script>
-  <script defer src="/static/weather_alert.js?v=1"></script>
-  <script defer src="/static/ais.js?v=1"></script>
-  <script defer src="/static/acars.js?v=1"></script>
-  <script defer src="/static/radiosonde.js?v=1"></script>
-  <script defer src="/static/noaa.js?v=1"></script>
+  <dialog class="confirm-dialog" id="destructive-dialog" aria-labelledby="destructive-dialog-title" aria-describedby="destructive-dialog-message">
+    <form class="confirm-dialog-form" method="dialog">
+      <h2 id="destructive-dialog-title">Confirm action</h2>
+      <p id="destructive-dialog-message"></p>
+      <div class="confirm-dialog-actions">
+        <button type="submit" value="cancel" id="destructive-dialog-cancel">Cancel</button>
+        <button type="submit" value="confirm" class="restart-btn" id="destructive-dialog-confirm">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="confirm-dialog" id="password-change-dialog" aria-labelledby="password-change-dialog-title">
+    <form class="confirm-dialog-form" id="password-change-form">
+      <h2 id="password-change-dialog-title">Replace bootstrap password</h2>
+      <p>The generated password is temporary. Choose a new password before using the dashboard.</p>
+      <label for="current-dashboard-password">Current password</label>
+      <input class="rt-input" type="password" id="current-dashboard-password" autocomplete="current-password" required>
+      <label for="new-dashboard-password">New password</label>
+      <input class="rt-input" type="password" id="new-dashboard-password" autocomplete="new-password" minlength="12" aria-describedby="password-change-help" required>
+      <p id="password-change-help">Use at least 12 characters.</p>
+      <label for="confirm-dashboard-password">Confirm new password</label>
+      <input class="rt-input" type="password" id="confirm-dashboard-password" autocomplete="new-password" minlength="12" required>
+      <p class="error" id="password-change-feedback" role="alert" aria-live="assertive"></p>
+      <div class="confirm-dialog-actions">
+        <button type="button" id="password-change-logout">Log out</button>
+        <button type="submit" class="restart-btn" id="password-change-submit">Change password</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="confirm-dialog" id="restart-dialog" aria-labelledby="restart-dialog-title">
+    <form class="confirm-dialog-form" id="restart-dialog-form">
+      <h2 id="restart-dialog-title">Restart node services</h2>
+      <p>RNS and ReticulumPi will be briefly unavailable. Confirm with your dashboard password.</p>
+      <label for="restart-password">Dashboard password</label>
+      <input class="rt-input" type="password" id="restart-password" autocomplete="current-password" required>
+      <p class="error" id="restart-feedback" role="alert" aria-live="assertive"></p>
+      <div class="confirm-dialog-actions">
+        <button type="button" id="restart-cancel-btn">Cancel</button>
+        <button type="submit" class="restart-btn" id="restart-confirm-btn">Restart services</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script defer src="{{ASSET:dashboard.js}}"></script>
 </body>
 </html>

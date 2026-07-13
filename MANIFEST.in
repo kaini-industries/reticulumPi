@@ -1,0 +1,17 @@
+# Git-export archives expand this file directly. Ordinary sdists carry the
+# generated version module and exclude the unexpanded placeholders.
+exclude .git_archival.txt
+include .gitattributes
+include package.json
+include package-lock.json
+recursive-include constraints *.in *.txt
+recursive-include config/nomadnet/pages *.mu
+recursive-include config/reticulum config.*
+recursive-include config/reticulumpi *.yaml
+include docker/Dockerfile
+include docker/docker-compose.yml
+include docker/entrypoint.sh
+recursive-include docs *.md
+recursive-include scripts *.py *.sh
+recursive-include systemd *
+recursive-include tools *.py *.mjs

@@ -50,17 +50,16 @@
         url: trunc(location.href, 512),
         ua: trunc(navigator.userAgent, 512)
       };
-      window
-        .fetch("/api/client_error", {
+      window.RPI
+        .jsonFetch("/api/client_error", {
           method: "POST",
           keepalive: true,
           credentials: "same-origin",
           headers: {
-            "Content-Type": "application/json",
             "X-Requested-With": "XMLHttpRequest",
             Accept: "application/json"
           },
-          body: JSON.stringify(body)
+          json: body
         })
         .catch(function () {});
     } catch (e) {

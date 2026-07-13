@@ -21,9 +21,17 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.process_supervisor import (
+    ManagedProcessGroup,
+    ProcessFailure,
+    ProcessSpec,
+    RestartPolicy,
+)
 from reticulumpi.sdr_scheduler import PRIORITY_BACKGROUND
 
 _VALID_MODES = ("wbfm", "fm", "am", "usb", "lsb")
+_SCHEDULER_RESTART_DELAYS = (1.0, 2.0, 4.0, 8.0, 30.0)
+_SCHEDULER_RESTART_WINDOW_SECONDS = 600.0
 
 _MODE_DEFAULTS: dict[str, dict[str, int]] = {
     "wbfm": {"sample_rate_hz": 170_000, "output_rate_hz": 32_000},
@@ -203,6 +211,13 @@ class FMReceiver(PluginBase):
         self._volume = max(0.0, min(1.0, float(cfg.get("default_volume", 75)) / 100.0))
         self._enable_bias_tee = bool(cfg.get("enable_bias_tee", False))
         self._max_restarts = int(cfg.get("max_restarts", 5))
+        self._restart_limit = min(5, max(0, self._max_restarts))
+        self._scheduler_retry_lock = threading.Lock()
+        self._scheduler_retry_times: deque[float] = deque()
+        self._scheduler_retry_epoch = 0
+        self._scheduler_retry_pending = False
+        self._scheduler_retry_registration_id: int | None = None
+        self._preserve_restart_count_on_play = False
         self._auto_play = bool(cfg.get("auto_play", False))
         self._audio_buffer_seconds = max(1, int(cfg.get("audio_buffer_seconds", 4)))
 
@@ -323,7 +338,9 @@ class FMReceiver(PluginBase):
 
     def start(self) -> None:
         self._state_lock = threading.Lock()
+        self._process_lock = threading.RLock()
         self._process: subprocess.Popen | None = None
+        self._process_group: ManagedProcessGroup | None = None
         self._pid: int | None = None
         self._restart_count = 0
         self._rtl_fm_path: str | None = None
@@ -331,7 +348,15 @@ class FMReceiver(PluginBase):
         self._status = "stopped"
         self._playing = False
         self._resolved_index: int | None = None
+        self._device_lease = None
+        self._dongle_generation: int | None = None
         self._supervisor_alive = False
+        self._supervisor_generation = 0
+        with self._scheduler_retry_lock:
+            self._scheduler_retry_epoch += 1
+            self._scheduler_retry_times.clear()
+            self._scheduler_retry_pending = False
+            self._scheduler_retry_registration_id = None
 
         self._signal_rms: float = 0.0
         self._signal_db: float = -90.0
@@ -353,6 +378,7 @@ class FMReceiver(PluginBase):
         self._recording_file = None
         self._recording_path: str | None = None
         self._recording_start_ts: float | None = None
+        self._recording_start_monotonic: float | None = None
         self._recording_bytes = 0
         self._recording_label: str | None = None
         self._rec_lock = threading.Lock()
@@ -381,9 +407,14 @@ class FMReceiver(PluginBase):
             )
         else:
             try:
-                from reticulumpi.rtlsdr import resolve_device
+                from reticulumpi.rtlsdr import refresh_device_lease
 
-                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+                self._device_lease = refresh_device_lease(
+                    self._device_lease,
+                    self._device_id,
+                    self.plugin_name,
+                )
+                self._resolved_index = self._device_lease.index
                 self._dongle_active = True
             except (RuntimeError, ValueError) as exc:
                 self.log.error("RTL-SDR device resolution failed: %s", exc)
@@ -410,21 +441,21 @@ class FMReceiver(PluginBase):
 
     def stop(self) -> None:
         self._active = False
+        with self._scheduler_retry_lock:
+            self._scheduler_retry_epoch += 1
+            self._scheduler_retry_pending = False
+            self._scheduler_retry_registration_id = None
         if self._recording:
             self._stop_recording_internal("shutdown")
         self._playing = False
+        self._invalidate_supervisor()
         self._terminate_process()
         self._notify_clients_stopped()
         sched = getattr(self.app, "sdr_scheduler", None)
         if sched is not None and self._device_id:
             sched.unregister(self._device_id, self.plugin_name)
         else:
-            try:
-                from reticulumpi.rtlsdr import release_device
-
-                release_device(self._device_id, caller=self.plugin_name)
-            except Exception:
-                self.log.debug("SDR device release failed", exc_info=True)
+            self._release_standalone_lease()
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -432,13 +463,32 @@ class FMReceiver(PluginBase):
 
     def _on_scheduler_acquire(self, serial: str, device_index: int) -> None:
         self._resolved_index = device_index
+        scheduler = getattr(self.app, "sdr_scheduler", None)
+        allocation_getter = getattr(type(scheduler), "get_allocation_generation", None)
+        if callable(allocation_getter):
+            self._dongle_generation = allocation_getter(
+                scheduler,
+                serial,
+                self.plugin_name,
+            )
+        else:
+            generation_getter = getattr(type(scheduler), "get_generation", None)
+            self._dongle_generation = (
+                generation_getter(scheduler, serial) if callable(generation_getter) else None
+            )
         self._dongle_active = True
         self._preempted_by = ""
         self._preempted_by_label = ""
         self._preempted_until_ts = None
         self.log.info("Acquired dongle %s (index %d)", serial, device_index)
-        if self._was_playing_before_yield:
+        with self._scheduler_retry_lock:
+            retrying = self._scheduler_retry_pending
+            if retrying:
+                self._scheduler_retry_pending = False
+                self._scheduler_retry_registration_id = None
+        if self._was_playing_before_yield or retrying:
             self._was_playing_before_yield = False
+            self._preserve_restart_count_on_play = retrying
             self.play()
         elif self._auto_play:
             self.play()
@@ -453,11 +503,13 @@ class FMReceiver(PluginBase):
         if self._recording:
             self._stop_recording_internal("preempted")
         self._dongle_active = False
+        self._dongle_generation = None
         self._preempted_by = preempted_by
         self._preempted_by_label = preempted_by_label
         self._preempted_until_ts = preempted_until_ts
         if self._playing:
             self._playing = False
+            self._invalidate_supervisor()
             self._terminate_process()
             self._notify_clients_stopped()
             self._set_status("paused")
@@ -507,17 +559,25 @@ class FMReceiver(PluginBase):
         if self._resolved_index is None:
             return {"status": "error", "error": "No RTL-SDR device resolved"}
         self._playing = True
-        self._restart_count = 0
-        self._supervisor_alive = True
-        self._start_thread(self._supervisor_loop, name="fm-supervisor")
+        if not self._preserve_restart_count_on_play:
+            self._restart_count = 0
+        try:
+            self._start_supervisor()
+        except BaseException:
+            self._preserve_restart_count_on_play = False
+            raise
         return {"status": "starting", "frequency_mhz": self._frequency_hz / 1_000_000}
 
     def stop_playback(self) -> dict[str, Any]:
-        if not self._playing:
+        with self._scheduler_retry_lock:
+            retry_pending = self._scheduler_retry_pending
+        if not self._playing and not retry_pending:
             return {"status": "already_stopped"}
+        self._cancel_scheduler_retry(restore_eligibility=True)
         if self._recording:
             self._stop_recording_internal("stop")
         self._playing = False
+        self._invalidate_supervisor()
         self._terminate_process()
         self._notify_clients_stopped()
         self._set_status("stopped")
@@ -545,9 +605,7 @@ class FMReceiver(PluginBase):
             self.log.warning(self._dead_zone_warning)
 
         if self._playing:
-            self._terminate_process()
-            self._notify_clients_stopped()
-            self._restart_count = 0
+            self._restart_playback()
 
         self._persist_state()
 
@@ -575,18 +633,14 @@ class FMReceiver(PluginBase):
         self._gain_db = gain_db
         self._persist_state()
         if self._playing:
-            self._terminate_process()
-            self._notify_clients_stopped()
-            self._restart_count = 0
+            self._restart_playback()
         return {"gain_db": self._gain_db}
 
     def set_squelch(self, level: int) -> dict[str, Any]:
         self._squelch_level = max(0, int(level))
         self._persist_state()
         if self._playing:
-            self._terminate_process()
-            self._notify_clients_stopped()
-            self._restart_count = 0
+            self._restart_playback()
         return {"squelch_level": self._squelch_level}
 
     def set_volume(self, volume: float) -> dict[str, Any]:
@@ -766,6 +820,7 @@ class FMReceiver(PluginBase):
             self._recording_file = f
             self._recording_path = path
             self._recording_start_ts = time.time()
+            self._recording_start_monotonic = time.monotonic()
             self._recording_bytes = 0
             self._recording_label = label
             self._recording = True
@@ -799,12 +854,12 @@ class FMReceiver(PluginBase):
         with self._rec_lock:
             if not self._recording:
                 return {"recording": False}
-            f, path, data_bytes, start_ts = self._stop_recording_locked()
+            f, path, data_bytes, start_monotonic = self._stop_recording_locked()
 
         if f is not None:
             self._finalize_recording_file(f, data_bytes)
 
-        duration = time.time() - start_ts if start_ts else 0.0
+        duration = self._recording_elapsed(start_monotonic)
         filename = os.path.basename(path) if path else ""
         self.log.info(
             "Recording stopped (%s): %s (%.1fs)",
@@ -837,14 +892,21 @@ class FMReceiver(PluginBase):
         f = self._recording_file
         path = self._recording_path or ""
         data_bytes = self._recording_bytes
-        start_ts = self._recording_start_ts or 0.0
+        start_monotonic = self._recording_start_monotonic
         self._recording = False
         self._recording_file = None
         self._recording_path = None
         self._recording_start_ts = None
+        self._recording_start_monotonic = None
         self._recording_bytes = 0
         self._recording_label = None
-        return f, path, data_bytes, start_ts
+        return f, path, data_bytes, start_monotonic
+
+    @staticmethod
+    def _recording_elapsed(start_monotonic: float | None) -> float:
+        if start_monotonic is None:
+            return 0.0
+        return max(0.0, time.monotonic() - start_monotonic)
 
     def _finalize_recording_file(self, f, data_bytes: int) -> None:
         try:
@@ -889,18 +951,19 @@ class FMReceiver(PluginBase):
                 return
             over_size = self._recording_bytes + len(chunk) > self._max_recording_size_bytes
             over_time = (
-                self._recording_start_ts is not None
-                and time.time() - self._recording_start_ts > self._max_recording_seconds
+                self._recording_start_monotonic is not None
+                and self._recording_elapsed(self._recording_start_monotonic)
+                > self._max_recording_seconds
             )
             if over_size or over_time:
-                f, path, data_bytes, start_ts = self._stop_recording_locked()
+                f, path, data_bytes, start_monotonic = self._stop_recording_locked()
             else:
                 self._recording_file.write(chunk)
                 self._recording_bytes += len(chunk)
                 return
 
         self._finalize_recording_file(f, data_bytes)
-        duration = time.time() - start_ts if start_ts else 0.0
+        duration = self._recording_elapsed(start_monotonic)
         filename = os.path.basename(path) if path else ""
         self.log.info("Recording auto-stopped (limit): %s (%.1fs)", filename, duration)
         try:
@@ -1097,8 +1160,7 @@ class FMReceiver(PluginBase):
             snap["recording"] = {
                 "active": True,
                 "duration_seconds": round(
-                    time.time() - (self._recording_start_ts or time.time()),
-                    1,
+                    self._recording_elapsed(self._recording_start_monotonic), 1
                 ),
                 "filename": os.path.basename(self._recording_path or ""),
             }
@@ -1121,92 +1183,394 @@ class FMReceiver(PluginBase):
 
     # ── supervisor ───────────────────────────────────────────────────
 
-    def _supervisor_loop(self) -> None:
-        self._supervisor_alive = True
-        try:
-            self._supervisor_loop_inner()
-        finally:
-            self._playing = False
+    def _start_supervisor(self) -> None:
+        lock = getattr(self, "_process_lock", None)
+        if lock is None:
+            lock = self._process_lock = threading.RLock()
+        with lock:
+            self._supervisor_generation = getattr(self, "_supervisor_generation", 0) + 1
+            generation = self._supervisor_generation
+            self._supervisor_alive = True
+        self._start_thread(
+            lambda: self._supervisor_loop(generation),
+            name="fm-supervisor",
+        )
+
+    def _invalidate_supervisor(self) -> None:
+        lock = getattr(self, "_process_lock", None)
+        if lock is None:
+            self._supervisor_generation = getattr(self, "_supervisor_generation", 0) + 1
+            self._supervisor_alive = False
+            return
+        with lock:
+            self._supervisor_generation = getattr(self, "_supervisor_generation", 0) + 1
             self._supervisor_alive = False
 
-    def _supervisor_loop_inner(self) -> None:
+    def _restart_playback(self) -> None:
+        """Apply a live tuning change through a fresh supervised launch."""
+
+        self._invalidate_supervisor()
+        self._terminate_process()
+        self._notify_clients_stopped()
+        self._restart_count = 0
+        if self._active and self._playing and self._dongle_active:
+            self._start_supervisor()
+
+    def _supervisor_loop(self, generation: int | None = None) -> None:
+        if generation is None:
+            generation = getattr(self, "_supervisor_generation", 0)
+        self._supervisor_alive = True
+        try:
+            self._supervisor_loop_inner(generation)
+        finally:
+            if generation == getattr(self, "_supervisor_generation", generation):
+                self._supervisor_alive = False
+
+    def _supervisor_loop_inner(self, generation: int | None = None) -> None:
+        if generation is None:
+            generation = getattr(self, "_supervisor_generation", 0)
         self._rtl_fm_path = shutil.which("rtl_fm")
         if not self._rtl_fm_path:
             self._set_status("unavailable", "rtl_fm not found on PATH")
+            self.mark_degraded("rtl_fm not found on PATH")
             self.log.warning("rtl_fm binary not found; %s will stay idle.", self.plugin_name)
+            self._playing = False
+            self._release_sdr_after_failure()
             return
-
-        while self._active and self._playing:
-            try:
-                self._launch_rtl_fm()
-            except Exception as exc:
-                self._terminate_process()
-                self._set_status("error", f"launch failed: {exc}")
-                self.log.exception("Failed to launch rtl_fm")
-                break
-
-            reader = self._start_thread(self._audio_reader_loop, name="fm-audio-reader")
-
-            while self._active and self._playing and self._process is not None:
-                rc = self._process.poll()
-                if rc is not None:
-                    self.log.warning("rtl_fm exited (code %s)", rc)
-                    break
-                if not reader.is_alive():
-                    self.log.warning("Audio reader thread exited unexpectedly")
-                    break
-                self._sleep_while_active(1.0)
-
-            reader.join(timeout=2.0)
-            self._remove_thread(reader)
+        if (
+            generation != getattr(self, "_supervisor_generation", generation)
+            or not self._active
+            or not self._playing
+            or not self._dongle_active
+        ):
+            return
+        try:
+            self._launch_rtl_fm(generation)
+        except Exception as exc:
+            if generation != getattr(self, "_supervisor_generation", generation):
+                return
             self._terminate_process()
-
-            if not self._active or not self._playing:
-                break
-
-            self._restart_count += 1
-            if self._restart_count > self._max_restarts:
-                self._set_status(
-                    "error",
-                    f"rtl_fm exceeded max_restarts ({self._max_restarts})",
-                )
-                self.log.error(
-                    "rtl_fm exceeded max_restarts (%d); giving up",
-                    self._max_restarts,
-                )
+            self._set_status("error", f"launch failed: {exc}")
+            self.mark_degraded(str(exc))
+            if getattr(self.app, "sdr_scheduler", None) is not None:
+                if not self._schedule_scheduler_retry():
+                    self._playing = False
+            else:
                 self._playing = False
-                break
+                self._release_sdr_after_failure()
+            self.log.exception("Failed to launch rtl_fm")
 
-            backoff = min(60.0, 2.0**self._restart_count)
-            self._set_status("restarting", f"backoff {backoff:.0f}s")
-            self.log.info(
-                "Restarting rtl_fm in %.0fs (attempt %d/%d)",
-                backoff,
-                self._restart_count,
-                self._max_restarts,
-            )
-            self._sleep_while_active(backoff)
-
-    def _launch_rtl_fm(self) -> None:
+    def _launch_rtl_fm(self, generation: int | None = None) -> None:
         cmd = self._build_cmd()
         self.log.debug("Launching: %s", " ".join(cmd))
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        group: ManagedProcessGroup
+        group = ManagedProcessGroup(
+            [
+                ProcessSpec(
+                    tuple(cmd),
+                    name="rtl_fm",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            ],
+            restart_policy=RestartPolicy(
+                enabled=getattr(self.app, "sdr_scheduler", None) is None,
+                max_restarts=self._restart_limit,
+            ),
+            on_started=lambda processes, restarted: self._on_process_started(
+                group,
+                processes,
+                restarted,
+            ),
+            on_unexpected_exit=lambda failure: self._on_process_failure(group, failure),
+            on_restart=lambda attempt, delay: self._on_process_restart(
+                group,
+                attempt,
+                delay,
+            ),
+            on_restart_failed=lambda error, attempt: self._on_process_restart_failed(
+                group,
+                error,
+                attempt,
+            ),
+            on_exhausted=lambda failure: self._on_process_exhausted(group, failure),
         )
-        self._pid = self._process.pid
+        lock = getattr(self, "_process_lock", None)
+        if lock is None:
+            lock = self._process_lock = threading.RLock()
+        with lock:
+            current_generation = getattr(self, "_supervisor_generation", 0)
+            if generation is not None and generation != current_generation:
+                return
+            if not self._active or not self._playing or not self._dongle_active:
+                return
+            self._process_group = group
+        try:
+            group.start()
+        except Exception:
+            with lock:
+                if self._process_group is group:
+                    self._process_group = None
+            raise
+
+    def _on_process_started(
+        self,
+        group: ManagedProcessGroup,
+        processes: tuple[subprocess.Popen[Any], ...],
+        restarted: bool,
+    ) -> None:
+        process = processes[0]
+        if (
+            self._process_group is not group
+            or not self._active
+            or not self._playing
+            or not self._dongle_active
+        ):
+            raise RuntimeError("stale rtl_fm launch completed after playback stopped")
+        self._process = process
+        self._pid = process.pid
+        scheduler_relaunch = self._preserve_restart_count_on_play
+        if restarted:
+            self._restart_count = group.restart_count
+        elif not scheduler_relaunch:
+            self._restart_count = 0
+        self._preserve_restart_count_on_play = False
         with self._state_lock:
             self._signal_rms = 0.0
             self._signal_db = -90.0
         self._set_status("playing")
-        self._start_stderr_reader(self._process, prefix="rtl_fm")
+        self._start_stderr_reader(process, prefix="rtl_fm")
+        self._start_thread(
+            lambda: self._audio_reader_loop(process),
+            name="fm-audio-reader",
+        )
         self.log.info(
             "Started rtl_fm at %.3f MHz %s (PID %d)",
             self._frequency_hz / 1_000_000,
             self._mode.upper(),
             self._pid,
         )
+
+    def _on_process_failure(
+        self,
+        group: ManagedProcessGroup,
+        failure: ProcessFailure,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._set_status(
+            "restarting",
+            f"{failure.stage_name or 'rtl_fm'}: {failure.reason} (rc={failure.returncode})",
+        )
+        self.mark_degraded(self._last_error or failure.reason)
+        if getattr(self.app, "sdr_scheduler", None) is None:
+            self._release_standalone_lease()
+        elif not self._schedule_scheduler_retry(group):
+            self._on_process_exhausted(group, failure)
+
+    def _on_process_restart(
+        self,
+        group: ManagedProcessGroup,
+        attempt: int,
+        delay: float,
+    ) -> None:
+        if (
+            self._process_group is not group
+            or not self._active
+            or not self._playing
+            or not self._dongle_active
+        ):
+            raise RuntimeError("rtl_fm playback was stopped during restart backoff")
+        if getattr(self.app, "sdr_scheduler", None) is None:
+            from reticulumpi.rtlsdr import invalidate_cache, refresh_device_lease
+
+            invalidate_cache()
+            self._device_lease = refresh_device_lease(
+                self._device_lease,
+                self._device_id,
+                self.plugin_name,
+            )
+            self._resolved_index = self._device_lease.index
+        group.replace_specs(
+            [
+                ProcessSpec(
+                    tuple(self._build_cmd()),
+                    name="rtl_fm",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            ]
+        )
+        self._restart_count = attempt
+        self._set_status("restarting", f"backoff {delay:.0f}s")
+
+    def _on_process_restart_failed(
+        self,
+        group: ManagedProcessGroup,
+        error: BaseException,
+        attempt: int,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._restart_count = attempt
+        self._set_status("restarting", f"restart {attempt} failed: {error}")
+        self.mark_degraded(self._last_error or str(error))
+        if getattr(self.app, "sdr_scheduler", None) is None:
+            self._release_standalone_lease()
+
+    def _on_process_exhausted(
+        self,
+        group: ManagedProcessGroup,
+        failure: ProcessFailure,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._process = None
+        self._pid = None
+        self._restart_count = max(self._restart_count, group.restart_count)
+        self._playing = False
+        self._set_status(
+            "error",
+            f"rtl_fm exceeded restart limit ({self._restart_limit}): {failure.reason}",
+        )
+        self.mark_degraded(self._last_error or failure.reason)
+        self._notify_clients_stopped()
+        self._release_sdr_after_failure()
+
+    def _release_standalone_lease(self) -> None:
+        lease = getattr(self, "_device_lease", None)
+        self._device_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                self.log.debug("SDR device release failed", exc_info=True)
+
+    def _release_sdr_after_failure(self) -> int | None:
+        """Release and suspend failed scheduler ownership to prevent spin."""
+
+        scheduler = getattr(self.app, "sdr_scheduler", None)
+        registration_id: int | None = None
+        if scheduler is not None and self._device_id:
+            suspend_method = getattr(type(scheduler), "suspend", None)
+            if callable(suspend_method):
+                result = suspend_method(
+                    scheduler,
+                    self._device_id,
+                    self.plugin_name,
+                    generation=getattr(self, "_dongle_generation", None),
+                )
+                if isinstance(result, int):
+                    registration_id = result
+            else:
+                release_method = getattr(type(scheduler), "dongle_released", None)
+                if callable(release_method):
+                    release_method(
+                        scheduler,
+                        self._device_id,
+                        self.plugin_name,
+                        generation=getattr(self, "_dongle_generation", None),
+                    )
+                else:
+                    scheduler.dongle_released(self._device_id, self.plugin_name)
+            self._dongle_generation = None
+        else:
+            self._release_standalone_lease()
+        self._dongle_active = False
+        return registration_id
+
+    def _schedule_scheduler_retry(self, group: ManagedProcessGroup | None = None) -> bool:
+        """Back off with no lease, then ask the scheduler to arbitrate again."""
+
+        scheduler = getattr(self.app, "sdr_scheduler", None)
+        resume_method = getattr(type(scheduler), "resume", None)
+        registration_id = self._release_sdr_after_failure()
+        if registration_id is None or not callable(resume_method):
+            return False
+
+        now = time.monotonic()
+        with self._scheduler_retry_lock:
+            cutoff = now - _SCHEDULER_RESTART_WINDOW_SECONDS
+            while self._scheduler_retry_times and self._scheduler_retry_times[0] < cutoff:
+                self._scheduler_retry_times.popleft()
+            if len(self._scheduler_retry_times) >= self._restart_limit:
+                return False
+            self._scheduler_retry_times.append(now)
+            attempt = len(self._scheduler_retry_times)
+            delay = _SCHEDULER_RESTART_DELAYS[min(attempt - 1, len(_SCHEDULER_RESTART_DELAYS) - 1)]
+            self._scheduler_retry_epoch += 1
+            retry_epoch = self._scheduler_retry_epoch
+            self._scheduler_retry_pending = True
+            self._scheduler_retry_registration_id = registration_id
+            self._restart_count += 1
+
+        self._process_group = None
+        self._process = None
+        self._pid = None
+        self._playing = False
+        self._was_playing_before_yield = True
+        self._invalidate_supervisor()
+
+        def _resume_after_backoff() -> None:
+            if self._stop_event.wait(delay) or not self._active:
+                return
+            with self._scheduler_retry_lock:
+                if retry_epoch != self._scheduler_retry_epoch or not self._scheduler_retry_pending:
+                    return
+            try:
+                resumed = resume_method(
+                    scheduler,
+                    self._device_id,
+                    self.plugin_name,
+                    registration_id=registration_id,
+                )
+            except Exception:
+                self.log.exception("FM SDR scheduler resume failed")
+                resumed = False
+            if not resumed:
+                with self._scheduler_retry_lock:
+                    if retry_epoch == self._scheduler_retry_epoch:
+                        self._scheduler_retry_pending = False
+                        self._scheduler_retry_registration_id = None
+                self._was_playing_before_yield = False
+                self._set_status("error", "SDR scheduler retry registration became stale")
+
+        try:
+            self._start_thread(_resume_after_backoff, name="fm-sdr-retry")
+        except BaseException:
+            if group is not None:
+                self._process_group = group
+            with self._scheduler_retry_lock:
+                if retry_epoch == self._scheduler_retry_epoch:
+                    self._scheduler_retry_pending = False
+                    self._scheduler_retry_registration_id = None
+            self.log.exception("Failed to start FM scheduler retry worker")
+            return False
+        self._set_status("restarting", f"backoff {delay:.0f}s")
+        return True
+
+    def _cancel_scheduler_retry(self, *, restore_eligibility: bool) -> None:
+        """Cancel a delayed FM restart, optionally unsuspending its slot."""
+
+        with self._scheduler_retry_lock:
+            registration_id = self._scheduler_retry_registration_id
+            was_pending = self._scheduler_retry_pending
+            self._scheduler_retry_epoch += 1
+            self._scheduler_retry_pending = False
+            self._scheduler_retry_registration_id = None
+        self._was_playing_before_yield = False
+        self._preserve_restart_count_on_play = False
+        if not restore_eligibility or not was_pending or registration_id is None:
+            return
+        scheduler = getattr(self.app, "sdr_scheduler", None)
+        resume_method = getattr(type(scheduler), "resume", None)
+        if callable(resume_method):
+            resume_method(
+                scheduler,
+                self._device_id,
+                self.plugin_name,
+                registration_id=registration_id,
+            )
 
     def _build_cmd(self) -> list[str]:
         assert self._rtl_fm_path is not None
@@ -1239,13 +1603,13 @@ class FMReceiver(PluginBase):
 
     # ── audio reader ─────────────────────────────────────────────────
 
-    def _audio_reader_loop(self) -> None:
-        proc = self._process
+    def _audio_reader_loop(self, proc: subprocess.Popen[Any] | None = None) -> None:
+        proc = proc or self._process
         if proc is None or proc.stdout is None:
             return
         stream = proc.stdout
         try:
-            while self._active and self._playing:
+            while self._active and self._playing and self._process is proc:
                 chunk = stream.read(_CHUNK_BYTES)
                 if not chunk:
                     break
@@ -1262,6 +1626,16 @@ class FMReceiver(PluginBase):
             pass
         except Exception:
             self.log.exception("Audio reader loop crashed")
+        finally:
+            group = getattr(self, "_process_group", None)
+            if (
+                self._active
+                and self._playing
+                and self._process is proc
+                and group is not None
+                and group.running
+            ):
+                group.notify_unexpected_eof(0, "rtl_fm audio stream reached EOF")
 
     @staticmethod
     def _apply_volume(chunk: bytes, volume: float) -> bytes:
@@ -1284,7 +1658,7 @@ class FMReceiver(PluginBase):
         rms = math.sqrt(sum_sq / n_samples)
         db = 20.0 * math.log10(max(rms, 1.0)) - 90.0
 
-        now = time.time()
+        now = time.monotonic()
         squelch_open = rms > 500
 
         with self._state_lock:
@@ -1304,31 +1678,20 @@ class FMReceiver(PluginBase):
     # ── process management ───────────────────────────────────────────
 
     def _terminate_process(self) -> None:
-        proc = self._process
-        self._process = None
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.log.warning("rtl_fm did not stop; sending SIGKILL")
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        self.log.warning("rtl_fm did not exit after SIGKILL")
-        except Exception:
-            self.log.exception("Error stopping rtl_fm")
-        finally:
-            for f in (proc.stdout, proc.stderr):
-                if f:
-                    try:
-                        f.close()
-                    except OSError:
-                        pass
+        lock = getattr(self, "_process_lock", None)
+        if lock is None:
+            group = getattr(self, "_process_group", None)
+            self._process_group = None
+            self._process = None
+            self._pid = None
+        else:
+            with lock:
+                group = getattr(self, "_process_group", None)
+                self._process_group = None
+                self._process = None
+                self._pid = None
+        if group is not None:
+            group.stop()
 
     def _set_status(self, status: str, error: str | None = None) -> None:
         with self._state_lock:

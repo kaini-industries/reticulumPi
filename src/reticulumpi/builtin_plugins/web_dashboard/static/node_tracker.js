@@ -270,7 +270,7 @@
     if (!_dom.tbody) return;
     var ids = Object.keys(_trackedIds);
     if (!ids.length) {
-      _dom.tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:1.5rem">Search for nodes above to start tracking</td></tr>';
+      _dom.tbody.innerHTML = '<tr><td colspan="5" class="dashboard-empty-cell">Search for nodes above to start tracking</td></tr>';
       return;
     }
     var html = '';
@@ -296,7 +296,7 @@
       html += '<tr>'
         + '<td><span class="nt-status ' + statusClass + '"></span></td>'
         + '<td>' + esc(name) + ' <span class="svc-tag ' + srcClass + ' nt-source-badge">' + src + '</span></td>'
-        + '<td style="font-family:var(--mono);font-size:0.8em">' + esc(id) + '</td>'
+        + '<td class="dashboard-mono-compact">' + esc(id) + '</td>'
         + '<td>' + esc(pos) + '</td>'
         + '<td>' + esc(timeStr) + '</td>'
         + '</tr>';

@@ -15,13 +15,17 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import RNS
 import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi import events
-from reticulumpi.plugin_base import PluginBase
+from reticulumpi.lxmf_compat import create_lxm_router
+from reticulumpi.migrations import Migration, MigrationTarget
+from reticulumpi.plugin_base import PluginBase, resolve_ready_plugin
+from reticulumpi.runtime_metrics import instrument_sqlite_class
 
 if TYPE_CHECKING:
     pass
@@ -86,6 +90,7 @@ class TransportAdapter:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@instrument_sqlite_class
 class MessageStore:
     """Thread-safe SQLite message store for all transports."""
 
@@ -93,30 +98,38 @@ class MessageStore:
         self._db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
-        # Separate read-only connection: WAL mode supports concurrent
-        # readers, so read queries no longer block behind writes.
-        self._read_conn = sqlite3.connect(
-            db_path,
-            check_same_thread=False,
-            timeout=10,
-        )
-        self._read_conn.execute("PRAGMA query_only=ON")
-        self._read_conn.row_factory = sqlite3.Row
-        self._read_lock = threading.Lock()
-        # Wall-clock timestamps can jump backwards (NTP correction, manual
-        # clock changes). Track the highest timestamp we've written so we
-        # can keep the stored message order monotonic even across a jump.
-        self._last_ts: float = 0.0
-        self._create_tables()
-        # Seed from DB so a post-restart clock regression doesn't bury new
-        # messages below the pre-restart high-water mark.
-        row = self._conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()
-        if row and row[0] is not None:
-            self._last_ts = row[0]
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.row_factory = sqlite3.Row
+            self._lock = threading.Lock()
+            # Separate read-only connection: WAL mode supports concurrent
+            # readers, so read queries no longer block behind writes.
+            self._read_conn = sqlite3.connect(
+                db_path,
+                check_same_thread=False,
+                timeout=10,
+            )
+            try:
+                self._read_conn.execute("PRAGMA query_only=ON")
+                self._read_conn.row_factory = sqlite3.Row
+                self._read_lock = threading.Lock()
+                # Wall-clock timestamps can jump backwards (NTP correction,
+                # manual clock changes). Track the highest timestamp we've
+                # written so stored message order stays monotonic.
+                self._last_ts: float = 0.0
+                self._create_tables()
+                # Seed from DB so a post-restart clock regression doesn't
+                # bury new messages below the pre-restart high-water mark.
+                row = self._conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()
+                if row and row[0] is not None:
+                    self._last_ts = row[0]
+            except BaseException:
+                self._read_conn.close()
+                raise
+        except BaseException:
+            self._conn.close()
+            raise
 
     def _create_tables(self) -> None:
         with self._lock:
@@ -889,10 +902,25 @@ class LXMFAdapter(TransportAdapter):
         # Uses its own lock to avoid contention with _pending_lock.
         self._identity_cache: dict[str, tuple[Any, float]] = {}
         self._identity_cache_lock = threading.Lock()
+        # OUT destinations are reused per peer and owned by the parent plugin
+        # lifecycle. This prevents one registered RNS destination per send.
+        self._outbound_destinations: dict[bytes, Any] = {}
+        self._destination_lock = threading.Lock()
+        self._active = False
+
+    def _own_destination(self, destination: Any) -> Any:
+        """Attach an adapter destination to a real PluginBase owner.
+
+        Some external adapter test harnesses use lightweight hub objects; the
+        class-level lookup preserves that compatibility without mistaking a
+        dynamically-created mock attribute for lifecycle support.
+        """
+        manager = getattr(type(self._hub), "manage_destination", None)
+        if not callable(manager):
+            return destination
+        return manager(self._hub, destination)
 
     def start(self) -> None:
-        import LXMF
-
         cfg = self._hub.config.get("lxmf", {})
         storage_path = os.path.expanduser(cfg.get("storage_path", _DEFAULT_LXMF_STORAGE))
         os.makedirs(storage_path, exist_ok=True)
@@ -917,23 +945,16 @@ class LXMFAdapter(TransportAdapter):
             self._identity.to_file(identity_path)
             self._hub.log.info("Created new messaging LXMF identity at %s", identity_path)
 
-        # LXMRouter.__init__ registers a SIGINT handler which only works
-        # on the main thread.  When plugin startup runs in a worker thread
-        # (for timeout enforcement), this raises ValueError.  Suppress it
-        # by mocking signal.signal for the duration of the init call.
-        if threading.current_thread() is not threading.main_thread():
-            from unittest.mock import patch as _mock_patch
-
-            with _mock_patch("signal.signal"):
-                self._router = LXMF.LXMRouter(storagepath=storage_path)
-        else:
-            self._router = LXMF.LXMRouter(storagepath=storage_path)
+        self._router = create_lxm_router(storagepath=storage_path)
         display_name = cfg.get("display_name") or f"{self._hub.app.node_name} Messages"
-        self._destination = self._router.register_delivery_identity(
-            self._identity,
-            display_name=display_name,
+        self._destination = self._own_destination(
+            self._router.register_delivery_identity(
+                self._identity,
+                display_name=display_name,
+            )
         )
         self._router.register_delivery_callback(self._on_lxmf_message)
+        self._active = True
 
         # Auto-select nearest propagation node for store-and-forward
         self._announce_sub = self._hub.announce_dispatcher.subscribe(
@@ -947,16 +968,19 @@ class LXMFAdapter(TransportAdapter):
         )
 
     def stop(self) -> None:
+        self._active = False
         if self._announce_sub:
             self._hub.announce_dispatcher.unsubscribe(self._announce_sub)
         if self._router:
             self._router.register_delivery_callback(None)
+        with self._destination_lock:
+            self._outbound_destinations.clear()
 
     def send(self, text: str, destination: str, **kwargs: Any) -> dict[str, Any]:
         """Send an LXMF message to a destination hash (hex string)."""
         import LXMF
 
-        if not self._router or not self._destination:
+        if not self._active or not self._router or not self._destination:
             return {"sent": False, "reason": "LXMF adapter not started"}
 
         try:
@@ -965,7 +989,7 @@ class LXMFAdapter(TransportAdapter):
             return {"sent": False, "reason": f"Invalid destination hash: {destination}"}
 
         # Warm path if path_warmer is available
-        warmer = self._hub.app.get_plugin("path_warmer")
+        warmer = resolve_ready_plugin(self._hub, "path_warmer")
         if warmer and hasattr(warmer, "ensure_path"):
             try:
                 warmer.ensure_path(dest_hash, interactive=True)
@@ -978,13 +1002,19 @@ class LXMFAdapter(TransportAdapter):
             return {"sent": False, "reason": "Path not found, requested"}
 
         try:
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
+            with self._destination_lock:
+                dest = self._outbound_destinations.get(dest_hash)
+                if dest is None:
+                    dest = self._own_destination(
+                        RNS.Destination(
+                            dest_identity,
+                            RNS.Destination.OUT,
+                            RNS.Destination.SINGLE,
+                            "lxmf",
+                            "delivery",
+                        )
+                    )
+                    self._outbound_destinations[dest_hash] = dest
             msg = LXMF.LXMessage(
                 dest,
                 self._destination,
@@ -1114,7 +1144,7 @@ class LXMFAdapter(TransportAdapter):
         return []
 
     def is_available(self) -> bool:
-        return self._router is not None and self._destination is not None
+        return self._active and self._router is not None and self._destination is not None
 
     @property
     def address(self) -> str | None:
@@ -1126,7 +1156,7 @@ class LXMFAdapter(TransportAdapter):
     def _resolve_lxmf_name(self, dest_hash_hex: str) -> str | None:
         """Look up an LXMF peer's announced display name via network_map."""
         try:
-            nm = self._hub.app.get_plugin("network_map")
+            nm = resolve_ready_plugin(self._hub, "network_map")
             if nm and hasattr(nm, "get_node_name"):
                 return nm.get_node_name(dest_hash_hex)
         except Exception:
@@ -1135,7 +1165,7 @@ class LXMFAdapter(TransportAdapter):
 
     def _on_lxmf_message(self, message: Any) -> None:
         """Handle an incoming LXMF message and notify the hub."""
-        if not self._hub_callback:
+        if not self._active or not self._hub_callback:
             return
         try:
             sender_hash = message.source_hash.hex()
@@ -1424,7 +1454,7 @@ class MeshtasticAdapter(TransportAdapter):
                 break
         if packet_id is None or not peer_id:
             return
-        gw = self._hub.app.get_plugin("meshtastic_gateway")
+        gw = resolve_ready_plugin(self._hub, "meshtastic_gateway")
         if not gw or not hasattr(gw, "send_read_receipt"):
             return
         result = gw.send_read_receipt(packet_id, peer_id)
@@ -1491,7 +1521,7 @@ class MeshtasticAdapter(TransportAdapter):
     def _resolve_node_name(self, node_id: str) -> str | None:
         """Look up a Meshtastic node's human-readable name from the gateway."""
         try:
-            gw = self._hub.app.get_plugin("meshtastic_gateway")
+            gw = resolve_ready_plugin(self._hub, "meshtastic_gateway")
             if not gw or not hasattr(gw, "get_meshtastic_nodes"):
                 return None
             for n in gw.get_meshtastic_nodes():
@@ -1502,7 +1532,7 @@ class MeshtasticAdapter(TransportAdapter):
         return None
 
     def send(self, text: str, destination: str, **kwargs: Any) -> dict[str, Any]:
-        gw = self._hub.app.get_plugin("meshtastic_gateway")
+        gw = resolve_ready_plugin(self._hub, "meshtastic_gateway")
         if not gw or not hasattr(gw, "send_message"):
             return {"sent": False, "reason": "meshtastic_gateway plugin not available"}
         dest_id = destination if destination and destination != "broadcast" else None
@@ -1587,7 +1617,7 @@ class MeshtasticAdapter(TransportAdapter):
         return result
 
     def get_contacts(self) -> list[dict[str, Any]]:
-        gw = self._hub.app.get_plugin("meshtastic_gateway")
+        gw = resolve_ready_plugin(self._hub, "meshtastic_gateway")
         if not gw or not hasattr(gw, "get_meshtastic_nodes"):
             return []
         return [
@@ -1602,7 +1632,7 @@ class MeshtasticAdapter(TransportAdapter):
         ]
 
     def is_available(self) -> bool:
-        gw = self._hub.app.get_plugin("meshtastic_gateway")
+        gw = resolve_ready_plugin(self._hub, "meshtastic_gateway")
         if not gw:
             return False
         try:
@@ -1716,7 +1746,7 @@ class MeshCoreAdapter(TransportAdapter):
     def _resolve_contact_name(self, public_key: str) -> str | None:
         """Look up a MeshCore contact name from the gateway."""
         try:
-            gw = self._hub.app.get_plugin("meshcore_gateway")
+            gw = resolve_ready_plugin(self._hub, "meshcore_gateway")
             if not gw or not hasattr(gw, "get_meshcore_nodes"):
                 return None
             for n in gw.get_meshcore_nodes():
@@ -1727,7 +1757,7 @@ class MeshCoreAdapter(TransportAdapter):
         return None
 
     def send(self, text: str, destination: str, **kwargs: Any) -> dict[str, Any]:
-        gw = self._hub.app.get_plugin("meshcore_gateway")
+        gw = resolve_ready_plugin(self._hub, "meshcore_gateway")
         if not gw or not hasattr(gw, "send_message"):
             return {"sent": False, "reason": "meshcore_gateway plugin not available"}
         dest = destination if destination and destination != "broadcast" else None
@@ -1736,7 +1766,7 @@ class MeshCoreAdapter(TransportAdapter):
         return result
 
     def get_contacts(self) -> list[dict[str, Any]]:
-        gw = self._hub.app.get_plugin("meshcore_gateway")
+        gw = resolve_ready_plugin(self._hub, "meshcore_gateway")
         if not gw or not hasattr(gw, "get_meshcore_nodes"):
             return []
         return [
@@ -1750,7 +1780,7 @@ class MeshCoreAdapter(TransportAdapter):
         ]
 
     def is_available(self) -> bool:
-        gw = self._hub.app.get_plugin("meshcore_gateway")
+        gw = resolve_ready_plugin(self._hub, "meshcore_gateway")
         if not gw:
             return False
         try:
@@ -1773,6 +1803,46 @@ class MessagingHubPlugin(PluginBase):
     plugin_description = "Unified message store and chat hub for LXMF, Meshtastic, and MeshCore"
     broadcast_tier = 0
     broadcast_keys = "messaging"
+
+    def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
+        """Adopt the legacy message store under the transactional registry.
+
+        Conversation-column upgrades remain in the deprecated idempotent
+        adapter through 0.4.x so databases created by every 0.2 release can
+        be adopted without guessing which optional backfill already ran.
+        """
+
+        path = Path(os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH)))
+        return (
+            MigrationTarget(
+                "messaging_hub",
+                path,
+                (
+                    Migration(
+                        1,
+                        "adopt legacy message store",
+                        (
+                            """CREATE TABLE IF NOT EXISTS messages (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                timestamp REAL NOT NULL,
+                                transport TEXT NOT NULL,
+                                direction TEXT NOT NULL,
+                                msg_type TEXT NOT NULL,
+                                from_id TEXT,
+                                from_name TEXT,
+                                to_id TEXT,
+                                to_name TEXT,
+                                text TEXT NOT NULL,
+                                status TEXT DEFAULT 'sent',
+                                metadata TEXT
+                            )""",
+                            "CREATE INDEX IF NOT EXISTS idx_msg_ts ON messages(timestamp)",
+                            "CREATE INDEX IF NOT EXISTS idx_msg_transport ON messages(transport)",
+                        ),
+                    ),
+                ),
+            ),
+        )
 
     def validate_config(self) -> None:
         limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)
@@ -2118,7 +2188,7 @@ class MessagingHubPlugin(PluginBase):
                     to_name = c.get("name")
                     break
         if not to_name and transport == "lxmf":
-            nm = self.app.get_plugin("network_map")
+            nm = self.get_ready_plugin("network_map")
             if nm and hasattr(nm, "get_node_name"):
                 try:
                     to_name = nm.get_node_name(destination)
@@ -2192,9 +2262,17 @@ class MessagingHubPlugin(PluginBase):
 
     def _recover_queued_messages(self) -> int:
         """Rebuild in-memory outbound queues from SQLite after restart."""
-        rows = self._store.get_queued_sent(max_age_s=self._outbound_max_age_s)
+        # Load every queued row so entries that expired while the service was
+        # stopped are promoted to a terminal state in durable storage.  A
+        # filtered query would make those rows invisible forever.
+        rows = self._store.get_queued_sent()
+        now = time.time()
         recovered = expired = 0
         for row in rows:
+            if now - row["timestamp"] > self._outbound_max_age_s:
+                self._store.update_status(row["id"], "expired")
+                expired += 1
+                continue
             transport = row["transport"]
             meta = row.get("metadata") or {}
             kwargs: dict[str, Any] = {
@@ -2380,7 +2458,7 @@ class MessagingHubPlugin(PluginBase):
             return 0, 0, len(pending)
 
         now = time.time()
-        drain_start = now
+        drain_start = time.monotonic()
         sent = requeued = expired = 0
         for idx, item in enumerate(pending):
             age = now - item["queued_at"]
@@ -2392,7 +2470,8 @@ class MessagingHubPlugin(PluginBase):
                 )
                 expired += 1
                 continue
-            if time.time() - drain_start > self._drain_time_budget_s:
+            if time.monotonic() - drain_start > self._drain_time_budget_s:
+                budget_expired: list[dict[str, Any]] = []
                 with self._outbound_lock:
                     dest_q = self._outbound_queues.setdefault(
                         transport,
@@ -2404,6 +2483,13 @@ class MessagingHubPlugin(PluginBase):
                             requeued += 1
                         else:
                             expired += 1
+                            budget_expired.append(remaining)
+                for expired_item in budget_expired:
+                    self._on_delivery_status_update(
+                        expired_item["msg_id"],
+                        transport,
+                        "expired",
+                    )
                 self.log.info(
                     "Drain time budget (%.0fs) exceeded for %s, requeued %d",
                     self._drain_time_budget_s,

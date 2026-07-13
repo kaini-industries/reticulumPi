@@ -3,19 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0a111c">
   <title>ReticulumPi — Login</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="{{ASSET:dashboard.css}}">
 </head>
 <body class="login-body">
-  <div class="login-card">
+  <main class="login-card">
     <h1>ReticulumPi</h1>
     <p class="subtitle">Node Dashboard</p>
     <form id="login-form" method="POST" action="/auth/login">
+      <label class="sr-only" for="password">Dashboard password</label>
       <input type="password" name="password" id="password" placeholder="Password" autofocus required>
       <button type="submit" id="login-btn">Login</button>
-      <div id="error" class="error" hidden></div>
+      <div id="error" class="error" role="alert" aria-live="assertive" hidden></div>
     </form>
-  </div>
-  <script src="/static/login.js"></script>
+  </main>
+  <script defer src="{{ASSET:login.js}}"></script>
 </body>
 </html>

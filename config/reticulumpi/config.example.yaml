@@ -1,5 +1,6 @@
 # ReticulumPi Application Configuration
-# Copy to ~/.config/reticulumpi/config.yaml and edit as needed.
+# Production path: /etc/reticulumpi/config.yaml (root:reticulumpi, 0640).
+# The service-owned paths below follow the canonical 0.3 runtime layout.
 
 reticulumpi:
   # A friendly name for this node. Used by NomadNet, LXMF Echo, and announces.
@@ -8,8 +9,8 @@ reticulumpi:
   #node_name: MyNode
 
   # Path to Reticulum config directory.
-  # Set to null to use the default (~/.reticulum).
-  reticulum_config_dir: null
+  # Reticulum configuration and durable transport state.
+  reticulum_config_dir: /var/lib/reticulumpi/.reticulum
 
   # Connect to a shared rnsd instance (true) or run Reticulum standalone (false).
   # If true, rnsd must be running. If false, reticulumPi opens interfaces directly.
@@ -18,7 +19,7 @@ reticulumpi:
 
   # Path to the persistent node identity file.
   # Created automatically on first run.
-  identity_path: ~/.config/reticulumpi/identity
+  identity_path: /var/lib/reticulumpi/.config/reticulumpi/identity
 
   # Reticulum log level: 0=critical 1=error 2=warning 3=notice 4=info 5=verbose 6=debug 7=extreme
   log_level: 4
@@ -27,6 +28,14 @@ reticulumpi:
   # The built-in plugins/ directory is always scanned.
   plugin_paths: []
   #  - /path/to/custom_plugins
+
+  # Production activation of separately installed MeshChat/native radio tools
+  # is fail-closed. The root-owned manifest binds every executable (or the
+  # complete MeshChat source+venv tree) to a reviewed version and SHA-256.
+  # The manifest is only required when one of those plugins is enabled.
+  external_artifacts:
+    mode: required
+    manifest_path: /etc/reticulumpi/external-artifacts.yaml
 
   # Plugin configuration. Each key is a plugin_name.
   # Set enabled: true to activate a plugin.
@@ -44,14 +53,14 @@ reticulumpi:
     message_echo:
       enabled: true
       #display_name: "MyNode Echo"  # Defaults to "<node_name> Echo"
-      storage_path: ~/.local/share/reticulumpi/lxmf
+      storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/lxmf
 
     # Info Bot — responds to LXMF commands with internet-sourced info.
     # Send "!help" for a list of commands, "!weather <city>" for weather.
     #info_bot:
     #  enabled: false
     #  display_name: "MyNode Info"  # Defaults to "<node_name> Info"
-    #  storage_path: ~/.local/share/reticulumpi/info_bot_lxmf
+    #  storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/info_bot_lxmf
 
     system_monitor:
       enabled: true
@@ -68,7 +77,7 @@ reticulumpi:
     # rnsd instance. Set use_shared_instance: true above.
     #nomadnet_server:
     #  enabled: false
-    #  config_dir: ~/.nomadnet
+    #  config_dir: /var/lib/reticulumpi/.nomadnet
     #  node_name: MyNode  # Defaults to top-level node_name
     #  enable_propagation: false
     #  auto_restart: true
@@ -80,14 +89,15 @@ reticulumpi:
     #  cpu_violation_count: 3  # Consecutive violations before kill
 
     # MeshChat web UI — web-based chat over Reticulum/LXMF.
-    # Requires: --with-meshchat during bootstrap, or manual install.
+    # Requires: a separately reviewed MeshChat checkout and virtual environment.
+    # The transactional installer does not install or update MeshChat.
     # When enabled, set use_shared_instance: true above.
     #meshchat_server:
     #  enabled: false
-    #  install_dir: /opt/reticulumpi/meshchat
+    #  install_dir: /opt/reticulumpi-external/meshchat
     #  host: "0.0.0.0"
     #  port: 8000
-    #  storage_dir: /opt/reticulumpi/meshchat/storage
+    #  storage_dir: /var/lib/reticulumpi/meshchat/storage
     #  health_check_interval: 10
     #  auto_restart: true
     #  max_restarts: 5
@@ -100,11 +110,12 @@ reticulumpi:
 
     # Web Dashboard — secure web UI for node monitoring.
     # Requires: pip install aiohttp (or --with-dashboard during bootstrap).
-    # Password priority: env var > config > auto-generate on first start.
-    #   Env var:  RETICULUMPI_DASHBOARD_PASSWORD or _PASSWORD_HASH
-    #   Config:   password_hash below (generate with: reticulumpi --hash-password)
-    #   Auto:     logged once on first start, hash saved to ~/.config/reticulumpi/dashboard_secret
-    #   Reset:    delete ~/.config/reticulumpi/dashboard_secret and restart
+    # Password priority: hash environment override > config hash > first-start generation.
+    #   Preferred: password_hash below (generate with: reticulumpi --hash-password).
+    #   Automation may supply RETICULUMPI_DASHBOARD_PASSWORD_HASH through a protected
+    #   credential channel. Legacy plaintext password/env inputs are deprecated.
+    #   Auto:     plaintext written only to dashboard_password.txt (0600), never logged;
+    #             first login must replace it before normal dashboard access is enabled.
     #web_dashboard:
     #  enabled: false
     #  host: "127.0.0.1"          # Bind to localhost only
@@ -112,12 +123,12 @@ reticulumpi:
     #                              # With avahi-daemon installed, clients can reach the
     #                              # dashboard at http://<hostname>.local:8080
     #  port: 8080
-    #  secret_dir: ~/.config/reticulumpi  # Holds dashboard_secret (password hash),
+    #  secret_dir: /var/lib/reticulumpi/.config/reticulumpi
+    #                              # Holds dashboard_secret (password hash),
     #                              # sessions.db, and dashboard_password.txt (the
     #                              # auto-generated plaintext password, written 0600
-    #                              # on first start). To rotate the password: delete
-    #                              # dashboard_secret here and restart — a new password
-    #                              # is generated and saved to dashboard_password.txt.
+    #                              # on first start). It is removed only after a durable
+    #                              # password change, which also revokes active sessions.
     #  # password_hash: "scrypt:..."  # Optional — overrides auto-generated password
     #  session_timeout: 86400      # Session lifetime in seconds (default: 24h)
     #  max_sessions: 5
@@ -137,6 +148,11 @@ reticulumpi:
     #                              #     - 127.0.0.1/32
     #                              #     - ::1/128
     #                              #     - 192.168.0.0/16
+    #  reverse_proxy:              # Trust forwarded HTTPS only from these peers.
+    #    enabled: false            # Proxy must replace X-Forwarded-Proto with https.
+    #    trusted_networks:         # Never include a client/LAN range here.
+    #      - 127.0.0.1/32
+    #      - ::1/128
     #  lora_region: "US"           # Default LoRa Spectrum panel region.
     #                              # One of: US, EU_868, EU_433, CN, JP, ANZ.
     #                              # Users can override per-browser via the
@@ -145,7 +161,7 @@ reticulumpi:
     #                              # Each tile ~20-30KB. 5000 = ~100-150MB.
     #  tile_proxy:                 # Server-side tile proxy with disk cache.
     #    enabled: false            # Opt-in — tiles fetched from OSM by default.
-    #    cache_dir: ~/.local/share/reticulumpi/tile_cache
+    #    cache_dir: /var/cache/reticulumpi/tile_cache
     #    max_cache_mb: 500         # Disk budget for cached tiles.
     #    upstream_url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     #    user_agent: "reticulumpi/0.2 tile-proxy"
@@ -161,10 +177,16 @@ reticulumpi:
     #    enabled: false
     #    cert_file: null
     #    key_file: null
+    #                              # Operator keys should be 0600, or root-owned 0640;
+    #                              # symlinks, writable keys, and future/expiring
+    #                              # certificates fail closed.
     #    auto_generate: false      # Auto-generate self-signed cert
-    #    cert_dir: ~/.config/reticulumpi/web_certs
-    #    extra_hostnames: []       # Additional SAN entries baked into the
-    #                              # auto-generated cert (DNS names or IPs), e.g.
+    #    cert_dir: /var/lib/reticulumpi/.config/reticulumpi/web_certs
+    #                              # Managed cert+key use an atomically replaced
+    #                              # mode-0600 dashboard.pem bundle, checked daily
+    #                              # and renewed at <=30 days remaining.
+    #    extra_hostnames: []       # Required SANs for operator certs; additional
+    #                              # SANs baked into auto-generated certs, e.g.
     #                              # ["pi.local", "192.168.1.50"]. localhost,
     #                              # loopback, the hostname + .local, and detected
     #                              # LAN IPs are always included automatically.
@@ -186,7 +208,7 @@ reticulumpi:
     # Discovers all reachable nodes and tracks hop counts over time.
     #network_map:
     #  enabled: false
-    #  db_path: ~/.local/share/reticulumpi/network_map.db
+    #  db_path: /var/lib/reticulumpi/.local/share/reticulumpi/network_map.db
     #  max_history_days: 30
 
     # Mesh Telemetry — broadcasts system metrics over Reticulum announces.
@@ -210,7 +232,7 @@ reticulumpi:
     # Configure recipients (LXMF addresses) and rules.
     #alert_system:
     #  enabled: false
-    #  storage_path: ~/.local/share/reticulumpi/alert_lxmf
+    #  storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/alert_lxmf
     #  recipients:
     #    - "recipient_lxmf_hash_here"
     #  cooldown_seconds: 300
@@ -230,9 +252,13 @@ reticulumpi:
     # Uses RNS.Resource for chunked, compressed transfers.
     #file_transfer:
     #  enabled: false
-    #  shared_dir: ~/.local/share/reticulumpi/shared_files
+    #  shared_dir: /var/lib/reticulumpi/.local/share/reticulumpi/shared_files
     #  max_file_size_mb: 50
-    #  allowed_identities: []   # Empty = accept from anyone
+    #  access_policy: deny      # deny (default) | allowlist | open
+    #  # For allowlist only, add exact remote identity hashes:
+    #  # allowed_identities:
+    #  #   - "0123456789abcdef..."
+    #  # Use access_policy: open only for an intentionally public endpoint.
     #  auto_accept: true
 
     # Sensor Framework — config-driven sensor reading with logging and mesh broadcast.
@@ -266,7 +292,7 @@ reticulumpi:
     #      # shell: true                 # uncomment if command needs pipes/redirection
     #  storage:
     #    type: sqlite                  # sqlite, csv, or none
-    #    path: ~/.local/share/reticulumpi/sensor_data.db
+    #    path: /var/lib/reticulumpi/.local/share/reticulumpi/sensor_data.db
     #    retention_days: 30
     #  broadcast:
     #    enabled: false
@@ -287,7 +313,7 @@ reticulumpi:
     #connectivity_monitor:
     #  enabled: false
     #  check_interval: 30              # Seconds between diagnostic checks
-    #  log_path: ~/.local/share/reticulumpi/connectivity.log
+    #  log_path: /var/lib/reticulumpi/.local/share/reticulumpi/connectivity.log
     #  sam_port: 7656                  # i2pd SAM API port
     #  shared_instance_port: 37428     # rnsd shared instance port
 
@@ -348,7 +374,7 @@ reticulumpi:
     #transport_health:
     #  enabled: false
     #  check_interval: 60              # Seconds between health assessments
-    #  db_path: ~/.local/share/reticulumpi/transport_health.db
+    #  db_path: /var/lib/reticulumpi/.local/share/reticulumpi/transport_health.db
     #  history_retention_hours: 168    # Keep history for 7 days
     #  down_threshold_checks: 3        # Consecutive absences to mark "down" (~3min)
     #  degraded_threshold_pct: 80      # Availability below this % = "degraded"
@@ -371,7 +397,7 @@ reticulumpi:
     #  mode: serial                    # "serial" (USB device) or "mqtt" (network)
     #  serial_port: "auto"             # Serial port or "auto" (serial mode only)
     #  meshtastic_channel: 0           # Meshtastic channel index to use (0-7)
-    #  storage_path: ~/.local/share/reticulumpi/meshtastic_gw_lxmf
+    #  storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/meshtastic_gw_lxmf
     #  display_name: "MyNode Mesh GW"  # Defaults to "<node_name> Mesh Gateway"
     #  short_name: "MNGW"             # 4-char Meshtastic abbreviation (auto-derived if omitted)
     #  max_messages_per_minute: 2      # Rate limit LXMF->Mesh sends (0=unlimited)
@@ -433,7 +459,7 @@ reticulumpi:
     #  enabled: false
     #  serial_port: /dev/meshcore     # Device path (use udev symlink)
     #  baudrate: 115200
-    #  storage_path: ~/.local/share/reticulumpi/meshcore_gw
+    #  storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/meshcore_gw
     #  max_messages_per_minute: 0     # Rate limit outbound sends (0=unlimited)
     #  health_check_interval: 30      # Seconds between health checks
     #  health_failure_threshold: 3    # Consecutive failed checks before reconnect
@@ -468,11 +494,11 @@ reticulumpi:
     # Requires: web_dashboard enabled for the chat UI.
     #messaging_hub:
     #  enabled: false
-    #  db_path: ~/.local/share/reticulumpi/messaging_hub.db
+    #  db_path: /var/lib/reticulumpi/.local/share/reticulumpi/messaging_hub.db
     #  message_history_limit: 500    # Max stored messages PER transport (0 = unlimited)
     #  lxmf:
     #    enabled: true
-    #    storage_path: ~/.local/share/reticulumpi/messaging_hub_lxmf
+    #    storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/messaging_hub_lxmf
     #    display_name: "MyNode Messages"  # Defaults to "<node_name> Messages"
     #  meshtastic:
     #    enabled: true               # Bridges to meshtastic_gateway plugin
@@ -609,7 +635,7 @@ reticulumpi:
     #      - "NOAA 15"
     #      - "NOAA 18"
     #      - "NOAA 19"
-    #  cache_dir: ~/.local/share/reticulumpi/space_tracker
+    #  cache_dir: /var/cache/reticulumpi/space_tracker
     #  # Please set contact info in the user-agent so upstream operators can
     #  # reach you if something goes wrong with your node.
     #  user_agent: "reticulumpi/0.2 (+https://example.invalid/contact)"
@@ -752,7 +778,7 @@ reticulumpi:
     #  max_silence_minutes: 60     # force-record after this long even if stationary
     #  retention_days: 30
     #  max_rows: 500000
-    #  db_path: "~/.local/share/reticulumpi/node_positions.db"
+    #  db_path: /var/lib/reticulumpi/.local/share/reticulumpi/node_positions.db
 
     # --- NTP server -----------------------------------------------------------
     # GPS-disciplined time synchronization via chrony. Monitors chrony sync
@@ -765,7 +791,8 @@ reticulumpi:
     #  check_interval: 30                  # Seconds between chrony status checks
     #  manage_chrony_config: true           # Write/manage GPS refclock config snippet
     #  chrony_conf_dir: /etc/chrony/conf.d  # Directory for chrony config snippets
-    #  sudo_chronyc: true                  # Use sudo for chronyc commands
+    #  # Privileged chrony changes use the enumerated local control broker;
+    #  # the service never invokes sudo or writes /etc/chrony directly.
     #  gps_refclock:
     #    enabled: true                     # Configure GPS as chrony refclock
     #    shm_segment: 0                    # gpsd SHM segment (0 = coarse time)

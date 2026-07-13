@@ -109,6 +109,23 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="must be a list"):
             LoRaDiagnosticsPlugin(mock_app, base_config)
 
+    def test_rns_config_path_uses_application_override(self, mock_app, base_config):
+        mock_app._reticulum_config_dir = "/var/lib/reticulumpi/.reticulum"
+        plugin = _make_plugin(mock_app, base_config)
+        assert plugin._get_rns_config_path() == "/var/lib/reticulumpi/.reticulum/config"
+
+    def test_rns_config_path_follows_home_for_development(
+        self,
+        monkeypatch,
+        tmp_path,
+        mock_app,
+        base_config,
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        mock_app._reticulum_config_dir = None
+        plugin = _make_plugin(mock_app, base_config)
+        assert plugin._get_rns_config_path() == str(tmp_path / ".reticulum" / "config")
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -513,6 +530,44 @@ class TestAnnounceMode:
 
         with pytest.raises(ValueError, match="Invalid mode"):
             plugin.set_announce_mode("invalid_mode")
+        plugin.stop()
+
+    @patch("reticulumpi.rns_config.write_rns_config")
+    @patch("reticulumpi.rns_config.parse_rns_config_from_lines")
+    @patch("reticulumpi.rns_config.parse_rns_config")
+    @patch("reticulumpi.builtin_plugins.lora_diagnostics.request_control")
+    @patch("RNS.Transport")
+    def test_set_mode_restarts_through_control_broker(
+        self,
+        _mock_transport,
+        mock_control,
+        mock_parse,
+        mock_reparse,
+        _mock_write,
+        mock_app,
+        base_config,
+    ):
+        from reticulumpi.rns_config import InterfaceEntry
+
+        interface = InterfaceEntry(
+            name="RNode LoRa Interface",
+            properties={"announce_cap": "5"},
+        )
+        mock_parse.return_value = (["[RNode LoRa Interface]"], [interface])
+        mock_reparse.return_value = (["[RNode LoRa Interface]"], [interface])
+        plugin = _make_plugin(mock_app, base_config)
+        plugin.start()
+        plugin._wait_for_rnsd = MagicMock()
+
+        result = plugin.set_announce_mode("local_priority")
+
+        mock_control.assert_called_once_with(
+            "restart_rnsd",
+            socket_path="/run/reticulumpi/control.sock",
+            timeout=45.0,
+        )
+        plugin._wait_for_rnsd.assert_called_once_with(timeout=10)
+        assert result["rnsd_restarted"] is True
         plugin.stop()
 
     @patch("RNS.Transport")

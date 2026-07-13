@@ -10,6 +10,7 @@ import pytest
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.ntp_server import NtpServerPlugin
+from reticulumpi.control_client import ControlError
 
 
 def _make_app() -> MagicMock:
@@ -24,24 +25,27 @@ def _make_plugin(config: dict | None = None) -> NtpServerPlugin:
     plugin = NtpServerPlugin(_make_app(), config or {})
     plugin._active = True
     plugin._lock = threading.Lock()
-    plugin._start_time = time.time()
+    plugin._start_time = time.monotonic()
     plugin._check_interval = plugin.config.get("check_interval", 30)
     plugin._sync_state = "unknown"
     plugin._prev_sync_state = "unknown"
     plugin._last_synced_time = 0.0
+    plugin._sync_lost_since = None
     plugin._sync_lost_alerted = False
     plugin._tracking = {}
     plugin._sources = []
     plugin._last_check = 0.0
     plugin._check_errors = 0
-    plugin._last_online_recovery = 0.0
+    plugin._last_online_recovery = None
     plugin._online_recovery_interval = plugin.config.get("online_recovery_interval", 300)
     plugin._gps_refclock_active = False
     plugin._gps_refclock_configured = False
     plugin._manage_chrony = plugin.config.get("manage_chrony_config", True)
     plugin._conf_dir = plugin.config.get("chrony_conf_dir", "/etc/chrony/conf.d")
     plugin._conf_path = f"{plugin._conf_dir}/reticulumpi-gps.conf"
-    plugin._use_sudo = plugin.config.get("sudo_chronyc", True)
+    plugin._control_socket = plugin.config.get(
+        "control_socket", "/definitely/missing/reticulumpi-control.sock"
+    )
     return plugin
 
 
@@ -72,8 +76,21 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="sync_loss_threshold"):
             NtpServerPlugin(_make_app(), {"sync_loss_threshold": -1})
 
+    def test_legacy_sudo_option_is_ignored(self):
+        p = _make_plugin({"sudo_chronyc": True})
+        assert not hasattr(p, "_use_sudo")
+
 
 class TestParseTracking:
+    @patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run")
+    def test_status_query_never_uses_sudo(self, run):
+        run.return_value = MagicMock(returncode=0, stdout=SAMPLE_TRACKING, stderr="")
+        p = _make_plugin({"sudo_chronyc": True})
+
+        p._run_chronyc("tracking")
+
+        assert run.call_args.args[0] == ["chronyc", "-c", "tracking"]
+
     def test_valid_output(self):
         p = _make_plugin()
         result = p._parse_tracking(SAMPLE_TRACKING)
@@ -178,7 +195,7 @@ class TestStateTransitions:
         p = _make_plugin({"sync_loss_threshold": 10, "alert_on_sync_loss": True})
         p._prev_sync_state = "unsynced"
         p._sync_state = "unsynced"
-        p._last_synced_time = time.time() - 20
+        p._sync_lost_since = time.monotonic() - 20
         p._handle_state_transitions()
         calls = p.event_bus.publish.call_args_list
         event_types = [c[0][0] for c in calls]
@@ -189,7 +206,7 @@ class TestStateTransitions:
         p = _make_plugin({"sync_loss_threshold": 10})
         p._prev_sync_state = "unsynced"
         p._sync_state = "unsynced"
-        p._last_synced_time = time.time() - 20
+        p._sync_lost_since = time.monotonic() - 20
         p._sync_lost_alerted = True
         p._handle_state_transitions()
         p.event_bus.publish.assert_not_called()
@@ -205,9 +222,21 @@ class TestGpsRefclock:
     def test_on_gps_fix_skips_if_configured(self):
         p = _make_plugin()
         p._gps_refclock_configured = True
+        p._gps_refclock_active = True
         with patch.object(p, "_configure_gps_refclock") as mock_cfg:
             p._on_gps_fix(events.GPS_FIX_RECEIVED, {})
         mock_cfg.assert_not_called()
+
+    def test_on_gps_fix_reactivates_configured_refclock(self):
+        p = _make_plugin()
+        p._gps_refclock_configured = True
+        p._gps_refclock_active = False
+        p._on_gps_fix(events.GPS_FIX_RECEIVED, {})
+        assert p._gps_refclock_active is True
+        p.event_bus.publish.assert_called_with(
+            events.NTP_GPS_REFCLOCK_ACTIVE,
+            {"recovered": True},
+        )
 
     def test_on_gps_lost(self):
         p = _make_plugin()
@@ -215,72 +244,149 @@ class TestGpsRefclock:
         p._on_gps_lost(events.GPS_FIX_LOST, {})
         assert p._gps_refclock_active is False
 
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
     @patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run")
-    def test_configure_writes_and_restarts(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
+    def test_configure_fails_closed_without_broker(self, mock_run, mock_control):
+        mock_control.side_effect = ControlError("broker unavailable")
         p = _make_plugin({"gps_refclock": {"enabled": True}})
         p._conf_path = "/tmp/nonexistent-reticulumpi-gps.conf"
         p._configure_gps_refclock()
-        assert mock_run.call_count == 2
+        mock_control.assert_called_once()
+        mock_run.assert_not_called()
+        assert p._gps_refclock_configured is False
+        assert p._gps_refclock_active is False
+
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_configure_uses_control_broker(self, mock_control):
+        p = _make_plugin({"gps_refclock": {"enabled": True}})
+        p._conf_path = "/tmp/nonexistent-reticulumpi-broker-gps.conf"
+
+        p._configure_gps_refclock()
+
+        mock_control.assert_called_once_with(
+            "chrony",
+            ["configure", "0", "1e-1", "0.0", "0.2", "-", "1e-9"],
+            socket_path=p._control_socket,
+            timeout=45.0,
+        )
         assert p._gps_refclock_configured is True
         assert p._gps_refclock_active is True
-        p.event_bus.publish.assert_called()
+
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_remove_uses_control_broker(self, mock_control):
+        p = _make_plugin()
+        p._gps_refclock_configured = True
+        p._gps_refclock_active = True
+
+        p._remove_gps_refclock()
+
+        mock_control.assert_called_once_with(
+            "chrony",
+            ["remove"],
+            socket_path=p._control_socket,
+            timeout=45.0,
+        )
+        assert p._gps_refclock_configured is False
+        assert p._gps_refclock_active is False
+
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    @patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run")
+    def test_remove_fails_closed_without_subprocess_fallback(self, run, control):
+        control.side_effect = ControlError("broker unavailable")
+        p = _make_plugin()
+        p._gps_refclock_configured = True
+        p._gps_refclock_active = True
+
+        p._remove_gps_refclock()
+
+        run.assert_not_called()
+        assert p._gps_refclock_configured is True
+        assert p._gps_refclock_active is True
 
 
 class TestSourceRecovery:
-    def test_recovery_triggered_when_all_offline(self):
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    @patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run")
+    def test_recovery_fails_closed_without_broker(self, mock_run, mock_control):
+        mock_control.side_effect = ControlError("broker unavailable")
         p = _make_plugin()
-        p._last_online_recovery = 0.0
         p._online_recovery_interval = 300
         sources = [
             {"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"},
             {"mode": "^", "state": "?", "reach": 0, "name": "ntp.ubuntu.com"},
         ]
-        with patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+        with patch(
+            "reticulumpi.builtin_plugins.ntp_server.time.monotonic",
+            return_value=5.0,
+        ):
             p._check_source_recovery(sources)
-        mock_run.assert_called_once()
-        assert "online" in mock_run.call_args[0][0]
+        mock_control.assert_called_once_with(
+            "chrony",
+            ["online"],
+            socket_path=p._control_socket,
+            timeout=15.0,
+        )
+        mock_run.assert_not_called()
 
-    def test_recovery_skipped_when_some_reachable(self):
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_recovery_uses_control_broker(self, mock_control):
         p = _make_plugin()
-        p._last_online_recovery = 0.0
+        sources = [{"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"}]
+
+        with patch(
+            "reticulumpi.builtin_plugins.ntp_server.time.monotonic",
+            return_value=5.0,
+        ):
+            p._check_source_recovery(sources)
+
+        mock_control.assert_called_once_with(
+            "chrony",
+            ["online"],
+            socket_path=p._control_socket,
+            timeout=15.0,
+        )
+
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_recovery_skipped_when_some_reachable(self, mock_control):
+        p = _make_plugin()
         p._online_recovery_interval = 300
         sources = [
             {"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"},
             {"mode": "^", "state": "+", "reach": 377, "name": "ntp.ubuntu.com"},
         ]
-        with patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run") as mock_run:
-            p._check_source_recovery(sources)
-        mock_run.assert_not_called()
+        p._check_source_recovery(sources)
+        mock_control.assert_not_called()
 
-    def test_recovery_cooldown(self):
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_recovery_cooldown(self, mock_control):
         p = _make_plugin()
-        p._last_online_recovery = time.time()
+        p._last_online_recovery = 1_000.0
         p._online_recovery_interval = 300
         sources = [
             {"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"},
         ]
-        with patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run") as mock_run:
+        with patch(
+            "reticulumpi.builtin_plugins.ntp_server.time.monotonic",
+            return_value=1_100.0,
+        ):
             p._check_source_recovery(sources)
-        mock_run.assert_not_called()
+        mock_control.assert_not_called()
 
-    def test_recovery_ignores_refclock_sources(self):
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_recovery_ignores_refclock_sources(self, mock_control):
         p = _make_plugin()
-        p._last_online_recovery = 0.0
         p._online_recovery_interval = 300
         sources = [
             {"mode": "#", "state": "*", "reach": 377, "name": "GPS"},
         ]
-        with patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run") as mock_run:
-            p._check_source_recovery(sources)
-        mock_run.assert_not_called()
+        p._check_source_recovery(sources)
+        mock_control.assert_not_called()
 
 
 class TestGetStatusAndSnapshot:
     def test_get_status(self):
         p = _make_plugin()
-        p._last_check = time.time()
+        p._last_check = time.monotonic()
         s = p.get_status()
         assert s["active"] is True
         assert s["sync_state"] == "unknown"

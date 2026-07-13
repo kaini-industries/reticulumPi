@@ -1,0 +1,26 @@
+[Unit]
+Description=ReticulumPi privileged control request
+After=reticulumpi-control.socket
+
+[Service]
+Type=exec
+User=root
+Group=root
+WorkingDirectory=/
+Environment=PYTHONPATH=
+ExecStart=/opt/reticulumpi/current/.venv/bin/python -I -m reticulumpi.control_broker
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+TimeoutStartSec=70
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+ReadWritePaths=-/etc/dnsmasq.d -/etc/chrony/conf.d /var/backups/reticulumpi/admin /var/lib/reticulumpi /run/reticulumpi

@@ -8,45 +8,11 @@ var TILE_RE = /\.tile\.openstreetmap\.org\/|\/tiles\//;
 var SHELL_ASSETS = [
   '/index.html',
   '/login.html',
-  '/static/errlog.js',
-  '/static/style.css',
-  '/static/vendor/leaflet.css',
-  '/static/vendor/leaflet.js',
-  '/static/vendor/images/marker-icon.png',
-  '/static/vendor/images/marker-icon-2x.png',
-  '/static/vendor/images/marker-shadow.png',
-  '/static/app.js',
-  '/static/map.js',
-  '/static/gps.js',
-  '/static/space.js',
-  '/static/adsb.js',
-  '/static/mesh.js',
-  '/static/lora.js',
-  '/static/routing.js',
-  '/static/meshtastic.js',
-  '/static/meshcore.js',
-  '/static/messages_panel.js',
-  '/static/messages_lxmf.js',
-  '/static/messages_meshtastic_lora.js',
-  '/static/messages_meshcore.js',
-  '/static/mesh_bridge_panel.js',
-  '/static/node_tracker.js',
-  '/static/link_tester.js',
-  '/static/radio.js',
-  '/static/spectrum.js',
-  '/static/spectrum_common.js',
-  '/static/spectrum_page.js',
-  '/static/lora_spectrum.js',
-  '/static/hotspot.js',
-  '/static/ntp.js',
-  '/static/weather_alert.js',
-  '/static/ais.js',
-  '/static/acars.js',
-  '/static/radiosonde.js',
-  '/static/noaa.js',
-  '/static/mqtt_feed.js',
-  '/static/login.js',
-  '/static/version.js'
+  '/spectrum.html',
+  '/static/asset-manifest.json',
+  '/static/manifest.webmanifest',
+  '/static/version.js',
+  /*__RPI_BUILT_ASSETS__*/
 ];
 
 var KEEP_CACHES = [TILE_CACHE, SHELL_CACHE];
@@ -74,6 +40,11 @@ self.addEventListener('activate', function (e) {
 
 self.addEventListener('fetch', function (e) {
   var url = e.request.url;
+  var path = new URL(url).pathname;
+
+  // API/auth responses always bypass the service worker, including unusual
+  // navigation-mode requests made by diagnostics or browser address bars.
+  if (_isPrivateEndpoint(path)) return;
 
   // 1. Map tiles — cache-first (existing behavior)
   if (TILE_RE.test(url)) {
@@ -82,16 +53,25 @@ self.addEventListener('fetch', function (e) {
   }
 
   // 2. App shell — stale-while-revalidate
-  var path = new URL(url).pathname;
+  if (e.request.mode === 'navigate') {
+    e.respondWith(_navigationFetch(e.request));
+    return;
+  }
   if (_isShellAsset(path)) {
-    e.respondWith(_shellFetch(e.request));
+    e.respondWith(_shellFetch(e.request, e));
     return;
   }
 
   // 3. Everything else (API, WS) — passthrough
 });
 
+function _isPrivateEndpoint(path) {
+  return path === '/api' || path.indexOf('/api/') === 0 ||
+    path === '/auth' || path.indexOf('/auth/') === 0;
+}
+
 function _isShellAsset(path) {
+  if (path === '/' || path === '/index.html' || path === '/spectrum.html') return true;
   if (path === '/login.html') return true;
   if (path.indexOf('/static/') === 0) return true;
   return false;
@@ -105,8 +85,9 @@ function _tileFetch(request) {
       if (cached) return cached;
       return fetch(request).then(function (resp) {
         if (resp.ok) {
-          cache.put(request, resp.clone());
-          _trimCache(cache);
+          return cache.put(request, resp.clone()).then(function () {
+            return _trimCache(cache);
+          }).then(function () { return resp; });
         }
         return resp;
       });
@@ -115,7 +96,7 @@ function _tileFetch(request) {
 }
 
 function _trimCache(cache) {
-  cache.keys().then(function (keys) {
+  return cache.keys().then(function (keys) {
     var excess = keys.length - MAX_ENTRIES;
     if (excess <= 0) return;
     // Delete oldest entries in a single pass (no recursion)
@@ -139,25 +120,25 @@ function _placeholder() {
 
 // -- Shell: stale-while-revalidate -----------------------------------------
 
-function _shellFetch(request) {
+function _shellFetch(request, event) {
   var isVersion = request.url.indexOf('/version.js') !== -1;
   return caches.open(SHELL_CACHE).then(function (cache) {
     return cache.match(request).then(function (cached) {
       var snapshot = (cached && isVersion) ? cached.clone() : null;
       var networkFetch = fetch(request).then(function (resp) {
         if (resp.ok) {
-          cache.put(request, resp.clone());
-          if (snapshot) {
-            Promise.all([snapshot.text(), resp.clone().text()]).then(function (pair) {
+          return cache.put(request, resp.clone()).then(function () {
+            if (!snapshot) return resp;
+            return Promise.all([snapshot.text(), resp.clone().text()]).then(function (pair) {
               if (pair[0] !== pair[1]) {
-                self.clients.matchAll().then(function (clients) {
+                return self.clients.matchAll().then(function (clients) {
                   clients.forEach(function (c) {
                     c.postMessage({ type: 'sw-updated' });
                   });
                 });
               }
-            });
-          }
+            }).then(function () { return resp; });
+          });
         }
         return resp;
       }).catch(function () {
@@ -168,7 +149,42 @@ function _shellFetch(request) {
           });
         }
       });
+      if (cached && event) event.waitUntil(networkFetch.then(function () {}));
       return cached || networkFetch;
     });
   });
+}
+
+// -- Navigation: network-first, cached shell fallback ----------------------
+
+function _navigationFetch(request) {
+  var path = new URL(request.url).pathname;
+  var fallbackPath = _navigationFallbackPath(path);
+  return fetch(request).then(function (resp) {
+    // Never cache redirects or authentication failures as the application
+    // shell; doing so could strand the user on the wrong side of login.
+    if (!resp.ok || resp.redirected) return resp;
+    return caches.open(SHELL_CACHE).then(function (cache) {
+      return cache.put(fallbackPath, resp.clone()).then(function () { return resp; });
+    });
+  }).catch(function () {
+    return caches.open(SHELL_CACHE).then(function (cache) {
+      return cache.match(fallbackPath);
+    }).then(function (cached) {
+      return cached || new Response('Offline — dashboard shell is not cached yet', {
+        status: 503,
+        headers: {'Content-Type': 'text/plain', 'Cache-Control': 'no-store'}
+      });
+    });
+  });
+}
+
+function _navigationFallbackPath(path) {
+  // Keep every standalone document under its own key in the versioned shell
+  // cache.  In particular, caching a successful spectrum navigation as
+  // /index.html would replace the dashboard's offline fallback with the
+  // spectrum shell until the next complete service-worker installation.
+  if (path === '/login.html') return '/login.html';
+  if (path === '/spectrum.html') return '/spectrum.html';
+  return '/index.html';
 }

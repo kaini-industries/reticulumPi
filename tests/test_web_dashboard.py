@@ -1,7 +1,9 @@
 """Tests for the Web Dashboard plugin."""
 
+import threading
 import time
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -574,6 +576,8 @@ class TestAuthManagerPersistent:
             session_db_path=db,
         )
         assert mgr2.validate_token(token)
+        mgr1.sessions.close()
+        mgr2.sessions.close()
 
     def test_eviction_works_with_sqlite(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
@@ -593,6 +597,7 @@ class TestAuthManagerPersistent:
         # Oldest (t1) should be evicted
         assert not mgr.validate_token(t1)
         assert mgr.validate_token(t3)
+        mgr.sessions.close()
 
     def test_cleanup_with_sqlite(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
@@ -609,6 +614,7 @@ class TestAuthManagerPersistent:
         removed = mgr.cleanup_expired_sessions()
         assert removed == 2
         assert len(mgr.sessions) == 0
+        mgr.sessions.close()
 
     def test_logout_with_sqlite(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
@@ -621,6 +627,7 @@ class TestAuthManagerPersistent:
         token = mgr.login("test", "127.0.0.1")
         mgr.logout(token)
         assert not mgr.validate_token(token)
+        mgr.sessions.close()
 
     def test_last_seen_persists_with_sqlite(self, tmp_path):
         """Sliding-window: validate_token must write last_seen back to SQLite
@@ -644,6 +651,8 @@ class TestAuthManagerPersistent:
         # A fresh manager reading the same DB must see the advanced value.
         mgr2 = AuthManager(plaintext_password="test", session_db_path=db)
         assert mgr2.sessions[token]["last_seen"] > pushed_back
+        mgr.sessions.close()
+        mgr2.sessions.close()
 
 
 # --- Plugin config validation tests ---
@@ -803,7 +812,7 @@ def dashboard_plugin(dashboard_app):
         "allow_localhost_api": False,  # Disable for tests so auth is enforced
     }
     plugin = WebDashboardPlugin(dashboard_app, config)
-    plugin._start_time = time.time()
+    plugin._start_monotonic = time.monotonic()
     plugin._active = True
 
     from reticulumpi.builtin_plugins.web_dashboard.auth import AuthManager
@@ -818,6 +827,108 @@ def aiohttp_app(dashboard_plugin):
     from reticulumpi.builtin_plugins.web_dashboard.server import create_app
 
     return create_app(dashboard_plugin)
+
+
+class TestLocalApiTokenFile:
+    def test_token_rotates_and_mode_is_0600(self, dashboard_plugin, tmp_path):
+        token_file = tmp_path / "local_api.token"
+        cfg = {"enabled": True, "token_file": str(token_file)}
+
+        first = dashboard_plugin._load_or_create_local_api_token(cfg)
+        second = dashboard_plugin._load_or_create_local_api_token(cfg)
+
+        assert first != second
+        assert second == token_file.read_text().strip()
+        assert len(first) >= 32
+        assert token_file.stat().st_mode & 0o777 == 0o600
+
+    def test_default_token_uses_writable_runtime_directory(
+        self, dashboard_plugin, tmp_path, monkeypatch
+    ):
+        runtime_dir = tmp_path / "run" / "reticulumpi"
+        runtime_dir.mkdir(parents=True)
+        monkeypatch.setenv("RETICULUMPI_RUNTIME_DIR", str(runtime_dir))
+
+        token = dashboard_plugin._load_or_create_local_api_token({"enabled": True})
+
+        token_file = runtime_dir / "local_api.token"
+        assert token == token_file.read_text().strip()
+        assert token_file.stat().st_mode & 0o777 == 0o600
+
+
+class TestDashboardReadiness:
+    def test_api_v2_readiness_follows_runtime_marker(self, dashboard_app, tmp_path, monkeypatch):
+        from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+        from reticulumpi.plugin_base import PluginState
+
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        monkeypatch.setenv("RETICULUMPI_RUNTIME_DIR", str(runtime))
+        plugin = WebDashboardPlugin(dashboard_app, {"enabled": True, "password": "test"})
+        plugin._server_ready = threading.Event()
+        plugin.mark_starting()
+
+        assert plugin.plugin_lifecycle_api == 2
+        assert plugin.plugin_state == PluginState.STARTING
+        plugin._publish_dashboard_ready()
+
+        assert (runtime / "dashboard-ready").read_text(encoding="ascii") == "ready\n"
+        assert plugin.plugin_state == PluginState.READY
+        assert plugin._server_ready.is_set()
+
+    def test_bind_failure_is_reported_to_plugin_manager(self, dashboard_app, tmp_path, monkeypatch):
+        from unittest.mock import patch
+
+        from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+
+        plugin = WebDashboardPlugin(
+            dashboard_app,
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 8080,
+                "password": "testpass",
+                "secret_dir": str(tmp_path),
+            },
+        )
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        monkeypatch.setenv("RETICULUMPI_RUNTIME_DIR", str(runtime))
+        stale = runtime / "dashboard-ready"
+        stale.write_text("ready\n", encoding="ascii")
+
+        def fail_bind(*_args):
+            plugin._server_error = OSError("address already in use")
+            plugin._server_ready.set()
+
+        with (
+            patch.object(plugin, "_setup_ssl", return_value=None),
+            patch.object(plugin, "_start_thread", side_effect=fail_bind),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.server.create_app",
+                return_value=MagicMock(),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="failed to bind"):
+                plugin.start()
+
+        assert plugin._active is False
+        assert plugin._auth_executor is None
+        assert not stale.exists()
+
+    def test_stop_before_ready_removes_stale_marker(self, dashboard_app, tmp_path, monkeypatch):
+        from reticulumpi.builtin_plugins.web_dashboard.plugin import WebDashboardPlugin
+
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        marker = runtime / "dashboard-ready"
+        marker.write_text("ready\n", encoding="ascii")
+        monkeypatch.setenv("RETICULUMPI_RUNTIME_DIR", str(runtime))
+        plugin = WebDashboardPlugin(dashboard_app, {"enabled": True, "password": "test"})
+        plugin._loop = None
+        plugin._auth_executor = None
+        plugin.stop()
+        assert not marker.exists()
 
 
 class TestAPIEndpoints:
@@ -1080,7 +1191,7 @@ class TestTilesAuth:
             "tile_proxy": {"enabled": True},
         }
         plugin = WebDashboardPlugin(dashboard_app, config)
-        plugin._start_time = time.time()
+        plugin._start_monotonic = time.monotonic()
         plugin._active = True
         plugin._auth = AuthManager(plaintext_password="testpass")
 
@@ -1094,14 +1205,16 @@ class TestTilesAuth:
         plugin._tile_cache_bytes = 0
 
         upstream_resp = MagicMock(status=200)
+        upstream_resp.headers = {"Content-Type": "image/png; charset=binary"}
         upstream_resp.content = MagicMock()
-        upstream_resp.content.read = AsyncMock(return_value=b"PNGDATA")
+        upstream_resp.content.read = AsyncMock(return_value=b"\x89PNG\r\n\x1a\nDATA")
         resp_cm = MagicMock()
         resp_cm.__aenter__ = AsyncMock(return_value=upstream_resp)
         resp_cm.__aexit__ = AsyncMock(return_value=False)
         session = MagicMock()
         session.get = MagicMock(return_value=resp_cm)
         plugin._tile_session = session
+        plugin._test_tile_upstream_response = upstream_resp
         return plugin
 
     @pytest.fixture
@@ -1145,7 +1258,7 @@ class TestTilesAuth:
 
         event_loop.run_until_complete(_do())
 
-    def test_authenticated_tile_reaches_handler(self, client, event_loop):
+    def test_authenticated_tile_reaches_handler(self, client, event_loop, tile_plugin):
         async def _do():
             login = await client.post("/api/auth/login", json={"password": "testpass"})
             token = login.cookies["session"].value
@@ -1156,7 +1269,26 @@ class TestTilesAuth:
             assert resp.status == 200
             assert resp.headers.get("Content-Type") == "image/png"
             body = await resp.read()
-            assert body == b"PNGDATA"
+            assert body == b"\x89PNG\r\n\x1a\nDATA"
+            assert tile_plugin._tile_locks == {}
+
+        event_loop.run_until_complete(_do())
+
+    def test_tile_proxy_rejects_png_signature_with_non_png_mime(
+        self, client, event_loop, tile_plugin
+    ):
+        async def _do():
+            tile_plugin._test_tile_upstream_response.headers = {
+                "Content-Type": "text/html; charset=utf-8"
+            }
+            login = await client.post("/api/auth/login", json={"password": "testpass"})
+            token = login.cookies["session"].value
+            resp = await client.get(
+                "/tiles/3/1/3.png",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 502
+            assert tile_plugin._tile_locks == {}
 
         event_loop.run_until_complete(_do())
 
@@ -1253,7 +1385,7 @@ class TestIpAllowlist:
             "allowed_networks": ["127.0.0.1/32", "::1/128"],
         }
         plugin = WebDashboardPlugin(dashboard_app, config)
-        plugin._start_time = time.time()
+        plugin._start_monotonic = time.monotonic()
         plugin._active = True
         plugin._auth = AuthManager(plaintext_password="testpass")
         app = create_app(plugin)
@@ -1306,6 +1438,19 @@ class TestSanGeneration:
         # extra_sans classified correctly: DNS vs IP.
         assert "pi.local" in dns_names
         assert "192.168.1.50" in ip_addrs
+
+    def test_mismatched_certificate_and_key_are_rejected(self, tmp_path):
+        pytest.importorskip("cryptography")
+        from reticulumpi.builtin_plugins.web_dashboard.ssl_utils import (
+            generate_self_signed_cert,
+            validate_cert_pair,
+        )
+
+        cert_a, _ = generate_self_signed_cert(str(tmp_path / "a"), "NodeA")
+        _, key_b = generate_self_signed_cert(str(tmp_path / "b"), "NodeB")
+
+        with pytest.raises(ValueError, match="do not match"):
+            validate_cert_pair(cert_a, key_b)
 
 
 class TestHstsHeader:
@@ -1437,6 +1582,7 @@ class TestSessionGcCheckpoint:
             loop.close()
 
         checkpoint_spy.assert_called_once()
+        dashboard_plugin._auth.sessions.close()
 
 
 class TestGetStatus:
@@ -1449,6 +1595,22 @@ class TestGetStatus:
         assert status["web_url"] == "http://127.0.0.1:8080"
         assert "uptime" in status
         assert status["active_sessions"] == 0
+
+    def test_uptime_ignores_wall_clock_jump(self, dashboard_plugin):
+        dashboard_plugin._start_monotonic = 100.0
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.plugin.time.time",
+                return_value=9_999_999_999.0,
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.plugin.time.monotonic",
+                return_value=107.5,
+            ),
+        ):
+            status = dashboard_plugin.get_status()
+
+        assert status["uptime"] == 7.5
 
 
 class TestTmpPasswordFile:
@@ -1487,7 +1649,7 @@ class TestTmpPasswordFile:
         WebDashboardPlugin(app, config)
         assert not os.path.exists(pw_file)
 
-    def test_generated_password_written_to_file(self, tmp_path):
+    def test_generated_password_written_to_file(self, tmp_path, caplog):
         """Auto-generated password is saved to a file, not logged."""
         import os
         from unittest.mock import patch
@@ -1515,7 +1677,11 @@ class TestTmpPasswordFile:
         plugin = WebDashboardPlugin(app, config)
         with (
             patch.object(plugin, "_setup_ssl", return_value=None),
-            patch.object(plugin, "_start_thread"),
+            patch.object(
+                plugin,
+                "_start_thread",
+                side_effect=lambda *_args: plugin._server_ready.set(),
+            ),
             patch(
                 "reticulumpi.builtin_plugins.web_dashboard.server.create_app",
                 return_value=MagicMock(),
@@ -1527,7 +1693,9 @@ class TestTmpPasswordFile:
         assert os.path.isfile(pw_file)
         assert oct(os.stat(pw_file).st_mode & 0o777) == "0o600"
 
-        password = open(pw_file).read().strip()
+        password = Path(pw_file).read_text().strip()
         hash_file = os.path.join(secret_dir, "dashboard_secret")
-        stored_hash = open(hash_file).read().strip()
+        stored_hash = Path(hash_file).read_text().strip()
         assert verify_password(password, stored_hash)
+        assert password not in caplog.text
+        plugin.stop()

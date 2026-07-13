@@ -20,6 +20,7 @@ microReticulum).  Addresses three problems:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import deque
@@ -28,6 +29,7 @@ from typing import Any
 import RNS
 
 from reticulumpi import events
+from reticulumpi.control_client import DEFAULT_CONTROL_SOCKET, ControlError, request_control
 from reticulumpi.plugin_base import PluginBase
 
 # Defaults
@@ -238,8 +240,6 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
         Returns a dict with the result or raises ValueError for invalid modes.
         """
-        import subprocess
-
         from reticulumpi.rns_config import (
             parse_rns_config,
             parse_rns_config_from_lines,
@@ -290,17 +290,14 @@ class LoRaDiagnosticsPlugin(PluginBase):
         )
 
         try:
-            subprocess.run(
-                ["sudo", "systemctl", "restart", "rnsd"],
-                timeout=15,
-                check=True,
-                capture_output=True,
+            request_control(
+                "restart_rnsd",
+                socket_path=self.config.get("control_socket", str(DEFAULT_CONTROL_SOCKET)),
+                timeout=45.0,
             )
-        except subprocess.TimeoutExpired:
-            self.log.warning("rnsd restart timed out")
-        except subprocess.CalledProcessError as exc:
-            self.log.error("rnsd restart failed: %s", exc.stderr.decode())
-            raise RuntimeError(f"rnsd restart failed: {exc.stderr.decode()}")
+        except ControlError as exc:
+            self.log.error("rnsd restart failed: %s", exc)
+            raise RuntimeError(f"rnsd restart failed: {exc}") from exc
 
         self._wait_for_rnsd(timeout=10)
         self.event_bus.publish(
@@ -385,8 +382,10 @@ class LoRaDiagnosticsPlugin(PluginBase):
 
     def _get_rns_config_path(self) -> str:
         """Resolve the rnsd Reticulum config path."""
-        # rnsd runs as the reticulumpi user with its own config dir
-        return "/home/reticulumpi/.reticulum/config"
+        # rnsd and ReticulumPi share the canonical service HOME in production;
+        # an explicit application override still wins for development/tests.
+        config_dir = self.app._reticulum_config_dir or os.path.expanduser("~/.reticulum")
+        return os.path.join(config_dir, "config")
 
     # ------------------------------------------------------------------
     # Monitor thread — poll interface stats + check paths
@@ -539,7 +538,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
         announced = 0
 
         # 1. Heartbeat announce destination
-        heartbeat = self.app.get_plugin("heartbeat_announce")
+        heartbeat = self.get_ready_plugin("heartbeat_announce")
         if heartbeat and hasattr(heartbeat, "destination") and heartbeat.destination:
             try:
                 app_data = None
@@ -552,7 +551,7 @@ class LoRaDiagnosticsPlugin(PluginBase):
                 self.log.debug("Failed to beacon heartbeat destination", exc_info=True)
 
         # 2. Messaging hub adapter destinations (LXMF, etc.)
-        messaging_hub = self.app.get_plugin("messaging_hub")
+        messaging_hub = self.get_ready_plugin("messaging_hub")
         if messaging_hub and hasattr(messaging_hub, "get_announceable_destinations"):
             for name, dest in messaging_hub.get_announceable_destinations():
                 try:

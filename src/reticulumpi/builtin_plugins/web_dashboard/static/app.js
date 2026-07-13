@@ -2,6 +2,47 @@
 (function() {
   'use strict';
 
+  // Keep initially unavailable panels hidden before JavaScript runs, then move
+  // their visibility state to CSSOM properties.  CSP blocks style attributes,
+  // while property assignment remains available for live dashboard state.
+  var initiallyHidden = document.querySelectorAll('.csp-initial-hidden');
+  for (var hiddenIndex = 0; hiddenIndex < initiallyHidden.length; hiddenIndex++) {
+    initiallyHidden[hiddenIndex].style.display = 'none';
+    initiallyHidden[hiddenIndex].classList.remove('csp-initial-hidden');
+  }
+
+  // The server knows which plugins are READY while rendering the shell.  Seed
+  // feature visibility from that state so optional panels never flash and then
+  // disappear after the first status payload (a large layout shift on Pi-class
+  // hardware and slow LANs).
+  var _serverReadyFeatures = Object.create(null);
+  var readyFeatureTokens = ((document.body && document.body.dataset.readyFeatures) || '')
+    .split(/\s+/);
+  for (var readyFeatureIndex = 0; readyFeatureIndex < readyFeatureTokens.length; readyFeatureIndex++) {
+    if (readyFeatureTokens[readyFeatureIndex]) {
+      _serverReadyFeatures[readyFeatureTokens[readyFeatureIndex]] = true;
+    }
+  }
+
+  // Horizontal and bounded vertical regions must remain operable without a
+  // pointer.  Tables can be empty during first paint, so their wrappers cannot
+  // rely on a focusable descendant to satisfy this requirement.
+  var scrollableRegions = document.querySelectorAll(
+    '.table-wrap, .table-scroll, .scroll-max-500, .scroll-max-400, ' +
+    '.config-content, .mqtt-feed-list, .msg-conversations, .msg-chat, ' +
+    '.dialog-body, .lt-log-wrap, .nt-results, .radio-band-selector'
+  );
+  for (var scrollRegionIndex = 0; scrollRegionIndex < scrollableRegions.length; scrollRegionIndex++) {
+    var scrollRegion = scrollableRegions[scrollRegionIndex];
+    if (!scrollRegion.hasAttribute('tabindex')) scrollRegion.tabIndex = 0;
+    if (!scrollRegion.hasAttribute('aria-label') && !scrollRegion.hasAttribute('aria-labelledby')) {
+      var labelledSection = scrollRegion.closest('section[aria-label]');
+      var scrollLabel = labelledSection && labelledSection.getAttribute('aria-label');
+      if (!scrollRegion.hasAttribute('role')) scrollRegion.setAttribute('role', 'region');
+      scrollRegion.setAttribute('aria-label', (scrollLabel || 'Dashboard') + ' scrollable content');
+    }
+  }
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' })
       .catch(function () {});
@@ -26,7 +67,7 @@
   }
 
   /* ── Shared namespace ─────────────────────────────────────────────── */
-  var RPI = window.RPI = {};
+  var RPI = window.RPI = window.RPI || {};
 
   var ws = null;
   var reconnectDelay = 1000;
@@ -42,6 +83,8 @@
   var lastLiveIfaces = [];  // last live interfaces from RNS
   var _wsFirstTick = false;
   var _wsReadyCallbacks = [];
+  var passwordChangeRequired = new URLSearchParams(window.location.search)
+    .get('password_change') === 'required';
 
   // Wrap a block of wiring/boot work so an exception in one block cannot kill
   // the rest of the script. Reports through errlog.js if present (it may not be
@@ -60,6 +103,10 @@
   // DOM lookups are valid (app.js is a defer script). Wrapping in safeWire keeps
   // a boot-time exception from killing the rest of the script.
   function boot() {
+    if (passwordChangeRequired) {
+      showPasswordChangeDialog();
+      return;
+    }
     // If we reached this page, the cookie is valid.
     initOffgridToggle();
     fetchNode();
@@ -107,22 +154,30 @@
 
   function api(path, opts) {
     opts = opts || {};
-    var headers = opts.headers || {};
+    var headers = Object.assign({}, opts.headers || {});
     headers['Accept'] = 'application/json';
     headers['X-Requested-With'] = 'XMLHttpRequest';
-    if (opts.body) headers['Content-Type'] = 'application/json';
+    var hasJson = opts.json !== undefined && opts.json !== null;
+    if (hasJson) headers['Content-Type'] = 'application/json';
+    if (hasJson && typeof opts.json !== 'object') {
+      return Promise.resolve({ok: false, error: 'API json must be an object'});
+    }
     var timeoutMs = opts.timeout || 10000;
     var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function() { try { ctrl.abort(); } catch (e) {} }, timeoutMs) : null;
-    return fetch(path, {
+    return RPI.jsonFetch(path, {
       method: opts.method || 'GET',
       headers: headers,
       credentials: 'same-origin',
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      json: hasJson ? opts.json : undefined,
       signal: ctrl ? ctrl.signal : undefined
     }).then(function(r) {
       if (timer) clearTimeout(timer);
       if (r.status === 401) { window.location.href = '/login.html'; return null; }
+      if (r.status === 428) {
+        passwordChangeRequired = true;
+        showPasswordChangeDialog();
+      }
       return r.json().catch(function() { return {ok: false, error: 'Invalid response'}; });
     }).catch(function() { if (timer) clearTimeout(timer); return null; });
   }
@@ -140,6 +195,36 @@
   }
 
   function $(id) { return document.getElementById(id); }
+
+  function applyCspDynamicStyles(root) {
+    if (!root || !root.querySelectorAll) return;
+    var widthNodes = root.querySelectorAll('[data-rpi-width]');
+    for (var i = 0; i < widthNodes.length; i++) {
+      var width = Number(widthNodes[i].getAttribute('data-rpi-width'));
+      if (Number.isFinite(width)) {
+        widthNodes[i].style.width = Math.max(0, Math.min(100, width)) + '%';
+      }
+      widthNodes[i].removeAttribute('data-rpi-width');
+    }
+  }
+  RPI.applyCspDynamicStyles = applyCspDynamicStyles;
+
+  function confirmDestructive(title, message, confirmLabel) {
+    var dialog = $('destructive-dialog');
+    if (!dialog || dialog.open) return Promise.resolve(false);
+    $('destructive-dialog-title').textContent = title || 'Confirm action';
+    $('destructive-dialog-message').textContent = message || 'This action cannot be undone.';
+    $('destructive-dialog-confirm').textContent = confirmLabel || 'Continue';
+    dialog.returnValue = '';
+    return new Promise(function(resolve) {
+      dialog.addEventListener('close', function() {
+        resolve(dialog.returnValue === 'confirm');
+      }, {once: true});
+      dialog.showModal();
+      $('destructive-dialog-cancel').focus();
+    });
+  }
+  RPI.confirmDestructive = confirmDestructive;
 
   function esc(s) {
     var d = document.createElement('div');
@@ -195,6 +280,756 @@
 
   var _stash = {};
   var _sectionOnExpand = {};
+
+  // --- Optional feature loading -----------------------------------------
+  // Keep the coordinator in the core shell, but load heavyweight panels only
+  // after their backing plugin has produced an availability signal and the
+  // user opens the panel.  Feature bundles are ESM modules with an explicit
+  // init(context) / dispose(context) contract.
+
+  var _featureManifestPromise = null;
+  var _leafletPromise = null;
+  var _featureMessageEvents = [];
+  var _FEATURE_MESSAGE_EVENT_LIMIT = 100;
+  var _featureByToggle = Object.create(null);
+  var _features = Object.create(null);
+  var _readyPlugins = Object.create(null);
+
+  function registerFeature(name, spec) {
+    if (!name || !spec || !spec.asset) throw new Error('Invalid dashboard feature');
+    var feature = {
+      name: name,
+      asset: spec.asset,
+      sections: spec.sections || [],
+      toggles: spec.toggles || [],
+      bodies: spec.bodies || [],
+      dependencies: spec.dependencies || [],
+      hideUntilAvailable: spec.hideUntilAvailable !== false,
+      loadWhenVisible: spec.loadWhenVisible === true,
+      available: !!_serverReadyFeatures[name],
+      desired: false,
+      active: false,
+      replayingClick: false,
+      module: null,
+      promise: null,
+      dataPromise: null,
+      lastDataFetch: 0,
+      error: null
+    };
+    _features[name] = feature;
+    for (var i = 0; i < feature.toggles.length; i++) {
+      _featureByToggle[feature.toggles[i]] = name;
+    }
+    if (feature.hideUntilAvailable) {
+      _setFeatureSectionsVisible(feature, feature.available);
+    }
+    if (feature.loadWhenVisible) _observeFeatureVisibility(feature);
+    return feature;
+  }
+  RPI.registerFeature = registerFeature;
+
+  function _featureIsVisible(feature) {
+    var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    for (var i = 0; i < feature.sections.length; i++) {
+      var section = $(feature.sections[i]);
+      if (!section) continue;
+      var rect = section.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < viewportHeight) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function _observeFeatureVisibility(feature) {
+    if (!('IntersectionObserver' in window)) return;
+    feature.observer = new IntersectionObserver(function(entries) {
+      for (var i = 0; i < entries.length; i++) {
+        if (!entries[i].isIntersecting) continue;
+        if (!feature.available || feature.active || feature.promise) return;
+        feature.desired = true;
+        loadFeature(feature.name).catch(function() {});
+        return;
+      }
+    }, {rootMargin: '160px 0px'});
+    for (var i = 0; i < feature.sections.length; i++) {
+      var section = $(feature.sections[i]);
+      if (section) feature.observer.observe(section);
+    }
+  }
+
+  function _setFeatureSectionsVisible(feature, visible) {
+    for (var i = 0; i < feature.sections.length; i++) {
+      var section = $(feature.sections[i]);
+      if (section) section.style.display = visible ? '' : 'none';
+    }
+  }
+
+  function _featureHasOpenBody(feature) {
+    for (var i = 0; i < feature.bodies.length; i++) {
+      var body = $(feature.bodies[i]);
+      if (body && !body.classList.contains('hidden')) return true;
+    }
+    return false;
+  }
+
+  function _setFeatureBusy(feature, busy) {
+    for (var i = 0; i < feature.sections.length; i++) {
+      var section = $(feature.sections[i]);
+      if (!section) continue;
+      if (busy) section.setAttribute('aria-busy', 'true');
+      else section.removeAttribute('aria-busy');
+    }
+  }
+
+  function _featureContext() {
+    return {rpi: RPI, replay: _replayFeature};
+  }
+
+  function _loadStylesheetOnce(id, href) {
+    var existing = $(id);
+    if (existing && existing.sheet) return Promise.resolve(existing);
+    return new Promise(function(resolve, reject) {
+      var link = existing || document.createElement('link');
+      link.id = id;
+      link.rel = 'stylesheet';
+      link.href = href;
+      link.addEventListener('load', function() { resolve(link); }, {once: true});
+      link.addEventListener('error', function() { reject(new Error('Could not load ' + href)); }, {once: true});
+      if (!existing) document.head.appendChild(link);
+    });
+  }
+
+  function _loadScriptOnce(id, src) {
+    if (window.L) return Promise.resolve();
+    var existing = $(id);
+    return new Promise(function(resolve, reject) {
+      var script = existing || document.createElement('script');
+      script.id = id;
+      script.src = src;
+      script.defer = true;
+      script.addEventListener('load', function() { resolve(); }, {once: true});
+      script.addEventListener('error', function() { reject(new Error('Could not load ' + src)); }, {once: true});
+      if (!existing) document.head.appendChild(script);
+    });
+  }
+
+  function _loadLeaflet() {
+    if (window.L) return Promise.resolve();
+    if (_leafletPromise) return _leafletPromise;
+    _leafletPromise = _loadStylesheetOnce('rpi-leaflet-css', '/static/vendor/leaflet.css')
+      .then(function() {
+        return _loadScriptOnce('rpi-leaflet-script', '/static/vendor/leaflet.js');
+      }).then(function() {
+        if (!window.L) throw new Error('Leaflet did not initialize');
+        if (_stash.gps && RPI.updateGps) RPI.updateGps(_stash.gps);
+      }).catch(function(error) {
+        var css = $('rpi-leaflet-css');
+        var script = $('rpi-leaflet-script');
+        if (css) css.remove();
+        if (script) script.remove();
+        _leafletPromise = null;
+        throw error;
+      });
+    return _leafletPromise;
+  }
+
+  function _loadFeatureDependencies(feature) {
+    var pending = [];
+    for (var i = 0; i < feature.dependencies.length; i++) {
+      if (feature.dependencies[i] === 'leaflet') pending.push(_loadLeaflet());
+    }
+    return Promise.all(pending);
+  }
+
+  function _loadFeatureManifest() {
+    if (_featureManifestPromise) return _featureManifestPromise;
+    _featureManifestPromise = fetch('/static/asset-manifest.json', {
+      credentials: 'same-origin',
+      cache: 'no-cache',
+      headers: {'Accept': 'application/json'}
+    }).then(function(response) {
+      if (!response.ok) throw new Error('feature manifest request failed');
+      return response.json();
+    }).then(function(manifest) {
+      if (!manifest || manifest.schema !== 1 || !manifest.assets) {
+        throw new Error('feature manifest is invalid');
+      }
+      return manifest;
+    }).catch(function(error) {
+      _featureManifestPromise = null;
+      throw error;
+    });
+    return _featureManifestPromise;
+  }
+
+  function loadFeature(name) {
+    var feature = _features[name];
+    if (!feature) return Promise.reject(new Error('Unknown feature: ' + name));
+    if (!feature.available) return Promise.reject(new Error('Feature is unavailable: ' + name));
+    if (feature.active) {
+      _fetchFeatureData(name);
+      return Promise.resolve(feature.module);
+    }
+    if (feature.promise) return feature.promise;
+
+    _setFeatureBusy(feature, true);
+    feature.error = null;
+    feature.promise = _loadFeatureDependencies(feature).then(function() {
+      if (feature.module) return feature.module;
+      return _loadFeatureManifest().then(function(manifest) {
+          var record = manifest.assets[feature.asset];
+          if (!record || typeof record.path !== 'string' ||
+              !/^assets\/[a-z0-9-]+-[A-Z0-9]+\.js$/.test(record.path)) {
+            throw new Error('Feature asset is missing: ' + feature.asset);
+          }
+          return import('/static/' + record.path);
+        });
+    }).then(function(module) {
+      if (!module || typeof module.init !== 'function' || typeof module.dispose !== 'function') {
+        throw new Error('Feature module contract is invalid: ' + name);
+      }
+      feature.module = module;
+      return Promise.resolve(module.init(_featureContext())).then(function() {
+        feature.active = true;
+        feature.error = null;
+        return _fetchFeatureData(name).then(function() { return module; });
+      });
+    }).catch(function(error) {
+      feature.error = error;
+      feature.active = false;
+      showToast('Could not load ' + name + '. Open the panel to retry.', 'error');
+      throw error;
+    }).finally(function() {
+      feature.promise = null;
+      _setFeatureBusy(feature, false);
+    });
+    return feature.promise;
+  }
+  RPI.loadFeature = loadFeature;
+
+  function _fetchFeatureData(name) {
+    var feature = _features[name];
+    if (!feature || !feature.active) return Promise.resolve([]);
+    if (feature.dataPromise) return feature.dataPromise;
+    if (Date.now() - feature.lastDataFetch < 10000) return Promise.resolve([]);
+
+    var requests = [];
+    if (name === 'map') {
+      if (_readyPlugins.meshtastic_gateway) {
+        var mshStatus = null, mshNodes = null;
+        function mergeMeshtasticFeatureData() {
+          if (mshStatus === null || mshNodes === null) return;
+          _stash.meshtastic_status = mshStatus;
+          _stash.meshtastic_nodes = mshNodes;
+          if (RPI.updateMeshtastic) RPI.updateMeshtastic(mshStatus, mshNodes);
+          if (RPI.updateMap) RPI.updateMap(mshNodes);
+        }
+        requests.push(apiRetry('/api/meshtastic/status').then(function(r) {
+          mshStatus = (r && r.ok) ? r.data : {};
+          mergeMeshtasticFeatureData();
+        }));
+        requests.push(apiRetry('/api/meshtastic/nodes').then(function(r) {
+          mshNodes = (r && r.ok) ? r.data.nodes : [];
+          mergeMeshtasticFeatureData();
+        }));
+        requests.push(apiRetry('/api/meshtastic/device').then(function(r) {
+          if (r && r.ok && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(r.data);
+        }));
+        requests.push(apiRetry('/api/meshtastic/lora_neighbors').then(function(r) {
+          if (!r || !r.ok) return;
+          _stash.meshtastic_lora_neighbors = r.data.neighbors;
+          if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(r.data.neighbors);
+          if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(r.data.neighbors);
+        }));
+      }
+
+      if (_readyPlugins.meshcore_gateway || _readyPlugins.meshcore_observer) {
+        var mcStatus = null, mcContacts = null;
+        function mergeMeshCoreFeatureData() {
+          if (mcStatus === null || mcContacts === null) return;
+          _stash.meshcore_status = mcStatus;
+          _stash.meshcore_contacts = mcContacts;
+          if (RPI.updateMeshCore) RPI.updateMeshCore(mcStatus, mcContacts);
+          if (RPI.updateMapMeshCore) RPI.updateMapMeshCore(mcContacts);
+        }
+        requests.push(apiRetry('/api/meshcore/status').then(function(r) {
+          mcStatus = (r && r.ok) ? r.data : {};
+          mergeMeshCoreFeatureData();
+        }));
+        requests.push(apiRetry('/api/meshcore/contacts').then(function(r) {
+          mcContacts = (r && r.ok) ? r.data.contacts : [];
+          mergeMeshCoreFeatureData();
+        }));
+        requests.push(api('/api/meshcore/device').then(function(r) {
+          if (r && r.ok && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(r.data);
+        }));
+        requests.push(api('/api/meshcore_observer/status').then(function(r) {
+          if (r && r.ok && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(r.data);
+        }));
+      }
+
+      if (_readyPlugins.gps_telemetry) {
+        requests.push(apiRetry('/api/gps').then(function(r) {
+          if (!r || !r.ok) return;
+          _stash.gps = r.data;
+          if (RPI.updateGps) RPI.updateGps(r.data);
+          if (r.data.last_fix && RPI.updateMapGps) RPI.updateMapGps(r.data.last_fix);
+        }));
+      }
+      if (_readyPlugins.mesh_telemetry) {
+        requests.push(api('/api/mesh/telemetry').then(function(r) {
+          if (!r || !r.ok) return;
+          _stash.mesh_peers = r.data.peers;
+          if (RPI.cacheMeshPeers) RPI.cacheMeshPeers(r.data.peers);
+          if (RPI.updatePeerTelemetry) RPI.updatePeerTelemetry(r.data.peers);
+          if (RPI.updateMapReticulum) RPI.updateMapReticulum(r.data.peers);
+        }));
+      }
+    } else if (name === 'lora') {
+      if (RPI.updateLoraRadio) RPI.updateLoraRadio(_stash.interfaces || null, _stash.lora || null);
+      if (_stash.interfaces && RPI.updateLoraSignal) RPI.updateLoraSignal(_stash.interfaces);
+      if (RPI.fetchLoraReachability) RPI.fetchLoraReachability();
+      requests.push(Promise.resolve());
+    } else if (name === 'mesh') {
+      if (RPI.fetchMeshNodes) RPI.fetchMeshNodes();
+      if (RPI.fetchMeshSummary) RPI.fetchMeshSummary();
+      if (_stash.mesh && RPI.updateMeshFromWS) RPI.updateMeshFromWS(_stash.mesh);
+      requests.push(Promise.resolve());
+    } else if (name === 'routing' && _readyPlugins.connectivity_monitor) {
+      requests.push(apiRetry('/api/routing?per_page=0').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.routing = r.data.summary || {};
+        if (RPI.updateRoutingSummary) RPI.updateRoutingSummary(_stash.routing);
+      }));
+    } else if (name === 'mesh-bridge' && _readyPlugins.mesh_bridge) {
+      requests.push(apiRetry('/api/mesh_bridge/status').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.mesh_bridge = r.data;
+        if (RPI.updateMeshBridge) RPI.updateMeshBridge(r.data);
+      }));
+    } else if (name === 'meshtastic' && _readyPlugins.meshtastic_gateway) {
+      var featureMshStatus = null, featureMshNodes = null;
+      function mergeMeshtasticPanelData() {
+        if (featureMshStatus === null || featureMshNodes === null) return;
+        _stash.meshtastic_status = featureMshStatus;
+        _stash.meshtastic_nodes = featureMshNodes;
+        if (RPI.updateMeshtastic) RPI.updateMeshtastic(featureMshStatus, featureMshNodes);
+      }
+      requests.push(apiRetry('/api/meshtastic/status').then(function(r) {
+        featureMshStatus = (r && r.ok) ? r.data : {};
+        mergeMeshtasticPanelData();
+      }));
+      requests.push(apiRetry('/api/meshtastic/nodes').then(function(r) {
+        featureMshNodes = (r && r.ok) ? r.data.nodes : [];
+        mergeMeshtasticPanelData();
+      }));
+      requests.push(apiRetry('/api/meshtastic/device').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.meshtastic_device = r.data;
+        if (RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(r.data);
+      }));
+      requests.push(apiRetry('/api/meshtastic/lora_neighbors').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.meshtastic_lora_neighbors = r.data.neighbors;
+        if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(r.data.neighbors);
+      }));
+    } else if (name === 'meshcore' &&
+               (_readyPlugins.meshcore_gateway || _readyPlugins.meshcore_observer)) {
+      var featureMcStatus = null, featureMcContacts = null;
+      function mergeMeshCorePanelData() {
+        if (featureMcStatus === null || featureMcContacts === null) return;
+        _stash.meshcore_status = featureMcStatus;
+        _stash.meshcore_contacts = featureMcContacts;
+        if (RPI.updateMeshCore) RPI.updateMeshCore(featureMcStatus, featureMcContacts);
+      }
+      requests.push(apiRetry('/api/meshcore/status').then(function(r) {
+        featureMcStatus = (r && r.ok) ? r.data : {};
+        mergeMeshCorePanelData();
+      }));
+      requests.push(apiRetry('/api/meshcore/contacts').then(function(r) {
+        featureMcContacts = (r && r.ok) ? r.data.contacts : [];
+        mergeMeshCorePanelData();
+      }));
+      requests.push(apiRetry('/api/meshcore/device').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.meshcore_device = r.data;
+        if (RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(r.data);
+      }));
+      requests.push(apiRetry('/api/meshcore_observer/status').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.meshcore_observer = r.data;
+        if (RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(r.data);
+      }));
+    } else if (name === 'gps' && _readyPlugins.gps_telemetry) {
+      requests.push(apiRetry('/api/gps').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.gps = r.data;
+        if (RPI.updateGps) RPI.updateGps(r.data);
+      }));
+    } else if (name === 'ntp' && _readyPlugins.ntp_server) {
+      requests.push(apiRetry('/api/ntp').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.ntp = r.data;
+        if (RPI.updateNtp) RPI.updateNtp(r.data);
+      }));
+    } else if (name === 'link-tester' && _readyPlugins.lora_link_tester) {
+      requests.push(apiRetry('/api/link_tester').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.link_tester = r.data;
+        if (RPI.updateLinkTester) RPI.updateLinkTester(r.data);
+      }));
+    } else if (name === 'hotspot') {
+      requests.push(apiRetry('/api/captive_portal').then(function(r) {
+        if (r && r.ok) _stash.captive_portal = r.data;
+        if (_stash.hotspot && RPI.updateHotspot) {
+          RPI.updateHotspot(_stash.hotspot, _stash.captive_portal || null);
+        }
+      }));
+    } else if (name === 'weather-alert' && _readyPlugins.weather_alert) {
+      requests.push(apiRetry('/api/weather_alert').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.weather_alert = r.data;
+        if (RPI.updateWeatherAlert) RPI.updateWeatherAlert(r.data);
+      }));
+    } else if (name === 'ais' && _readyPlugins.ais_receiver) {
+      requests.push(apiRetry('/api/ais').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.ais = r.data;
+        if (RPI.updateAis) RPI.updateAis(r.data);
+      }));
+    } else if (name === 'acars' && _readyPlugins.acars_decoder) {
+      requests.push(apiRetry('/api/acars').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.acars = r.data;
+        if (RPI.updateAcars) RPI.updateAcars(r.data);
+      }));
+    } else if (name === 'radiosonde' && _readyPlugins.radiosonde_tracker) {
+      requests.push(apiRetry('/api/radiosonde').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.radiosonde = r.data;
+        if (RPI.updateRadiosonde) RPI.updateRadiosonde(r.data);
+      }));
+    } else if (name === 'noaa' && _readyPlugins.noaa_apt_decoder) {
+      requests.push(apiRetry('/api/noaa').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.noaa_apt = r.data;
+        if (RPI.updateNoaa) RPI.updateNoaa(r.data);
+      }));
+    } else if (name === 'adsb' && _readyPlugins.adsb_radar) {
+      requests.push(apiRetry('/api/adsb').then(function(r) {
+        if (!r || !r.ok) return;
+        _stash.adsb = r.data;
+        if (RPI.adsb && RPI.adsb.update) RPI.adsb.update(r.data);
+      }));
+    }
+
+    if (!requests.length) return Promise.resolve([]);
+    feature.dataPromise = Promise.all(requests).then(function(results) {
+      feature.lastDataFetch = Date.now();
+      return results;
+    }).finally(function() {
+      feature.dataPromise = null;
+    });
+    return feature.dataPromise;
+  }
+  RPI.fetchFeatureData = _fetchFeatureData;
+
+  function _disposeFeature(feature) {
+    if (!feature || !feature.module || !feature.active) return Promise.resolve();
+    feature.active = false;
+    return Promise.resolve(feature.module.dispose(_featureContext())).catch(function(error) {
+      if (window.__rpiReportError) window.__rpiReportError(error, 'feature-dispose:' + feature.name);
+    });
+  }
+
+  function _setFeatureAvailable(name, available) {
+    var feature = _features[name];
+    if (!feature) return;
+    feature.available = !!available;
+    if (feature.hideUntilAvailable) _setFeatureSectionsVisible(feature, feature.available);
+    if (!feature.available) {
+      feature.desired = false;
+      _disposeFeature(feature);
+      return;
+    }
+    if (feature.loadWhenVisible &&
+        (!('IntersectionObserver' in window) || _featureIsVisible(feature))) {
+      feature.desired = true;
+      loadFeature(name).catch(function() {});
+      return;
+    }
+    if (_featureHasOpenBody(feature)) {
+      feature.desired = true;
+      loadFeature(name).catch(function() {});
+    }
+  }
+  RPI.setFeatureAvailable = _setFeatureAvailable;
+
+  function _pluginIsReady(plugins, name) {
+    var plugin = plugins && plugins[name];
+    if (!plugin) return false;
+    var status = plugin.status || {};
+    var lifecycle = status._lifecycle || {};
+    if (lifecycle.state) return lifecycle.state === 'ready';
+    return status.active !== false;
+  }
+
+  function _markFeaturesFromPlugins(plugins) {
+    _readyPlugins = Object.create(null);
+    var pluginNames = Object.keys(plugins || {});
+    for (var pi = 0; pi < pluginNames.length; pi++) {
+      if (_pluginIsReady(plugins, pluginNames[pi])) _readyPlugins[pluginNames[pi]] = true;
+    }
+    var spectrumLink = $('spectrum-nav-link');
+    if (spectrumLink) {
+      var spectrumAvailable = _pluginIsReady(plugins, 'spectrum_scanner') ||
+        _pluginIsReady(plugins, 'lora_scanner') ||
+        _pluginIsReady(plugins, 'lora_link_tester');
+      spectrumLink.hidden = !spectrumAvailable;
+      spectrumLink.setAttribute('aria-disabled', spectrumAvailable ? 'false' : 'true');
+    }
+    _setFeatureAvailable('messages', _pluginIsReady(plugins, 'messaging_hub'));
+    _setFeatureAvailable('adsb', _pluginIsReady(plugins, 'adsb_radar'));
+    _setFeatureAvailable('space', _pluginIsReady(plugins, 'space_tracker'));
+    _setFeatureAvailable('radio', _pluginIsReady(plugins, 'fm_receiver'));
+    _setFeatureAvailable('mesh',
+      _pluginIsReady(plugins, 'network_map') || _pluginIsReady(plugins, 'mesh_telemetry'));
+    _setFeatureAvailable('routing', _pluginIsReady(plugins, 'connectivity_monitor'));
+    _setFeatureAvailable('mesh-bridge', _pluginIsReady(plugins, 'mesh_bridge'));
+    _setFeatureAvailable('meshtastic', _pluginIsReady(plugins, 'meshtastic_gateway'));
+    _setFeatureAvailable('meshcore',
+      _pluginIsReady(plugins, 'meshcore_gateway') || _pluginIsReady(plugins, 'meshcore_observer'));
+    _setFeatureAvailable('gps', _pluginIsReady(plugins, 'gps_telemetry'));
+    _setFeatureAvailable('ntp', _pluginIsReady(plugins, 'ntp_server'));
+    _setFeatureAvailable('link-tester', _pluginIsReady(plugins, 'lora_link_tester'));
+    _setFeatureAvailable('hotspot',
+      _pluginIsReady(plugins, 'hotspot_monitor') || _pluginIsReady(plugins, 'captive_portal'));
+    _setFeatureAvailable('weather-alert', _pluginIsReady(plugins, 'weather_alert'));
+    _setFeatureAvailable('ais', _pluginIsReady(plugins, 'ais_receiver'));
+    _setFeatureAvailable('acars', _pluginIsReady(plugins, 'acars_decoder'));
+    _setFeatureAvailable('radiosonde', _pluginIsReady(plugins, 'radiosonde_tracker'));
+    _setFeatureAvailable('noaa', _pluginIsReady(plugins, 'noaa_apt_decoder'));
+    var mapPlugins = [
+      'meshtastic_gateway', 'meshcore_gateway', 'meshcore_observer',
+      'node_location_tracker', 'gps_telemetry', 'mesh_telemetry'
+    ];
+    var mapAvailable = false;
+    for (var i = 0; i < mapPlugins.length; i++) {
+      if (_pluginIsReady(plugins, mapPlugins[i])) {
+        mapAvailable = true;
+        break;
+      }
+    }
+    _setFeatureAvailable('map', mapAvailable);
+  }
+
+  function _queueMessageFeatureEvent(handler, data) {
+    _setFeatureAvailable('messages', true);
+    if (typeof RPI[handler] === 'function') {
+      RPI[handler](data);
+      return;
+    }
+    if (_featureMessageEvents.length >= _FEATURE_MESSAGE_EVENT_LIMIT) {
+      _featureMessageEvents.shift();
+    }
+    _featureMessageEvents.push({handler: handler, data: data});
+  }
+
+  function _replayFeature(name) {
+    if (name === 'messages') {
+      if (_stash.messaging) {
+        if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(_stash.messaging);
+        if (RPI.updateMqttFeed) RPI.updateMqttFeed(_stash.messaging);
+        if (RPI.updateMessagingLora) RPI.updateMessagingLora(_stash.messaging);
+        if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(_stash.messaging);
+      }
+      var events = _featureMessageEvents.splice(0, _featureMessageEvents.length);
+      for (var mi = 0; mi < events.length; mi++) {
+        if (typeof RPI[events[mi].handler] === 'function') {
+          RPI[events[mi].handler](events[mi].data);
+        }
+      }
+      return;
+    }
+    if (name === 'map') {
+      if (_stash.meshtastic_nodes !== undefined && RPI.updateMap) RPI.updateMap(_stash.meshtastic_nodes);
+      if (_stash.meshtastic_lora_neighbors !== undefined && RPI.updateMapLoraNeighbors) {
+        RPI.updateMapLoraNeighbors(_stash.meshtastic_lora_neighbors);
+      }
+      if (_stash.meshcore_contacts !== undefined && RPI.updateMapMeshCore) RPI.updateMapMeshCore(_stash.meshcore_contacts);
+      if (_stash.mesh_peers !== undefined && RPI.updateMapReticulum) RPI.updateMapReticulum(_stash.mesh_peers);
+      if (_stash.gps && _stash.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(_stash.gps.last_fix);
+      if (RPI.updateNodeTracker) {
+        RPI.updateNodeTracker(
+          _stash.meshtastic_nodes || null,
+          _stash.meshtastic_lora_neighbors || null,
+          _stash.meshcore_contacts || null
+        );
+      }
+      return;
+    }
+    if (name === 'adsb' && _stash.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(_stash.adsb);
+    if (name === 'space' && _stash.space && RPI.space && RPI.space.update) RPI.space.update(_stash.space);
+    if (name === 'radio' && _stash.fm_receiver && RPI.updateRadio) RPI.updateRadio(_stash.fm_receiver);
+    if (name === 'lora') {
+      if (RPI.updateLoraRadio) RPI.updateLoraRadio(_stash.interfaces || null, _stash.lora || null);
+      if (_stash.interfaces && RPI.updateLoraSignal) RPI.updateLoraSignal(_stash.interfaces);
+    }
+    if (name === 'mesh') {
+      if (_stash.mesh && RPI.updateMeshFromWS) RPI.updateMeshFromWS(_stash.mesh);
+      if (_stash.mesh_peers && RPI.cacheMeshPeers) RPI.cacheMeshPeers(_stash.mesh_peers);
+      if (_stash.mesh_peers && RPI.updatePeerTelemetry) RPI.updatePeerTelemetry(_stash.mesh_peers);
+    }
+    if (name === 'routing' && _stash.routing && RPI.updateRoutingSummary) {
+      RPI.updateRoutingSummary(_stash.routing);
+    }
+    if (name === 'mesh-bridge' && _stash.mesh_bridge && RPI.updateMeshBridge) {
+      RPI.updateMeshBridge(_stash.mesh_bridge);
+    }
+    if (name === 'meshtastic') {
+      if ((_stash.meshtastic_status || _stash.meshtastic_nodes) && RPI.updateMeshtastic) {
+        RPI.updateMeshtastic(_stash.meshtastic_status || {}, _stash.meshtastic_nodes || []);
+      }
+      if (_stash.meshtastic_device && RPI.updateMeshtasticDevice) {
+        RPI.updateMeshtasticDevice(_stash.meshtastic_device);
+      }
+      if (_stash.meshtastic_lora_neighbors && RPI.updateLoraNeighbors) {
+        RPI.updateLoraNeighbors(_stash.meshtastic_lora_neighbors);
+      }
+    }
+    if (name === 'meshcore') {
+      if ((_stash.meshcore_status || _stash.meshcore_contacts) && RPI.updateMeshCore) {
+        RPI.updateMeshCore(_stash.meshcore_status || {}, _stash.meshcore_contacts || []);
+      }
+      if (_stash.meshcore_device && RPI.updateMeshCoreDevice) {
+        RPI.updateMeshCoreDevice(_stash.meshcore_device);
+      }
+      if (_stash.meshcore_observer && RPI.updateMeshCoreObserver) {
+        RPI.updateMeshCoreObserver(_stash.meshcore_observer);
+      }
+    }
+    if (name === 'gps' && _stash.gps && RPI.updateGps) RPI.updateGps(_stash.gps);
+    if (name === 'ntp' && _stash.ntp && RPI.updateNtp) RPI.updateNtp(_stash.ntp);
+    if (name === 'hotspot' && _stash.hotspot && RPI.updateHotspot) {
+      RPI.updateHotspot(_stash.hotspot, _stash.captive_portal || null);
+    }
+    if (name === 'link-tester' && _stash.link_tester && RPI.updateLinkTester) {
+      RPI.updateLinkTester(_stash.link_tester);
+    }
+    if (name === 'weather-alert' && _stash.weather_alert && RPI.updateWeatherAlert) {
+      RPI.updateWeatherAlert(_stash.weather_alert);
+    }
+    if (name === 'ais' && _stash.ais && RPI.updateAis) RPI.updateAis(_stash.ais);
+    if (name === 'acars' && _stash.acars && RPI.updateAcars) RPI.updateAcars(_stash.acars);
+    if (name === 'radiosonde' && _stash.radiosonde && RPI.updateRadiosonde) {
+      RPI.updateRadiosonde(_stash.radiosonde);
+    }
+    if (name === 'noaa' && _stash.noaa_apt && RPI.updateNoaa) RPI.updateNoaa(_stash.noaa_apt);
+  }
+  RPI.replayFeature = _replayFeature;
+
+  registerFeature('messages', {
+    asset: 'feature-messages.js',
+    sections: ['msg-lxmf-section', 'mqtt-feed-section', 'msg-lora-section', 'msg-meshcore-section'],
+    toggles: ['msg-lxmf-toggle', 'mqtt-feed-toggle', 'msg-lora-toggle', 'msg-meshcore-toggle'],
+    bodies: ['msg-lxmf-body', 'mqtt-feed-body', 'msg-lora-body', 'msg-meshcore-body']
+  });
+  registerFeature('map', {
+    asset: 'feature-map.js',
+    sections: ['map-section', 'node-tracker-section'],
+    bodies: ['map-body', 'node-tracker-body'],
+    dependencies: ['leaflet'],
+    hideUntilAvailable: false
+  });
+  registerFeature('adsb', {
+    asset: 'feature-adsb.js', sections: ['adsb-section'], toggles: ['adsb-toggle'],
+    bodies: ['adsb-body'], dependencies: ['leaflet']
+  });
+  registerFeature('space', {
+    asset: 'feature-space.js', sections: ['space-section'], toggles: ['space-toggle'],
+    bodies: ['space-body'], dependencies: ['leaflet']
+  });
+  registerFeature('radio', {
+    asset: 'feature-radio.js', sections: ['radio-section'], toggles: ['radio-toggle'], bodies: ['radio-body']
+  });
+  registerFeature('lora', {
+    asset: 'feature-lora.js', sections: ['lora-section'],
+    hideUntilAvailable: false, loadWhenVisible: true
+  });
+  registerFeature('mesh', {
+    asset: 'feature-mesh.js', sections: ['mesh-section', 'telemetry-section'],
+    toggles: ['telemetry-toggle'], bodies: ['telemetry-body'], loadWhenVisible: true
+  });
+  registerFeature('routing', {
+    asset: 'feature-routing.js', sections: ['routing-section'], loadWhenVisible: true
+  });
+  registerFeature('mesh-bridge', {
+    asset: 'feature-mesh-bridge.js', sections: ['mesh-bridge-section'],
+    toggles: ['mesh-bridge-section-toggle'], bodies: ['mesh-bridge-section-body']
+  });
+  registerFeature('meshtastic', {
+    asset: 'feature-meshtastic.js', sections: ['meshtastic-section'], loadWhenVisible: true
+  });
+  registerFeature('meshcore', {
+    asset: 'feature-meshcore.js', sections: ['meshcore-section'], loadWhenVisible: true
+  });
+  registerFeature('gps', {
+    asset: 'feature-gps.js', sections: ['gps-section'], dependencies: ['leaflet'], loadWhenVisible: true
+  });
+  registerFeature('ntp', {
+    asset: 'feature-ntp.js', sections: ['ntp-section'], loadWhenVisible: true
+  });
+  registerFeature('link-tester', {
+    asset: 'feature-link-tester.js', sections: ['link-tester-section'],
+    toggles: ['link-tester-toggle'], bodies: ['link-tester-body']
+  });
+  registerFeature('hotspot', {
+    asset: 'feature-hotspot.js', sections: ['hotspot-section'],
+    toggles: ['hotspot-toggle'], bodies: ['hotspot-body']
+  });
+  registerFeature('weather-alert', {
+    asset: 'feature-weather-alert.js', sections: ['weather-alert-section'],
+    toggles: ['weather-alert-toggle'], bodies: ['weather-alert-body']
+  });
+  registerFeature('ais', {
+    asset: 'feature-ais.js', sections: ['ais-section'], toggles: ['ais-toggle'], bodies: ['ais-body']
+  });
+  registerFeature('acars', {
+    asset: 'feature-acars.js', sections: ['acars-section'], toggles: ['acars-toggle'], bodies: ['acars-body']
+  });
+  registerFeature('radiosonde', {
+    asset: 'feature-radiosonde.js', sections: ['radiosonde-section'],
+    toggles: ['radiosonde-toggle'], bodies: ['radiosonde-body']
+  });
+  registerFeature('noaa', {
+    asset: 'feature-noaa.js', sections: ['noaa-section'], toggles: ['noaa-toggle'], bodies: ['noaa-body']
+  });
+
+  // Capture the first activation before a legacy feature can toggle its body.
+  // After import/init, replay that one click so existing keyboard and pointer
+  // behavior remains unchanged.
+  document.addEventListener('click', function(event) {
+    var toggle = event.target.closest && event.target.closest('.section-header.collapsible');
+    var name = toggle && _featureByToggle[toggle.id];
+    var feature = name && _features[name];
+    if (!feature || feature.replayingClick) return;
+    if (feature.active) {
+      _fetchFeatureData(name);
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    feature.desired = true;
+    if (!feature.available) {
+      showToast('This panel is not available until its plugin is ready.', 'warning');
+      return;
+    }
+    loadFeature(name).then(function() {
+      feature.replayingClick = true;
+      try { toggle.click(); } finally { feature.replayingClick = false; }
+    }).catch(function() {});
+  }, true);
 
   // --- Section freshness tracking ---
 
@@ -503,6 +1338,7 @@
   // --- Plugins ---
 
   function updatePlugins(plugins, failedPlugins) {
+    _markFeaturesFromPlugins(plugins);
     var tbody = $('plugins-table');
     if (!tbody) return;
     var html = '';
@@ -725,8 +1561,7 @@
     if (sel) sel.disabled = true;
     api('/api/lora/announce_mode', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: mode})
+      json: {mode: mode}
     }).then(function(r) {
       if (!r || !r.ok) {
         alert('Failed to set announce mode: ' + (r ? (r.error || 'unknown error') : 'no response'));
@@ -740,24 +1575,107 @@
     });
   };
 
-  function doRestart() {
-    if (!confirm('Restart rnsd and reticulumpi? The dashboard will be briefly unavailable.')) return;
-    var btn = $('restart-btn');
-    btn.disabled = true;
-    btn.textContent = 'Restarting\u2026';
-    api('/api/services/restart', {method: 'POST'}).then(function() {
-      startRestartWatcher();
+  function showPasswordChangeDialog() {
+    var dialog = $('password-change-dialog');
+    var current = $('current-dashboard-password');
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    if (current) current.focus();
+  }
+
+  function submitPasswordChange() {
+    var current = $('current-dashboard-password');
+    var replacement = $('new-dashboard-password');
+    var confirmation = $('confirm-dashboard-password');
+    var feedback = $('password-change-feedback');
+    var submit = $('password-change-submit');
+    if (!current || !replacement || !confirmation) return;
+    if (replacement.value.length < 12) {
+      feedback.textContent = 'Use at least 12 characters for the new password.';
+      replacement.focus();
+      return;
+    }
+    if (replacement.value !== confirmation.value) {
+      feedback.textContent = 'The new passwords do not match.';
+      confirmation.focus();
+      return;
+    }
+    if (submit) submit.disabled = true;
+    feedback.textContent = '';
+    api('/api/auth/password', {
+      method: 'POST',
+      json: {
+        current_password: current.value,
+        new_password: replacement.value
+      }
+    }).then(function(result) {
+      current.value = '';
+      replacement.value = '';
+      confirmation.value = '';
+      if (!result || !result.ok) {
+        feedback.textContent = (result && result.error) || 'Password change failed.';
+        if (submit) submit.disabled = false;
+        current.focus();
+        return;
+      }
+      window.location.href = '/login.html?password_changed=1';
     });
   }
 
-  function startRestartWatcher() {
+  function doRestart() {
+    var dialog = $('restart-dialog');
+    var password = $('restart-password');
+    var feedback = $('restart-feedback');
+    if (!dialog || !password) return;
+    password.value = '';
+    if (feedback) feedback.textContent = '';
+    dialog.showModal();
+    password.focus();
+  }
+
+  function submitRestart() {
+    var dialog = $('restart-dialog');
+    var password = $('restart-password');
+    var feedback = $('restart-feedback');
+    if (!password || !password.value) {
+      if (feedback) feedback.textContent = 'Enter your dashboard password.';
+      if (password) password.focus();
+      return;
+    }
+    var btn = $('restart-btn');
+    var confirmBtn = $('restart-confirm-btn');
+    if (confirmBtn) confirmBtn.disabled = true;
+    btn.disabled = true;
+    btn.textContent = 'Restarting\u2026';
+    api('/api/services/restart', {
+      method: 'POST',
+      headers: {'X-Confirm-Password': password.value}
+    }).then(function(r) {
+      password.value = '';
+      if (!r || !r.ok) {
+        btn.disabled = false;
+        btn.textContent = 'Restart Services';
+        if (confirmBtn) confirmBtn.disabled = false;
+        if (feedback) feedback.textContent = (r && r.error) || 'Restart request failed.';
+        return;
+      }
+      if (dialog) dialog.close();
+      startRestartWatcher(r.data && r.data.operation_id);
+    });
+  }
+
+  function startRestartWatcher(operationId) {
     var attempts = 0;
     var maxAttempts = 30;
+    var sawUnavailable = false;
     var check = setInterval(function() {
       attempts++;
-      fetch('/api/status', {credentials: 'same-origin'})
+      var statusPath = operationId
+        ? '/api/services/restart/' + encodeURIComponent(operationId)
+        : '/api/status';
+      fetch(statusPath, {credentials: 'same-origin'})
         .then(function(r) {
-          if (r.ok) {
+          if (r.ok && !operationId) {
             clearInterval(check);
             pendingRestart = false;
             $('restart-banner').classList.add('hidden');
@@ -766,8 +1684,27 @@
             btn.textContent = 'Restart Services';
             window.location.reload();
           }
+          if (operationId && sawUnavailable && r.status === 404) {
+            return fetch('/api/status', {credentials: 'same-origin'}).then(function(statusResp) {
+              if (statusResp.ok) window.location.reload();
+              return null;
+            });
+          }
+          return r.json().catch(function() { return null; });
+        }).then(function(payload) {
+          if (!operationId || !payload || !payload.ok) return;
+          var state = payload.data && payload.data.state;
+          if (state === 'failed' || state === 'cancelled') {
+            clearInterval(check);
+            var restartBtn = $('restart-btn');
+            restartBtn.textContent = 'Restart failed \u2014 try again';
+            restartBtn.disabled = false;
+          } else if (state === 'complete') {
+            clearInterval(check);
+            window.location.reload();
+          }
         })
-        .catch(function() { /* still down */ });
+        .catch(function() { sawUnavailable = true; });
       if (attempts >= maxAttempts) {
         clearInterval(check);
         var btn = $('restart-btn');
@@ -1291,7 +2228,7 @@
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({action: 'set_offgrid_mode', enabled: enabled}));
       } else {
-        api('/api/offgrid', {method: 'POST', body: {enabled: enabled}}).then(function(r) {
+        api('/api/offgrid', {method: 'POST', json: {enabled: enabled}}).then(function(r) {
           if (_offgridReenableTimer) clearTimeout(_offgridReenableTimer);
           _offgridReenableTimer = null;
           sw.disabled = false;
@@ -1524,95 +2461,36 @@
     var _ifaceResult = null, _loraResult = null;
     function mergeIfaceLora() {
       if (_ifaceResult === null || _loraResult === null) return;
+      _stash.interfaces = _ifaceResult;
+      _stash.lora = _loraResult;
+      _setFeatureAvailable('lora', true);
       if (RPI.updateLoraRadio) RPI.updateLoraRadio(_ifaceResult, _loraResult);
     }
     apiRetry('/api/interfaces').then(function(r) {
       if (!r || !r.ok) return;
       updateInterfaces(r.data.interfaces);
+      _stash.interfaces = r.data.interfaces;
       if (RPI.updateLoraSignal) RPI.updateLoraSignal(r.data.interfaces);
       _ifaceResult = r.data.interfaces;
       mergeIfaceLora();
     });
     apiRetry('/api/lora').then(function(r) {
       _loraResult = (r && r.ok) ? r.data : {};
+      _stash.lora = _loraResult;
       mergeIfaceLora();
     });
 
     apiRetry('/api/plugins').then(function(r) {
       if (r && r.ok) updatePlugins(r.data.plugins, r.data.failed_plugins);
     });
-
-    // Map + visible-section data — fetch immediately alongside metrics
-    var _mshStatus = null, _mshNodes = null;
-    function mergeMeshtastic() {
-      if (_mshStatus === null || _mshNodes === null) return;
-      if (RPI.updateMeshtastic) RPI.updateMeshtastic(_mshStatus, _mshNodes);
-      if (RPI.updateMap) RPI.updateMap(_mshNodes);
-    }
-    apiRetry('/api/meshtastic/status').then(function(r) {
-      _mshStatus = (r && r.ok) ? r.data : {};
-      mergeMeshtastic();
-    });
-    apiRetry('/api/meshtastic/nodes').then(function(r) {
-      _mshNodes = (r && r.ok) ? r.data.nodes : [];
-      mergeMeshtastic();
-    });
-    apiRetry('/api/meshtastic/device').then(function(r) {
-      if (r && r.ok && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(r.data);
-    });
-    apiRetry('/api/meshtastic/lora_neighbors').then(function(r) {
-      if (r && r.ok) {
-        if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(r.data.neighbors);
-        if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(r.data.neighbors);
-      }
-    });
-
-    var _mcStatus = null, _mcContacts = null;
-    function mergeMeshCore() {
-      if (_mcStatus === null || _mcContacts === null) return;
-      if (RPI.updateMeshCore) RPI.updateMeshCore(_mcStatus, _mcContacts);
-    }
-    apiRetry('/api/meshcore/status').then(function(r) {
-      _mcStatus = (r && r.ok) ? r.data : {};
-      mergeMeshCore();
-    });
-    apiRetry('/api/meshcore/contacts').then(function(r) {
-      _mcContacts = (r && r.ok) ? r.data.contacts : [];
-      mergeMeshCore();
-      if (RPI.updateMapMeshCore) RPI.updateMapMeshCore(_mcContacts);
-    });
-
-    apiRetry('/api/gps').then(function(r) {
-      if (r && r.ok && RPI.updateGps) RPI.updateGps(r.data);
-      if (r && r.ok && r.data.last_fix && RPI.updateMapGps) RPI.updateMapGps(r.data.last_fix);
-    });
-
-    apiRetry('/api/adsb').then(function(r) {
-      if (r && r.ok && RPI.adsb && RPI.adsb.update) RPI.adsb.update(r.data);
-    });
   }
 
   function fetchSecondary() {
-    api('/api/mesh/telemetry').then(function(r) {
-      if (!r || !r.ok) return;
-      if (RPI.cacheMeshPeers) RPI.cacheMeshPeers(r.data.peers);
-      if (RPI.updatePeerTelemetry) RPI.updatePeerTelemetry(r.data.peers);
-      if (RPI.updateMapReticulum) RPI.updateMapReticulum(r.data.peers);
-    });
-    api('/api/meshcore/device').then(function(r) {
-      if (r && r.ok && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(r.data);
-    });
-    api('/api/meshcore_observer/status').then(function(r) {
-      if (r && r.ok && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(r.data);
-    });
     api('/api/transport').then(function(r) {
       if (r && r.ok) updateTransport(r.data);
     });
     api('/api/connectivity').then(function(r) {
       if (r && r.ok) updateConnectivity(r.data);
-    });
-    api('/api/routing?per_page=0').then(function(r) {
-      if (r && r.ok && RPI.updateRoutingSummary) RPI.updateRoutingSummary(r.data.summary);
     });
   }
 
@@ -1625,16 +2503,53 @@
   // --- WebSocket ---
 
   function _applyUpdate(d) {
+    if (Array.isArray(d._removed)) {
+      var sectionByKey = {
+        hotspot: 'hotspot-section', captive_portal: 'hotspot-section',
+        meshtastic_status: 'meshtastic-section', meshcore_status: 'meshcore-section',
+        mesh_bridge: 'mesh-bridge-section', gps: 'gps-section', ntp: 'ntp-section',
+        adsb: 'adsb-section', ais: 'ais-section', acars: 'acars-section',
+        radiosonde: 'radiosonde-section', noaa_apt: 'noaa-section',
+        fm_receiver: 'radio-section', link_tester: 'link-tester-section',
+        weather_alert: 'weather-alert-section', space: 'space-section',
+        mesh: 'mesh-section', routing: 'routing-section'
+      };
+      var featureByKey = {
+        mesh: 'mesh', routing: 'routing', mesh_bridge: 'mesh-bridge',
+        meshtastic_status: 'meshtastic', meshtastic_nodes: 'meshtastic',
+        meshtastic_device: 'meshtastic', meshtastic_lora_neighbors: 'meshtastic',
+        meshcore_status: 'meshcore', meshcore_contacts: 'meshcore',
+        meshcore_device: 'meshcore', meshcore_observer: 'meshcore',
+        gps: 'gps', ntp: 'ntp', hotspot: 'hotspot', link_tester: 'link-tester',
+        weather_alert: 'weather-alert', ais: 'ais', acars: 'acars',
+        radiosonde: 'radiosonde', noaa_apt: 'noaa', messaging: 'messages',
+        adsb: 'adsb', space: 'space', fm_receiver: 'radio'
+      };
+      d._removed.forEach(function(key) {
+        delete _stash[key];
+        if (featureByKey[key]) _setFeatureAvailable(featureByKey[key], false);
+        var section = $(sectionByKey[key]);
+        if (section) section.style.display = 'none';
+      });
+    }
     if (d.internet !== undefined) {
       updateInternetStatus(d.internet);
     }
     if (d.metrics) updateMetrics(d.metrics);
     updateWsStats(d.ws_stats || null);
     if (d.interfaces) {
+      _stash.interfaces = d.interfaces;
+      _setFeatureAvailable('lora', true);
       updateInterfaces(d.interfaces);
       if (RPI.updateLoraRadio) RPI.updateLoraRadio(d.interfaces, null);
     }
     if (d.mesh) {
+      _stash.mesh = d.mesh;
+      _setFeatureAvailable('mesh', true);
+      if (d.mesh.peers) {
+        _stash.mesh_peers = d.mesh.peers;
+        _setFeatureAvailable('map', true);
+      }
       if (d.mesh.peers && RPI.cacheMeshPeers) RPI.cacheMeshPeers(d.mesh.peers);
       if (d.mesh.peers && RPI.updateMapReticulum) RPI.updateMapReticulum(d.mesh.peers);
       if (RPI.updateMeshFromWS) RPI.updateMeshFromWS(d.mesh);
@@ -1649,9 +2564,19 @@
     }
     if (d.transport) updateTransport(d.transport);
     if (d.connectivity) updateConnectivity(d.connectivity);
-    if (d.routing && RPI.updateRoutingSummary) RPI.updateRoutingSummary(d.routing);
-    if (d.meshtastic_device && RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(d.meshtastic_device);
+    if (d.routing) {
+      _stash.routing = d.routing;
+      _setFeatureAvailable('routing', true);
+      if (RPI.updateRoutingSummary) RPI.updateRoutingSummary(d.routing);
+    }
+    if (d.meshtastic_device) {
+      _stash.meshtastic_device = d.meshtastic_device;
+      _setFeatureAvailable('meshtastic', true);
+      if (RPI.updateMeshtasticDevice) RPI.updateMeshtasticDevice(d.meshtastic_device);
+    }
     if (d.meshtastic_status) {
+      _stash.meshtastic_status = d.meshtastic_status;
+      _setFeatureAvailable('meshtastic', true);
       var _fw = d.meshtastic_status.firmware_watchdog;
       if (_fw && _fw.enabled) {
         var _fwHang = !!_fw.hang_detected;
@@ -1660,50 +2585,127 @@
       }
     }
     if (d.meshtastic_nodes) {
+      _stash.meshtastic_status = d.meshtastic_status || {};
+      _stash.meshtastic_nodes = d.meshtastic_nodes;
+      _setFeatureAvailable('meshtastic', true);
+      _setFeatureAvailable('map', true);
       if (RPI.updateMeshtastic) RPI.updateMeshtastic(d.meshtastic_status || {}, d.meshtastic_nodes);
       if (RPI.updateMap) RPI.updateMap(d.meshtastic_nodes);
     }
     if (d.meshtastic_lora_neighbors) {
+      _stash.meshtastic_lora_neighbors = d.meshtastic_lora_neighbors;
+      _setFeatureAvailable('meshtastic', true);
+      _setFeatureAvailable('map', true);
       if (RPI.updateLoraNeighbors) RPI.updateLoraNeighbors(d.meshtastic_lora_neighbors);
       if (RPI.updateMapLoraNeighbors) RPI.updateMapLoraNeighbors(d.meshtastic_lora_neighbors);
     }
     if (d.meshtastic_nodes || d.meshtastic_lora_neighbors || d.meshcore_contacts) {
       if (RPI.updateNodeTracker) RPI.updateNodeTracker(d.meshtastic_nodes || null, d.meshtastic_lora_neighbors || null, d.meshcore_contacts || null);
     }
+    if (d.meshcore_status) {
+      _stash.meshcore_status = d.meshcore_status;
+      _setFeatureAvailable('meshcore', true);
+    }
+    if (d.meshcore_contacts) {
+      _stash.meshcore_contacts = d.meshcore_contacts;
+      _setFeatureAvailable('meshcore', true);
+      _setFeatureAvailable('map', true);
+    }
     if (d.meshcore_status && RPI.updateMeshCore) RPI.updateMeshCore(d.meshcore_status, d.meshcore_contacts);
     if (d.meshcore_contacts && RPI.updateMapMeshCore) RPI.updateMapMeshCore(d.meshcore_contacts);
-    if (d.meshcore_device && RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(d.meshcore_device);
-    if (d.meshcore_observer && RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(d.meshcore_observer);
-    if (d.mesh_bridge && RPI.updateMeshBridge) RPI.updateMeshBridge(d.mesh_bridge);
+    if (d.meshcore_device) {
+      _stash.meshcore_device = d.meshcore_device;
+      _setFeatureAvailable('meshcore', true);
+      if (RPI.updateMeshCoreDevice) RPI.updateMeshCoreDevice(d.meshcore_device);
+    }
+    if (d.meshcore_observer) {
+      _stash.meshcore_observer = d.meshcore_observer;
+      _setFeatureAvailable('meshcore', true);
+      if (RPI.updateMeshCoreObserver) RPI.updateMeshCoreObserver(d.meshcore_observer);
+    }
+    if (d.mesh_bridge) {
+      _stash.mesh_bridge = d.mesh_bridge;
+      _setFeatureAvailable('mesh-bridge', true);
+      if (RPI.updateMeshBridge) RPI.updateMeshBridge(d.mesh_bridge);
+    }
     if (d.messaging) {
+      _stash.messaging = d.messaging;
+      _setFeatureAvailable('messages', true);
       if (RPI.updateMessagingLxmf) RPI.updateMessagingLxmf(d.messaging);
       if (RPI.updateMqttFeed) RPI.updateMqttFeed(d.messaging);
       if (RPI.updateMessagingLora) RPI.updateMessagingLora(d.messaging);
       if (RPI.updateMessagingMeshcore) RPI.updateMessagingMeshcore(d.messaging);
     }
-    if (d.space && RPI.space && RPI.space.update) RPI.space.update(d.space);
-    if (d.gps && RPI.updateGps) RPI.updateGps(d.gps);
+    if (d.space) {
+      _stash.space = d.space;
+      _setFeatureAvailable('space', true);
+      if (RPI.space && RPI.space.update) RPI.space.update(d.space);
+    }
+    if (d.gps) {
+      _stash.gps = d.gps;
+      _setFeatureAvailable('gps', true);
+      _setFeatureAvailable('map', true);
+      if (RPI.updateGps) RPI.updateGps(d.gps);
+    }
     if (d.gps && d.gps.last_fix && RPI.updateMapGps) RPI.updateMapGps(d.gps.last_fix);
-    if (d.adsb && RPI.adsb && RPI.adsb.update) RPI.adsb.update(d.adsb);
-    if (d.ntp && RPI.updateNtp) RPI.updateNtp(d.ntp);
+    if (d.adsb) {
+      _stash.adsb = d.adsb;
+      _setFeatureAvailable('adsb', true);
+      if (RPI.adsb && RPI.adsb.update) RPI.adsb.update(d.adsb);
+    }
+    if (d.ntp) {
+      _stash.ntp = d.ntp;
+      _setFeatureAvailable('ntp', true);
+      if (RPI.updateNtp) RPI.updateNtp(d.ntp);
+    }
     if (d.ntp) updateHeaderNtpSync(d.ntp);
     if (d.hotspot) {
       _stash.hotspot = d.hotspot;
+      _setFeatureAvailable('hotspot', true);
       if (RPI.updateHotspot) RPI.updateHotspot(d.hotspot, _stash.captive_portal || null);
     }
     if (d.captive_portal) {
       _stash.captive_portal = d.captive_portal;
+      _setFeatureAvailable('hotspot', true);
       if (_stash.hotspot && isPanelVisible('hotspot-body') && RPI.updateHotspot) {
         RPI.updateHotspot(_stash.hotspot, d.captive_portal);
       }
     }
-    if (d.fm_receiver && RPI.updateRadio) RPI.updateRadio(d.fm_receiver);
-    if (d.link_tester && RPI.updateLinkTester) RPI.updateLinkTester(d.link_tester);
-    if (d.weather_alert && RPI.updateWeatherAlert) RPI.updateWeatherAlert(d.weather_alert);
-    if (d.ais && RPI.updateAis) RPI.updateAis(d.ais);
-    if (d.acars && RPI.updateAcars) RPI.updateAcars(d.acars);
-    if (d.radiosonde && RPI.updateRadiosonde) RPI.updateRadiosonde(d.radiosonde);
-    if (d.noaa_apt && RPI.updateNoaa) RPI.updateNoaa(d.noaa_apt);
+    if (d.fm_receiver) {
+      _stash.fm_receiver = d.fm_receiver;
+      _setFeatureAvailable('radio', true);
+      if (RPI.updateRadio) RPI.updateRadio(d.fm_receiver);
+    }
+    if (d.link_tester) {
+      _stash.link_tester = d.link_tester;
+      _setFeatureAvailable('link-tester', true);
+      if (RPI.updateLinkTester) RPI.updateLinkTester(d.link_tester);
+    }
+    if (d.weather_alert) {
+      _stash.weather_alert = d.weather_alert;
+      _setFeatureAvailable('weather-alert', true);
+      if (RPI.updateWeatherAlert) RPI.updateWeatherAlert(d.weather_alert);
+    }
+    if (d.ais) {
+      _stash.ais = d.ais;
+      _setFeatureAvailable('ais', true);
+      if (RPI.updateAis) RPI.updateAis(d.ais);
+    }
+    if (d.acars) {
+      _stash.acars = d.acars;
+      _setFeatureAvailable('acars', true);
+      if (RPI.updateAcars) RPI.updateAcars(d.acars);
+    }
+    if (d.radiosonde) {
+      _stash.radiosonde = d.radiosonde;
+      _setFeatureAvailable('radiosonde', true);
+      if (RPI.updateRadiosonde) RPI.updateRadiosonde(d.radiosonde);
+    }
+    if (d.noaa_apt) {
+      _stash.noaa_apt = d.noaa_apt;
+      _setFeatureAvailable('noaa', true);
+      if (RPI.updateNoaa) RPI.updateNoaa(d.noaa_apt);
+    }
   }
 
   function connectWS() {
@@ -1749,22 +2751,22 @@
         }
         if (msg.type === 'message' && msg.data) {
           _lastWsUpdate = Date.now() / 1000;
-          if (RPI.onMessagingEvent) RPI.onMessagingEvent(msg.data);
-          if (RPI.onMqttFeedMessage) RPI.onMqttFeedMessage(msg.data);
+          _queueMessageFeatureEvent('onMessagingEvent', msg.data);
+          _queueMessageFeatureEvent('onMqttFeedMessage', msg.data);
           return;
         }
         if (msg.type === 'message_status' && msg.data) {
           _lastWsUpdate = Date.now() / 1000;
-          if (RPI.onMessagingStatus) RPI.onMessagingStatus(msg.data);
+          _queueMessageFeatureEvent('onMessagingStatus', msg.data);
           return;
         }
         if (msg.type === 'reaction' && msg.data) {
           _lastWsUpdate = Date.now() / 1000;
-          if (RPI.onMessagingReaction) RPI.onMessagingReaction(msg.data);
+          _queueMessageFeatureEvent('onMessagingReaction', msg.data);
           return;
         }
         if (msg.type === 'conversation_deleted' && msg.data) {
-          if (RPI.onConversationDeleted) RPI.onConversationDeleted(msg.data);
+          _queueMessageFeatureEvent('onConversationDeleted', msg.data);
           return;
         }
         if (msg.type === 'internet_status' && msg.data) {
@@ -1807,12 +2809,22 @@
             _wsReadyCallbacks = [];
           }
           // Batch DOM updates into the next animation frame.
-          RPI._pendingUpdate = msg.data;
+          var pending = RPI._pendingUpdate || {};
+          Object.keys(msg.data).forEach(function(key) {
+            if (key === '_removed') {
+              var prior = Array.isArray(pending._removed) ? pending._removed : [];
+              pending._removed = Array.from(new Set(prior.concat(msg.data._removed || [])));
+            } else {
+              pending[key] = msg.data[key];
+            }
+          });
+          RPI._pendingUpdate = pending;
           if (!RPI._rafPending) {
             RPI._rafPending = true;
             requestAnimationFrame(function() {
               RPI._rafPending = false;
               var d = RPI._pendingUpdate;
+              RPI._pendingUpdate = null;
               if (!d) return;
               _applyUpdate(d);
               _checkStaleness();
@@ -1894,6 +2906,15 @@
         window.location.href = '/login.html';
       });
     });
+    if (_el = $('password-change-form')) _el.addEventListener('submit', function(ev) {
+      ev.preventDefault();
+      submitPasswordChange();
+    });
+    if (_el = $('password-change-logout')) _el.addEventListener('click', function() {
+      api('/api/auth/logout', {method: 'POST'}).finally(function() {
+        window.location.href = '/login.html';
+      });
+    });
   });
 
   // Collapsible section toggles with deferred-fetch on first expand
@@ -1905,7 +2926,9 @@
         toggle.addEventListener('click', function() {
           if (body.classList.contains('hidden')) {
             body.classList.remove('hidden');
+            body.hidden = false;
             toggle.classList.add('open');
+            toggle.setAttribute('aria-expanded', 'true');
             if (_sectionOnExpand[name]) _sectionOnExpand[name]();
             if (_sectionFirstExpand[name]) {
               _sectionFirstExpand[name]();
@@ -1913,11 +2936,38 @@
             }
           } else {
             body.classList.add('hidden');
+            body.hidden = true;
             toggle.classList.remove('open');
+            toggle.setAttribute('aria-expanded', 'false');
           }
         });
       }
     });
+
+    // Other feature modules also own collapsible headers. Add one semantic,
+    // keyboard-operable contract without duplicating their click handlers.
+    var collapsibles = document.querySelectorAll('.section-header.collapsible');
+    for (var ci = 0; ci < collapsibles.length; ci++) {
+      var control = collapsibles[ci];
+      var targetId = control.getAttribute('aria-controls') ||
+        (control.id ? control.id.replace(/-toggle$/, '-body') : '');
+      var controlledBody = targetId && $(targetId);
+      var expanded = !!(controlledBody && !controlledBody.classList.contains('hidden'));
+      if (controlledBody) controlledBody.hidden = !expanded;
+      control.classList.toggle('open', expanded);
+      control.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      if (controlledBody) control.setAttribute('aria-controls', targetId);
+      if (control.tagName !== 'BUTTON') {
+        control.setAttribute('role', 'button');
+        control.setAttribute('tabindex', '0');
+        control.addEventListener('keydown', function(ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            ev.currentTarget.click();
+          }
+        });
+      }
+    }
 
     if (_el = $('config-toggle')) _el.addEventListener('click', function() {
       var content = $('config-content');
@@ -1944,6 +2994,60 @@
           RPI.onMeshSort(th.getAttribute('data-sort'));
         });
       })(sortHeaders[i]);
+    }
+  });
+
+  safeWire('accessibility-contract', function () {
+    // Preserve compact visual labels while ensuring controls have names.
+    var unnamedFields = document.querySelectorAll('input:not([aria-label]), textarea:not([aria-label]), select:not([aria-label])');
+    for (var ai = 0; ai < unnamedFields.length; ai++) {
+      var field = unnamedFields[ai];
+      if (field.labels && field.labels.length) continue;
+      var name = field.getAttribute('placeholder') || field.getAttribute('title');
+      if (name) field.setAttribute('aria-label', name.replace(/\u2026/g, ''));
+    }
+    var iconButtons = document.querySelectorAll(
+      'button[title]:not([aria-label]):not(.section-header.collapsible)'
+    );
+    for (var bi = 0; bi < iconButtons.length; bi++) {
+      iconButtons[bi].setAttribute('aria-label', iconButtons[bi].getAttribute('title'));
+    }
+    var canvases = document.querySelectorAll('canvas:not([aria-label])');
+    for (var cai = 0; cai < canvases.length; cai++) {
+      canvases[cai].setAttribute('role', 'img');
+      canvases[cai].setAttribute('aria-label', canvases[cai].getAttribute('title') || 'Live telemetry chart');
+    }
+    var sortable = document.querySelectorAll('th[data-sort]');
+    for (var si = 0; si < sortable.length; si++) {
+      sortable[si].setAttribute('tabindex', '0');
+      sortable[si].setAttribute('aria-sort', 'none');
+    }
+    document.addEventListener('keydown', function(ev) {
+      var th = ev.target.closest && ev.target.closest('th[data-sort]');
+      if (th && (ev.key === 'Enter' || ev.key === ' ')) {
+        ev.preventDefault();
+        th.click();
+      }
+    });
+    document.addEventListener('click', function(ev) {
+      var toggle = ev.target.closest && ev.target.closest('.section-header.collapsible');
+      if (toggle) {
+        var isExpanded = toggle.classList.contains('open');
+        toggle.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+        var controlled = $(toggle.getAttribute('aria-controls'));
+        if (controlled) controlled.hidden = !isExpanded;
+      }
+      var th = ev.target.closest && ev.target.closest('th[data-sort]');
+      if (th) {
+        var peers = th.parentElement ? th.parentElement.querySelectorAll('th[data-sort]') : [];
+        for (var pi = 0; pi < peers.length; pi++) peers[pi].setAttribute('aria-sort', 'none');
+        th.setAttribute('aria-sort', th.classList.contains('sort-asc') ? 'ascending' : 'descending');
+      }
+    });
+    var toastRegion = $('toast-container');
+    if (toastRegion) {
+      toastRegion.setAttribute('role', 'status');
+      toastRegion.setAttribute('aria-live', 'polite');
     }
   });
 
@@ -2176,6 +3280,14 @@
   // Interface management -- event delegation (CSP blocks inline handlers)
   safeWire('iface-lora-controls', function () {
     if (_el = $('restart-btn')) _el.addEventListener('click', doRestart);
+    if (_el = $('restart-dialog-form')) _el.addEventListener('submit', function(ev) {
+      ev.preventDefault();
+      submitRestart();
+    });
+    if (_el = $('restart-cancel-btn')) _el.addEventListener('click', function() {
+      var dialog = $('restart-dialog');
+      if (dialog) dialog.close();
+    });
     if (_el = $('interfaces-table')) _el.addEventListener('change', function(ev) {
       var cb = ev.target;
       if (cb.tagName === 'INPUT' && cb.dataset.iface) {
@@ -2204,7 +3316,13 @@
       if (_stash.hotspot && RPI.updateHotspot) RPI.updateHotspot(_stash.hotspot, _stash.captive_portal || null);
     };
     _sectionOnExpand.map = function() {
-      if (RPI._mapInvalidate) RPI._mapInvalidate();
+      var feature = _features.map;
+      if (feature) feature.desired = true;
+      if (feature && feature.available) {
+        loadFeature('map').then(function() {
+          if (RPI._mapInvalidate) RPI._mapInvalidate();
+        }).catch(function() {});
+      }
     };
 
     // Register deferred fetches for collapsed sections

@@ -10,12 +10,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$(dirname "$SCRIPT_DIR")"
 VENV_BIN="$INSTALL_DIR/.venv/bin"
-RNS_CONFIG="/home/reticulumpi/.reticulum"
+STATE_ROOT="${RETICULUMPI_STATE_DIR:-/var/lib/reticulumpi}"
+RNS_CONFIG="${RETICULUMPI_RNS_CONFIG_DIR:-$STATE_ROOT/.reticulum}"
+
+# sudo and SSH do not consistently preserve the service account's HOME. Use
+# the same conventional runtime environment as the systemd services so
+# NomadNet and its dependencies cannot fall back to a legacy service home.
+export HOME="$STATE_ROOT"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$STATE_ROOT/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$STATE_ROOT/.local/share}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$STATE_ROOT/.local/state}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/var/cache/reticulumpi}"
 
 # Use a separate config directory for TUI browsing.
 # This lets the TUI connect to rnsd as its own client while the daemon
 # continues serving pages uninterrupted.
-TUI_CONFIG="/home/reticulumpi/.nomadnet-tui"
+TUI_CONFIG="${RETICULUMPI_NOMADNET_TUI_DIR:-$STATE_ROOT/.nomadnet-tui}"
 
 # Create the TUI config directory on first use
 if [ ! -d "$TUI_CONFIG" ]; then

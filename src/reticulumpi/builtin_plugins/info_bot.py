@@ -20,6 +20,7 @@ import LXMF
 import RNS
 import RNS.vendor.umsgpack as umsgpack
 
+from reticulumpi.lxmf_compat import create_lxm_router
 from reticulumpi.plugin_base import PluginBase
 
 # ── Fortunes ─────────────────────────────────────────────────────────
@@ -173,10 +174,12 @@ class InfoBot(PluginBase):
             self._bot_identity.to_file(identity_path)
             self.log.info("Created new Info Bot identity at %s", identity_path)
 
-        self.lxmf_router = LXMF.LXMRouter(storagepath=storage_path)
-        self.local_lxmf_destination = self.lxmf_router.register_delivery_identity(
-            self._bot_identity,
-            display_name=self.config.get("display_name") or f"{self.app.node_name} Info",
+        self.lxmf_router = create_lxm_router(storagepath=storage_path)
+        self.local_lxmf_destination = self.manage_destination(
+            self.lxmf_router.register_delivery_identity(
+                self._bot_identity,
+                display_name=self.config.get("display_name") or f"{self.app.node_name} Info",
+            )
         )
         self.lxmf_router.register_delivery_callback(self._handle_message)
 
@@ -231,7 +234,7 @@ class InfoBot(PluginBase):
 
     def _handle_message(self, message: LXMF.LXMessage) -> None:
         # Warm path before reply if path_warmer is available (outside lock to avoid blocking)
-        warmer = self.app.get_plugin("path_warmer")
+        warmer = self.get_ready_plugin("path_warmer")
         if warmer and hasattr(warmer, "ensure_path"):
             try:
                 warmer.ensure_path(message.source_hash)
@@ -535,9 +538,12 @@ class InfoBot(PluginBase):
             return "\n".join(lines)
 
         except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                return f"No definition found for: {word}"
-            return f"Dictionary lookup failed (HTTP {exc.code})."
+            try:
+                if exc.code == 404:
+                    return f"No definition found for: {word}"
+                return f"Dictionary lookup failed (HTTP {exc.code})."
+            finally:
+                exc.close()
         except urllib.error.URLError:
             if not self.internet_available:
                 return "Dictionary lookup unavailable — node is offline."
@@ -809,7 +815,7 @@ class InfoBot(PluginBase):
         )
 
         # Gather data from sibling plugins
-        network_map = self.app.get_plugin("network_map")
+        network_map = self.get_ready_plugin("network_map")
         if not network_map or not hasattr(network_map, "get_known_nodes"):
             return "Network map plugin not available."
 
@@ -818,14 +824,14 @@ class InfoBot(PluginBase):
             return "No known nodes in the network map."
 
         # Path table
-        conn_mon = self.app.get_plugin("connectivity_monitor")
+        conn_mon = self.get_ready_plugin("connectivity_monitor")
         path_table: list = []
         if conn_mon and hasattr(conn_mon, "get_routing_data"):
             routing = conn_mon.get_routing_data(per_page=500)
             path_table = routing.get("paths", [])
 
         # Transport health
-        th = self.app.get_plugin("transport_health")
+        th = self.get_ready_plugin("transport_health")
         transport_nodes: list = []
         if th and hasattr(th, "get_transport_nodes"):
             transport_nodes = th.get_transport_nodes()
@@ -913,7 +919,7 @@ class InfoBot(PluginBase):
 
     def _cmd_pageauth(self, args: str = "", sender: str = "") -> str:
         """Manage NomadNet page access control."""
-        nn = self.app.get_plugin("nomadnet_server")
+        nn = self.get_ready_plugin("nomadnet_server")
         if not nn or not hasattr(nn, "get_allowed_identities"):
             return "NomadNet server plugin not available."
 
@@ -966,7 +972,7 @@ class InfoBot(PluginBase):
 
     def _cmd_mesh(self, args: str = "") -> str:
         """Show Meshtastic gateway status and nodes."""
-        gw = self.app.get_plugin("meshtastic_gateway")
+        gw = self.get_ready_plugin("meshtastic_gateway")
         if not gw or not hasattr(gw, "get_status"):
             return "Meshtastic gateway plugin not available."
 

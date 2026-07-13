@@ -1,5 +1,0 @@
-# Allow reticulumpi to manage chrony for NTP/GPS (ntp_server plugin)
-reticulumpi ALL=(ALL) NOPASSWD: /usr/bin/chronyc
-reticulumpi ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/chrony/conf.d/reticulumpi-gps.conf
-reticulumpi ALL=(ALL) NOPASSWD: /bin/systemctl restart chrony
-reticulumpi ALL=(ALL) NOPASSWD: /bin/rm -f /etc/chrony/conf.d/reticulumpi-gps.conf

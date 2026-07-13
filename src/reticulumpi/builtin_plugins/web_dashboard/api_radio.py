@@ -9,11 +9,13 @@ import struct
 import aiohttp.web
 
 from reticulumpi.builtin_plugins.web_dashboard.api import _error, _get_plugin, _ok, _run_sync
+from reticulumpi.builtin_plugins.web_dashboard.keys import get_request_token
+from reticulumpi.plugin_base import resolve_ready_plugin
 
 
 def _get_fm_receiver(request: aiohttp.web.Request):
     plugin = _get_plugin(request)
-    fm = plugin.app.plugins.get("fm_receiver")
+    fm = resolve_ready_plugin(plugin, "fm_receiver")
     if not fm:
         return None
     return fm
@@ -27,7 +29,7 @@ def _require_fm(request: aiohttp.web.Request):
 
 
 def _require_auth(request: aiohttp.web.Request) -> aiohttp.web.Response | None:
-    if not request.get("token"):
+    if not get_request_token(request):
         return _error("Authentication required", 401)
     return None
 
@@ -233,6 +235,12 @@ async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.Stream
 
     fm.set_event_loop(asyncio.get_event_loop())
 
+    # Reserve capacity before committing a 200 response.  Once headers have
+    # been prepared aiohttp can no longer truthfully return a 503.
+    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+    if not await _run_sync(fm.register_audio_client, queue):
+        raise aiohttp.web.HTTPServiceUnavailable(text="Too many audio clients")
+
     response = aiohttp.web.StreamResponse(
         status=200,
         headers={
@@ -241,20 +249,17 @@ async def handle_radio_audio(request: aiohttp.web.Request) -> aiohttp.web.Stream
             "X-Content-Type-Options": "nosniff",
         },
     )
-    response.enable_chunked_encoding()
-    await response.prepare(request)
-
-    wav_header = _build_wav_header(
-        sample_rate=fm.output_rate_hz,
-        channels=1,
-        bits=16,
-    )
-    await response.write(wav_header)
-
-    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-    if not await _run_sync(fm.register_audio_client, queue):
-        raise aiohttp.web.HTTPServiceUnavailable(text="Too many audio clients")
     try:
+        response.enable_chunked_encoding()
+        await response.prepare(request)
+
+        wav_header = _build_wav_header(
+            sample_rate=fm.output_rate_hz,
+            channels=1,
+            bits=16,
+        )
+        await response.write(wav_header)
+
         while True:
             try:
                 chunk = await asyncio.wait_for(queue.get(), timeout=10.0)
@@ -451,7 +456,7 @@ async def handle_radio_recordings_list(request: aiohttp.web.Request) -> aiohttp.
 
 
 async def handle_radio_recording_download(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    if not request.get("token"):
+    if not get_request_token(request):
         return _error("Authentication required", 401)
     fm, err = _require_fm(request)
     if err:

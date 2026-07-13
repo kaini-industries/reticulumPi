@@ -1,5 +1,9 @@
 # Solar Power Build for ReticulumPi
 
+> **Historical / non-normative planning reference.** Hardware inventory, load estimates,
+> prices, and product specifications are not release-qualified. Re-measure the actual build
+> and follow current installation, hardware-validation, and security documentation.
+
 Reference document for running the ReticulumPi node off-grid using solar + battery storage.
 
 > **Status:** Planning / reference. Not yet deployed. Verify current product specs before purchasing.

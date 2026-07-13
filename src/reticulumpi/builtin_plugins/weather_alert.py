@@ -16,6 +16,12 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.signal_plugin_base import SignalPluginBase
+from reticulumpi.process_supervisor import (
+    ManagedProcessGroup,
+    ProcessFailure,
+    ProcessSpec,
+    RestartPolicy,
+)
 from reticulumpi.sdr_scheduler import PRIORITY_CRITICAL
 
 _SAME_RE = re.compile(
@@ -181,6 +187,7 @@ class WeatherAlert(SignalPluginBase):
         )
         self._gain_db = self.config.get("gain", None)
         self._ppm = int(self.config.get("ppm", 0))
+        self._max_restarts = int(self.config.get("max_restarts", 5))
         self._max_history = int(self.config.get("max_history", 50))
         self._fips_filter: set[str] | None = None
         fips = self.config.get("fips_filter")
@@ -205,6 +212,7 @@ class WeatherAlert(SignalPluginBase):
         self._seen_headers: dict[str, float] = {}
         self._status = "idle"
         self._last_error: str | None = None
+        self._restart_count = 0
         self._start_thread(self._expiry_loop, name="wx-expiry")
 
     def _on_stop(self) -> None:
@@ -257,25 +265,31 @@ class WeatherAlert(SignalPluginBase):
 
         self.log.debug("Launching: %s | %s", " ".join(rtl_cmd), " ".join(multimon_cmd))
 
-        rtl_proc = subprocess.Popen(
-            rtl_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        group = ManagedProcessGroup(
+            [
+                ProcessSpec(
+                    tuple(rtl_cmd),
+                    name="rtl_fm",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ),
+                ProcessSpec(
+                    tuple(multimon_cmd),
+                    name="multimon-ng",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                ),
+            ],
+            restart_policy=RestartPolicy(enabled=False),
+            on_started=self._on_decoder_started,
+            on_unexpected_exit=self._on_decoder_failure,
         )
-        self._process = subprocess.Popen(
-            multimon_cmd,
-            stdin=rtl_proc.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        self._rtl_process = rtl_proc
-        if rtl_proc.stdout:
-            rtl_proc.stdout.close()
-        self._pid = self._process.pid
-        self._status = "monitoring"
-
-        self._start_stderr_reader(rtl_proc, prefix="rtl_fm")
-        self._start_thread(self._parser_loop, name="wx-parser")
+        self._process_group = group
+        try:
+            group.start()
+        except Exception:
+            self._process_group = None
+            raise
 
         self.log.info(
             "Monitoring %.3f MHz for SAME headers (PID %d)",
@@ -283,7 +297,67 @@ class WeatherAlert(SignalPluginBase):
             self._pid,
         )
 
+    def _on_decoder_started(
+        self,
+        processes: tuple[subprocess.Popen[Any], ...],
+        restarted: bool,
+    ) -> None:
+        rtl_process, decoder_process = processes
+        self._rtl_process = rtl_process
+        self._process = decoder_process
+        self._pid = decoder_process.pid
+        self._status = "monitoring"
+        self._last_error = None
+        was_retry = restarted or self._sdr_retry_pending
+        if restarted:
+            group = self._process_group
+            self._restart_count = group.restart_count if group is not None else 1
+        elif not was_retry:
+            self._restart_count = 0
+        if self.plugin_state.value == "ready":
+            self.mark_ready()
+        self._start_stderr_reader(rtl_process, prefix="rtl_fm")
+        self._start_thread(
+            lambda: self._parser_loop(decoder_process),
+            name="wx-parser",
+        )
+        if was_retry:
+            self.log.warning(
+                "SAME decoder restarted after unexpected exit (attempt %d)",
+                self._restart_count,
+            )
+
+    def _on_decoder_failure(self, failure: ProcessFailure) -> None:
+        self._status = "restarting"
+        self._last_error = (
+            f"{failure.stage_name or 'decoder'}: {failure.reason} (rc={failure.returncode})"
+        )
+        self.mark_degraded(self._last_error)
+        self._update_snapshot_cache()
+        self._rtl_process = None
+        if not self._schedule_sdr_retry(self._max_restarts):
+            self._on_decoder_exhausted(failure)
+
+    def _on_decoder_restart_failed(self, error: BaseException, attempt: int) -> None:
+        self._status = "restarting"
+        self._last_error = f"restart {attempt} failed: {error}"
+        self.mark_degraded(self._last_error)
+
+    def _on_decoder_exhausted(self, failure: ProcessFailure) -> None:
+        self._status = "error"
+        self._last_error = f"SAME decoder restart budget exhausted: {failure.reason}"
+        self.mark_degraded(self._last_error)
+        should_release = self._dongle_active or self._dongle_generation is not None
+        self._dongle_active = False
+        if should_release:
+            self._release_dongle(suspend=True)
+        self._update_snapshot_cache()
+
     def _kill_subprocess(self) -> None:
+        if self._process_group is not None:
+            self._rtl_process = None
+            super()._kill_subprocess()
+            return
         rtl = getattr(self, "_rtl_process", None)
         self._rtl_process = None  # type: ignore[assignment]
         super()._kill_subprocess()
@@ -306,8 +380,8 @@ class WeatherAlert(SignalPluginBase):
                         except OSError:
                             pass
 
-    def _parser_loop(self) -> None:
-        proc = self._process
+    def _parser_loop(self, process: subprocess.Popen[Any] | None = None) -> None:
+        proc = process or self._process
         if proc is None or proc.stdout is None:
             return
         try:
@@ -326,6 +400,10 @@ class WeatherAlert(SignalPluginBase):
             pass
         except Exception:
             self.log.exception("SAME parser crashed")
+        finally:
+            group = self._process_group
+            if self._active and self._process is proc and group is not None and group.running:
+                group.notify_unexpected_eof(1, "SAME decoder stdout ended")
 
     def _handle_same_header(self, m: re.Match) -> None:
         org = m.group("org")

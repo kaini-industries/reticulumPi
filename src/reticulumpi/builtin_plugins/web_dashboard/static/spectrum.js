@@ -59,9 +59,12 @@
   var _lastStoreGen = -1;
   var _needsBulkPaint = false;
 
-  // Waterfall canvas native dims — scaled up via CSS to fit panel width.
+  // Waterfall backing-store dimensions.  The history remains 256 logical
+  // sweep rows; the backing store follows the rendered size and display DPR.
+  var WF_HISTORY_ROWS = 256;
   var WF_ROWS = 256;
   var WF_COLS = 800;
+  var _pixelRatio = 1;
 
   // -- Zoom helpers ---------------------------------------------------------
   function _clip(data, range) {
@@ -96,6 +99,7 @@
 
   function _setZoom(range, silent) {
     _zoom = range;
+    _updateZoomAccessibility();
     _lastBandSignature = '';
     _peakHoldDb = null;
     try { localStorage.setItem(_LS_ZOOM, range ? JSON.stringify(range) : ''); } catch (e) {}
@@ -122,12 +126,21 @@
     if (!_wfCanvas || !_wfCtx) return false;
     var container = _wfCanvas.parentElement;
     if (!container) return false;
-    var newCols = Math.max(400, Math.min(container.clientWidth, 1920));
+    var ratio = Math.max(1, Math.min(Number(window.devicePixelRatio) || 1, 2));
+    var logicalCols = Math.max(320, Math.min(container.clientWidth || 320, 1920));
+    var logicalRows = Math.max(160, Math.min(_wfCanvas.clientHeight || 256, 640));
+    var newCols = Math.round(logicalCols * ratio);
     newCols = (newCols + 1) & ~1;
-    if (newCols === WF_COLS && _wfCanvas.width === WF_COLS) return false;
+    var newRows = Math.max(1, Math.round(logicalRows * ratio));
+    if (newCols === WF_COLS && newRows === WF_ROWS
+        && _wfCanvas.width === WF_COLS && _wfCanvas.height === WF_ROWS
+        && ratio === _pixelRatio) return false;
+    _pixelRatio = ratio;
     WF_COLS = newCols;
+    WF_ROWS = newRows;
     _wfCanvas.width = WF_COLS;
     _wfCanvas.height = WF_ROWS;
+    _wfCanvas.setAttribute('data-pixel-ratio', String(_pixelRatio));
     _wfCtx.fillStyle = '#050810';
     _wfCtx.fillRect(0, 0, WF_COLS, WF_ROWS);
     _needsBulkPaint = true;
@@ -161,8 +174,8 @@
     if (_wfCanvas) {
       _wfCtx = _wfCanvas.getContext('2d');
       _resizeCanvas();
-      _wfCanvas.addEventListener('mousemove', _onHover);
-      _wfCanvas.addEventListener('mouseleave', _onHoverLeave);
+      _wfCanvas.addEventListener('pointermove', _onHover);
+      _wfCanvas.addEventListener('pointerleave', _onHoverLeave);
       var wfParent = _wfCanvas.parentElement;
       if (wfParent && typeof ResizeObserver !== 'undefined') {
         _resizeObs = new ResizeObserver(function () {
@@ -196,8 +209,11 @@
     _zoomResetEl = $('spectrum-zoom-reset');
     _peakHoldToggleEl = $('spectrum-peakhold-toggle');
 
-    // Drag-to-zoom on line plot (window listeners added/removed in drag handlers)
-    if (_lineEl) _lineEl.addEventListener('mousedown', _onDragStart);
+    // Pointer drag and keyboard controls share the same zoom state.
+    if (_lineEl) {
+      _lineEl.addEventListener('pointerdown', _onDragStart);
+      _lineEl.addEventListener('keydown', _onZoomKeyDown);
+    }
     if (_plotWrap) _plotWrap.addEventListener('dblclick', _onDoubleClickReset);
     if (_zoomResetEl) _zoomResetEl.addEventListener('click', _onZoomChipClick);
     if (_peakHoldToggleEl) _peakHoldToggleEl.addEventListener('click', _onPeakHoldToggle);
@@ -223,17 +239,33 @@
     if (!_legendEl) return;
     _legendExpanded = _legendEl.classList.contains('hidden');
     _legendEl.classList.toggle('hidden');
+    _legendEl.hidden = !_legendExpanded;
+    if (_legendToggleEl) {
+      _legendToggleEl.setAttribute('aria-expanded', _legendExpanded ? 'true' : 'false');
+      _legendToggleEl.title = _legendExpanded ? 'Hide band legend' : 'Show band legend';
+    }
     var chev = _legendToggleEl ? _legendToggleEl.querySelector('.chevron') : null;
     if (chev) chev.innerHTML = _legendExpanded ? '&#9662;' : '&#9656;';
   }
 
+  function _setExpanded(expanded) {
+    _expanded = !!expanded;
+    if (_body) {
+      _body.classList.toggle('hidden', !_expanded);
+      _body.hidden = !_expanded;
+    }
+    if (_toggle) {
+      _toggle.classList.toggle('open', _expanded);
+      _toggle.setAttribute('aria-expanded', _expanded ? 'true' : 'false');
+      _toggle.title = _expanded ? 'Click to collapse' : 'Click to expand';
+    }
+  }
+
   function _onToggleClick() {
     if (!_body) return;
-    _expanded = _body.classList.contains('hidden');
-    _body.classList.toggle('hidden');
-    var chev = _toggle.querySelector('.chevron');
-    if (chev) chev.innerHTML = _expanded ? '&#9662;' : '&#9656;';
+    _setExpanded(_body.classList.contains('hidden'));
     if (_expanded && _lastData) {
+      _resizeCanvas();
       var clip = _clip(_lastData, _zoom);
       _renderMeta(_lastData);
       _lastBandSignature = '';
@@ -244,20 +276,44 @@
   }
 
   // -- Drag-to-zoom --------------------------------------------------------
+  function _removeDragListeners() {
+    window.removeEventListener('pointermove', _onDragMove);
+    window.removeEventListener('pointerup', _onDragEnd);
+    window.removeEventListener('pointercancel', _onDragCancel);
+  }
+
+  function _cancelDrag() {
+    if (!_dragState) return;
+    var pointerId = _dragState.pointerId;
+    _dragState = null;
+    _removeDragListeners();
+    if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
+    if (_lineEl && _lineEl.releasePointerCapture && pointerId != null) {
+      try { _lineEl.releasePointerCapture(pointerId); } catch (e) {}
+    }
+    if (_lastData) _renderLine(_lastData, _clip(_lastData, _zoom));
+  }
+
   function _onDragStart(ev) {
     if (!_lineEl || !_lastData) return;
-    if (ev.button !== 0) return;
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
     var rect = _lineEl.getBoundingClientRect();
     var frac = (ev.clientX - rect.left) / rect.width;
     if (frac < 0 || frac > 1) return;
-    _dragState = { startFrac: frac, curFrac: frac };
-    window.addEventListener('mousemove', _onDragMove);
-    window.addEventListener('mouseup', _onDragEnd);
+    _cancelDrag();
+    _dragState = { startFrac: frac, curFrac: frac, pointerId: ev.pointerId };
+    if (_lineEl.setPointerCapture && ev.pointerId != null) {
+      try { _lineEl.setPointerCapture(ev.pointerId); } catch (e) {}
+    }
+    window.addEventListener('pointermove', _onDragMove);
+    window.addEventListener('pointerup', _onDragEnd);
+    window.addEventListener('pointercancel', _onDragCancel);
     ev.preventDefault();
     _renderLine(_lastData, _clip(_lastData, _zoom));
   }
   function _onDragMove(ev) {
     if (!_dragState || !_lineEl) return;
+    if (ev.pointerId != null && ev.pointerId !== _dragState.pointerId) return;
     var rect = _lineEl.getBoundingClientRect();
     var frac = (ev.clientX - rect.left) / rect.width;
     if (frac < 0) frac = 0; else if (frac > 1) frac = 1;
@@ -271,8 +327,12 @@
   }
   function _onDragEnd(ev) {
     if (!_dragState) return;
-    window.removeEventListener('mousemove', _onDragMove);
-    window.removeEventListener('mouseup', _onDragEnd);
+    if (ev.pointerId != null && ev.pointerId !== _dragState.pointerId) return;
+    var pointerId = _dragState.pointerId;
+    _removeDragListeners();
+    if (_lineEl && _lineEl.releasePointerCapture && pointerId != null) {
+      try { _lineEl.releasePointerCapture(pointerId); } catch (e) {}
+    }
     if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
     var start = _dragState.startFrac, end = _dragState.curFrac;
     _dragState = null;
@@ -292,6 +352,66 @@
       return;
     }
     _setZoom([loMhz, hiMhz]);
+  }
+  function _onDragCancel(ev) {
+    if (_dragState && ev.pointerId != null && ev.pointerId !== _dragState.pointerId) return;
+    _cancelDrag();
+  }
+
+  function _updateZoomAccessibility() {
+    if (!_lineEl) return;
+    var label = 'SDR spectrum line plot';
+    if (_lastData) {
+      var clip = _clip(_lastData, _zoom);
+      if (clip) {
+        label += _zoom
+          ? ', zoomed from ' + clip.loMhz.toFixed(3) + ' to ' + clip.hiMhz.toFixed(3) + ' MHz'
+          : ', full band from ' + clip.loMhz.toFixed(3) + ' to ' + clip.hiMhz.toFixed(3) + ' MHz';
+      }
+    }
+    _lineEl.setAttribute('aria-label', label);
+  }
+
+  function _onZoomKeyDown(ev) {
+    if (!_lastData) return;
+    var key = ev.key;
+    var full = _clip(_lastData, null);
+    var current = _clip(_lastData, _zoom);
+    if (!full || !current) return;
+    var fullSpan = full.hiMhz - full.loMhz;
+    var span = current.hiMhz - current.loMhz;
+    var center = (current.loMhz + current.hiMhz) / 2;
+    var next = null;
+    var handled = true;
+    if (key === '+' || key === '=' || key === 'Enter') {
+      var minSpan = Math.max((current.binStepKhz || 250) * 2 / 1000, fullSpan / 1024);
+      var zoomSpan = Math.max(minSpan, span / 2);
+      next = [center - zoomSpan / 2, center + zoomSpan / 2];
+    } else if (key === '-') {
+      if (!_zoom) return;
+      var outSpan = Math.min(fullSpan, span * 2);
+      if (outSpan >= fullSpan * 0.999) next = null;
+      else next = [center - outSpan / 2, center + outSpan / 2];
+    } else if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      if (!_zoom) return;
+      var shift = span * 0.1 * (key === 'ArrowLeft' ? -1 : 1);
+      var lo = current.loMhz + shift;
+      var hi = current.hiMhz + shift;
+      if (lo < full.loMhz) { hi += full.loMhz - lo; lo = full.loMhz; }
+      if (hi > full.hiMhz) { lo -= hi - full.hiMhz; hi = full.hiMhz; }
+      next = [lo, hi];
+    } else if (key === 'Escape' || key === 'Home' || key === '0') {
+      next = null;
+    } else {
+      handled = false;
+    }
+    if (!handled) return;
+    ev.preventDefault();
+    if (next) {
+      next[0] = Math.max(full.loMhz, next[0]);
+      next[1] = Math.min(full.hiMhz, next[1]);
+    }
+    _setZoom(next);
   }
   function _onDoubleClickReset(ev) {
     if (!_zoom) return;
@@ -623,7 +743,7 @@
       }
     }
     SC.paintHistoryToCanvas(_wfCtx, _wfCanvas, chron, WF_COLS, WF_ROWS,
-                            _minDb, _maxDb);
+                            _minDb, _maxDb, WF_HISTORY_ROWS);
     _lastSweepCount = SC.historyStore.sweepCount;
   }
 
@@ -636,7 +756,9 @@
     var toDraw = Math.min(delta, tail.length);
     for (var i = tail.length - toDraw; i < tail.length; i++) {
       var row = (clip && clip.zoomed) ? tail[i].slice(clip.loIdx, clip.hiIdx + 1) : tail[i];
-      SC.paintRowToCanvas(_wfCtx, _wfCanvas, row, WF_COLS, WF_ROWS, _minDb, _maxDb);
+      SC.paintRowToCanvas(
+        _wfCtx, _wfCanvas, row, WF_COLS, WF_ROWS, _minDb, _maxDb, WF_HISTORY_ROWS
+      );
     }
     _lastSweepCount = sc;
   }
@@ -660,7 +782,9 @@
     // rowIdx * sweep_seconds approximation — the latter drifts badly on
     // wide spans where each sweep takes longer than sweep_seconds, and
     // lies outright for rows from before a scanner restart.
-    var rowIdx = Math.min(Math.floor(fracY * WF_ROWS), WF_ROWS - 1);
+    var rowIdx = Math.min(
+      Math.floor(fracY * WF_HISTORY_ROWS), WF_HISTORY_ROWS - 1
+    );
     var rowTs = SC.historyStore.rowTimestamps[rowIdx];
     var agoSec = (rowTs != null) ? (Date.now() / 1000 - rowTs) : null;
     var rowPowers = SC.historyStore.rows[rowIdx];
@@ -764,10 +888,8 @@
       _hasReceivedData = true;
       if (_placeholderEl) _placeholderEl.style.display = 'none';
       if (_body && _body.classList.contains('hidden')) {
-        _body.classList.remove('hidden');
-        _expanded = true;
-        var chev = _toggle ? _toggle.querySelector('.chevron') : null;
-        if (chev) chev.innerHTML = '&#9662;';
+        _setExpanded(true);
+        _resizeCanvas();
       }
     }
 
@@ -784,10 +906,7 @@
       _lastBandSignature = '';
       _needsBulkPaint = true;
       if (_dragState) {
-        _dragState = null;
-        if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
-        window.removeEventListener('mousemove', _onDragMove);
-        window.removeEventListener('mouseup', _onDragEnd);
+        _cancelDrag();
       }
       _setZoom(null, true);
     }
@@ -801,6 +920,7 @@
       data.bins_hz = _cachedBinsHz;
     }
     _lastData = data;
+    _updateZoomAccessibility();
     if (_body && _body.classList.contains('hidden')) return;
     var clip = _clip(data, _zoom);
 
@@ -885,9 +1005,6 @@
       if (!_switchingOverlay && _body) {
         _switchingOverlay = document.createElement('div');
         _switchingOverlay.className = 'spectrum-switching-overlay';
-        _switchingOverlay.style.cssText =
-          'position:absolute;top:0;right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center;' +
-          'background:rgba(0,0,0,0.6);color:#fff;font-size:1.1em;z-index:10;border-radius:6px;';
         _switchingOverlay.textContent = 'Switching preset…';
         _body.style.position = 'relative';
         _body.appendChild(_switchingOverlay);
@@ -909,7 +1026,7 @@
     if (!_body) return;
     _channelGridEl = document.createElement('div');
     _channelGridEl.className = 'lora-channel-grid-unified';
-    _channelGridEl.style.cssText = 'margin-top:8px;display:none;';
+    _channelGridEl.style.display = 'none';
     _body.appendChild(_channelGridEl);
   }
 
@@ -925,12 +1042,12 @@
     var nf = analysis.noise_floor_db;
 
     // Summary bar
-    var summary = '<div class="ch-summary" style="font-size:0.85em;margin-bottom:6px;">' +
+    var summary = '<div class="ch-summary">' +
       '<span>Noise floor: <b>' + (nf != null ? esc(nf.toFixed(1)) + ' dB' : '—') + '</b></span>' +
       ' · <span>Active: <b>' + esc(analysis.active_count + '/' + chs.length) + '</b></span>' +
       ' · <span>Threshold: ' + esc(analysis.threshold_db) + ' dB</span>';
     if (analysis.interference_flags && analysis.interference_flags.length) {
-      summary += ' · <span style="color:#f44;">⚠ ' + esc(analysis.interference_flags.length) + ' interference</span>';
+      summary += ' · <span class="ch-summary-alert">⚠ ' + esc(analysis.interference_flags.length) + ' interference</span>';
     }
     summary += '</div>';
 
@@ -938,7 +1055,7 @@
     var ups = chs.filter(function (c) { return c.dir === 'up'; });
     var dns = chs.filter(function (c) { return c.dir === 'dn'; });
 
-    var html = summary + '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
+    var html = summary + '<div class="ch-blocks">';
     html += _buildChannelBlock('Uplink (' + ups.length + ')', ups, nf);
     html += _buildChannelBlock('Downlink (' + dns.length + ')', dns, nf);
     html += '</div>';
@@ -946,17 +1063,17 @@
   }
 
   function _buildChannelBlock(title, channels, nf) {
-    var html = '<div><div style="font-size:0.8em;color:#aaa;margin-bottom:2px;">' + esc(title) + '</div>';
-    html += '<div style="display:flex;flex-wrap:wrap;gap:2px;">';
+    var html = '<div><div class="ch-block-title">' + esc(title) + '</div>';
+    html += '<div class="ch-cells">';
     for (var i = 0; i < channels.length; i++) {
       var c = channels[i];
-      var color = '#333';
-      if (c.active) color = '#2a6';
-      else if (c.duty_pct > 5) color = '#a62';
+      var cellClass = 'ch-cell';
+      if (c.active) cellClass += ' ch-cell-active';
+      else if (c.duty_pct > 5) cellClass += ' ch-cell-busy';
       html += '<div title="Ch ' + esc(c.idx) + ' ' + esc(c.center_mhz) + ' MHz\n' +
         'Power: ' + (c.power_db != null ? esc(c.power_db) + ' dB' : '—') + '\n' +
         'Duty: ' + esc(c.duty_pct) + '%\nDetections: ' + esc(c.det_count) + '"' +
-        ' style="width:8px;height:12px;background:' + color + ';border-radius:1px;"></div>';
+        ' class="' + cellClass + '"></div>';
     }
     html += '</div></div>';
     return html;

@@ -302,7 +302,7 @@ class TestRunCheck:
         self_info = {
             "address": "200:abcd:ef01::1",
             "subnet": "300:abcd::/64",
-            "key": "abc123def456",
+            "key": "test",
             "build_version": "0.5.13",
             "coords": [1, 2, 3],
         }
@@ -338,7 +338,7 @@ class TestRunCheck:
         assert health["running"] is True
         assert health["address"] == "200:abcd:ef01::1"
         assert health["subnet"] == "300:abcd::/64"
-        assert health["public_key"] == "abc123def456"
+        assert health["public_key"] == "test"
         assert health["build_version"] == "0.5.13"
         assert health["peer_count"] == 2
         assert health["traffic"]["bytes_sent"] == 4000

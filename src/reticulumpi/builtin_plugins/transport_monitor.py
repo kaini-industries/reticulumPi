@@ -25,6 +25,7 @@ import RNS.vendor.umsgpack as umsgpack
 import yaml
 
 from reticulumpi import events
+from reticulumpi.control_client import ControlError, request_control
 from reticulumpi.plugin_base import PluginBase
 
 # Timeout for TCP connectivity probes (seconds)
@@ -626,22 +627,23 @@ class TransportMonitorPlugin(PluginBase):
             return False
         self.event_bus.publish(events.RNSD_RESTARTING, {"reason": reason})
         try:
-            subprocess.run(
-                ["sudo", "systemctl", "restart", "rnsd"],
+            request_control(
+                "restart_rnsd",
+                socket_path=self.config.get(
+                    "control_socket",
+                    "/run/reticulumpi/control.sock",
+                ),
                 timeout=15,
-                check=True,
-                capture_output=True,
             )
-        except subprocess.TimeoutExpired:
-            self.log.warning("rnsd restart timed out")
-            return False
-        except subprocess.CalledProcessError as exc:
-            self.log.error("rnsd restart failed: %s", exc.stderr.decode())
+        except ControlError as exc:
+            self.log.error("rnsd restart failed: %s", exc)
             return False
         self._last_rnsd_restart = time.monotonic()
         if self._wait_for_rnsd():
             self.event_bus.publish(events.RNSD_RECOVERED, {"reason": reason})
-        return True
+            return True
+        self.log.error("rnsd restart command succeeded but readiness probe failed")
+        return False
 
     def _wait_for_rnsd(self, timeout: float = 10) -> bool:
         deadline = time.monotonic() + timeout
@@ -1186,12 +1188,14 @@ class TransportMonitorPlugin(PluginBase):
         """Create the hub exchange destination, register announce handler, and
         start the exchange thread."""
         try:
-            self._exchange_destination = RNS.Destination(
-                self.identity,
-                RNS.Destination.IN,
-                RNS.Destination.SINGLE,
-                _HUB_EXCHANGE_APP,
-                _HUB_EXCHANGE_ASPECT,
+            self._exchange_destination = self.manage_destination(
+                RNS.Destination(
+                    self.identity,
+                    RNS.Destination.IN,
+                    RNS.Destination.SINGLE,
+                    _HUB_EXCHANGE_APP,
+                    _HUB_EXCHANGE_ASPECT,
+                )
             )
 
             # Serve our hub list to peers that link to us
@@ -1203,6 +1207,7 @@ class TransportMonitorPlugin(PluginBase):
                 self._handle_hub_request,
                 allow=RNS.Destination.ALLOW_ALL,
             )
+            self.manage_request_handler(self._exchange_destination, "/hubs")
 
             # Listen for other nodes announcing hub exchange
             _aspect = f"{_HUB_EXCHANGE_APP}.{_HUB_EXCHANGE_ASPECT}"
@@ -1233,6 +1238,17 @@ class TransportMonitorPlugin(PluginBase):
 
     def _exchange_link_established(self, link: Any) -> None:
         """Called when a peer links to our hub exchange destination."""
+        if not self._active:
+            link.teardown()
+            return
+        try:
+            self.manage_link(link)
+        except RuntimeError:
+            link.teardown()
+            return
+        if not self._active:
+            link.teardown()
+            return
         self.log.debug("Hub exchange: incoming link from %s", link)
 
     def _handle_hub_request(
@@ -1245,6 +1261,8 @@ class TransportMonitorPlugin(PluginBase):
         requested_at: Any,
     ) -> Any:
         """Serve our known-working hub list to a requesting peer."""
+        if not self._active:
+            return umsgpack.packb({"hubs": [], "v": 1, "error": "plugin unavailable"})
         with self._lock:
             working_hubs = []
             # Include hubs from our pool that we've successfully connected to
@@ -1308,9 +1326,15 @@ class TransportMonitorPlugin(PluginBase):
         if not RNS.Transport.has_path(dest_hash):
             RNS.Transport.request_path(dest_hash)
             # Brief wait for path
-            deadline = time.time() + 10
-            while not RNS.Transport.has_path(dest_hash) and time.time() < deadline:
+            deadline = time.monotonic() + 10
+            while (
+                self._active
+                and not RNS.Transport.has_path(dest_hash)
+                and time.monotonic() < deadline
+            ):
                 time.sleep(0.5)
+            if not self._active:
+                return False
             if not RNS.Transport.has_path(dest_hash):
                 self.log.debug("Hub exchange: no path to <%s>", dest_hex)
                 return False
@@ -1331,6 +1355,9 @@ class TransportMonitorPlugin(PluginBase):
         result = {"done": False, "data": None}
 
         def on_established(link: Any) -> None:
+            if not self._active:
+                link.teardown()
+                return
             link.request(
                 "/hubs",
                 data=None,
@@ -1346,22 +1373,30 @@ class TransportMonitorPlugin(PluginBase):
         def _on_failed(res: dict) -> None:
             res["done"] = True
 
+        link: Any = None
         try:
-            link = RNS.Link(destination, established_callback=on_established)
-        except Exception:
-            self.log.debug("Hub exchange: link creation failed for <%s>", dest_hex)
-            return False
+            try:
+                link = RNS.Link(destination, established_callback=on_established)
+            except Exception:
+                self.log.debug("Hub exchange: link creation failed for <%s>", dest_hex)
+                return False
 
-        # Wait for response
-        deadline = time.time() + _EXCHANGE_LINK_TIMEOUT + 10
-        while not result["done"] and time.time() < deadline:
-            time.sleep(0.5)
-
-        try:
-            if link.status == RNS.Link.ACTIVE:
-                link.teardown()
-        except Exception:
-            self.log.debug("Link teardown failed", exc_info=True)
+            # Wait for response, but do not make stop wait for the full link
+            # timeout. The finally block tears down pending as well as active
+            # links and deregisters the short-lived OUT destination.
+            deadline = time.monotonic() + _EXCHANGE_LINK_TIMEOUT + 10
+            while self._active and not result["done"] and time.monotonic() < deadline:
+                time.sleep(0.5)
+        finally:
+            if link is not None:
+                try:
+                    link.teardown()
+                except Exception:
+                    self.log.debug("Link teardown failed", exc_info=True)
+            try:
+                RNS.Transport.deregister_destination(destination)
+            except Exception:
+                self.log.debug("Hub exchange destination cleanup failed", exc_info=True)
 
         if result["data"] is None:
             self.log.debug("Hub exchange: no response from <%s>", dest_hex)

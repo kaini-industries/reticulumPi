@@ -1,0 +1,11 @@
+{
+  "id": "/",
+  "name": "ReticulumPi Dashboard",
+  "short_name": "ReticulumPi",
+  "description": "Local field dashboard for a ReticulumPi node",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#050910",
+  "theme_color": "#0a111c"
+}

@@ -16,13 +16,22 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 import aiohttp.web
 
-
+from reticulumpi._paths import runtime_state_path
 from reticulumpi.builtin_plugins.web_dashboard.broadcast_registry import (
     BroadcastRegistry,
+)
+from reticulumpi.builtin_plugins.web_dashboard.keys import (
+    get_app_plugin,
+    get_ws_compress,
+)
+from reticulumpi.builtin_plugins.web_dashboard.operational_metrics import (
+    record_websocket_close,
 )
 from reticulumpi.builtin_plugins.web_dashboard.shared_state import (
     offgrid_rate_limiter as _offgrid_rl,
 )
+from reticulumpi.daemon_executor import BoundedDaemonExecutor
+from reticulumpi.plugin_base import resolve_ready_plugin
 
 if TYPE_CHECKING:
     pass
@@ -43,7 +52,10 @@ def _check_ws_origin(request: aiohttp.web.Request) -> bool:
         return False
 
     # Build an allowed-origins set from the plugin's configured host/SSL names.
-    plugin = request.app.get("plugin")
+    try:
+        plugin = get_app_plugin(request.app)
+    except (KeyError, TypeError):
+        plugin = None
     allowed: set[str] = {request.host}
     if plugin is not None:
         cfg_host = plugin.config.get("host", "127.0.0.1")
@@ -91,6 +103,9 @@ def _diff_payload(data: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any]:
             result[key] = value
         elif value != prev.get(key):
             result[key] = value
+    removed = sorted(set(prev).difference(data))
+    if removed:
+        result["_removed"] = removed
     return result
 
 
@@ -123,6 +138,22 @@ def _ws_preset_rate_ok(ws_id: int) -> bool:
 
 
 _WS_SEND_TIMEOUT = 5.0
+
+
+async def _rejected_websocket(
+    request: aiohttp.web.Request,
+    code: int,
+    message: bytes,
+) -> aiohttp.web.WebSocketResponse:
+    """Prepare and close one rejected upgrade while counting a fixed reason."""
+
+    ws = aiohttp.web.WebSocketResponse()
+    await ws.prepare(request)
+    try:
+        await ws.close(code=code, message=message)
+    finally:
+        record_websocket_close(code)
+    return ws
 
 
 async def _send_with_timeout(
@@ -162,7 +193,7 @@ _rnode_config_mtime: float = 0
 # directly.  No additional locking is needed.
 
 _RETICULUM_CONFIG_PATHS = [
-    os.path.expanduser("~reticulumpi/.reticulum/config"),
+    runtime_state_path(".reticulum", "config"),
     os.path.expanduser("~/.reticulum/config"),
 ]
 
@@ -397,9 +428,55 @@ def setup_websocket_routes(app: aiohttp.web.Application) -> None:
 
 _ws_clients: set[aiohttp.web.WebSocketResponse] = set()
 _ws_last_activity: dict[aiohttp.web.WebSocketResponse, float] = {}
+_ws_tokens: dict[aiohttp.web.WebSocketResponse, str] = {}
 _ws_last_snapshot: dict[int, float] = {}
 _last_global_snapshot: float = 0.0
 _broadcast_task: asyncio.Task | None = None
+_ws_pending = 0
+
+
+def _reserve_ws_slot(plugin: Any) -> bool:
+    """Atomically reserve from the combined metrics+spectrum client budget."""
+    global _ws_pending
+    max_clients = int(plugin.config.get("max_websocket_clients", 10))
+    if len(_ws_clients) + len(_spectrum_clients) + _ws_pending >= max_clients:
+        return False
+    _ws_pending += 1
+    return True
+
+
+def _release_ws_slot() -> None:
+    global _ws_pending
+    _ws_pending = max(0, _ws_pending - 1)
+
+
+async def _revalidate_ws_session(
+    ws: aiohttp.web.WebSocketResponse,
+    plugin: Any,
+    token: str,
+) -> None:
+    """Expire passive clients even when they never send an application frame."""
+    interval = float(plugin.config.get("ws_session_revalidate_interval", 30))
+    while not ws.closed:
+        await asyncio.sleep(interval)
+        if not plugin._auth.validate_token(token):
+            await _send_with_timeout(
+                ws,
+                json.dumps({"type": "error", "error": "Session expired"}),
+            )
+            await ws.close(code=4001, message=b"Session expired")
+            return
+
+
+async def close_websockets_for_token(token: str) -> int:
+    """Close every live WebSocket associated with a revoked session token."""
+    matches = [ws for ws, ws_token in list(_ws_tokens.items()) if ws_token == token]
+    if matches:
+        await asyncio.gather(
+            *(ws.close(code=4001, message=b"Session revoked") for ws in matches),
+            return_exceptions=True,
+        )
+    return len(matches)
 
 
 # Loop + plugin refs captured at startup so cross-thread event-bus
@@ -409,8 +486,8 @@ _ws_plugin: Any | None = None
 
 # Dedicated single-worker executor for broadcast data collection.
 # Prevents overlapping collections from saturating the default pool.
-_broadcast_executor: concurrent.futures.ThreadPoolExecutor | None = None
-_command_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_broadcast_executor: concurrent.futures.Executor | None = None
+_command_executor: concurrent.futures.Executor | None = None
 _collection_running = threading.Event()
 
 # ── Warm cache heartbeat ──────────────────────────────────────────
@@ -456,38 +533,38 @@ _spectrum_task: asyncio.Task | None = None
 async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Dedicated WebSocket for spectrum/waterfall panels."""
     if not _check_ws_origin(request):
-        ws = aiohttp.web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.close(code=4003, message=b"Origin not allowed")
-        return ws
+        return await _rejected_websocket(request, 4003, b"Origin not allowed")
 
-    plugin = request.app["plugin"]
-    max_clients = plugin.config.get("max_websocket_clients", 10)
-
+    plugin = get_app_plugin(request.app)
     _auth_hdr = request.headers.get("Authorization", "")
     token = _auth_hdr[7:] if _auth_hdr.startswith("Bearer ") else request.cookies.get("session")
     if not token or not plugin._auth.validate_token(token):
-        ws = aiohttp.web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.close(code=4001, message=b"Authentication required")
-        return ws
+        return await _rejected_websocket(request, 4001, b"Authentication required")
 
-    if len(_spectrum_clients) >= max_clients:
-        ws = aiohttp.web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.close(code=4002, message=b"Too many connections")
-        return ws
+    if not _reserve_ws_slot(plugin):
+        return await _rejected_websocket(request, 4002, b"Too many connections")
 
-    compress = 15 if request.app.get("ws_compress", True) else 0
-    ws = aiohttp.web.WebSocketResponse(heartbeat=60.0, compress=compress)
-    await ws.prepare(request)
+    compress = 15 if get_ws_compress(request.app) else 0
+    try:
+        ws = aiohttp.web.WebSocketResponse(
+            heartbeat=60.0,
+            compress=compress,
+            max_msg_size=64 * 1024,
+        )
+        await ws.prepare(request)
+        _spectrum_clients.add(ws)
+        _ws_tokens[ws] = token
+    except Exception:
+        _release_ws_slot()
+        raise
+    _release_ws_slot()
 
     for name, msg_type in [
         ("spectrum_scanner", "spectrum_history"),
         ("lora_scanner", "lora_scanner_history"),
         ("lora_link_tester", "link_tester_history"),
     ]:
-        p = plugin.app.get_plugin(name)
+        p = resolve_ready_plugin(plugin, name)
         if p and hasattr(p, "get_history"):
             try:
                 hist = p.get_history()
@@ -502,7 +579,7 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
         ("lora_scanner", "lora_scanner"),
         ("lora_link_tester", "link_tester"),
     ]:
-        p = plugin.app.get_plugin(name)
+        p = resolve_ready_plugin(plugin, name)
         if p and hasattr(p, "get_snapshot"):
             try:
                 snap = p.get_snapshot()
@@ -514,26 +591,16 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
         if not await _send_with_timeout(ws, json.dumps({"type": "update", "data": snap_data})):
             log.debug("Failed to send initial snapshot")
 
-    _spectrum_clients.add(ws)
     log.debug("Spectrum WS client connected (%d total)", len(_spectrum_clients))
 
-    _spectrum_revalidate_ts = time.monotonic()
+    revalidate_task = asyncio.create_task(
+        _revalidate_ws_session(ws, plugin, token),
+        name="dashboard-spectrum-session-revalidate",
+    )
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.ERROR:
                 break
-
-            # Periodic session re-validation (every 5 minutes)
-            _now_mono = time.monotonic()
-            if _now_mono - _spectrum_revalidate_ts >= 300.0:
-                _spectrum_revalidate_ts = _now_mono
-                if not token or not plugin._auth.validate_token(token):
-                    await _send_with_timeout(
-                        ws,
-                        json.dumps({"type": "error", "error": "Session expired"}),
-                    )
-                    await ws.close(code=4001, message=b"Session expired")
-                    break
 
             if msg.type == aiohttp.WSMsgType.TEXT:
                 loop = asyncio.get_running_loop()
@@ -551,9 +618,13 @@ async def websocket_spectrum(request: aiohttp.web.Request) -> aiohttp.web.WebSoc
                     if not await _send_with_timeout(ws, json.dumps(resp)):
                         break
     finally:
+        revalidate_task.cancel()
+        await asyncio.gather(revalidate_task, return_exceptions=True)
         _spectrum_clients.discard(ws)
+        _ws_tokens.pop(ws, None)
         _ws_preset_rate.pop(id(ws), None)
         _ws_last_snapshot.pop(id(ws), None)
+        record_websocket_close(ws.close_code)
         log.info(
             "Spectrum WS disconnected (code=%s, %d remaining)",
             ws.close_code,
@@ -569,7 +640,7 @@ def _collect_spectrum_data(plugin: Any) -> dict[str, Any]:
         ("lora_scanner", "lora_scanner"),
         ("lora_link_tester", "link_tester"),
     ]:
-        p = plugin.app.get_plugin(name)
+        p = resolve_ready_plugin(plugin, name)
         if p and hasattr(p, "get_snapshot"):
             try:
                 snap = p.get_snapshot()
@@ -588,7 +659,7 @@ def _collect_spectrum_data(plugin: Any) -> dict[str, Any]:
 
 
 async def _spectrum_broadcast_loop(app: aiohttp.web.Application) -> None:
-    plugin = app["plugin"]
+    plugin = get_app_plugin(app)
     interval = plugin.config.get("spectrum_broadcast_interval", 2)
     resync_every = int(plugin.config.get("spectrum_resync_cycles", 12))
     prev_data: dict[str, Any] = {}
@@ -695,34 +766,35 @@ async def _handle_snapshot_request(ws: aiohttp.web.WebSocketResponse, plugin: An
 async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     """Handle WebSocket connections for live metrics streaming."""
     if not _check_ws_origin(request):
-        ws = aiohttp.web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.close(code=4003, message=b"Origin not allowed")
-        return ws
+        return await _rejected_websocket(request, 4003, b"Origin not allowed")
 
     global _cache_hits
-    plugin = request.app["plugin"]
-    max_clients = plugin.config.get("max_websocket_clients", 10)
-
+    plugin = get_app_plugin(request.app)
     # Authenticate via cookie or Authorization header
     _auth_hdr = request.headers.get("Authorization", "")
     token = _auth_hdr[7:] if _auth_hdr.startswith("Bearer ") else request.cookies.get("session")
 
     if not token or not plugin._auth.validate_token(token):
-        ws = aiohttp.web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.close(code=4001, message=b"Authentication required")
-        return ws
+        return await _rejected_websocket(request, 4001, b"Authentication required")
 
-    if len(_ws_clients) >= max_clients:
-        ws = aiohttp.web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.close(code=4002, message=b"Too many connections")
-        return ws
+    if not _reserve_ws_slot(plugin):
+        return await _rejected_websocket(request, 4002, b"Too many connections")
 
-    compress = 15 if request.app.get("ws_compress", True) else 0
-    ws = aiohttp.web.WebSocketResponse(heartbeat=60.0, compress=compress)
-    await ws.prepare(request)
+    compress = 15 if get_ws_compress(request.app) else 0
+    try:
+        ws = aiohttp.web.WebSocketResponse(
+            heartbeat=60.0,
+            compress=compress,
+            max_msg_size=64 * 1024,
+        )
+        await ws.prepare(request)
+        _ws_clients.add(ws)
+        _ws_tokens[ws] = token
+        _ws_last_activity[ws] = time.time()
+    except Exception:
+        _release_ws_slot()
+        raise
+    _release_ws_slot()
 
     # Send a full data snapshot so every panel populates immediately
     # instead of waiting up to 5s for the next broadcast cycle.
@@ -749,7 +821,7 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
                 ),
             )
         data["ws_stats"] = {
-            "clients": len(_ws_clients) + 1,
+            "clients": len(_ws_clients),
             "max_clients": plugin.config.get("max_websocket_clients", 10),
             "collect_ms": 0,
             "prev_payload_bytes": 0,
@@ -768,29 +840,18 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
     except Exception:
         log.debug("Failed to collect initial data snapshot", exc_info=True)
 
-    _ws_clients.add(ws)
-    _ws_last_activity[ws] = time.time()
     log.debug("WebSocket client connected (%d total)", len(_ws_clients))
 
-    _session_revalidate_ts = time.monotonic()
+    revalidate_task = asyncio.create_task(
+        _revalidate_ws_session(ws, plugin, token),
+        name="dashboard-metrics-session-revalidate",
+    )
     try:
         async for msg in ws:
             _ws_last_activity[ws] = time.time()
             if msg.type == aiohttp.WSMsgType.ERROR:
                 log.debug("WebSocket error: %s", ws.exception())
                 break
-
-            # Periodic session re-validation (every 5 minutes)
-            _now_mono = time.monotonic()
-            if _now_mono - _session_revalidate_ts >= 300.0:
-                _session_revalidate_ts = _now_mono
-                if not token or not plugin._auth.validate_token(token):
-                    await _send_with_timeout(
-                        ws,
-                        json.dumps({"type": "error", "error": "Session expired"}),
-                    )
-                    await ws.close(code=4001, message=b"Session expired")
-                    break
 
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
@@ -815,10 +876,14 @@ async def websocket_metrics(request: aiohttp.web.Request) -> aiohttp.web.WebSock
                     if not await _send_with_timeout(ws, json.dumps(resp)):
                         break
     finally:
+        revalidate_task.cancel()
+        await asyncio.gather(revalidate_task, return_exceptions=True)
         _ws_clients.discard(ws)
+        _ws_tokens.pop(ws, None)
         _ws_last_activity.pop(ws, None)
         _ws_last_snapshot.pop(id(ws), None)
         _ws_preset_rate.pop(id(ws), None)
+        record_websocket_close(ws.close_code)
         log.info(
             "WebSocket disconnected (code=%s, %d remaining)",
             ws.close_code,
@@ -842,6 +907,7 @@ def _get_registry(interval: float, config: Any = None) -> BroadcastRegistry:
             slow_threshold_ms=cfg.get("broadcast_slow_threshold_ms", 200.0),
             tier1_factor=cfg.get("broadcast_tier1_factor", 0.75 * 0.70),
             tier2_factor=cfg.get("broadcast_tier2_factor", 0.75 * 0.30),
+            callback_timeout_ms=cfg.get("broadcast_callback_timeout_ms", 500.0),
         )
     return _broadcast_registry
 
@@ -862,16 +928,20 @@ def _collect_broadcast_data(
     registry = _get_registry(interval, plugin.config)
 
     plugin_statuses: dict[str, Any] = {}
+    ready_plugins: dict[str, Any] = {}
     for name, p in plugin.app.plugins.items():
         try:
             plugin_statuses[name] = {"active": p.get_status().get("active", False)}
         except Exception:
             plugin_statuses[name] = {"active": False}
+        ready = resolve_ready_plugin(plugin, name)
+        if ready is p:
+            ready_plugins[name] = p
 
     interfaces = _collect_interfaces(plugin.app.reticulum)
 
     data = registry.collect(
-        plugin.app.plugins,
+        ready_plugins,
         cycle_count,
         budget_multiplier=3.0 if initial else 1.0,
     )
@@ -889,25 +959,30 @@ def _collect_broadcast_data(
         except Exception:
             log.debug("Transport traffic enrichment failed", exc_info=True)
 
+    mesh_present = "mesh" in data
     mesh = data.get("mesh") or {}
     mesh_peers = data.pop("mesh_peers", None)
     if mesh_peers is not None:
+        mesh_present = True
         mesh["peers"] = mesh_peers
         mesh["peer_count"] = len(mesh_peers)
     alerts = data.pop("alerts", None)
     if alerts:
+        mesh_present = True
         mesh["alerts_sent"] = alerts.get("alerts_sent", 0)
         mesh["last_alert"] = alerts.get("last_alert")
 
-    recent = mesh.get("recent_announces")
-    if recent:
-        newest_ts = max(n.get("last_seen", 0) for n in recent)
-        if newest_ts > last_mesh_announce_ts:
-            mesh_version += 1
-            last_mesh_announce_ts = newest_ts
-    mesh["version"] = mesh_version
-    if mesh:
+    if mesh_present:
+        recent = mesh.get("recent_announces")
+        if recent:
+            newest_ts = max(n.get("last_seen", 0) for n in recent)
+            if newest_ts > last_mesh_announce_ts:
+                mesh_version += 1
+                last_mesh_announce_ts = newest_ts
+        mesh["version"] = mesh_version
         data["mesh"] = mesh
+    else:
+        data.pop("mesh", None)
 
     space = data.get("space")
     if space:
@@ -943,7 +1018,7 @@ async def _broadcast_metrics(app: aiohttp.web.Application) -> None:
         _last_heartbeat_ts
     global _hb_count, _hb_fail, _cache_hits, _last_hb_summary_ts
 
-    plugin = app["plugin"]
+    plugin = get_app_plugin(app)
     interval = plugin.config.get("metrics_interval", 5)
     _cycle_count = 0
     _prev_data: dict[str, Any] = {}
@@ -1158,22 +1233,27 @@ async def _start_broadcast_task(app: aiohttp.web.Application) -> None:
         _last_hb_summary_ts
     _ws_loop = asyncio.get_running_loop()
     _ws_loop.set_exception_handler(_dashboard_exception_handler)
-    _ws_plugin = app["plugin"]
+    _ws_plugin = get_app_plugin(app)
     _push_sem = asyncio.Semaphore(8)
-    _broadcast_executor = concurrent.futures.ThreadPoolExecutor(
+    _broadcast_executor = BoundedDaemonExecutor(
         max_workers=2,
+        max_pending=16,
         thread_name_prefix="ws-broadcast",
     )
-    _command_executor = concurrent.futures.ThreadPoolExecutor(
+    _command_executor = BoundedDaemonExecutor(
         max_workers=2,
+        max_pending=32,
         thread_name_prefix="ws-command",
     )
 
     # Warm plugin caches and seed the warm cache for instant first-client response
     try:
-        data, _, _ = await asyncio.get_running_loop().run_in_executor(
-            _broadcast_executor,
-            functools.partial(_collect_broadcast_data, app["plugin"], 0, 0, 0),
+        data, _, _ = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                _broadcast_executor,
+                functools.partial(_collect_broadcast_data, get_app_plugin(app), 0, 0, 0),
+            ),
+            timeout=float(_ws_plugin.config.get("broadcast_warm_timeout", 2.0)),
         )
         _warm_cache_data = data
         _warm_cache_ts = time.monotonic()
@@ -1219,7 +1299,8 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
         _hb_count, \
         _hb_fail, \
         _cache_hits, \
-        _last_hb_summary_ts
+        _last_hb_summary_ts, \
+        _ws_pending
     try:
         if _ws_plugin is not None:
             event_bus = _ws_plugin.app.event_bus
@@ -1273,17 +1354,19 @@ async def _stop_broadcast_task(app: aiohttp.web.Application) -> None:
     _hb_fail = 0
     _cache_hits = 0
     _last_hb_summary_ts = 0.0
+    _ws_pending = 0
     if _broadcast_executor is not None:
-        _broadcast_executor.shutdown(wait=True, cancel_futures=True)
+        _broadcast_executor.shutdown(wait=False, cancel_futures=True)
         _broadcast_executor = None
     if _command_executor is not None:
-        _command_executor.shutdown(wait=True, cancel_futures=True)
+        _command_executor.shutdown(wait=False, cancel_futures=True)
         _command_executor = None
     # Close all WebSocket connections
     for ws in list(_ws_clients):
         await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
     _ws_clients.clear()
     _ws_last_activity.clear()
+    _ws_tokens.clear()
     for ws in list(_spectrum_clients):
         await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutting down")
     _spectrum_clients.clear()
@@ -1299,7 +1382,7 @@ def _lookup_message_row(msg_id: Any) -> dict | None:
     if _ws_plugin is None or msg_id is None:
         return None
     try:
-        msg_hub = _ws_plugin.app.get_plugin("messaging_hub")
+        msg_hub = resolve_ready_plugin(_ws_plugin, "messaging_hub")
     except Exception:
         return None
     if not msg_hub or not hasattr(msg_hub, "get_message"):
@@ -1413,7 +1496,7 @@ def _handle_ws_command(
     if action == "spectrum_switch_preset":
         if ws is not None and not _ws_preset_rate_ok(id(ws)):
             return {"type": "spectrum_preset_error", "error": "Rate limited — try again shortly"}
-        scanner = plugin.app.plugins.get("spectrum_scanner")
+        scanner = resolve_ready_plugin(plugin, "spectrum_scanner")
         if scanner and hasattr(scanner, "switch_preset"):
             preset_name = cmd.get("preset", "")
             try:
@@ -1428,11 +1511,11 @@ def _handle_ws_command(
                     "error": str(exc) or "Internal error during preset switch",
                 }
     elif action == "spectrum_list_presets":
-        scanner = plugin.app.plugins.get("spectrum_scanner")
+        scanner = resolve_ready_plugin(plugin, "spectrum_scanner")
         if scanner and hasattr(scanner, "get_presets"):
             return {"type": "spectrum_presets", **scanner.get_presets()}
     elif action.startswith("radio_"):
-        fm = plugin.app.plugins.get("fm_receiver")
+        fm = resolve_ready_plugin(plugin, "fm_receiver")
         if not fm:
             return None
 

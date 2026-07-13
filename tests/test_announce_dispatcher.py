@@ -303,6 +303,21 @@ class TestCircuitBreaker:
         dispatcher._enqueue(DEST_HASH, IDENTITY, APP_DATA)
         _wait_for_event(sentinel)  # loop survived
 
+    def test_hung_subscriber_does_not_block_healthy_subscriber(self, dispatcher):
+        entered = threading.Event()
+        never = threading.Event()
+        healthy = threading.Event()
+
+        def hung(*_args):
+            entered.set()
+            never.wait()
+
+        dispatcher.subscribe(None, hung)
+        dispatcher.subscribe(None, lambda *_args: healthy.set())
+        dispatcher._enqueue(DEST_HASH, IDENTITY, APP_DATA)
+        _wait_for_event(entered)
+        _wait_for_event(healthy)
+
 
 # ===================================================================
 # 4. Queue overflow
@@ -318,6 +333,53 @@ class TestQueueOverflow:
         # Queue is now full.  This must not raise.
         d._enqueue(b"\x03" * 16, IDENTITY, b"c")
         assert d._queue.qsize() == 2
+        assert d.get_stats()["queue_dropped"] == 1
+
+    def test_stats_report_subscription_pressure_without_callback_data(self):
+        d = _make_dispatcher()
+        subscription_id = d.subscribe(None, lambda *_args: None)
+        try:
+            stats = d.get_stats()
+            assert stats["subscribers"] == 1
+            assert stats["subscriber_pending"] == 0
+            assert stats["subscriber_dropped"] == 0
+            assert stats["abandoned_workers"] == 0
+            assert set(stats) == {
+                "pending",
+                "queue_dropped",
+                "subscribers",
+                "subscriber_pending",
+                "subscriber_dropped",
+                "disabled_subscribers",
+                "abandoned_workers",
+            }
+        finally:
+            d.unsubscribe(subscription_id)
+
+    def test_subscriber_drop_total_survives_unsubscribe(self, dispatcher):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked(*_args):
+            entered.set()
+            release.wait()
+
+        subscription_id = dispatcher.subscribe(None, blocked)
+        dispatcher._enqueue(DEST_HASH, IDENTITY, APP_DATA)
+        _wait_for_event(entered)
+        subscription = dispatcher._subscriptions[subscription_id]
+        for _ in range(subscription.queue.maxsize):
+            subscription.queue.put_nowait((DEST_HASH, IDENTITY, APP_DATA))
+
+        dispatcher._enqueue(DEST_HASH, IDENTITY, APP_DATA)
+        deadline = time.monotonic() + 2.0
+        while dispatcher.get_stats()["subscriber_dropped"] == 0:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        dispatcher.unsubscribe(subscription_id)
+        assert dispatcher.get_stats()["subscriber_dropped"] == 1
+        release.set()
 
     def test_full_queue_logs_warning(self, caplog):
         import logging

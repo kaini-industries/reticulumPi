@@ -18,15 +18,16 @@ def info_plugin(mock_app, tmp_path):
         "display_name": "Test Info",
         "storage_path": str(tmp_path / "info_lxmf"),
     }
-    import RNS as _RNS
-
     mock_bot_identity = MagicMock()
 
     with (
-        patch("LXMF.LXMRouter") as mock_router_cls,
-        patch.object(_RNS.Transport, "register_announce_handler"),
-        patch.object(_RNS.Transport, "deregister_announce_handler"),
-        patch("RNS.Identity", return_value=mock_bot_identity),
+        patch("reticulumpi.builtin_plugins.info_bot.create_lxm_router") as mock_router_cls,
+        patch("reticulumpi.builtin_plugins.info_bot.RNS.Transport.register_announce_handler"),
+        patch("reticulumpi.builtin_plugins.info_bot.RNS.Transport.deregister_announce_handler"),
+        patch(
+            "reticulumpi.builtin_plugins.info_bot.RNS.Identity",
+            return_value=mock_bot_identity,
+        ),
     ):
         mock_router = MagicMock()
         mock_dest = MagicMock()
@@ -253,15 +254,16 @@ class TestCmdWeather:
 class TestDisplayName:
     def test_uses_config_display_name(self, mock_app, tmp_path):
         config = {"display_name": "Custom Name", "storage_path": str(tmp_path / "lxmf")}
-        import RNS as _RNS
-
         mock_bot_identity = MagicMock()
 
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
-            patch.object(_RNS.Transport, "register_announce_handler"),
-            patch.object(_RNS.Transport, "deregister_announce_handler"),
-            patch("RNS.Identity", return_value=mock_bot_identity),
+            patch("reticulumpi.builtin_plugins.info_bot.create_lxm_router") as mock_router_cls,
+            patch("reticulumpi.builtin_plugins.info_bot.RNS.Transport.register_announce_handler"),
+            patch("reticulumpi.builtin_plugins.info_bot.RNS.Transport.deregister_announce_handler"),
+            patch(
+                "reticulumpi.builtin_plugins.info_bot.RNS.Identity",
+                return_value=mock_bot_identity,
+            ),
         ):
             mock_router = MagicMock()
             mock_dest = MagicMock()
@@ -281,15 +283,16 @@ class TestDisplayName:
 
     def test_defaults_to_node_name_info(self, mock_app, tmp_path):
         config = {"storage_path": str(tmp_path / "lxmf")}
-        import RNS as _RNS
-
         mock_bot_identity = MagicMock()
 
         with (
-            patch("LXMF.LXMRouter") as mock_router_cls,
-            patch.object(_RNS.Transport, "register_announce_handler"),
-            patch.object(_RNS.Transport, "deregister_announce_handler"),
-            patch("RNS.Identity", return_value=mock_bot_identity),
+            patch("reticulumpi.builtin_plugins.info_bot.create_lxm_router") as mock_router_cls,
+            patch("reticulumpi.builtin_plugins.info_bot.RNS.Transport.register_announce_handler"),
+            patch("reticulumpi.builtin_plugins.info_bot.RNS.Transport.deregister_announce_handler"),
+            patch(
+                "reticulumpi.builtin_plugins.info_bot.RNS.Identity",
+                return_value=mock_bot_identity,
+            ),
         ):
             mock_router = MagicMock()
             mock_dest = MagicMock()
@@ -615,9 +618,7 @@ class TestCmdDefine:
                 "meanings": [
                     {
                         "partOfSpeech": "noun",
-                        "definitions": [
-                            {"definition": "A procedure to evaluate something."}
-                        ],
+                        "definitions": [{"definition": "A procedure to evaluate something."}],
                     }
                 ],
             }
@@ -629,14 +630,11 @@ class TestCmdDefine:
         assert "procedure" in result
 
     def test_define_not_found(self, info_plugin):
-        with patch(
-            "urllib.request.urlopen",
-            side_effect=urllib.error.HTTPError(
-                "url", 404, "Not Found", {}, None
-            ),
-        ):
+        error = urllib.error.HTTPError("url", 404, "Not Found", {}, None)
+        with patch("urllib.request.urlopen", side_effect=error):
             result = info_plugin._cmd_define("xyznotaword")
         assert "No definition found" in result
+        assert error.closed
 
 
 class TestCmdNews:
@@ -671,12 +669,16 @@ class TestHandleMessage:
         msg.content_as_string.return_value = "!ping"
         msg.source = MagicMock()
 
-        import RNS as _RNS
-
         mock_reply = MagicMock()
         with (
-            patch.object(_RNS, "prettyhexrep", return_value="<0303030303030303>"),
-            patch("LXMF.LXMessage", return_value=mock_reply) as mock_lxm_cls,
+            patch(
+                "reticulumpi.builtin_plugins.info_bot.RNS.prettyhexrep",
+                return_value="<0303030303030303>",
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.info_bot.LXMF.LXMessage",
+                return_value=mock_reply,
+            ) as mock_lxm_cls,
         ):
             info_plugin._handle_message(msg)
 

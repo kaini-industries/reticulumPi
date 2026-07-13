@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import aiohttp.web
@@ -60,9 +61,11 @@ def _make_request(method, path, headers=None, peername=None):
 def _make_plugin(allow_localhost_api=False, token_valid=True):
     """Build a mock plugin with config and _auth.validate_token."""
     plugin = MagicMock()
-    plugin.config = {"allow_localhost_api": allow_localhost_api}
+    plugin.config = {"local_api": {"enabled": allow_localhost_api}}
+    plugin._local_api_token = "local-service-token-with-at-least-32-bytes"
     plugin._auth = MagicMock()
     plugin._auth.validate_token.return_value = token_valid
+    plugin._auth.password_change_required = False
     return plugin
 
 
@@ -166,12 +169,17 @@ class TestPublicPaths:
 
 
 class TestLocalhostBypass:
-    """Localhost requests may bypass token auth when allow_localhost_api=True."""
+    """The local API requires a scoped token and never blocks session auth."""
 
     def test_ipv4_localhost_get_bypasses_auth(self):
         plugin = _make_plugin(allow_localhost_api=True, token_valid=False)
         mw = _get_auth_middleware(plugin)
-        req = _make_request("GET", "/api/status", peername=("127.0.0.1", 12345))
+        req = _make_request(
+            "GET",
+            "/api/status",
+            headers={"Authorization": "Bearer local-service-token-with-at-least-32-bytes"},
+            peername=("127.0.0.1", 12345),
+        )
         loop = asyncio.new_event_loop()
         resp = loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
@@ -180,7 +188,12 @@ class TestLocalhostBypass:
     def test_ipv6_localhost_get_bypasses_auth(self):
         plugin = _make_plugin(allow_localhost_api=True, token_valid=False)
         mw = _get_auth_middleware(plugin)
-        req = _make_request("GET", "/api/status", peername=("::1", 12345))
+        req = _make_request(
+            "GET",
+            "/api/status",
+            headers={"Authorization": "Bearer local-service-token-with-at-least-32-bytes"},
+            peername=("::1", 12345),
+        )
         loop = asyncio.new_event_loop()
         resp = loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
@@ -204,46 +217,62 @@ class TestLocalhostBypass:
             loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
 
-    def test_localhost_post_requires_csrf_header(self):
-        """POST from localhost must include X-Requested-With even with bypass."""
-        plugin = _make_plugin(allow_localhost_api=True, token_valid=False)
-        mw = _get_auth_middleware(plugin)
-        req = _make_request("POST", "/api/data", peername=("127.0.0.1", 12345))
-        loop = asyncio.new_event_loop()
-        with pytest.raises(aiohttp.web.HTTPForbidden):
-            loop.run_until_complete(mw(req, _ok_handler))
-        loop.close()
-
-    def test_localhost_post_with_csrf_header_denied(self):
-        """Localhost bypass is restricted to GET on whitelisted paths only."""
+    def test_local_api_token_cannot_post(self):
         plugin = _make_plugin(allow_localhost_api=True, token_valid=False)
         mw = _get_auth_middleware(plugin)
         req = _make_request(
             "POST",
             "/api/data",
-            headers={"X-Requested-With": "XMLHttpRequest"},
+            headers={"Authorization": "Bearer local-service-token-with-at-least-32-bytes"},
             peername=("127.0.0.1", 12345),
         )
         loop = asyncio.new_event_loop()
-        with pytest.raises(aiohttp.web.HTTPForbidden):
+        with pytest.raises(aiohttp.web.HTTPUnauthorized):
             loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
 
-    def test_localhost_put_requires_csrf_header(self):
+    def test_authenticated_localhost_post_falls_through(self):
+        plugin = _make_plugin(allow_localhost_api=True, token_valid=True)
+        mw = _get_auth_middleware(plugin)
+        req = _make_request(
+            "POST",
+            "/api/data",
+            headers={
+                "Authorization": "Bearer valid-session",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            peername=("127.0.0.1", 12345),
+        )
+        loop = asyncio.new_event_loop()
+        resp = loop.run_until_complete(mw(req, _ok_handler))
+        loop.close()
+        assert resp.status == 200
+
+    def test_local_api_token_cannot_put(self):
         plugin = _make_plugin(allow_localhost_api=True, token_valid=False)
         mw = _get_auth_middleware(plugin)
-        req = _make_request("PUT", "/api/data", peername=("::1", 12345))
+        req = _make_request(
+            "PUT",
+            "/api/data",
+            headers={"Authorization": "Bearer local-service-token-with-at-least-32-bytes"},
+            peername=("::1", 12345),
+        )
         loop = asyncio.new_event_loop()
-        with pytest.raises(aiohttp.web.HTTPForbidden):
+        with pytest.raises(aiohttp.web.HTTPUnauthorized):
             loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
 
-    def test_localhost_delete_requires_csrf_header(self):
+    def test_local_api_token_cannot_delete(self):
         plugin = _make_plugin(allow_localhost_api=True, token_valid=False)
         mw = _get_auth_middleware(plugin)
-        req = _make_request("DELETE", "/api/data", peername=("127.0.0.1", 12345))
+        req = _make_request(
+            "DELETE",
+            "/api/data",
+            headers={"Authorization": "Bearer local-service-token-with-at-least-32-bytes"},
+            peername=("127.0.0.1", 12345),
+        )
         loop = asyncio.new_event_loop()
-        with pytest.raises(aiohttp.web.HTTPForbidden):
+        with pytest.raises(aiohttp.web.HTTPUnauthorized):
             loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
 
@@ -448,7 +477,14 @@ class TestSecurityHeaders:
         loop.close()
         assert resp.headers["X-Content-Type-Options"] == "nosniff"
         assert resp.headers["X-Frame-Options"] == "DENY"
-        assert "default-src 'self'" in resp.headers["Content-Security-Policy"]
+        csp = resp.headers["Content-Security-Policy"]
+        assert "default-src 'self'" in csp
+        assert "script-src 'self'" in csp
+        assert "script-src-attr 'none'" in csp
+        assert "style-src 'self'" in csp
+        assert "style-src-elem 'self'" in csp
+        assert "style-src-attr 'none'" in csp
+        assert "'unsafe-inline'" not in csp
         assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
 
     def test_api_version_on_api_path(self):
@@ -457,7 +493,7 @@ class TestSecurityHeaders:
         loop = asyncio.new_event_loop()
         resp = loop.run_until_complete(mw(req, _ok_handler))
         loop.close()
-        assert resp.headers["Api-Version"] == "1.0"
+        assert resp.headers["Api-Version"] == "1.1"
 
     def test_no_api_version_on_non_api_path(self):
         mw = _get_security_middleware()
@@ -476,3 +512,56 @@ class TestSecurityHeaders:
         assert resp.headers["X-Content-Type-Options"] == "nosniff"
         assert resp.headers["X-Frame-Options"] == "DENY"
         assert "Api-Version" in resp.headers
+
+    def test_hsts_trusts_https_header_only_from_configured_proxy(self, monkeypatch):
+        from reticulumpi.builtin_plugins.web_dashboard import server
+
+        plugin = SimpleNamespace(
+            config={
+                "reverse_proxy": {
+                    "enabled": True,
+                    "trusted_networks": ["127.0.0.1/32"],
+                }
+            }
+        )
+        monkeypatch.setattr(server, "get_app_plugin", lambda _app: plugin)
+        trusted = _make_request(
+            "GET",
+            "/login.html",
+            headers={"X-Forwarded-Proto": "https"},
+            peername=("127.0.0.1", 43100),
+        )
+        response = aiohttp.web.Response(text="ok")
+
+        server._apply_security_headers(trusted, response)
+
+        assert response.headers["Strict-Transport-Security"] == "max-age=31536000"
+
+        untrusted = _make_request(
+            "GET",
+            "/login.html",
+            headers={"X-Forwarded-Proto": "https"},
+            peername=("192.0.2.10", 43100),
+        )
+        response = aiohttp.web.Response(text="ok")
+        server._apply_security_headers(untrusted, response)
+        assert "Strict-Transport-Security" not in response.headers
+
+    def test_ambiguous_forwarded_proto_fails_closed(self):
+        from reticulumpi.builtin_plugins.web_dashboard.server import _request_is_secure
+
+        plugin = SimpleNamespace(
+            config={
+                "reverse_proxy": {
+                    "enabled": True,
+                    "trusted_networks": ["127.0.0.1/32"],
+                }
+            }
+        )
+        request = _make_request(
+            "GET",
+            "/login.html",
+            headers={"X-Forwarded-Proto": "http, https"},
+            peername=("127.0.0.1", 43100),
+        )
+        assert _request_is_secure(request, plugin) is False

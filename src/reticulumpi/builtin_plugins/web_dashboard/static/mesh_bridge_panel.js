@@ -99,7 +99,7 @@
     _pendingAction = true;
     api('/api/mesh_bridge/running', {
       method: 'POST',
-      body: { running: running },
+      json: { running: running },
     }).then(function (r) {
       _pendingAction = false;
       if (r && r.ok && r.data) _render(r.data);

@@ -9,6 +9,7 @@ or spawning dump1090.
 from __future__ import annotations
 
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -22,6 +23,7 @@ from reticulumpi.builtin_plugins.adsb_radar import (
     AircraftState,
     _haversine_nm,
 )
+from reticulumpi.process_supervisor import ProcessFailure
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +44,7 @@ def _make_plugin(config: dict | None = None) -> AdsbRadarPlugin:
     plugin = AdsbRadarPlugin(_make_app(), config or {})
     plugin._state_lock = threading.Lock()
     plugin._process = None
+    plugin._process_group = None
     plugin._pid = None
     plugin._restart_count = 0
     plugin._status = "starting"
@@ -51,8 +54,10 @@ def _make_plugin(config: dict | None = None) -> AdsbRadarPlugin:
     plugin._total_messages = 0
     plugin._aircraft_seen_total = 0
     plugin._resolved_index = None
+    plugin._device_lease = None
     plugin._rtl_biast_path = None
     plugin._bias_tee_active = False
+    plugin._bias_tee_lock = threading.Lock()
     plugin._log_reader_thread = None
     plugin._patience_active = False
     plugin._launch_time = None
@@ -800,89 +805,45 @@ class TestRestartCounterReset:
 
 
 class TestCacheInvalidation:
-    """Verify RTL-SDR cache invalidation and device re-resolution on restart."""
+    """Verify RTL-SDR cache invalidation and device re-resolution."""
 
-    def test_invalidate_cache_called_before_restart(self):
+    def test_invalidate_cache_called_before_initial_resolution(self):
         p = _make_plugin()
         p._active = True
         p._stop_event = threading.Event()
         p._total_messages = 0
-
-        proc = MagicMock()
-        exit_after = [2]
-
-        def poll_side_effect():
-            exit_after[0] -= 1
-            if exit_after[0] <= 0:
-                p._active = False
-                return 0
-            return None
-
-        proc.poll.side_effect = poll_side_effect
-        p._process = proc
-        p._pid = 9999
+        lease = MagicMock(index=2)
 
         with (
             patch(
                 "reticulumpi.builtin_plugins.adsb_radar.shutil.which",
                 return_value="/usr/bin/dump1090",
             ),
-            patch(
-                "reticulumpi.rtlsdr.invalidate_cache"
-            ) as mock_invalidate,
-            patch(
-                "reticulumpi.rtlsdr.resolve_device", return_value=2
-            ),
+            patch("reticulumpi.rtlsdr.invalidate_cache") as mock_invalidate,
+            patch("reticulumpi.rtlsdr.refresh_device_lease", return_value=lease),
             patch.object(p, "_launch_dump1090"),
-            patch.object(p, "_start_thread", return_value=MagicMock()),
-            patch.object(p, "_remove_thread"),
-            patch.object(p, "_terminate_process"),
-            patch.object(p, "_sleep_while_active"),
         ):
             p._supervisor_loop()
 
-        mock_invalidate.assert_not_called()
+        mock_invalidate.assert_called_once_with()
+        assert p._resolved_index == 2
 
     def test_invalidate_cache_called_on_restart(self):
         p = _make_plugin({"max_restarts": 3})
         p._active = True
-        p._stop_event = threading.Event()
-        p._total_messages = 0
-
-        iteration = [0]
-
-        def fake_launch():
-            p._process = MagicMock()
-            p._process.poll.return_value = 1
-            p._pid = 9999 + iteration[0]
-            iteration[0] += 1
-
-        def fake_sleep(secs):
-            if iteration[0] >= 2:
-                p._active = False
+        group = MagicMock()
+        p._process_group = group
+        lease = MagicMock(index=2)
 
         with (
-            patch(
-                "reticulumpi.builtin_plugins.adsb_radar.shutil.which",
-                return_value="/usr/bin/dump1090",
-            ),
-            patch(
-                "reticulumpi.rtlsdr.invalidate_cache"
-            ) as mock_invalidate,
-            patch(
-                "reticulumpi.rtlsdr.resolve_device", return_value=2
-            ),
-            patch.object(p, "_launch_dump1090", side_effect=fake_launch),
-            patch.object(
-                p, "_start_thread", return_value=MagicMock()
-            ),
-            patch.object(p, "_remove_thread"),
-            patch.object(p, "_terminate_process"),
-            patch.object(p, "_sleep_while_active", side_effect=fake_sleep),
+            patch("reticulumpi.rtlsdr.invalidate_cache") as mock_invalidate,
+            patch("reticulumpi.rtlsdr.refresh_device_lease", return_value=lease),
         ):
-            p._supervisor_loop()
+            p._on_process_restart(group, 1, 1.0)
 
-        assert mock_invalidate.call_count >= 1
+        mock_invalidate.assert_called_once_with()
+        group.replace_specs.assert_called_once()
+        assert p._resolved_index == 2
 
 
 class TestSupervisorMissingBinary:
@@ -1020,31 +981,29 @@ class TestAircraftState:
 
 
 class TestPatienceMode:
-    def test_patience_mode_entered_after_max_restarts(self):
+    def test_initial_failure_does_not_enter_unbounded_patience_mode(self):
         p = _make_plugin({"max_restarts": 1})
         p._active = True
-        p._restart_count = 1
         p._dump1090_path = "/usr/bin/dump1090"
 
-        def fake_resolve(*_a, **_kw):
-            raise RuntimeError("not found")
-
-        patience_entered = threading.Event()
-
-        def mock_enter(self_, invalidate_fn):
-            patience_entered.set()
-            self_._active = False
-
         with (
-            patch("shutil.which", return_value="/usr/bin/dump1090"),
-            patch("reticulumpi.rtlsdr.resolve_device", side_effect=fake_resolve),
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.shutil.which",
+                return_value="/usr/bin/dump1090",
+            ),
+            patch(
+                "reticulumpi.rtlsdr.refresh_device_lease",
+                side_effect=RuntimeError("not found"),
+            ),
             patch("reticulumpi.rtlsdr.invalidate_cache"),
-            patch.object(AdsbRadarPlugin, "_enter_patience_mode", mock_enter),
-            patch.object(AdsbRadarPlugin, "_sleep_while_active"),
+            patch.object(p, "_enter_patience_mode") as enter_patience,
         ):
             p._supervisor_loop()
 
-        assert patience_entered.is_set()
+        enter_patience.assert_not_called()
+        assert p._patience_active is False
+        assert p._status == "error"
+        assert "not found" in (p._last_error or "")
 
     def test_patience_recovers_on_dongle_return(self):
         p = _make_plugin({"max_restarts": 1, "patience_interval": 0.1})
@@ -1085,9 +1044,7 @@ class TestPatienceMode:
             with open(flag_path, "w") as f:
                 f.write("")
 
-            with patch(
-                "reticulumpi.builtin_plugins.adsb_radar._RECONNECT_FLAG_DIR", tmpdir
-            ):
+            with patch("reticulumpi.builtin_plugins.adsb_radar._RECONNECT_FLAG_DIR", tmpdir):
                 result = p._patience_sleep(10.0)
 
             assert result is True
@@ -1098,9 +1055,7 @@ class TestPatienceMode:
         p._active = True
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            patch(
-                "reticulumpi.builtin_plugins.adsb_radar._RECONNECT_FLAG_DIR", tmpdir
-            ),
+            patch("reticulumpi.builtin_plugins.adsb_radar._RECONNECT_FLAG_DIR", tmpdir),
             patch.object(p, "_sleep_while_active"),
         ):
             result = p._patience_sleep(0.01)
@@ -1113,48 +1068,35 @@ class TestPatienceMode:
 
 
 class TestLogReaderThreadLeak:
-    def test_log_reader_saved_on_launch(self):
+    def test_log_reader_saved_when_managed_process_starts(self):
         p = _make_plugin()
-        p._process = None
+        p._active = True
+        group = MagicMock(restart_count=0)
+        p._process_group = group
+        process = MagicMock(pid=12345)
         mock_thread = MagicMock()
         with (
-            patch.object(p, "_set_bias_tee"),
-            patch("subprocess.Popen") as mock_popen,
             patch.object(p, "_start_log_reader", return_value=mock_thread),
+            patch.object(p, "_start_thread"),
             patch.object(p, "_set_status"),
         ):
-            mock_popen.return_value = MagicMock(pid=12345)
-            p._launch_dump1090()
+            p._on_process_started(group, (process,), False)
         assert p._log_reader_thread is mock_thread
+        assert p._process is process
 
-    def test_log_reader_joined_on_cleanup(self):
-        """The supervisor cleanup path joins the log reader thread."""
-        p = _make_plugin({"max_restarts": 0})
-        p._active = True
-        p._dump1090_path = "/usr/bin/dump1090"
-        mock_log_thread = MagicMock()
+    def test_cleanup_delegates_to_managed_process_group(self):
+        p = _make_plugin()
+        group = MagicMock()
+        p._process_group = group
+        p._process = MagicMock()
+        p._pid = 999
 
-        def fake_launch():
-            p._process = MagicMock()
-            p._process.poll.return_value = 1
-            p._pid = 999
-            p._log_reader_thread = mock_log_thread
+        p._terminate_process()
 
-        with (
-            patch("shutil.which", return_value="/usr/bin/dump1090"),
-            patch("reticulumpi.rtlsdr.resolve_device", return_value=0),
-            patch("reticulumpi.rtlsdr.invalidate_cache"),
-            patch.object(p, "_launch_dump1090", side_effect=fake_launch),
-            patch.object(p, "_start_thread", return_value=MagicMock()),
-            patch.object(p, "_remove_thread"),
-            patch.object(p, "_terminate_process"),
-            patch.object(p, "_enter_patience_mode", side_effect=lambda _: setattr(p, "_active", False)),
-            patch.object(p, "_set_status"),
-            patch.object(p, "_publish"),
-        ):
-            p._supervisor_loop()
-
-        mock_log_thread.join.assert_called_once_with(timeout=2.0)
+        group.stop.assert_called_once_with()
+        assert p._process_group is None
+        assert p._process is None
+        assert p._pid is None
 
 
 # ---------------------------------------------------------------------------
@@ -1203,36 +1145,82 @@ class TestBiasTeeRetry:
 
 
 class TestParserLivenessCheck:
-    def test_dead_parser_breaks_supervisor_loop(self):
-        p = _make_plugin({"max_restarts": 0})
+    def test_crashed_parser_reports_failure_to_managed_group(self):
+        p = _make_plugin()
         p._active = True
-        p._dump1090_path = "/usr/bin/dump1090"
-
-        dead_parser = MagicMock()
-        dead_parser.is_alive.return_value = False
-
-        def fake_launch():
-            p._process = MagicMock()
-            p._process.poll.return_value = None
-            p._pid = 999
-            p._log_reader_thread = MagicMock()
+        process = MagicMock()
+        process.poll.return_value = None
+        group = MagicMock(running=True)
+        p._process = process
+        p._process_group = group
 
         with (
-            patch("shutil.which", return_value="/usr/bin/dump1090"),
-            patch("reticulumpi.rtlsdr.resolve_device", return_value=0),
-            patch("reticulumpi.rtlsdr.invalidate_cache"),
-            patch.object(p, "_launch_dump1090", side_effect=fake_launch),
-            patch.object(p, "_start_thread", return_value=dead_parser),
-            patch.object(p, "_remove_thread"),
-            patch.object(p, "_terminate_process"),
-            patch.object(p, "_enter_patience_mode", side_effect=lambda _: setattr(p, "_active", False)),
-            patch.object(p, "_set_status"),
-            patch.object(p, "_publish"),
-            patch.object(p, "_sleep_while_active"),
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.socket.socket",
+                side_effect=RuntimeError("parser crashed"),
+            ),
+            pytest.raises(RuntimeError, match="parser crashed"),
         ):
-            p._supervisor_loop()
+            p._parser_loop(process)
 
-        dead_parser.join.assert_called()
+        group.notify_unexpected_eof.assert_called_once_with(
+            0,
+            "ADS-B SBS parser stopped unexpectedly",
+        )
+
+
+class TestManagedProcessLifecycle:
+    def test_stop_during_launch_rejects_stale_started_callback(self):
+        p = _make_plugin()
+        p._active = False
+        group = MagicMock()
+        p._process_group = group
+
+        with pytest.raises(RuntimeError, match="stale dump1090 launch"):
+            p._on_process_started(group, (MagicMock(pid=1234),), False)
+
+        assert p._process is None
+
+    def test_restart_exhaustion_releases_device_lease(self):
+        p = _make_plugin({"max_restarts": 5})
+        p._active = True
+        lease = MagicMock()
+        p._device_lease = lease
+        group = MagicMock(restart_count=5)
+        p._process_group = group
+        failure = MagicMock(reason="decoder exited")
+
+        p._on_process_exhausted(group, failure)
+
+        lease.release.assert_called_once_with()
+        assert p._device_lease is None
+        assert p._status == "exhausted"
+        assert p._restart_count == 5
+
+    def test_wedge_detection_reports_one_supervisor_failure(self):
+        p = _make_plugin({"wedge_timeout": 5, "wedge_grace": 0})
+        p._active = True
+        process = MagicMock()
+        process.poll.return_value = None
+        group = MagicMock(running=True)
+        p._process = process
+        p._process_group = group
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.time.monotonic",
+                side_effect=[0.0, 10.0],
+            ),
+            patch.object(p, "_sleep_while_active"),
+            patch.object(p, "_publish") as publish,
+        ):
+            p._health_loop(process)
+
+        group.notify_unexpected_eof.assert_called_once_with(
+            0,
+            "SBS feed exceeded wedge timeout",
+        )
+        assert publish.call_args.args[0] == "adsb.wedge_detected"
 
 
 # ---------------------------------------------------------------------------
@@ -1317,11 +1305,301 @@ class TestWedgeEvent:
 
             from reticulumpi import events
 
-            p._publish(events.ADSB_WEDGE_DETECTED, {
-                "pid": 123,
-                "silence_seconds": 10.0,
-            })
+            p._publish(
+                events.ADSB_WEDGE_DETECTED,
+                {
+                    "pid": 123,
+                    "silence_seconds": 10.0,
+                },
+            )
 
         wedge_events = [e for e in published if e[0] == "adsb.wedge_detected"]
         assert len(wedge_events) == 1
         assert "silence_seconds" in wedge_events[0][1]
+
+
+class TestManagedAdsbLifecycleHardening:
+    def test_stop_releases_device_lease_and_unsubscribes(self):
+        p = _make_plugin()
+        p._active = True
+        lease = MagicMock()
+        p._device_lease = lease
+        with (
+            patch.object(p, "_terminate_process") as terminate,
+            patch.object(p, "_join_threads") as join_threads,
+        ):
+            p.stop()
+        terminate.assert_called_once_with()
+        lease.release.assert_called_once_with()
+        join_threads.assert_called_once_with(timeout=5.0)
+        assert p._device_lease is None
+        assert p._status == "stopped"
+        assert p.event_bus.unsubscribe.call_count == 2
+
+    def test_supervisor_launch_failure_turns_off_bias_tee_and_degrades(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._active = True
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.shutil.which",
+                side_effect=["/usr/bin/dump1090", "/usr/bin/rtl_biast"],
+            ),
+            patch.object(p, "_refresh_device_lease", side_effect=OSError("USB missing")),
+            patch.object(p, "_terminate_process") as terminate,
+            patch.object(p, "_set_bias_tee") as bias,
+            patch.object(p, "_release_device_lease") as release,
+            patch.object(p, "mark_degraded") as degraded,
+        ):
+            p._supervisor_loop()
+        terminate.assert_called_once_with()
+        bias.assert_called_once_with(False)
+        release.assert_called_once_with()
+        degraded.assert_called_once_with("USB missing")
+        assert p._status == "error"
+
+    def test_supervisor_failure_after_stop_does_not_resurrect_error_state(self):
+        p = _make_plugin()
+        p._active = True
+
+        def stop_then_fail():
+            p._active = False
+            raise OSError("cancelled launch")
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.shutil.which",
+                return_value="/usr/bin/dump1090",
+            ),
+            patch.object(p, "_refresh_device_lease", side_effect=stop_then_fail),
+            patch.object(p, "_terminate_process"),
+            patch.object(p, "_release_device_lease"),
+            patch.object(p, "mark_degraded") as degraded,
+        ):
+            p._supervisor_loop()
+        degraded.assert_not_called()
+        assert p._status == "starting"
+
+    def test_launch_rejects_a_plugin_stopped_before_spawn(self):
+        p = _make_plugin()
+        p._active = False
+        with pytest.raises(RuntimeError, match="stopped before"):
+            p._launch_dump1090()
+
+    def test_launch_turns_bias_tee_back_off_when_stop_wins_setup_race(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._active = True
+        calls = []
+
+        def set_bias(on):
+            calls.append(on)
+            if on:
+                p._active = False
+
+        with patch.object(p, "_set_bias_tee", side_effect=set_bias):
+            with pytest.raises(RuntimeError, match="during bias-tee"):
+                p._launch_dump1090()
+        assert calls == [True, False]
+
+    def test_launch_constructs_managed_group_and_clears_failed_start(self):
+        p = _make_plugin()
+        p._active = True
+        group = MagicMock()
+        group.start.side_effect = RuntimeError("monitor unavailable")
+        with patch(
+            "reticulumpi.builtin_plugins.adsb_radar.ManagedProcessGroup",
+            return_value=group,
+        ) as constructor:
+            with pytest.raises(RuntimeError, match="monitor unavailable"):
+                p._launch_dump1090()
+        assert p._process_group is None
+        spec = constructor.call_args.args[0][0]
+        assert spec.name == "dump1090"
+        assert spec.argv[0] == "/usr/bin/dump1090"
+
+    def test_failure_restart_and_restart_failure_update_health(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        p._active = True
+        group = MagicMock()
+        p._process_group = group
+        failure = ProcessFailure(0, "dump1090", 3, "decoder crashed", 1.0)
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_set_bias_tee") as bias,
+            patch.object(p, "_release_device_lease") as release,
+        ):
+            p._on_process_failure(group, failure)
+        degraded.assert_called_once()
+        bias.assert_called_once_with(False)
+        release.assert_called_once_with()
+        assert "decoder crashed" in p._last_error
+
+        with (
+            patch.object(p, "_refresh_device_lease") as refresh,
+            patch.object(p, "_set_bias_tee") as bias,
+        ):
+            p._on_process_restart(group, 2, 4.0)
+        refresh.assert_called_once_with()
+        bias.assert_called_once_with(True)
+        group.replace_specs.assert_called_once()
+        assert p._restart_count == 2
+
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_set_bias_tee") as bias,
+            patch.object(p, "_release_device_lease") as release,
+        ):
+            p._on_process_restart_failed(group, RuntimeError("retry failed"), 3)
+        degraded.assert_called_once()
+        bias.assert_called_once_with(False)
+        release.assert_called_once_with()
+        assert p._restart_count == 3
+        assert "restart 3 failed" in p._last_error
+
+    def test_restart_rejects_a_stale_group(self):
+        p = _make_plugin()
+        p._active = True
+        with pytest.raises(RuntimeError, match="stopped"):
+            p._on_process_restart(MagicMock(), 1, 1.0)
+
+    def test_stale_callbacks_do_not_mutate_current_group(self):
+        p = _make_plugin()
+        current = MagicMock()
+        stale = MagicMock()
+        p._process_group = current
+        failure = ProcessFailure(0, "dump1090", 1, "EOF", 1.0)
+        p._on_process_failure(stale, failure)
+        p._on_process_restart_failed(stale, RuntimeError("ignored"), 2)
+        p._on_process_exhausted(stale, failure)
+        assert p._process_group is current
+        assert p._status == "starting"
+
+    def test_exhaustion_disables_bias_tee_and_publishes_reason(self):
+        p = _make_plugin({"enable_bias_tee": True})
+        group = MagicMock(restart_count=5)
+        p._process_group = group
+        failure = ProcessFailure(0, "dump1090", 1, "EOF", 1.0)
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_publish") as publish,
+            patch.object(p, "_set_bias_tee") as bias,
+            patch.object(p, "_release_device_lease") as release,
+        ):
+            p._on_process_exhausted(group, failure)
+        degraded.assert_called_once()
+        bias.assert_called_once_with(False)
+        release.assert_called_once_with()
+        assert publish.call_args.args[1] == {"max_restarts": 5, "reason": "EOF"}
+        assert p._status == "exhausted"
+
+    def test_lease_release_error_is_isolated_and_reference_is_cleared(self):
+        p = _make_plugin()
+        lease = MagicMock()
+        lease.release.side_effect = OSError("already detached")
+        p._device_lease = lease
+        p._release_device_lease()
+        assert p._device_lease is None
+
+    def test_bias_tee_lock_is_created_for_legacy_instances(self):
+        p = _make_plugin()
+        del p._bias_tee_lock
+        p._rtl_biast_path = None
+        p._set_bias_tee(True)
+        assert isinstance(p._bias_tee_lock, type(threading.Lock()))
+
+    def test_health_loop_tracks_messages_then_exits_when_stopped(self):
+        p = _make_plugin({"wedge_timeout": 30, "wedge_grace": 0})
+        p._active = True
+        process = MagicMock()
+        process.poll.return_value = None
+        p._process = process
+        calls = 0
+
+        def sleep(_seconds):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                p._total_messages += 1
+            else:
+                p._active = False
+
+        with (
+            patch.object(p, "_sleep_while_active", side_effect=sleep),
+            patch(
+                "reticulumpi.builtin_plugins.adsb_radar.time.monotonic",
+                side_effect=[0.0, 1.0],
+            ),
+        ):
+            p._health_loop(process)
+        assert calls == 2
+
+
+class TestManagedAdsbParserHardening:
+    def test_parser_without_a_process_returns_cleanly(self):
+        p = _make_plugin()
+        p._process = None
+        p._parser_loop()
+
+    def test_parser_handles_timeout_lines_and_socket_close_errors(self):
+        p = _make_plugin()
+        p._active = True
+        process = MagicMock()
+        process.poll.return_value = None
+        p._process = process
+        sock = MagicMock()
+        sock.recv.side_effect = [socket.timeout(), b"MSG,line\n", b""]
+        sock.close.side_effect = OSError("already closed")
+
+        def stop_after_retry(_seconds):
+            p._active = False
+
+        with (
+            patch("reticulumpi.builtin_plugins.adsb_radar.socket.socket", return_value=sock),
+            patch.object(p, "_parse_sbs_line") as parse,
+            patch.object(p, "_sleep_while_active", side_effect=stop_after_retry),
+        ):
+            p._parser_loop(process)
+        sock.connect.assert_called_once_with(("127.0.0.1", p._sbs_port))
+        parse.assert_called_once_with("MSG,line")
+        sock.close.assert_called_once_with()
+
+    def test_parser_discards_oversized_partial_frames(self):
+        p = _make_plugin()
+        p._active = True
+        p._MAX_SBS_BUF = 4
+        process = MagicMock()
+        process.poll.return_value = None
+        p._process = process
+        sock = MagicMock()
+        sock.recv.side_effect = [b"oversized", b""]
+
+        def stop_after_retry(_seconds):
+            p._active = False
+
+        with (
+            patch("reticulumpi.builtin_plugins.adsb_radar.socket.socket", return_value=sock),
+            patch.object(p, "_sleep_while_active", side_effect=stop_after_retry),
+            patch.object(p, "_parse_sbs_line") as parse,
+        ):
+            p._parser_loop(process)
+        parse.assert_not_called()
+        sock.close.assert_called_once_with()
+
+    def test_parser_retries_connection_error_only_while_current(self):
+        p = _make_plugin()
+        p._active = True
+        process = MagicMock()
+        process.poll.return_value = None
+        p._process = process
+        sock = MagicMock()
+        sock.connect.side_effect = OSError("connection refused")
+
+        def stop_after_retry(_seconds):
+            p._active = False
+
+        with (
+            patch("reticulumpi.builtin_plugins.adsb_radar.socket.socket", return_value=sock),
+            patch.object(p, "_sleep_while_active", side_effect=stop_after_retry) as sleep,
+        ):
+            p._parser_loop(process)
+        sleep.assert_called_once_with(2.0)
+        sock.close.assert_called_once_with()

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Privileged helper for the captive_portal plugin.  Called via sudo from
-# the unprivileged reticulumpi service to manage iptables NAT rules and
-# dnsmasq DNS overrides.
+# Root-owned privileged helper for the captive_portal plugin. It is invoked
+# only by the peer-credential-checking control broker to manage iptables NAT
+# rules and dnsmasq DNS overrides.
 #
 # Usage:
-#   sudo captive_portal_helper.sh activate  <iface> <port> <gateway_ip>
-#   sudo captive_portal_helper.sh deactivate
-#   sudo captive_portal_helper.sh cleanup
-#   sudo captive_portal_helper.sh status
+#   captive_portal_helper.sh activate  <iface> <port> <gateway_ip>
+#   captive_portal_helper.sh deactivate
+#   captive_portal_helper.sh cleanup
+#   captive_portal_helper.sh status
 
 CHAIN="RETICULUMPI_CAPTIVE"
 DNSMASQ_CONF="/etc/dnsmasq.d/reticulumpi-captive-portal.conf"
-STATE_FILE="/var/lib/reticulumpi/captive_portal.active"
+STATE_FILE="/var/backups/reticulumpi/admin/captive_portal.active"
 
 PORTAL_DOMAINS=(
     captive.apple.com
@@ -37,6 +37,27 @@ chain_exists() {
     iptables -t nat -n -L "$CHAIN" &>/dev/null
 }
 
+atomic_write() {
+    local destination="$1"
+    local mode="$2"
+    local directory temporary owner permissions
+    directory="$(dirname "$destination")"
+    if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+        die "Unsafe root-owned state directory: $directory"
+    fi
+    owner="$(stat -c '%u' -- "$directory")"
+    permissions="$(stat -c '%a' -- "$directory")"
+    if [ "$owner" -ne 0 ] || (( (8#$permissions & 022) != 0 )); then
+        die "State directory is not root-owned and immutable: $directory"
+    fi
+    temporary="$(mktemp "$directory/.reticulumpi-write.XXXXXX")"
+    chmod "$mode" "$temporary" || { rm -f -- "$temporary"; return 1; }
+    cat > "$temporary" || { rm -f -- "$temporary"; return 1; }
+    sync -f "$temporary" || { rm -f -- "$temporary"; return 1; }
+    mv -fT -- "$temporary" "$destination" || { rm -f -- "$temporary"; return 1; }
+    sync -f "$directory"
+}
+
 # ---------------------------------------------------------------------------
 # activate — install DNS overrides + iptables redirect
 # ---------------------------------------------------------------------------
@@ -49,8 +70,9 @@ cmd_activate() {
 
     # --- input validation ---
     [[ "$iface" =~ ^[a-zA-Z0-9._-]+$ ]] || die "Invalid interface name: $iface"
-    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
-        || die "Port must be numeric 1024-65535, got: $port"
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+        die "Port must be numeric 1024-65535, got: $port"
+    fi
     [[ "$gw_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Invalid IPv4 address: $gw_ip"
 
     trap 'cmd_cleanup 2>/dev/null; exit 1' ERR
@@ -61,7 +83,7 @@ cmd_activate() {
         for domain in "${PORTAL_DOMAINS[@]}"; do
             echo "address=/${domain}/${gw_ip}"
         done
-    } > "$DNSMASQ_CONF"
+    } | atomic_write "$DNSMASQ_CONF" 0644
 
     if systemctl is-active --quiet dnsmasq; then
         systemctl reload dnsmasq
@@ -77,8 +99,7 @@ cmd_activate() {
     fi
 
     # state file
-    mkdir -p "$(dirname "$STATE_FILE")"
-    date -Iseconds > "$STATE_FILE"
+    date -Iseconds | atomic_write "$STATE_FILE" 0600
 
     echo "activated"
 }

@@ -5,7 +5,132 @@ All notable changes to ReticulumPi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Entries below 0.2.5 describe historical behavior at their release date and are not current
+installation, path, authentication, or security guidance.
+
 ## [Unreleased]
+
+The 0.2.5–0.3.2 entries are release candidates. They have not been promoted until their exact
+artifacts, signatures, CI records, hardware qualification, and approvals are complete.
+
+## [0.3.2] - Unreleased
+
+### Added
+
+- Added secret-free operational lifecycle, process, SDR, and callback metrics.
+- Added code-derived documentation inventories and release-verification records.
+
+### Security
+
+- Removed first-party inline styles and handlers from the dashboard and enforced strict CSP
+  through local static and cross-browser regression gates.
+
+### Pending promotion evidence
+
+- Independent final audit, 18/20 dashboard score, release coverage, signed artifacts, and the
+  Pi 5 72-hour soak remain required.
+
+## [0.3.1] - Unreleased
+
+### Added
+
+- Added semantic landmarks, native disclosure buttons and dialogs, named controls, table
+  captions/scopes, live regions, keyboard/pointer spectrum controls, reduced-motion and
+  forced-colors behavior, and responsive layouts from 320 px through 4K.
+- Added 20 content-addressed optional feature chunks gated by plugin availability and panel
+  opening or proximity, plus network-first service-worker navigation fallback.
+
+### Pending promotion evidence
+
+- Manual Edge/assistive-technology review, interrupted-update/rollback drills, and all field
+  LCP/INP/CLS/network/WebSocket/frame-rate budgets remain required.
+
+## [0.3.0] - Unreleased
+
+### Changed
+
+- Adopted `setuptools-scm` as the single package-version source with strict release tags and
+  source-archive fallback metadata.
+- Added hashed universal production core, Dashboard/NomadNet, and build dependency profiles
+  shared by the qualified Bookworm/Python 3.11 and Noble/Python 3.12 lanes; release CI and
+  Docker builds now consume one prebuilt wheel.
+- Consolidated the service and RNS runtime under `HOME=/var/lib/reticulumpi`, with
+  conventional XDG state below that root and disposable caches under
+  `/var/cache/reticulumpi`; the former service home is migration input only.
+- Compatibility launchers now require an independently installed, fixed, root-owned
+  `reticulumpi-admin`; they never import administrator code from the candidate bundle,
+  checkout, `PATH`, or mutable current release.
+
+### Added
+
+- Added lifecycle API v2, readiness-aware dependencies, reverse-order managed cleanup,
+  bounded callback isolation, and hung-worker containment while retaining the API v1 adapter.
+- Added transactional SQLite migrations, supervised process groups, canonical SDR leases,
+  deterministic hardware recovery fixes, and a root-owned transactional administrator.
+- The administrator now persists its `preparing` journal before candidate release, virtualenv,
+  or package creation; power-loss recovery safely removes a recorded partial candidate, while
+  path and configuration mutation begins only after a verified backup checkpoint.
+- Production roots now require immutable root-owned ancestry. Signed manifests, constraints,
+  source, archives, and wheels are consumed only from a private no-follow snapshot with digest
+  checks immediately before installation; external-path replacement cannot change installed code.
+- Administration journals moved outside service-owned/swapped state, migration targets and locks
+  reject service-created symlinks, and obsolete Dashboard credential drop-ins are snapshotted and
+  removed transactionally.
+- Scheduler-backed radio decoders now release SDR ownership for every restart backoff and
+  reacquire through normal arbitration; stale completed acquisitions run decoder cleanup before
+  returning the physical lease, and scheduler duration accounting uses a monotonic clock.
+- Replaced runtime sudo with a root-owned, socket-activated, peer-credential-checking control
+  broker and adopted notify-based service readiness.
+
+### Pending promotion evidence
+
+- Signed multi-architecture artifacts, systemd-capable Bookworm install/rollback CI, Pi 5 and
+  representative radio/GPS qualification, and release coverage remain required.
+
+## [0.2.5] - Unreleased
+
+### Security
+
+- **Upgrade advisory:** operators upgrading from 0.2.4 or older must remove obsolete
+  service-owned sudo helpers/rules, rotate any dashboard password that may have appeared in
+  historical journals, and invalidate all sessions. See
+  [`docs/security-advisory-0.2.5.md`](docs/security-advisory-0.2.5.md).
+- Hardened first-start identity creation against concurrent writers and partial persistence.
+- Replaced implicit file-transfer trust with explicit deny, allowlist, and open policies.
+- Removed plaintext dashboard passwords from logs and added scoped loopback API tokens.
+- Required generated bootstrap credentials to be durably replaced before normal dashboard
+  access; password changes now revoke sessions/WebSockets, and local API tokens rotate in
+  runtime storage on every start.
+- Moved sudo-executed helper scripts into a root-owned `/usr/libexec` boundary.
+- Separated administrator-owned configuration from service-owned runtime overrides.
+- TLS now rejects unsafe operator key metadata, future/near-expiry certificates, and missing
+  required SANs; checks are scheduled at expiry guards. Secure cookies and HSTS trust
+  forwarded HTTPS only from explicitly configured proxy CIDRs, and config views conservatively
+  redact secret-like keys such as Meshtastic channel PSKs.
+- Generated bootstrap credentials remain in their protected mode-`0600` file after login
+  and are removed only after a successful durable password change; that change closes every
+  session and WebSocket.
+
+### Fixed
+
+- Packaged the complete dashboard static tree in wheels and added an installed-wheel check.
+- Corrected Docker persistence, offline verification counters, service deadlines, dependency
+  floors, developer extras, and Python/toolchain drift.
+- Added protected tag-only publication that promotes the exact tested wheel, sdist, SBOM,
+  signed ARM64 install bundle, and per-architecture container archives without rebuilding;
+  a trusted-fingerprint OpenPGP preflight and Bookworm/systemd rollback gate run before
+  publication, and release assets receive a global Minisign manifest, GitHub attestations, and
+  an immutable GHCR multi-architecture digest.
+
+### Documentation
+
+- Added security, dashboard, container, release, rollback, accessibility,
+  hardware-validation, architecture-decision, and audit-remediation guides.
+
+### Pending promotion evidence
+
+- Signed 0.2.5 artifacts and verification record, final CI, and the required Pi 5 plus
+  representative-device qualification remain required.
 
 ## [0.2.4] - 2026-06-12
 

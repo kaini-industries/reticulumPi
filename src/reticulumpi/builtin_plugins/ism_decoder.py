@@ -15,6 +15,12 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.signal_plugin_base import SignalPluginBase
+from reticulumpi.process_supervisor import (
+    ManagedProcessGroup,
+    ProcessFailure,
+    ProcessSpec,
+    RestartPolicy,
+)
 from reticulumpi.sdr_scheduler import PRIORITY_BACKGROUND
 
 
@@ -96,22 +102,83 @@ class ISMDecoder(SignalPluginBase):
 
         self.log.debug("Launching: %s", " ".join(cmd))
 
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        group = ManagedProcessGroup(
+            [
+                ProcessSpec(
+                    tuple(cmd),
+                    name=self._decoder_bin,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            ],
+            restart_policy=RestartPolicy(enabled=False),
+            on_started=self._on_decoder_started,
+            on_unexpected_exit=self._on_decoder_failure,
         )
-        self._pid = self._process.pid
-        self._status = "scanning"
-        self._restart_count = 0
-
-        self._start_stderr_reader(self._process, prefix="rtl_433")
-        self._start_thread(self._parser_loop, name="ism-parser")
+        self._process_group = group
+        try:
+            group.start()
+        except Exception:
+            self._process_group = None
+            raise
 
         self.log.info("ISM decoder started (PID %d)", self._pid)
 
-    def _parser_loop(self) -> None:
-        proc = self._process
+    def _on_decoder_started(
+        self,
+        processes: tuple[subprocess.Popen[Any], ...],
+        restarted: bool,
+    ) -> None:
+        process = processes[0]
+        self._process = process
+        self._pid = process.pid
+        self._status = "scanning"
+        self._last_error = None
+        was_retry = restarted or self._sdr_retry_pending
+        if restarted:
+            group = self._process_group
+            self._restart_count = group.restart_count if group is not None else 1
+        elif not was_retry:
+            self._restart_count = 0
+        if self.plugin_state.value == "ready":
+            self.mark_ready()
+        self._start_stderr_reader(process, prefix="rtl_433")
+        self._start_thread(lambda: self._parser_loop(process), name="ism-parser")
+        if was_retry:
+            self.log.warning(
+                "ISM decoder restarted after unexpected exit (attempt %d)",
+                self._restart_count,
+            )
+
+    def _on_decoder_failure(self, failure: ProcessFailure) -> None:
+        self._status = "restarting"
+        self._last_error = (
+            f"{failure.stage_name or 'decoder'}: {failure.reason} (rc={failure.returncode})"
+        )
+        self.mark_degraded(self._last_error)
+        self._snapshot_dirty = True
+        self._update_snapshot_cache()
+        if not self._schedule_sdr_retry(self._max_restarts):
+            self._on_decoder_exhausted(failure)
+
+    def _on_decoder_restart_failed(self, error: BaseException, attempt: int) -> None:
+        self._status = "restarting"
+        self._last_error = f"restart {attempt} failed: {error}"
+        self.mark_degraded(self._last_error)
+
+    def _on_decoder_exhausted(self, failure: ProcessFailure) -> None:
+        self._status = "error"
+        self._last_error = f"ISM decoder restart budget exhausted: {failure.reason}"
+        self.mark_degraded(self._last_error)
+        should_release = self._dongle_active or self._dongle_generation is not None
+        self._dongle_active = False
+        if should_release:
+            self._release_dongle(suspend=True)
+        self._snapshot_dirty = True
+        self._update_snapshot_cache()
+
+    def _parser_loop(self, process: subprocess.Popen[Any] | None = None) -> None:
+        proc = process or self._process
         if proc is None or proc.stdout is None:
             return
         try:
@@ -130,6 +197,10 @@ class ISMDecoder(SignalPluginBase):
             pass
         except Exception:
             self.log.exception("ISM parser crashed")
+        finally:
+            group = self._process_group
+            if self._active and self._process is proc and group is not None and group.running:
+                group.notify_unexpected_eof(0, "ISM decoder stdout ended")
 
     def _handle_device(self, msg: dict[str, Any]) -> None:
         model = msg.get("model", "")

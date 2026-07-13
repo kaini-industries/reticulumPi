@@ -72,8 +72,9 @@
       + ' — ' + pct.toFixed(1) + '%'
       + '</div>'
       + '<div class="noaa-progress-track">'
-      + '<div class="noaa-progress-fill" style="width:' + pct + '%"></div>'
+      + '<div class="noaa-progress-fill" data-rpi-width="' + pct + '"></div>'
       + '</div>';
+    R.applyCspDynamicStyles(_progressEl);
   }
 
   // -- Render image gallery --

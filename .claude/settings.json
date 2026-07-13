@@ -97,7 +97,7 @@
       "WebFetch(domain:yggdrasil-network.github.io)",
       "Read(//home/reticulum/reticulumPi/**)",
       "Read(//home/reticulum/.reticulum/**)",
-      "Read(//home/reticulumpi/**)",
+      "Read(//var/lib/reticulumpi/**)",
       "Read(//etc/systemd/system/**)",
       "Read(//etc/reticulumpi/**)",
       "Read(//etc/udev/rules.d/**)",

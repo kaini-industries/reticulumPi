@@ -1,6 +1,7 @@
 # Reticulum Configuration Example for Raspberry Pi 5
 #
-# Copy this to ~/.reticulum/config and edit as needed.
+# Production path: /var/lib/reticulumpi/.reticulum/config.
+# For a non-service development account, ~/.reticulum/config remains valid.
 # For full documentation see: https://reticulum.network/manual/interfaces.html
 #
 # This example enables LAN auto-discovery and a TCP listener.

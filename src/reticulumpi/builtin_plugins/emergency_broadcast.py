@@ -76,13 +76,15 @@ class EmergencyBroadcastPlugin(PluginBase):
         self._start_thread(self._periodic_prune_loop, "emergency-prune")
 
         # Create destination for emergency broadcasts
-        self.destination = RNS.Destination(
-            self.identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            "reticulumpi",
-            "emergency",
-            "broadcast",
+        self.destination = self.manage_destination(
+            RNS.Destination(
+                self.identity,
+                RNS.Destination.IN,
+                RNS.Destination.SINGLE,
+                "reticulumpi",
+                "emergency",
+                "broadcast",
+            )
         )
 
         # Subscribe to receive emergency broadcasts from others
@@ -133,6 +135,8 @@ class EmergencyBroadcastPlugin(PluginBase):
 
         Returns the message ID.
         """
+        if not self._active:
+            raise RuntimeError("emergency_broadcast plugin is unavailable")
         if ttl is None:
             ttl = self._max_ttl
 
@@ -182,7 +186,7 @@ class EmergencyBroadcastPlugin(PluginBase):
         app_data: bytes | None,
     ) -> None:
         """Process a received emergency broadcast."""
-        if not app_data:
+        if not self._active or not app_data:
             return
 
         try:

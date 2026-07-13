@@ -1,7 +1,6 @@
 """Tests for the api_cache response caching decorator."""
 
 import asyncio
-import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -78,7 +77,10 @@ class TestApiCacheDecorator:
     async def test_cache_miss_after_ttl(self, monkeypatch):
         calls = []
         t = [100.0]
-        monkeypatch.setattr(time, "time", lambda: t[0])
+        monkeypatch.setattr(
+            "reticulumpi.builtin_plugins.web_dashboard.api_cache._monotonic",
+            lambda: t[0],
+        )
 
         @api_cache(ttl=5, stale=0)
         async def handler(request):
@@ -97,7 +99,10 @@ class TestApiCacheDecorator:
     async def test_stale_while_revalidate(self, monkeypatch):
         calls = []
         t = [100.0]
-        monkeypatch.setattr(time, "time", lambda: t[0])
+        monkeypatch.setattr(
+            "reticulumpi.builtin_plugins.web_dashboard.api_cache._monotonic",
+            lambda: t[0],
+        )
 
         @api_cache(ttl=5, stale=30)
         async def handler(request):
@@ -139,6 +144,29 @@ class TestApiCacheDecorator:
         resp = await handler(_make_request())
         assert "max-age=10" in resp.headers["Cache-Control"]
         assert "stale-while-revalidate=30" in resp.headers["Cache-Control"]
+        assert "private" in resp.headers["Cache-Control"]
+        assert resp.headers["Vary"] == "Cookie, Authorization"
+
+    @pytest.mark.asyncio
+    async def test_error_response_is_not_cached_or_relabelled_success(self):
+        calls = 0
+
+        @api_cache(ttl=60)
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            return aiohttp.web.Response(
+                status=503,
+                body=f"failure-{calls}".encode(),
+                content_type="text/plain",
+            )
+
+        first = await handler(_make_request())
+        second = await handler(_make_request())
+        assert first.status == second.status == 503
+        assert first.body != second.body
+        assert calls == 2
+        assert first.headers["Cache-Control"] == "private, no-store"
 
     @pytest.mark.asyncio
     async def test_concurrent_requests_no_thundering_herd(self):

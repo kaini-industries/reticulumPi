@@ -26,6 +26,12 @@ def _auth_required(handler):
 
     @functools.wraps(handler)
     def wrapper(self, path, data, request_id, link_id, remote_identity, *a, **kw):
+        # RNS can have a request already queued while lifecycle cleanup is
+        # deregistering the handler.  Authorization alone is not sufficient
+        # in that window: a previously authenticated peer must not be able to
+        # invoke a stopped plugin.
+        if not self._active:
+            return umsgpack.packb({"ok": False, "error": "plugin unavailable"})
         denied = self._check_auth(remote_identity)
         if denied:
             return denied
@@ -103,7 +109,7 @@ class RemoteControlPlugin(PluginBase):
 
     def start(self) -> None:
         self._active = True
-        self._start_time = time.time()
+        self._start_monotonic = time.monotonic()
         self._active_links: list[Any] = []
         self._links_lock = threading.Lock()
 
@@ -127,13 +133,15 @@ class RemoteControlPlugin(PluginBase):
         logging.getLogger("reticulumpi").addHandler(self._log_buffer)
 
         # Create control destination
-        self.destination = RNS.Destination(
-            self.identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            "reticulumpi",
-            "node",
-            "control",
+        self.destination = self.manage_destination(
+            RNS.Destination(
+                self.identity,
+                RNS.Destination.IN,
+                RNS.Destination.SINGLE,
+                "reticulumpi",
+                "node",
+                "control",
+            )
         )
 
         # Accept incoming links
@@ -144,36 +152,25 @@ class RemoteControlPlugin(PluginBase):
         # discoverability — requests are queued promptly so the link stays
         # responsive, but the @_auth_required decorator enforces our own
         # allowlist before any handler processes data.
-        self.destination.register_request_handler(
-            "/ping", self._handle_ping, allow=RNS.Destination.ALLOW_ALL
+        request_handlers = (
+            ("/ping", self._handle_ping),
+            ("/status", self._handle_status),
+            ("/metrics", self._handle_metrics),
+            ("/plugins", self._handle_plugins),
+            ("/interfaces", self._handle_interfaces),
+            ("/config", self._handle_config),
+            ("/logs", self._handle_logs),
+            ("/plugin/enable", self._handle_plugin_enable),
+            ("/plugin/disable", self._handle_plugin_disable),
+            ("/announce", self._handle_announce),
         )
-        self.destination.register_request_handler(
-            "/status", self._handle_status, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/metrics", self._handle_metrics, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/plugins", self._handle_plugins, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/interfaces", self._handle_interfaces, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/config", self._handle_config, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/logs", self._handle_logs, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/plugin/enable", self._handle_plugin_enable, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/plugin/disable", self._handle_plugin_disable, allow=RNS.Destination.ALLOW_ALL
-        )
-        self.destination.register_request_handler(
-            "/announce", self._handle_announce, allow=RNS.Destination.ALLOW_ALL
-        )
+        for path, handler in request_handlers:
+            self.destination.register_request_handler(
+                path,
+                handler,
+                allow=RNS.Destination.ALLOW_ALL,
+            )
+            self.manage_request_handler(self.destination, path)
 
         self.log.info(
             "Remote control active at %s (%d authorized identities)",
@@ -183,15 +180,10 @@ class RemoteControlPlugin(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        # Close all active links
+        # Links are torn down by PluginBase managed cleanup. Clear the public
+        # active count immediately so stopped status cannot report them live.
         with self._links_lock:
-            links = list(self._active_links)
             self._active_links.clear()
-        for link in links:
-            try:
-                link.teardown()
-            except Exception:
-                self.log.debug("Link teardown failed", exc_info=True)
         # Remove log handler
         try:
             logging.getLogger("reticulumpi").removeHandler(self._log_buffer)
@@ -215,12 +207,28 @@ class RemoteControlPlugin(PluginBase):
 
     def _link_established(self, link: Any) -> None:
         """Called when a remote peer establishes a Link."""
+        if not self._active:
+            link.teardown()
+            return
+        try:
+            self.manage_link(link)
+        except RuntimeError:
+            # Cleanup won the race with this callback. Never leave a link
+            # reachable after the plugin lifecycle has closed.
+            link.teardown()
+            return
+        if not self._active:
+            link.teardown()
+            return
         self.log.info("Incoming link from %s", link)
         link.set_remote_identified_callback(self._remote_identified)
         link.set_link_closed_callback(self._link_closed)
 
     def _remote_identified(self, link: Any, identity: Any) -> None:
         """Called when the remote peer identifies itself."""
+        if not self._active:
+            link.teardown()
+            return
         if identity.hash not in self._allowed_hashes:
             self.log.warning(
                 "Rejecting unauthorized identity: %s",
@@ -234,7 +242,14 @@ class RemoteControlPlugin(PluginBase):
             RNS.prettyhexrep(identity.hash),
         )
         with self._links_lock:
-            self._active_links.append(link)
+            if not self._active:
+                should_close = True
+            else:
+                should_close = False
+                if link not in self._active_links:
+                    self._active_links.append(link)
+        if should_close:
+            link.teardown()
 
     def _link_closed(self, link: Any) -> None:
         """Called when a link is closed."""
@@ -296,7 +311,7 @@ class RemoteControlPlugin(PluginBase):
         status["identity_hash"] = (
             RNS.prettyhexrep(self.app.identity.hash) if self.app.identity else ""
         )
-        status["uptime"] = time.time() - self._start_time
+        status["uptime"] = max(0.0, time.monotonic() - self._start_monotonic)
         return umsgpack.packb({"ok": True, "data": status})
 
     @_auth_required
@@ -309,7 +324,7 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        monitor = self.app.get_plugin("system_monitor")
+        monitor = self.get_ready_plugin("system_monitor")
         if monitor and hasattr(monitor, "latest_metrics"):
             return umsgpack.packb({"ok": True, "data": monitor.latest_metrics})
         return umsgpack.packb({"ok": False, "error": "system_monitor not available"})
@@ -464,7 +479,7 @@ class RemoteControlPlugin(PluginBase):
         requested_at: Any,
     ) -> Any:
         """Trigger an immediate announce from heartbeat_announce."""
-        heartbeat = self.app.get_plugin("heartbeat_announce")
+        heartbeat = self.get_ready_plugin("heartbeat_announce")
         if heartbeat and hasattr(heartbeat, "destination"):
             try:
                 app_data = heartbeat.build_app_data()

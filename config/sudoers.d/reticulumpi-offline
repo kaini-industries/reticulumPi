@@ -1,2 +1,0 @@
-# Allow reticulumpi user to run offline simulation script
-reticulumpi ALL=(ALL) NOPASSWD: /opt/reticulumpi/scripts/simulate_offline.sh

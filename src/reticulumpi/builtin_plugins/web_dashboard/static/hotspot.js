@@ -24,12 +24,12 @@
 
   function _fmtIdle(ms) {
     if (ms == null) return '';
-    if (ms < 30000) return '<span style="color:var(--ok)">(active)</span>';
+    if (ms < 30000) return '<span class="text-ok">(active)</span>';
     var sec = Math.floor(ms / 1000);
     var h = Math.floor(sec / 3600);
     var m = Math.floor((sec % 3600) / 60);
     var label = h > 0 ? h + 'h ' + m + 'm' : m + 'm';
-    return '<span style="color:var(--warn)">(idle ' + label + ')</span>';
+    return '<span class="text-warn">(idle ' + label + ')</span>';
   }
 
   R.updateHotspot = function (d, portalData) {

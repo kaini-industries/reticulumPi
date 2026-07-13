@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from reticulumpi import events
 from reticulumpi.builtin_plugins.acars_decoder import ACARSDecoder
+from reticulumpi.process_supervisor import ProcessFailure
 
 
 def _make_app() -> MagicMock:
@@ -85,6 +88,116 @@ class TestValidateConfig:
         assert p._max_messages == 200
         assert p._max_restarts == 5
         assert p._station_id == "reticulumpi"
+
+
+class TestManagedDecoderLifecycle:
+    def test_launch_uses_managed_process_group(self):
+        plugin = _make_plugin()
+        process = MagicMock(pid=1234)
+        process.stdout = MagicMock()
+        process.stderr = MagicMock()
+        managed = MagicMock()
+        managed.restart_count = 0
+
+        def construct(specs, **kwargs):
+            managed.specs = specs
+            managed.hooks = kwargs
+            managed.start.side_effect = lambda: kwargs["on_started"](
+                (process,),
+                False,
+            )
+            return managed
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.acars_decoder.shutil.which",
+                return_value="/usr/bin/acarsdec",
+            ),
+            patch(
+                "reticulumpi.builtin_plugins.acars_decoder.ManagedProcessGroup",
+                side_effect=construct,
+            ),
+            patch.object(plugin, "_start_stderr_reader"),
+            patch.object(plugin, "_start_thread"),
+        ):
+            plugin._launch_subprocess(2)
+
+        managed.start.assert_called_once()
+        assert managed.specs[0].argv[0] == "/usr/bin/acarsdec"
+        assert "2" in managed.specs[0].argv
+        assert plugin._process_group is managed
+        assert plugin._process is process
+        assert plugin._status == "running"
+        assert managed.hooks["restart_policy"].enabled is False
+
+    def test_failure_releases_lease_then_only_requests_scheduler_reacquisition(self):
+        class Scheduler:
+            def __init__(self):
+                self.calls = []
+
+            def suspend(self, serial, caller, *, generation):
+                self.calls.append(("suspend", serial, caller, generation))
+                return 41
+
+            def resume(self, serial, caller, *, registration_id):
+                self.calls.append(("resume", serial, caller, registration_id))
+                return True
+
+        plugin = _make_plugin()
+        scheduler = Scheduler()
+        plugin.app.sdr_scheduler = scheduler
+        plugin._dongle_serial = "ACARS-SDR"
+        plugin._dongle_generation = 9
+        plugin._dongle_active = True
+        failure = ProcessFailure(0, "acarsdec", 1, "EOF", time.monotonic())
+
+        with patch.object(plugin, "_start_thread") as start_thread:
+            plugin._on_decoder_failure(failure)
+
+        assert scheduler.calls == [("suspend", "ACARS-SDR", plugin.plugin_name, 9)]
+        assert plugin._dongle_active is False
+        retry_worker = start_thread.call_args.args[0]
+        with patch.object(plugin._stop_event, "wait", return_value=False):
+            retry_worker()
+        assert scheduler.calls[-1] == ("resume", "ACARS-SDR", plugin.plugin_name, 41)
+
+    def test_parser_eof_notifies_running_supervisor(self):
+        plugin = _make_plugin()
+        process = MagicMock()
+        process.stdout = []
+        group = MagicMock()
+        group.running = True
+        plugin._process = process
+        plugin._process_group = group
+
+        plugin._parser_loop()
+
+        group.notify_unexpected_eof.assert_called_once_with(0, "ACARS stdout ended")
+
+    def test_signal_base_stop_delegates_to_managed_group(self):
+        plugin = _make_plugin()
+        group = MagicMock()
+        plugin._process_group = group
+        plugin._process = MagicMock()
+
+        plugin._kill_subprocess()
+
+        group.stop.assert_called_once()
+        assert plugin._process_group is None
+        assert plugin._process is None
+
+    def test_failed_acquisition_clears_plugin_dongle_state(self):
+        plugin = _make_plugin()
+        with patch.object(
+            plugin,
+            "_launch_subprocess",
+            side_effect=RuntimeError("partial pipeline failure"),
+        ):
+            with pytest.raises(RuntimeError, match="partial pipeline"):
+                plugin._on_acquire("ACARS-SDR", 2)
+
+        assert plugin._dongle_active is False
+        assert plugin._dongle_index is None
 
     def test_custom_config(self):
         p = ACARSDecoder(

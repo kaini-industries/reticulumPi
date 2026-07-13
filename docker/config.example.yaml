@@ -1,0 +1,49 @@
+# ReticulumPi Application Configuration
+# Copy this file to docker/config/config.yaml before starting Compose.
+
+reticulumpi:
+  # Reticulum state persists on the /data volume.
+  reticulum_config_dir: /data/.reticulum
+
+  # The container entrypoint starts rnsd so ReticulumPi and optional NomadNet
+  # share one durable transport instance.
+  use_shared_instance: true
+
+  # The node identity is durable state on the /data volume.
+  identity_path: /data/.config/reticulumpi/identity
+
+  # Reticulum log level: 0=critical through 7=extreme.
+  log_level: 4
+
+  plugin_paths: []
+
+  # The runtime image intentionally contains no external MeshChat/radio
+  # executables. If a derived image enables one, mount a root-owned manifest
+  # and change this path to that read-only file.
+  external_artifacts:
+    mode: required
+    manifest_path: /config/external-artifacts.yaml
+
+  plugins:
+    heartbeat_announce:
+      enabled: true
+      interval_seconds: 300
+      app_name: reticulumpi
+      aspects:
+        - node
+        - heartbeat
+      include_telemetry: true
+
+    message_echo:
+      enabled: true
+      display_name: "ReticulumPi Echo"
+      storage_path: /data/.local/share/reticulumpi/lxmf
+
+    system_monitor:
+      enabled: true
+      collect_interval_seconds: 60
+      metrics:
+        - cpu_percent
+        - cpu_temp
+        - memory_percent
+        - disk_percent

@@ -32,7 +32,7 @@
       var pct = f.max > 0 ? Math.round(f.points / f.max * 100) : 0;
       h += '<div class="reach-factor">'
         + '<span class="reach-factor-name">' + (names[key] || key) + '</span>'
-        + '<span class="reach-factor-bar"><span class="reach-factor-fill" style="width:' + pct + '%"></span></span>'
+        + '<span class="reach-factor-bar"><span class="reach-factor-fill" data-rpi-width="' + pct + '"></span></span>'
         + '<span class="reach-factor-val">' + f.points + '/' + f.max + '</span>'
         + '<span class="reach-factor-detail">' + esc(f.detail || '') + '</span>'
         + '</div>';
@@ -370,13 +370,14 @@
     }
 
     container.innerHTML = html;
+    R.applyCspDynamicStyles(container);
     markUpdated('lora-section');
   }
 
   function _loraBar(pct, maxPct) {
     var w = Math.min(100, (pct / maxPct) * 100).toFixed(0);
     var cls = pct > (maxPct * 0.5) ? 'bar-crit' : pct > (maxPct * 0.2) ? 'bar-warn' : 'bar-ok';
-    return '<span class="lora-bar"><span class="lora-bar-fill ' + cls + '" style="width:' + w + '%"></span></span>';
+    return '<span class="lora-bar"><span class="lora-bar-fill ' + cls + '" data-rpi-width="' + w + '"></span></span>';
   }
 
   function updateLoraSignal(interfaces) {
@@ -455,6 +456,7 @@
         var td = document.createElement('td');
         td.colSpan = 8;
         td.innerHTML = _buildLoraDetailHTML(n);
+        R.applyCspDynamicStyles(td);
         detailTr.appendChild(td);
         tbody.appendChild(detailTr);
       }

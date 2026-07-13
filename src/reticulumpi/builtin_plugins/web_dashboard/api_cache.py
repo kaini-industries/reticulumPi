@@ -18,15 +18,28 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import time
 from collections import OrderedDict
-from typing import Any, Callable
+from time import monotonic as _monotonic
+from typing import Any, Callable, NamedTuple
 
 import aiohttp.web
 
+from reticulumpi.builtin_plugins.web_dashboard.operational_metrics import (
+    record_api_refresh_finished,
+    record_api_refresh_started,
+)
+
 log = logging.getLogger(__name__)
 
-_CacheEntry = tuple[bytes, str, float]  # (body, content_type, timestamp)
+
+class _CacheEntry(NamedTuple):
+    """Complete response state safe to replay to an authenticated caller."""
+
+    body: bytes
+    content_type: str
+    status: int
+    reason: str | None
+    timestamp: float
 
 
 class ApiResponseCache:
@@ -36,6 +49,7 @@ class ApiResponseCache:
         self._entries: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._max = max_entries
         self._lock = asyncio.Lock()
+        self._refresh_tasks: dict[str, asyncio.Task[str]] = {}
 
     def get(self, key: str) -> _CacheEntry | None:
         entry = self._entries.get(key)
@@ -43,8 +57,21 @@ class ApiResponseCache:
             self._entries.move_to_end(key)
         return entry
 
-    def put(self, key: str, body: bytes, content_type: str) -> None:
-        self._entries[key] = (body, content_type, time.time())
+    def put(
+        self,
+        key: str,
+        body: bytes,
+        content_type: str,
+        status: int = 200,
+        reason: str | None = None,
+    ) -> None:
+        self._entries[key] = _CacheEntry(
+            body=body,
+            content_type=content_type,
+            status=status,
+            reason=reason,
+            timestamp=_monotonic(),
+        )
         self._entries.move_to_end(key)
         while len(self._entries) > self._max:
             self._entries.popitem(last=False)
@@ -72,27 +99,41 @@ def api_cache(
             key = request.path_qs
 
             entry = cache.get(key)
-            now = time.time()
+            now = _monotonic()
 
             if entry is not None:
-                body, ct, ts = entry
-                age = now - ts
+                age = now - entry.timestamp
 
                 if age < ttl:
-                    return _cached_response(body, ct, ttl, stale)
+                    return _cached_response(entry, ttl, stale)
 
                 if stale and age < ttl + stale:
-                    asyncio.ensure_future(_refresh(cache, key, handler, request))
-                    return _cached_response(body, ct, ttl, stale)
+                    if key not in cache._refresh_tasks:
+                        task = asyncio.create_task(_refresh(cache, key, handler, request))
+                        cache._refresh_tasks[key] = task
+                        record_api_refresh_started()
+                        task.add_done_callback(
+                            lambda _task, *, _key=key: _finish_refresh(cache, _key, _task)
+                        )
+                    return _cached_response(entry, ttl, stale)
 
             async with cache._lock:
                 entry = cache.get(key)
-                if entry is not None and time.time() - entry[2] < ttl:
-                    return _cached_response(entry[0], entry[1], ttl, stale)
+                if entry is not None and _monotonic() - entry.timestamp < ttl:
+                    return _cached_response(entry, ttl, stale)
 
                 resp = await handler(request)
-                cache.put(key, resp.body, resp.content_type)
-                _set_cache_headers(resp, ttl, stale)
+                if _is_cacheable(resp):
+                    cache.put(
+                        key,
+                        resp.body or b"",
+                        resp.content_type,
+                        resp.status,
+                        resp.reason,
+                    )
+                    _set_cache_headers(resp, ttl, stale)
+                else:
+                    resp.headers.setdefault("Cache-Control", "private, no-store")
                 return resp
 
         return wrapper
@@ -105,29 +146,67 @@ async def _refresh(
     key: str,
     handler: Callable,
     request: Any,
-) -> None:
+) -> str:
     """Background refresh — errors are swallowed to keep stale data alive."""
     try:
         async with cache._lock:
             entry = cache.get(key)
-            if entry is not None and time.time() - entry[2] < 2.0:
-                return
+            if entry is not None and _monotonic() - entry.timestamp < 2.0:
+                return "skipped"
             resp = await handler(request)
-            cache.put(key, resp.body, resp.content_type)
+            if _is_cacheable(resp):
+                cache.put(
+                    key,
+                    resp.body or b"",
+                    resp.content_type,
+                    resp.status,
+                    resp.reason,
+                )
+                return "succeeded"
+            return "failed"
+    except asyncio.CancelledError:
+        raise
     except Exception:
         log.debug("Background refresh failed for %s", key, exc_info=True)
+        return "failed"
 
 
-def _cached_response(
-    body: bytes, content_type: str, ttl: float, stale: float
-) -> aiohttp.web.Response:
-    resp = aiohttp.web.Response(body=body, content_type=content_type)
+def _finish_refresh(cache: ApiResponseCache, key: str, task: asyncio.Task[str]) -> None:
+    cache._refresh_tasks.pop(key, None)
+    if task.cancelled():
+        outcome = "cancelled"
+    else:
+        try:
+            outcome = task.result()
+        except BaseException:
+            outcome = "failed"
+    record_api_refresh_finished(outcome)
+
+
+def _is_cacheable(resp: aiohttp.web.Response) -> bool:
+    """Only retain successful, materialised responses without credentials."""
+    return (
+        resp.status == 200
+        and resp.body is not None
+        and "Set-Cookie" not in resp.headers
+        and "WWW-Authenticate" not in resp.headers
+    )
+
+
+def _cached_response(entry: _CacheEntry, ttl: float, stale: float) -> aiohttp.web.Response:
+    resp = aiohttp.web.Response(
+        body=entry.body,
+        content_type=entry.content_type,
+        status=entry.status,
+        reason=entry.reason,
+    )
     _set_cache_headers(resp, ttl, stale)
     return resp
 
 
 def _set_cache_headers(resp: aiohttp.web.Response, ttl: float, stale: float) -> None:
-    parts = [f"max-age={int(ttl)}"]
+    parts = ["private", f"max-age={int(ttl)}"]
     if stale:
         parts.append(f"stale-while-revalidate={int(stale)}")
     resp.headers["Cache-Control"] = ", ".join(parts)
+    resp.headers["Vary"] = "Cookie, Authorization"

@@ -31,9 +31,22 @@ All endpoints except login and static files require authentication.
    - Header: `Authorization: Bearer <token>`
    - Cookie: `session=<token>` (set automatically by login)
 
-### Localhost Bypass
+### Local-service token
 
-When `allow_localhost_api: true` (default), requests from `127.0.0.1` or `::1` bypass authentication. Useful for local scripts and NomadNet page integration.
+There is no anonymous localhost bypass. Optional local automation uses a separate mode-`0600`
+Bearer token and must originate from `127.0.0.1` or `::1`. Its fixed scope is read-only
+`GET` access to `/api/version`, `/api/status`, `/api/node`, and `/api/interfaces`; it cannot
+mutate state or open WebSockets.
+
+```yaml
+web_dashboard:
+  local_api:
+    enabled: true
+    # Defaults to /run/reticulumpi/local_api.token and rotates at startup.
+```
+
+Normal session authentication is checked first, including for localhost clients. Never
+forward this token through a reverse proxy.
 
 ### Rate Limiting
 
@@ -44,6 +57,7 @@ When `allow_localhost_api: true` (default), requests from `127.0.0.1` or `::1` b
 - Tokens are 64-character hex strings (256 bits via `secrets.token_hex`)
 - Default timeout: 86,400 seconds (24 hours)
 - Maximum 5 sessions per password (LRU eviction)
+- Logout, expiry, and password rotation revoke associated WebSockets
 
 ---
 
@@ -62,13 +76,38 @@ Authenticate and receive a session token.
 ```json
 {
   "ok": true,
-  "data": { "token": "<64-char hex>" }
+  "data": {
+    "message": "Login successful",
+    "password_change_required": false
+  }
 }
 ```
 
 **Errors:** 401 (invalid password), 429 (rate limited)
 
-Sets `session` cookie (HttpOnly, Secure if SSL, SameSite=Lax).
+Sets `session` cookie (HttpOnly, SameSite=Lax, and Secure for direct TLS or an explicitly
+configured trusted reverse proxy reporting an exact `X-Forwarded-Proto: https`).
+
+When `password_change_required` is true, that session may access only password change and
+logout endpoints until the bootstrap credential is replaced.
+
+---
+
+### POST /api/auth/password
+
+Durably replace an auto-managed dashboard password. Requires an authenticated session and
+the normal `X-Requested-With` CSRF header.
+
+```json
+{
+  "current_password": "temporary bootstrap value",
+  "new_password": "a new password of at least 12 characters"
+}
+```
+
+Success invalidates all sessions, closes associated WebSockets, removes the bootstrap file,
+deletes the current session cookie, and requires a new login. Returns 409 when the password
+is managed by environment or system configuration. The response is always `no-store`.
 
 ---
 
@@ -117,7 +156,11 @@ Node identity and version info.
 
 ### GET /api/status
 
-Full application status including all plugin states.
+Full application status including all plugin states and the fixed-cardinality,
+secret-free `operational_metrics` snapshot. The snapshot covers lifecycle/readiness,
+workers/resources, thread/process and callback pressure, migrations/SQLite, SDR leases,
+and dashboard security/cache counters. Field semantics are documented in
+[Dashboard Operations](dashboard-operations.md#operational-metrics).
 
 ---
 
@@ -568,39 +611,7 @@ Real-time streaming of all dashboard data.
 
 ## Endpoint Summary
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/auth/login` | No | JSON login |
-| POST | `/auth/login` | No | Form login |
-| POST | `/api/auth/logout` | Yes | Logout |
-| GET | `/api/node` | Yes | Node info |
-| GET | `/api/status` | Yes | Full status |
-| GET | `/api/metrics` | Yes | System metrics |
-| GET | `/api/config` | Yes | Sanitized config |
-| GET | `/api/interfaces` | Yes | Network interfaces |
-| GET | `/api/plugins` | Yes | All plugins |
-| GET | `/api/plugins/{name}` | Yes | Plugin detail |
-| GET | `/api/mesh/nodes` | Yes | Mesh nodes |
-| GET | `/api/mesh/telemetry` | Yes | Peer telemetry |
-| GET | `/api/reachability` | Yes | Reachability scores |
-| GET | `/api/routing` | Yes | Routing table |
-| GET | `/api/transport` | Yes | Transport hubs |
-| GET | `/api/connectivity` | Yes | Connectivity health |
-| GET | `/api/path_warming` | Yes | Path warmer stats |
-| GET | `/api/transport_health` | Yes | Transport health |
-| GET | `/api/sensors` | Yes | Sensor readings |
-| GET | `/api/sensors/history` | Yes | Sensor history |
-| GET | `/api/files` | Yes | Shared files |
-| GET | `/api/emergency` | Yes | Emergency messages |
-| GET | `/api/alerts` | Yes | Alert status |
-| GET | `/api/nomadnet/auth` | Yes | NomadNet auth list |
-| POST | `/api/nomadnet/auth/add` | Yes | Add identity |
-| POST | `/api/nomadnet/auth/remove` | Yes | Remove identity |
-| GET | `/api/meshtastic/status` | Yes | Gateway status |
-| GET | `/api/meshtastic/nodes` | Yes | Meshtastic nodes |
-| GET | `/api/messages` | Yes | Message history |
-| POST | `/api/messages/send` | Yes | Send message |
-| GET | `/api/messages/transports` | Yes | Transport list |
-| GET | `/api/messages/contacts` | Yes | Contact list |
-| GET | `/api/messages/stats` | Yes | Message stats |
-| GET | `/ws/metrics` | Yes | WebSocket stream |
+The complete method/path inventory is generated from aiohttp registrations and checked on
+every documentation-CI run. See [Dashboard routes](generated-code-reference.md#dashboard-routes).
+The same generated reference records the effective
+[core configuration defaults](generated-code-reference.md#core-configuration-defaults).

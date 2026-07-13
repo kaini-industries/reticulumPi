@@ -73,7 +73,9 @@ class TestAnnounceLoop:
         p = HeartbeatAnnounce(app, {"interval_seconds": 60})
         with patch.object(p, "_start_thread"):
             p.start()
-        with patch.object(p, "_sleep_while_active", side_effect=lambda _: setattr(p, "_active", False)):
+        with patch.object(
+            p, "_sleep_while_active", side_effect=lambda _: setattr(p, "_active", False)
+        ):
             p._announce_loop()
         p.destination.announce.assert_called_once()
 

@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools==83.0.0", "setuptools-scm==10.2.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "reticulumpi"
-version = "0.2.4"
+dynamic = ["version"]
 description = "An extensible Reticulum network node for Raspberry Pi"
 readme = "README.md"
-requires-python = ">=3.9"
-license = {text = "MIT"}
+requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
     "rns>=1.2.5,<2.0",
     "lxmf>=0.9.4,<2.0",
@@ -21,10 +21,10 @@ nomadnet = [
     "nomadnet>=0.5,<2.0",
 ]
 dashboard = [
-    "aiohttp>=3.9,<4.0",
+    "aiohttp>=3.14.1,<4.0",
 ]
 lora = [
-    "rnodeconf>=2.0,<3.0",
+    "rnodeconf>=1.3.1,<2.0",
 ]
 sensors = [
     "smbus2>=0.4,<1.0",
@@ -33,7 +33,7 @@ sensors = [
 meshtastic = [
     "meshtastic>=2.0,<3.0",
     "paho-mqtt>=2.0,<3.0",
-    "cryptography>=3.0,<50.0",
+    "cryptography>=48.0.1,<50.0",
 ]
 meshcore = [
     "meshcore>=2.3,<3.0",
@@ -50,31 +50,62 @@ adsb = [
     "pyModeS>=2.0",
 ]
 dev = [
-    "pytest>=7.4,<9.0",
-    "pytest-cov",
-    "pytest-mock",
-    "pytest-xdist",
-    "pytest-asyncio",
-    "pytest-timeout",
+    "aiohttp>=3.14.1,<4.0",
+    "pytest>=9.0.3,<10.0",
+    "pytest-cov>=7.0,<8.0",
+    "pytest-mock>=3.15,<4.0",
+    "pytest-xdist>=3.8,<4.0",
+    "pytest-asyncio>=1.3,<2.0",
+    "pytest-timeout>=2.4,<3.0",
     "pynmea2>=1.19,<2.0",
     "sgp4>=2.20,<3.0",
-    "ruff",
+    "build>=1.4,<2.0",
+    "setuptools==83.0.0",
+    "setuptools-scm==10.2.0",
+    "twine>=6.2,<7.0",
+    "wheel==0.47.0",
+    "ruff==0.15.21",
 ]
 
 [project.scripts]
 reticulumpi = "reticulumpi.cli:main"
+reticulumpi-admin = "reticulumpi.admin_cli:main"
 
 [tool.setuptools.package-data]
-reticulumpi = ["data/*.yaml"]
+reticulumpi = [
+    "data/*.pydata",
+    "data/*.yaml",
+    "builtin_plugins/web_dashboard/static/*",
+    "builtin_plugins/web_dashboard/static/assets/*",
+    "builtin_plugins/web_dashboard/static/vendor/*",
+    "builtin_plugins/web_dashboard/static/vendor/images/*",
+]
+
+[tool.setuptools.data-files]
+"share/reticulumpi/nomadnet/pages" = [
+    "config/nomadnet/pages/*.mu",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools_scm]
+version_file = "src/reticulumpi/_version.py"
+fallback_version = "0+unknown"
+parentdir_prefix_version = "reticulumpi-"
+tag_regex = '^v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)$'
+version_scheme = "no-guess-dev"
+
 [tool.coverage.report]
-fail_under = 40
+fail_under = 50
+show_missing = true
+
+[tool.coverage.run]
+branch = true
+source = ["src/reticulumpi"]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 line-length = 100
 
 [tool.pytest.ini_options]
@@ -82,6 +113,7 @@ testpaths = ["tests"]
 # -n 2 leaves a core free for the OS/thermals on a 4-core Pi; override with -n0 for debugging.
 # timeout guards against hangs on a slow/throttled Pi without masking real slow tests.
 addopts = "-n 2 --timeout=60 --timeout-method=thread"
+filterwarnings = ["error"]
 markers = [
     "integration: tests that require a real Reticulum instance",
 ]

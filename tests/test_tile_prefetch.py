@@ -107,6 +107,25 @@ class TestMaxPrefetchTiles:
         assert MAX_PREFETCH_TILES == 10_000
 
 
+class TestPngValidation:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("image/png", True),
+            ("IMAGE/PNG; charset=binary", True),
+            (" image/png ; profile=test", True),
+            ("image/jpeg", False),
+            (None, False),
+        ],
+    )
+    def test_content_type(self, value, expected):
+        from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import (
+            is_png_content_type,
+        )
+
+        assert is_png_content_type(value) is expected
+
+
 class TestRunPrefetch:
     def _make_plugin(self, tmp_path, *, bbox=None, lat=None, lon=None):
         plugin = MagicMock()
@@ -136,13 +155,15 @@ class TestRunPrefetch:
         session = MagicMock()
         resp = AsyncMock()
         resp.status = 200
-        resp.read = AsyncMock(return_value=b"\x89PNG fake tile data")
+        resp.headers = {"Content-Type": "image/png; charset=binary"}
+        resp.read = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n fake tile data")
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp)
         ctx.__aexit__ = AsyncMock(return_value=False)
         session.get = MagicMock(return_value=ctx)
         plugin._prefetch_session = session
         plugin._tile_session = None
+        plugin._test_upstream_response = resp
 
         return plugin
 
@@ -219,6 +240,28 @@ class TestRunPrefetch:
 
         assert any("prefetch failed" in r.message for r in caplog.records)
 
+    @pytest.mark.parametrize(
+        ("content_type", "payload"),
+        [
+            ("text/html", b"\x89PNG\r\n\x1a\n fake tile data"),
+            ("image/png", b"\x89PNG invalid signature"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_rejects_mime_or_signature_mismatch(self, tmp_path, content_type, payload):
+        from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
+
+        plugin = self._make_plugin(tmp_path, lat=40.0, lon=-74.0)
+        plugin._test_upstream_response.headers = {"Content-Type": content_type}
+        plugin._test_upstream_response.read = AsyncMock(return_value=payload)
+        with patch(
+            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            await run_prefetch(plugin)
+
+        assert not list((tmp_path / "tiles").rglob("*.png"))
+
     @pytest.mark.asyncio
     async def test_atomic_write(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
@@ -233,23 +276,21 @@ class TestRunPrefetch:
                 "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.tempfile.mkstemp"
             ) as mock_mkstemp,
             patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.write"),
+            patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.fsync"),
             patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.close"),
             patch(
-                "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.rename"
-            ) as mock_rename,
+                "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.os.replace"
+            ) as mock_replace,
         ):
             mock_mkstemp.return_value = (99, "/tmp/tile.tmp")
             await run_prefetch(plugin)
 
         assert mock_mkstemp.called
-        assert mock_rename.called
+        assert mock_replace.called
 
     @pytest.mark.asyncio
     async def test_truncates_at_max_tiles(self, tmp_path):
-        from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import (
-            MAX_PREFETCH_TILES,
-            run_prefetch,
-        )
+        from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
 
         plugin = self._make_plugin(tmp_path, bbox=[-85, -180, 85, 180])
         plugin.config["tile_proxy"]["prefetch"]["min_zoom"] = 0
@@ -265,13 +306,16 @@ class TestRunPrefetch:
 
         plugin._prefetch_session.get = counting_get
 
-        with patch(
-            "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
-            new_callable=AsyncMock,
+        with (
+            patch("reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.MAX_PREFETCH_TILES", 5),
+            patch(
+                "reticulumpi.builtin_plugins.web_dashboard.tile_prefetch.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             await run_prefetch(plugin)
 
-        assert call_count <= MAX_PREFETCH_TILES
+        assert call_count <= 5
 
 
 class TestPrefetchCacheBudget:
@@ -300,18 +344,20 @@ class TestPrefetchCacheBudget:
         session = MagicMock()
         resp = AsyncMock()
         resp.status = 200
-        resp.read = AsyncMock(return_value=b"\x89PNG fake tile data")
+        resp.headers = {"Content-Type": "image/png"}
+        resp.read = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n fake tile data")
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=resp)
         ctx.__aexit__ = AsyncMock(return_value=False)
         session.get = MagicMock(return_value=ctx)
         plugin._prefetch_session = session
         plugin._tile_session = None
+        plugin._test_upstream_response = resp
 
         return plugin
 
     @pytest.mark.asyncio
-    async def test_stops_at_budget(self, tmp_path):
+    async def test_eviction_keeps_actual_disk_usage_at_budget(self, tmp_path):
         from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import run_prefetch
 
         plugin = self._make_plugin(tmp_path, max_bytes=50, cache_bytes=50)
@@ -322,7 +368,30 @@ class TestPrefetchCacheBudget:
             await run_prefetch(plugin)
 
         cached = list((tmp_path / "tiles").rglob("*.png"))
-        assert len(cached) == 0
+        actual_bytes = sum(path.stat().st_size for path in cached)
+        assert 0 < actual_bytes <= 50
+        assert plugin._tile_cache_bytes == actual_bytes
+
+    @pytest.mark.asyncio
+    async def test_startup_reconciliation_evicts_existing_oversize_cache(self, tmp_path):
+        from reticulumpi.builtin_plugins.web_dashboard.tile_prefetch import (
+            enforce_tile_cache_budget,
+        )
+
+        plugin = self._make_plugin(tmp_path, max_bytes=50, cache_bytes=999)
+        cache = tmp_path / "tiles"
+        for index in range(3):
+            tile = cache / "1" / str(index) / "0.png"
+            tile.parent.mkdir(parents=True, exist_ok=True)
+            tile.write_bytes(bytes([index]) * 30)
+
+        assert await enforce_tile_cache_budget(plugin) is True
+
+        remaining = list(cache.rglob("*.png"))
+        actual_bytes = sum(path.stat().st_size for path in remaining)
+        assert actual_bytes <= 50
+        assert plugin._tile_cache_bytes == actual_bytes
+        assert len(remaining) == 1
 
     @pytest.mark.asyncio
     async def test_increments_cache_bytes(self, tmp_path):

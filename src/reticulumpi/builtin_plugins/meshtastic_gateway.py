@@ -25,6 +25,7 @@ import RNS
 import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi import events
+from reticulumpi.lxmf_compat import create_lxm_router
 from reticulumpi.mtu import MESHTASTIC_MTU, truncate_bytes, truncate_for_mtu
 from reticulumpi.plugin_base import PluginBase
 
@@ -742,6 +743,7 @@ class MeshtasticGateway(PluginBase):
     plugin_name = "meshtastic_gateway"
     plugin_description = "Bridges Meshtastic text messages with LXMF over Reticulum"
     plugin_version = "1.2.0"
+    plugin_lifecycle_api = 2
     broadcast_tier = 1
     broadcast_keys = [
         "meshtastic_device",
@@ -906,10 +908,9 @@ class MeshtasticGateway(PluginBase):
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
-        import LXMF
-
         self._lock = threading.Lock()
         self._mode = self.config.get("mode", MODE_SERIAL)
+        self._lxmf_destinations: dict[bytes, Any] = {}
 
         # Stats
         self._msgs_mesh_to_lxmf = 0
@@ -1054,11 +1055,13 @@ class MeshtasticGateway(PluginBase):
             self._gw_identity.to_file(identity_path)
             self.log.info("Created new gateway identity at %s", identity_path)
 
-        self.lxmf_router = LXMF.LXMRouter(storagepath=storage_path)
+        self.lxmf_router = create_lxm_router(storagepath=storage_path)
         display_name = self.config.get("display_name") or f"{self.app.node_name} Mesh Gateway"
-        self.local_lxmf_destination = self.lxmf_router.register_delivery_identity(
-            self._gw_identity,
-            display_name=display_name,
+        self.local_lxmf_destination = self._manage_lxmf_destination(
+            self.lxmf_router.register_delivery_identity(
+                self._gw_identity,
+                display_name=display_name,
+            )
         )
         self.lxmf_router.register_delivery_callback(self._handle_lxmf_message)
 
@@ -1152,6 +1155,8 @@ class MeshtasticGateway(PluginBase):
         # finally block clears _serial_listener once _active is False.
         self._graceful_device_shutdown()
         self._active = False
+        with self._lock:
+            self._lxmf_destinations.clear()
         self._save_node_data_cache()
         self._save_name_cache()
         # Close persistent serial listener (if any) before joining threads
@@ -1356,6 +1361,10 @@ class MeshtasticGateway(PluginBase):
             self._fw_hang_detected = False
             self._fw_hang_reason = None
 
+        # API v2 readiness means the physical device or MQTT connection is
+        # genuinely usable, not merely that the reconnect worker was started.
+        self.mark_ready()
+
         # Identify ourselves
         node_id = self._get_own_node_id(iface)
         conn_detail = self._get_connection_detail()
@@ -1487,6 +1496,7 @@ class MeshtasticGateway(PluginBase):
         """
         with self._lock:
             iface = self._mesh_interface
+            was_connected = self._connected
             self._mesh_interface = None
             self._connected = False
             self._nodes_cache = None
@@ -1494,6 +1504,8 @@ class MeshtasticGateway(PluginBase):
             if self._mode == MODE_SERIAL:
                 self._cached_device_info = None
                 self._cached_lora_neighbors = []
+        if was_connected:
+            self.mark_degraded("Meshtastic connection closed")
         if iface is not None:
             try:
                 iface.close()
@@ -1652,6 +1664,15 @@ class MeshtasticGateway(PluginBase):
             self._abandoned_serial_threads = [
                 t for t in self._abandoned_serial_threads if t.is_alive()
             ]
+            if len(self._abandoned_serial_threads) >= _MAX_ABANDONED_SERIAL_THREADS:
+                self.mark_degraded(
+                    "Meshtastic serial-open worker cap reached; refusing another probe"
+                )
+                self.log.error(
+                    "Abandoned serial thread cap remains reached; refusing to "
+                    "start another uncancellable SerialInterface constructor"
+                )
+                return None
 
         timeout_s = self._device_probe_open_timeout
         result: dict[str, Any] = {"iface": None, "error": None}
@@ -1706,6 +1727,8 @@ class MeshtasticGateway(PluginBase):
                 result["error"],
             )
             return None
+        if self.plugin_state.value == "ready":
+            self.mark_ready()
         return result["iface"]
 
     def _device_probe_loop(self) -> None:
@@ -2825,6 +2848,9 @@ class MeshtasticGateway(PluginBase):
                 self._fw_hang_detected = False
             self._fw_hang_reason = None
         if was_disconnected:
+            # READY -> READY clears a transient degraded health condition;
+            # STARTING -> READY covers an initial connection callback.
+            self.mark_ready()
             self.log.info("Meshtastic connection re-established (auto-reconnect)")
             self.event_bus.publish(
                 events.MESHTASTIC_CONNECTED,
@@ -2851,12 +2877,15 @@ class MeshtasticGateway(PluginBase):
             self._last_disconnect_time = time.monotonic()
 
         self.log.warning("Meshtastic connection lost")
+        self.mark_degraded("Meshtastic connection lost")
         self.event_bus.publish(events.MESHTASTIC_DISCONNECTED, {"reason": "connection_lost"})
 
     # ── LXMF delivery callback ──────────────────────────────────────
 
     def _handle_lxmf_message(self, message: Any) -> None:
         """Handle incoming LXMF message and forward to Meshtastic."""
+        if not self._active:
+            return
         if not self._check_send_rate_limit():
             self._enqueue_lxmf_send(message)
             return
@@ -2988,6 +3017,8 @@ class MeshtasticGateway(PluginBase):
         """Attempt to send an LXMF message. Returns True on success."""
         import LXMF
 
+        if not self._active:
+            return False
         try:
             dest_identity = RNS.Identity.recall(recipient_hash)
             if dest_identity is None:
@@ -2998,13 +3029,21 @@ class MeshtasticGateway(PluginBase):
                 )
                 return False
 
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
+            with self._lock:
+                if not self._active:
+                    return False
+                dest = self._lxmf_destinations.get(recipient_hash)
+                if dest is None:
+                    dest = self._manage_lxmf_destination(
+                        RNS.Destination(
+                            dest_identity,
+                            RNS.Destination.OUT,
+                            RNS.Destination.SINGLE,
+                            "lxmf",
+                            "delivery",
+                        )
+                    )
+                    self._lxmf_destinations[recipient_hash] = dest
             msg = LXMF.LXMessage(
                 dest,
                 self.local_lxmf_destination,
@@ -3020,6 +3059,10 @@ class MeshtasticGateway(PluginBase):
                 RNS.prettyhexrep(recipient_hash),
             )
             return False
+
+    def _manage_lxmf_destination(self, destination: Any) -> Any:
+        """Own an LXMF destination and undo lifecycle-raced acquisition."""
+        return self.manage_destination(destination)
 
     def _retry_pending_lxmf(self) -> None:
         """Retry deferred LXMF messages whose paths may now be resolved."""

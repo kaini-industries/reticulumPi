@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +20,8 @@ from reticulumpi.builtin_plugins.spectrum_scanner import (
     _E4000_LO_GAP_MHZ,
     SpectrumScanner,
 )
+from reticulumpi.plugin_base import PluginState
+from reticulumpi.process_supervisor import ProcessFailure
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +43,7 @@ def _make_plugin(config: dict | None = None) -> SpectrumScanner:
     # can exercise parser + snapshot methods in isolation.
     plugin._state_lock = threading.Lock()
     plugin._process = None
+    plugin._process_group = None
     plugin._pid = None
     plugin._restart_count = 0
     plugin._sweep_count = 0
@@ -54,6 +58,7 @@ def _make_plugin(config: dict | None = None) -> SpectrumScanner:
     plugin._current_ts = None
     plugin._supervisor_alive = False
     plugin._resolved_index = None
+    plugin._device_lease = None
     plugin._detected_peaks = []
     plugin._sweep_intervals = deque(maxlen=60)
     plugin._last_sweep_mono = None
@@ -330,6 +335,7 @@ class TestSnapshot:
             "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, -55.5, -54.4, -53.3, -52.2"
         )
         p._flush_current_sweep()
+        after = _t.time()
 
         snap = p.get_snapshot()
         assert snap["sweep_count"] == 1
@@ -339,12 +345,14 @@ class TestSnapshot:
         assert len(snap["waterfall_tail"]) == 1
         assert snap["freq_start_hz"] == 88_000_000
         assert snap["freq_stop_hz"] == 108_000_000
-        # Sibling timestamp array stays aligned with waterfall_tail; value is
-        # captured inside _flush_current_sweep so it sits between `before`
-        # and "now" with plenty of slack.
+        # The raw timestamp is captured during the flush.  The wire timestamp
+        # is rounded to milliseconds, so validate timing before rounding and
+        # validate the serialization precision separately.
         assert len(snap["waterfall_tail_times"]) == 1
         ts = snap["waterfall_tail_times"][0]
-        assert before <= ts <= _t.time() + 1.0
+        assert p._last_sweep_at is not None
+        assert before <= p._last_sweep_at <= after
+        assert ts == round(p._last_sweep_at, 3)
 
     def test_snapshot_tail_caps_at_configured_length(self):
         """Plugin may retain hundreds of sweeps internally, but the snapshot
@@ -866,3 +874,250 @@ class TestSpectrumSweepEvent:
         assert len(payload["powers_db"]) == n_bins
         assert payload["bins_hz"][0] == freq_lo
         assert payload["powers_db"][0] == -70.0
+
+
+class TestManagedSpectrumLifecycle:
+    def test_start_and_stop_own_one_device_lease(self):
+        p = _make_plugin()
+        lease = SimpleNamespace(index=7, release=MagicMock())
+        with (
+            patch("reticulumpi.rtlsdr.refresh_device_lease", return_value=lease) as refresh,
+            patch.object(p, "_start_thread") as start_thread,
+            patch.object(p, "_join_threads") as join_threads,
+        ):
+            p.start()
+            assert p._device_lease is lease
+            assert p._resolved_index == 7
+            assert p._process_group is None
+            start_thread.assert_called_once()
+            p.stop()
+
+        refresh.assert_called_once_with(None, "0", "spectrum_scanner")
+        lease.release.assert_called_once_with()
+        join_threads.assert_called_once_with(timeout=5.0)
+        assert p._device_lease is None
+        assert p._status == "stopped"
+
+    def test_start_continues_in_degraded_state_when_device_is_missing(self):
+        p = _make_plugin()
+        with (
+            patch(
+                "reticulumpi.rtlsdr.refresh_device_lease",
+                side_effect=RuntimeError("no compatible dongle"),
+            ),
+            patch.object(p, "_start_thread") as start_thread,
+        ):
+            p.start()
+        start_thread.assert_called_once()
+        assert p._status == "error"
+        assert p._last_error == "no compatible dongle"
+
+    def test_supervisor_launch_failure_degrades_and_releases_lease(self):
+        p = _make_plugin()
+        p._active = True
+        lease = MagicMock()
+        p._device_lease = lease
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.spectrum_scanner.shutil.which",
+                return_value="/usr/bin/rtl_power",
+            ),
+            patch.object(p, "_launch_rtl_power", side_effect=OSError("fork failed")),
+            patch.object(p, "mark_degraded") as degraded,
+        ):
+            p._supervisor_loop_inner()
+        degraded.assert_called_once_with("fork failed")
+        lease.release.assert_called_once_with()
+        assert p._device_lease is None
+        assert p._status == "error"
+
+    def test_supervisor_refreshes_an_absent_lease_before_launch(self):
+        p = _make_plugin()
+        p._active = True
+        p._device_lease = None
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.spectrum_scanner.shutil.which",
+                return_value="/usr/bin/rtl_power",
+            ),
+            patch.object(p, "_refresh_device_lease") as refresh,
+            patch.object(p, "_launch_rtl_power") as launch,
+        ):
+            p._supervisor_loop_inner()
+        refresh.assert_called_once_with()
+        launch.assert_called_once_with()
+
+    def test_launch_constructs_managed_group_and_clears_failed_start(self):
+        p = _make_plugin()
+        p._active = True
+        p._process_group = None
+        group = MagicMock()
+        group.start.side_effect = RuntimeError("monitor unavailable")
+        with patch(
+            "reticulumpi.builtin_plugins.spectrum_scanner.ManagedProcessGroup",
+            return_value=group,
+        ) as constructor:
+            with pytest.raises(RuntimeError, match="monitor unavailable"):
+                p._launch_rtl_power()
+        assert p._process_group is None
+        spec = constructor.call_args.args[0][0]
+        assert spec.name == "rtl_power"
+        assert spec.text is True
+        assert spec.encoding == "utf-8"
+
+    def test_process_started_registers_parser_and_preserves_ready_state(self):
+        p = _make_plugin()
+        p._active = True
+        p._plugin_state = PluginState.READY
+        group = MagicMock(restart_count=3)
+        process = MagicMock(pid=2468)
+        p._process_group = group
+        with (
+            patch.object(p, "mark_ready") as ready,
+            patch.object(p, "_start_thread") as start_thread,
+        ):
+            p._on_process_started(group, (process,), restarted=True)
+        ready.assert_called_once_with()
+        start_thread.assert_called_once()
+        assert p._process is process
+        assert p._pid == 2468
+        assert p._restart_count == 3
+        assert p._status == "running"
+        assert p._segments == {}
+
+    def test_process_started_rejects_stale_launch(self):
+        p = _make_plugin()
+        p._active = True
+        with pytest.raises(RuntimeError, match="stale"):
+            p._on_process_started(MagicMock(), (MagicMock(),), restarted=False)
+
+    def test_failure_restart_and_restart_failure_update_health(self):
+        p = _make_plugin()
+        p._active = True
+        group = MagicMock()
+        p._process_group = group
+        failure = ProcessFailure(0, "rtl_power", 2, "unexpected EOF", 1.0)
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_release_device_lease") as release,
+        ):
+            p._on_process_failure(group, failure)
+        degraded.assert_called_once()
+        release.assert_called_once_with()
+        assert "unexpected EOF" in p._last_error
+
+        with patch.object(p, "_refresh_device_lease") as refresh:
+            p._on_process_restart(group, 2, 4.0)
+        refresh.assert_called_once_with()
+        group.replace_specs.assert_called_once()
+        assert p._restart_count == 2
+        assert p._status == "restarting"
+
+        with (
+            patch.object(p, "mark_degraded") as degraded,
+            patch.object(p, "_release_device_lease") as release,
+        ):
+            p._on_process_restart_failed(group, RuntimeError("still absent"), 3)
+        degraded.assert_called_once()
+        release.assert_called_once_with()
+        assert p._restart_count == 3
+        assert "restart 3 failed" in p._last_error
+
+    def test_restart_rejects_a_stale_group(self):
+        p = _make_plugin()
+        p._active = True
+        with pytest.raises(RuntimeError, match="stopped"):
+            p._on_process_restart(MagicMock(), 1, 1.0)
+
+    def test_restart_exhaustion_degrades_and_releases_device(self):
+        p = _make_plugin()
+        group = MagicMock(restart_count=5)
+        p._process_group = group
+        lease = MagicMock()
+        p._device_lease = lease
+        failure = ProcessFailure(0, "rtl_power", 1, "EOF", 1.0)
+        with patch.object(p, "mark_degraded") as degraded:
+            p._on_process_exhausted(group, failure)
+        degraded.assert_called_once()
+        lease.release.assert_called_once_with()
+        assert p._restart_count == 5
+        assert p._status == "error"
+        assert p._device_lease is None
+
+    def test_stale_callbacks_do_not_change_current_group(self):
+        p = _make_plugin()
+        current = MagicMock()
+        p._process_group = current
+        stale = MagicMock()
+        failure = ProcessFailure(0, "rtl_power", 1, "EOF", 1.0)
+        p._on_process_failure(stale, failure)
+        p._on_process_restart_failed(stale, RuntimeError("ignored"), 2)
+        p._on_process_exhausted(stale, failure)
+        assert p._process_group is current
+        assert p._status == "starting"
+
+    def test_refresh_and_release_device_lease_are_generation_safe(self):
+        p = _make_plugin()
+        old = MagicMock()
+        replacement = SimpleNamespace(index=11, release=MagicMock())
+        p._device_lease = old
+        with (
+            patch("reticulumpi.rtlsdr.invalidate_cache") as invalidate,
+            patch("reticulumpi.rtlsdr.refresh_device_lease", return_value=replacement) as refresh,
+        ):
+            p._refresh_device_lease()
+        invalidate.assert_called_once_with()
+        refresh.assert_called_once_with(old, "0", "spectrum_scanner")
+        assert p._resolved_index == 11
+
+        p._release_device_lease()
+        replacement.release.assert_called_once_with()
+        p._release_device_lease()
+
+        broken = MagicMock()
+        broken.release.side_effect = OSError("already unplugged")
+        p._device_lease = broken
+        p._release_device_lease()
+        assert p._device_lease is None
+
+    def test_terminate_stops_managed_group_and_clears_process_metadata(self):
+        p = _make_plugin()
+        group = MagicMock()
+        p._process_group = group
+        p._process = MagicMock()
+        p._pid = 123
+        p._terminate_process()
+        group.stop.assert_called_once_with()
+        assert p._process_group is None
+        assert p._process is None
+        assert p._pid is None
+
+    def test_parser_eof_flushes_and_notifies_current_group(self):
+        p = _make_plugin()
+        p._active = True
+        stream = MagicMock()
+        stream.fileno.return_value = 10
+        stream.readline.return_value = ""
+        process = MagicMock(stdout=stream)
+        process.poll.return_value = None
+        group = MagicMock(running=True)
+        p._process = process
+        p._process_group = group
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.spectrum_scanner.select.select",
+                return_value=([10], [], []),
+            ),
+            patch.object(p, "_flush_current_sweep") as flush,
+        ):
+            p._parser_loop(process)
+        flush.assert_called_once_with()
+        group.notify_unexpected_eof.assert_called_once_with(
+            0,
+            "rtl_power stdout reached EOF",
+        )
+
+    def test_parser_without_process_returns_cleanly(self):
+        p = _make_plugin()
+        p._process = None
+        p._parser_loop()

@@ -18,6 +18,7 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.runtime_metrics import record_hung_worker
 
 _MESH_NODE_ID_RE = re.compile(r"^![0-9a-fA-F]{8}$")
 
@@ -290,6 +291,7 @@ class LoraLinkTester(PluginBase):
         t.join(timeout=_SERIAL_OPEN_TIMEOUT)
 
         if t.is_alive():
+            record_hung_worker()
             raise TimeoutError(
                 f"SerialInterface open on {self._serial_port} timed out after {_SERIAL_OPEN_TIMEOUT}s"
             )

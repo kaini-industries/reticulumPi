@@ -10,8 +10,13 @@ respects a time budget, and assembles the result dict.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any
+
+from reticulumpi.builtin_plugins.web_dashboard.operational_metrics import (
+    record_broadcast_worker_hung,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,10 +34,13 @@ class BroadcastRegistry:
         slow_threshold_ms: float = _SLOW_THRESHOLD * 1000,
         tier1_factor: float = _TIER1_FACTOR,
         tier2_factor: float = _TIER2_FACTOR,
+        callback_timeout_ms: float = 500.0,
     ) -> None:
         self._slow_threshold = slow_threshold_ms / 1000.0
         self._tier1_budget = metrics_interval * tier1_factor
         self._tier2_budget = metrics_interval * tier2_factor
+        self._callback_timeout = max(0.01, callback_timeout_ms / 1000.0)
+        self._disabled: set[str] = set()
         # Per-tier instrumentation from the last collect() call, surfaced to
         # the WS health log.  Keyed by tier (0/1/2) -> elapsed ms.
         self.last_tier_ms: dict[int, float] = {0: 0.0, 1: 0.0, 2: 0.0}
@@ -45,11 +53,35 @@ class BroadcastRegistry:
         cycle_count: int,
         data: dict[str, Any],
     ) -> None:
+        if name in self._disabled:
+            return
         t = time.monotonic()
-        try:
-            result = p.broadcast_snapshot(cycle_count=cycle_count)
-        except Exception:
-            result = None
+        done = threading.Event()
+        result_holder: list[Any] = []
+
+        def _snapshot() -> None:
+            try:
+                result_holder.append(p.broadcast_snapshot(cycle_count=cycle_count))
+            except BaseException:
+                result_holder.append(None)
+            finally:
+                done.set()
+
+        threading.Thread(
+            target=_snapshot,
+            name=f"dashboard-broadcast-{name}",
+            daemon=True,
+        ).start()
+        if not done.wait(self._callback_timeout):
+            self._disabled.add(name)
+            record_broadcast_worker_hung()
+            log.warning(
+                "Broadcast plugin %s exceeded %.0fms and was disabled until restart",
+                name,
+                self._callback_timeout * 1000,
+            )
+            return
+        result = result_holder[0] if result_holder else None
         elapsed_ms = (time.monotonic() - t) * 1000
         if elapsed_ms > self._slow_threshold * 1000:
             log.warning(
@@ -84,6 +116,9 @@ class BroadcastRegistry:
 
         by_tier: dict[int, list[tuple[str, Any]]] = {0: [], 1: [], 2: []}
         for name, p in all_plugins.items():
+            if name in self._disabled:
+                skipped.append(name)
+                continue
             tier = getattr(p, "broadcast_tier", None)
             if tier is not None and tier in by_tier:
                 by_tier[tier].append((name, p))

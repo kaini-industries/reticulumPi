@@ -327,7 +327,7 @@
 
     html += '<div class="lora-radio-header">'
       + '<span class="lora-radio-name">' + esc(name)
-      + (nodeId ? ' <span style="color:var(--text-muted);font-weight:400">(' + esc(nodeId) + ')</span>' : '')
+      + (nodeId ? ' <span class="text-muted-normal">(' + esc(nodeId) + ')</span>' : '')
       + '</span>'
       + '<span class="lora-radio-status">'
       + '<span class="status-dot ' + statusCls + '"></span> ' + statusText
@@ -451,6 +451,7 @@
 
     html += '</div>';
     container.innerHTML = html;
+    R.applyCspDynamicStyles(container);
 
     var rebootBtn = container.querySelector('.msh-reboot-btn');
     if (rebootBtn) {
@@ -491,7 +492,7 @@
     h += '<div class="fw-silence-row">'
       + '<span class="fw-silence-label">Silence</span>'
       + '<div class="fw-bar-track">'
-      + '<div class="fw-bar-fill fw-' + state + '" style="width:' + pct.toFixed(1) + '%"></div>'
+      + '<div class="fw-bar-fill fw-' + state + '" data-rpi-width="' + pct.toFixed(1) + '"></div>'
       + '</div>'
       + '<span class="fw-silence-value">' + silenceText + ' / ' + formatSilence(timeout) + '</span>'
       + '</div>';
@@ -558,17 +559,23 @@
 
   function rebootMeshtasticDevice() {
     if (_rebootInProgress) return;
-    if (!confirm('Reboot the Meshtastic device? The radio will be offline briefly.')) return;
-    _rebootInProgress = true;
-    var btn = document.querySelector('.msh-reboot-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Rebooting…'; }
-    api('/api/meshtastic/device/reset', {method: 'POST', timeout: 15000}).then(function(r) {
-      _rebootInProgress = false;
-      if (btn) { btn.disabled = false; btn.textContent = 'Reboot Device'; }
-      if (!r || !r.ok) {
-        var reason = (r && r.error) ? r.error : 'Reset failed';
-        alert('Device reset failed: ' + reason);
-      }
+    R.confirmDestructive(
+      'Reboot Meshtastic device',
+      'The radio will be offline briefly while the device reboots.',
+      'Reboot device'
+    ).then(function(confirmed) {
+      if (!confirmed) return;
+      _rebootInProgress = true;
+      var btn = document.querySelector('.msh-reboot-btn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Rebooting…'; }
+      api('/api/meshtastic/device/reset', {method: 'POST', timeout: 15000}).then(function(r) {
+        _rebootInProgress = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Reboot Device'; }
+        if (!r || !r.ok) {
+          var reason = (r && r.error) ? r.error : 'Reset failed';
+          alert('Device reset failed: ' + reason);
+        }
+      });
     });
   }
 

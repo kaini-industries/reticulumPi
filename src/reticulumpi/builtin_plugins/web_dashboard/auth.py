@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import ipaddress
 import json
@@ -9,9 +10,14 @@ import logging
 import os
 import secrets
 import sqlite3
+import stat
+import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
+
+from reticulumpi.runtime_metrics import instrument_sqlite_class
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +38,100 @@ def _normalize_ip(ip: str) -> str:
 
 
 SECRET_FILENAME = "dashboard_secret"
+BOOTSTRAP_FILENAME = "dashboard_password.txt"
+_CREDENTIAL_LOCK_FILENAME = ".dashboard-credentials.lock"
+
+
+def _fsync_directory(path: str) -> None:
+    """Durably commit a directory entry update."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def write_secret_file_atomic(path: str, value: str) -> None:
+    """Atomically replace a UTF-8 secret file as mode 0600 and fsync it."""
+    path = os.path.abspath(os.path.expanduser(path))
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory)
+    replaced = False
+    try:
+        os.fchmod(fd, 0o600)
+        payload = value.encode("utf-8")
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write while persisting dashboard secret")
+            view = view[written:]
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temporary_path, path)
+        replaced = True
+        os.chmod(path, 0o600)
+        _fsync_directory(directory)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not replaced:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+
+
+def _unlink_secret_file_durably(path: str) -> None:
+    """Remove a secret and fsync its containing directory."""
+    path = os.path.abspath(os.path.expanduser(path))
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    _fsync_directory(os.path.dirname(path) or ".")
+
+
+@dataclass(frozen=True)
+class PasswordChangeResult:
+    """Structured result for a dashboard credential rotation."""
+
+    applied: bool
+    reason: str
+    revoked_tokens: tuple[str, ...] = ()
+    password_change_required: bool = False
+
+
+def _read_secret_regular(path: str, *, max_bytes: int) -> str | None:
+    """Read one bounded, single-link regular secret without following links."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise OSError(f"dashboard credential is not a single-link regular file: {path}")
+        os.fchmod(fd, 0o600)
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(fd, min(remaining, 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > max_bytes:
+            raise OSError(f"dashboard credential exceeds {max_bytes} bytes: {path}")
+        return payload.decode("utf-8").strip()
+    finally:
+        os.close(fd)
 
 
 def load_or_create_password_hash(secret_dir: str) -> tuple[str, str | None]:
@@ -44,28 +144,43 @@ def load_or_create_password_hash(secret_dir: str) -> tuple[str, str | None]:
         (password_hash, generated_password) — generated_password is None if
         the hash was loaded from an existing file.
     """
-    secret_dir = os.path.expanduser(secret_dir)
-    os.makedirs(secret_dir, exist_ok=True)
+    secret_dir = os.path.abspath(os.path.expanduser(secret_dir))
+    if os.path.islink(secret_dir):
+        raise OSError(f"dashboard secret directory may not be a symlink: {secret_dir}")
+    os.makedirs(secret_dir, mode=0o700, exist_ok=True)
+    os.chmod(secret_dir, 0o700)
     secret_path = os.path.join(secret_dir, SECRET_FILENAME)
-
-    if os.path.isfile(secret_path):
-        with open(secret_path, "r") as f:
-            stored_hash = f.read().strip()
+    bootstrap_path = os.path.join(secret_dir, BOOTSTRAP_FILENAME)
+    lock_path = os.path.join(secret_dir, _CREDENTIAL_LOCK_FILENAME)
+    lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(lock_path, lock_flags, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        stored_hash = _read_secret_regular(secret_path, max_bytes=4096)
         if stored_hash:
             log.info("Loaded dashboard password hash from %s", secret_path)
             return stored_hash, None
 
-    # Generate a new random password
-    password = secrets.token_urlsafe(16)
-    password_hash = hash_password(password)
+        # Crash recovery: bootstrap is deliberately published before its hash.
+        # If the second durable write failed, recreate the matching hash rather
+        # than generating an unknowable replacement password.
+        bootstrap_password = _read_secret_regular(bootstrap_path, max_bytes=512)
+        if bootstrap_password:
+            recovered_hash = hash_password(bootstrap_password)
+            write_secret_file_atomic(secret_path, recovered_hash + "\n")
+            log.warning("Recovered dashboard password hash from the bootstrap credential")
+            return recovered_hash, None
 
-    # Write hash atomically with restrictive permissions from the start
-    fd = os.open(secret_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(password_hash + "\n")
-
-    log.info("Saved new dashboard password hash to %s", secret_path)
-    return password_hash, password
+        password = secrets.token_urlsafe(16)
+        password_hash = hash_password(password)
+        write_secret_file_atomic(bootstrap_path, password + "\n")
+        write_secret_file_atomic(secret_path, password_hash + "\n")
+        log.info("Saved new dashboard password hash to %s", secret_path)
+        return password_hash, password
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def hash_password(password: str) -> str:
@@ -146,7 +261,7 @@ class RateLimiter:
             return float(self.base_window)
         failures = state.get("consecutive_failures", 0)
         # Cap the multiplier at 2^8 = 256x (~4.25 h at base=60 s)
-        multiplier = min(2 ** failures, 256)
+        multiplier = min(2**failures, 256)
         return float(self.base_window * multiplier)
 
     def is_allowed(self, ip: str) -> bool:
@@ -167,11 +282,7 @@ class RateLimiter:
         if ip not in self._state and len(self._state) >= self.MAX_TRACKED_IPS:
             oldest_ip = min(
                 self._state,
-                key=lambda k: (
-                    self._state[k]["attempts"][-1]
-                    if self._state[k]["attempts"]
-                    else 0
-                ),
+                key=lambda k: self._state[k]["attempts"][-1] if self._state[k]["attempts"] else 0,
             )
             del self._state[oldest_ip]
         if ip not in self._state:
@@ -217,9 +328,7 @@ class RateLimiter:
         if len(self._state) > self.MAX_TRACKED_IPS:
             by_newest = sorted(
                 self._state.items(),
-                key=lambda kv: max(kv[1]["attempts"])
-                if kv[1]["attempts"]
-                else 0,
+                key=lambda kv: max(kv[1]["attempts"]) if kv[1]["attempts"] else 0,
             )
             excess = len(self._state) - self.MAX_TRACKED_IPS
             for ip, _ in by_newest[:excess]:
@@ -232,13 +341,12 @@ class RateLimiter:
         if ip in self._state:
             window = self._effective_window(ip)
             cutoff = now - window
-            self._state[ip]["attempts"] = [
-                t for t in self._state[ip]["attempts"] if t > cutoff
-            ]
+            self._state[ip]["attempts"] = [t for t in self._state[ip]["attempts"] if t > cutoff]
             if not self._state[ip]["attempts"]:
                 del self._state[ip]
 
 
+@instrument_sqlite_class
 class SqliteSessionStore:
     """Dict-like session store backed by SQLite for persistence across restarts.
 
@@ -251,30 +359,29 @@ class SqliteSessionStore:
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        os.chmod(db_path, 0o600)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS sessions ("
-            "  token TEXT PRIMARY KEY,"
-            "  data TEXT NOT NULL,"
-            "  expires_at REAL"
-            ")"
-        )
-        # Migrate: add expires_at column if missing (pre-existing DB)
-        cols = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(sessions)")
-        }
-        if "expires_at" not in cols:
+        try:
+            os.chmod(db_path, 0o600)
+            self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(
-                "ALTER TABLE sessions ADD COLUMN expires_at REAL"
+                "CREATE TABLE IF NOT EXISTS sessions ("
+                "  token TEXT PRIMARY KEY,"
+                "  data TEXT NOT NULL,"
+                "  expires_at REAL"
+                ")"
             )
-        # Index for efficient expired-session cleanup
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at "
-            "ON sessions (expires_at)"
-        )
-        self._conn.commit()
+            # Migrate: add expires_at column if missing (pre-existing DB)
+            cols = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+            if "expires_at" not in cols:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN expires_at REAL")
+            # Index for efficient expired-session cleanup
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)"
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.close()
+            self._conn = None
+            raise
 
     def _is_closed(self) -> bool:
         return self._conn is None
@@ -296,8 +403,7 @@ class SqliteSessionStore:
         expires_at = value.get("expires_at")
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO sessions "
-                "(token, data, expires_at) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO sessions (token, data, expires_at) VALUES (?, ?, ?)",
                 (token, json.dumps(value), expires_at),
             )
             self._conn.commit()
@@ -381,8 +487,7 @@ class SqliteSessionStore:
         now = time.time()
         with self._lock:
             cursor = self._conn.execute(
-                "DELETE FROM sessions WHERE expires_at IS NOT NULL "
-                "AND expires_at <= ?",
+                "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= ?",
                 (now,),
             )
             self._conn.commit()
@@ -420,6 +525,7 @@ class AuthManager:
         rate_limit_window: int = 60,
         force_secure_cookie: bool = False,
         generated_pw_file: str | None = None,
+        password_hash_file: str | None = None,
     ):
         if password_hash:
             self._password_hash = password_hash
@@ -430,19 +536,19 @@ class AuthManager:
 
         # Checksum of the current password hash — stored in each session
         # so that validate_token can detect password rotation.
-        self._password_hash_checksum = hashlib.sha256(
-            self._password_hash.encode()
-        ).hexdigest()
+        self._password_hash_checksum = hashlib.sha256(self._password_hash.encode()).hexdigest()
 
         self.session_timeout = session_timeout
         self.max_sessions = max_sessions
         self.force_secure_cookie = force_secure_cookie
-        # Path to the generated password file; deleted after first login
+        # The bootstrap file remains until a successful password change.
         self._generated_pw_file = generated_pw_file
+        self._password_hash_file = password_hash_file
+        self._credential_lock = threading.RLock()
         if session_db_path:
-            self.sessions: (
-                dict[str, dict[str, Any]] | SqliteSessionStore
-            ) = SqliteSessionStore(session_db_path)
+            self.sessions: dict[str, dict[str, Any]] | SqliteSessionStore = SqliteSessionStore(
+                session_db_path
+            )
             log.info("Using persistent session store: %s", session_db_path)
         else:
             self.sessions = {}
@@ -496,65 +602,98 @@ class AuthManager:
 
     def login(self, password: str, remote_ip: str) -> str | None:
         """Verify password and create session. Returns token or None."""
-        if not self.rate_limiter.is_allowed(remote_ip):
-            self._audit_failed_login(remote_ip, "rate_limited")
-            return None
+        with self._credential_lock:
+            if not self.rate_limiter.is_allowed(remote_ip):
+                self._audit_failed_login(remote_ip, "rate_limited")
+                return None
 
-        if not verify_password(password, self._password_hash):
-            self.rate_limiter.record_attempt(remote_ip)
-            self._audit_failed_login(remote_ip, "bad_password")
-            return None
+            if not verify_password(password, self._password_hash):
+                self.rate_limiter.record_attempt(remote_ip)
+                self._audit_failed_login(remote_ip, "bad_password")
+                return None
 
-        # Reset exponential backoff on success
-        self.rate_limiter.record_success(remote_ip)
+            # Reset exponential backoff on success
+            self.rate_limiter.record_success(remote_ip)
 
-        token = secrets.token_hex(32)
-        now = time.time()
-        self.sessions[token] = {
-            "created_at": now,
-            "last_seen": now,
-            "remote_ip": remote_ip,
-            "password_hash_checksum": self._password_hash_checksum,
-            "expires_at": now + self.session_timeout,
-        }
+            token = secrets.token_hex(32)
+            now = time.time()
+            self.sessions[token] = {
+                "created_at": now,
+                "last_seen": now,
+                "remote_ip": remote_ip,
+                "password_hash_checksum": self._password_hash_checksum,
+                "expires_at": now + self.session_timeout,
+            }
 
-        # IP-aware session eviction: prefer sessions from same IP
-        while len(self.sessions) > self.max_sessions:
-            norm_ip = _normalize_ip(remote_ip)
-            same_ip = [
-                (t, s) for t, s in self.sessions.items()
-                if t != token
-                and _normalize_ip(s.get("remote_ip", "")) == norm_ip
-            ]
-            if same_ip:
-                victim = min(same_ip, key=lambda ts: ts[1]["last_seen"])
-                del self.sessions[victim[0]]
-            else:
-                oldest_token = min(
-                    (t for t in self.sessions if t != token),
-                    key=lambda t: self.sessions[t]["last_seen"],
-                )
-                del self.sessions[oldest_token]
+            # IP-aware session eviction: prefer sessions from same IP
+            while len(self.sessions) > self.max_sessions:
+                norm_ip = _normalize_ip(remote_ip)
+                same_ip = [
+                    (t, s)
+                    for t, s in self.sessions.items()
+                    if t != token and _normalize_ip(s.get("remote_ip", "")) == norm_ip
+                ]
+                if same_ip:
+                    victim = min(same_ip, key=lambda ts: ts[1]["last_seen"])
+                    del self.sessions[victim[0]]
+                else:
+                    oldest_token = min(
+                        (t for t in self.sessions if t != token),
+                        key=lambda t: self.sessions[t]["last_seen"],
+                    )
+                    del self.sessions[oldest_token]
 
-        # Delete the generated password file after first successful login
-        if self._generated_pw_file:
+            return token
+
+    @property
+    def password_change_required(self) -> bool:
+        """Whether the generated bootstrap credential must be replaced."""
+        path = self._generated_pw_file
+        return bool(path and os.path.isfile(path))
+
+    def change_password(self, current_password: str, new_password: str) -> PasswordChangeResult:
+        """Persist a replacement hash, revoke sessions, then remove bootstrap material."""
+        if len(new_password) < 12:
+            return PasswordChangeResult(False, "new_password_too_short")
+        if len(new_password) > 256:
+            return PasswordChangeResult(False, "new_password_too_long")
+        if not self._password_hash_file:
+            return PasswordChangeResult(False, "password_managed_externally")
+
+        with self._credential_lock:
+            if not verify_password(current_password, self._password_hash):
+                return PasswordChangeResult(False, "invalid_current_password")
+            if verify_password(new_password, self._password_hash):
+                return PasswordChangeResult(False, "password_unchanged")
+
+            replacement_hash = hash_password(new_password)
             try:
-                os.remove(self._generated_pw_file)
-                log.info(
-                    "Deleted generated password file: %s",
-                    self._generated_pw_file,
-                )
-            except FileNotFoundError:
-                pass
+                write_secret_file_atomic(self._password_hash_file, replacement_hash + "\n")
             except OSError:
-                log.debug(
-                    "Could not delete password file: %s",
-                    self._generated_pw_file,
-                    exc_info=True,
-                )
-            self._generated_pw_file = None
+                log.error("Could not persist dashboard password replacement", exc_info=True)
+                return PasswordChangeResult(False, "persistence_failed")
 
-        return token
+            self._password_hash = replacement_hash
+            self._password_hash_checksum = hashlib.sha256(replacement_hash.encode()).hexdigest()
+            revoked_tokens = self._invalidate_all_sessions()
+
+            cleanup_failed = False
+            if self._generated_pw_file:
+                try:
+                    _unlink_secret_file_durably(self._generated_pw_file)
+                except OSError:
+                    cleanup_failed = True
+                    log.error("Could not remove dashboard bootstrap password file", exc_info=True)
+                else:
+                    self._generated_pw_file = None
+
+            reason = "bootstrap_cleanup_failed" if cleanup_failed else "password_changed"
+            return PasswordChangeResult(
+                True,
+                reason,
+                revoked_tokens=revoked_tokens,
+                password_change_required=self.password_change_required,
+            )
 
     def validate_token(self, token: str) -> bool:
         """Check if a session token is valid and update last_seen."""
@@ -564,13 +703,8 @@ class AuthManager:
 
         # Invalidate if the password was rotated since this session began
         stored_checksum = session.get("password_hash_checksum")
-        if (
-            stored_checksum is not None
-            and stored_checksum != self._password_hash_checksum
-        ):
-            log.warning(
-                "Password rotation detected — invalidating all sessions"
-            )
+        if stored_checksum is not None and stored_checksum != self._password_hash_checksum:
+            log.warning("Password rotation detected — invalidating all sessions")
             self._invalidate_all_sessions()
             return False
 
@@ -588,14 +722,15 @@ class AuthManager:
 
         return True
 
-    def _invalidate_all_sessions(self) -> None:
+    def _invalidate_all_sessions(self) -> tuple[str, ...]:
         """Remove every active session (used on password rotation)."""
-        tokens = list(self.sessions)
+        tokens = tuple(self.sessions)
         for t in tokens:
             try:
                 del self.sessions[t]
             except KeyError:
                 pass
+        return tokens
 
     def cleanup_expired_sessions(self) -> int:
         """Remove all expired sessions. Returns count of sessions removed.

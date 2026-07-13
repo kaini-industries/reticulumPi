@@ -30,23 +30,26 @@ def truncate_for_mtu(header: str, body: str, mtu: int) -> str:
     """Build ``header + body`` truncating body UTF-8-safely to fit within *mtu*.
 
     If the combined length fits, the original strings are concatenated. If
-    the body must be cut, a ``" ..."`` ellipsis is appended so recipients
-    can see that truncation occurred. If the header alone exceeds the MTU,
-    the header is returned as-is (the radio will truncate further).
+    space permits, a ``" ..."`` ellipsis marks truncation.  The returned
+    UTF-8 payload always fits the requested byte budget, including when the
+    header alone is too large or the budget is smaller than the ellipsis.
     """
+    if mtu <= 0:
+        return ""
     header_bytes = len(header.encode("utf-8"))
+    if header_bytes >= mtu:
+        return truncate_bytes(header, mtu)
     max_body_bytes = mtu - header_bytes
-    if max_body_bytes <= 0:
-        return header
 
     body_encoded = body.encode("utf-8")
     if len(body_encoded) <= max_body_bytes:
         return header + body
 
     ellipsis = " ..."
-    target = max_body_bytes - len(ellipsis.encode("utf-8"))
-    if target <= 0:
-        return header + ellipsis
+    ellipsis_bytes = len(ellipsis.encode("utf-8"))
+    if max_body_bytes <= ellipsis_bytes:
+        return header + truncate_bytes(body, max_body_bytes)
+    target = max_body_bytes - ellipsis_bytes
 
     truncated = body.encode("utf-8")[:target].decode("utf-8", errors="ignore")
 

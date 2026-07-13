@@ -6,10 +6,11 @@ import os
 import subprocess
 import threading
 import time
+from importlib.resources import files
 from typing import Any
 
-from reticulumpi._paths import find_repo_asset
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.runtime_metrics import record_process_restart
 
 
 class MeshChatServer(PluginBase):
@@ -54,18 +55,31 @@ class MeshChatServer(PluginBase):
         self._meshchat_script = meshchat_script
         self._python_bin = python_bin
 
-        # Resolve the launcher wrapper (lives in ReticulumPi's tree, not
-        # MeshChat's). Try multiple candidate roots because __file__ may
-        # resolve inside site-packages rather than the repo tree.
-        launcher = find_repo_asset("scripts", "meshchat_launcher.py")
-        if launcher:
-            self._launcher_script = launcher
-        else:
-            self.log.warning(
-                "meshchat_launcher.py not found in any known location — "
-                "falling back to direct meshchat.py (timeouts will not be patched)"
-            )
-            self._launcher_script = None
+        configured_storage = os.path.expanduser(
+            self.config.get("storage_dir", os.path.join(self._install_dir, "storage"))
+        )
+        policy = getattr(getattr(self.app, "config", None), "external_artifact_policy", None)
+        if getattr(policy, "required", False) is True:
+            install_root = os.path.realpath(self._install_dir)
+            storage_root = os.path.realpath(configured_storage)
+            try:
+                storage_inside_install = (
+                    os.path.commonpath((install_root, storage_root)) == install_root
+                )
+            except ValueError:
+                storage_inside_install = False
+            if storage_inside_install:
+                raise ValueError(
+                    "production MeshChat storage must be outside the immutable install tree"
+                )
+
+        # The launcher is a first-class wheel resource.  Falling back to the
+        # unpatched upstream entry point would silently drop configured safety
+        # timeouts, so a broken package is fatal instead.
+        launcher = files("reticulumpi").joinpath("data/meshchat_launcher.pydata")
+        if not launcher.is_file():
+            raise ValueError("Packaged MeshChat launcher is missing")
+        self._launcher_script = str(launcher)
 
         link_timeout = self.config.get("link_timeout", 75)
         if not isinstance(link_timeout, (int, float)) or link_timeout <= 0:
@@ -100,7 +114,7 @@ class MeshChatServer(PluginBase):
         self._pid: int | None = None
         self._restart_count = 0
         self._consecutive_failures = 0
-        self._last_start_time: float = 0.0
+        self._last_start_monotonic: float = 0.0
         self._backoff_base = self.config.get("backoff_base_delay", 2.0)
         self._backoff_max = self.config.get("backoff_max_delay", 120.0)
         self._stability_threshold = self.config.get("stability_seconds", 60.0)
@@ -115,10 +129,9 @@ class MeshChatServer(PluginBase):
 
         rns_config_dir = self.app._reticulum_config_dir or os.path.expanduser("~/.reticulum")
 
-        script = self._launcher_script or self._meshchat_script
         cmd = [
             self._python_bin,
-            script,
+            self._launcher_script,
             "--headless",
             "--host",
             self._host,
@@ -133,6 +146,7 @@ class MeshChatServer(PluginBase):
         env["MESHCHAT_DIR"] = self._install_dir
         env["MESHCHAT_LINK_TIMEOUT"] = str(int(self._link_timeout))
         env["MESHCHAT_PATH_LOOKUP_TIMEOUT"] = str(int(self._path_lookup_timeout))
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         self._env = env
         self._launch_process(cmd, env=env)
         self._cmd = cmd
@@ -172,9 +186,10 @@ class MeshChatServer(PluginBase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,
+                cwd=self._storage_dir,
             )
             self._pid = self._process.pid
-            self._last_start_time = time.time()
+            self._last_start_monotonic = time.monotonic()
         self._log_thread = self._start_log_reader(self._process, prefix="meshchat")
 
     def _terminate_process(self) -> None:
@@ -220,12 +235,13 @@ class MeshChatServer(PluginBase):
                 self.log.warning("MeshChat process exited unexpectedly (code: %s)", exit_code)
 
                 # Reset failure counter if the process ran stably
-                uptime = time.time() - self._last_start_time
+                uptime = max(0.0, time.monotonic() - self._last_start_monotonic)
                 if uptime >= self._stability_threshold:
                     self._consecutive_failures = 0
 
                 if auto_restart and self._restart_count < max_restarts:
                     self._restart_count += 1
+                    record_process_restart()
                     self._consecutive_failures += 1
 
                     # Exponential backoff between restarts

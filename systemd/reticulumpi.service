@@ -1,39 +1,46 @@
 [Unit]
 Description=ReticulumPi Network Node
-After=network.target rnsd.service gpsd.service
-Wants=rnsd.service gpsd.service
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=reticulumpi
 Group=reticulumpi
-Environment=PATH=/opt/reticulumpi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# Wait for rnsd shared instance to be ready before starting.
-# RNS 1.1.4+ uses abstract Unix socket @rns/default (visible in ss -xa).
-# rnsd can take 30-60s to initialize serial interfaces (RNode, Meshtastic).
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ss -xa 2>/dev/null | grep -q "@rns/default" && exit 0; sleep 1; done; echo "rnsd not ready after 60s, starting anyway"; exit 0'
-ExecStart=/opt/reticulumpi/.venv/bin/reticulumpi --config /etc/reticulumpi/config.yaml
+Environment=PATH=/opt/reticulumpi/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/var/lib/reticulumpi
+Environment=XDG_CONFIG_HOME=/var/lib/reticulumpi/.config
+Environment=XDG_DATA_HOME=/var/lib/reticulumpi/.local/share
+Environment=XDG_STATE_HOME=/var/lib/reticulumpi/.local/state
+Environment=XDG_CACHE_HOME=/var/cache/reticulumpi
+Environment=RETICULUMPI_RUNTIME_OVERRIDES=/var/lib/reticulumpi/runtime-overrides.yaml
+WorkingDirectory=/var/lib/reticulumpi
+UMask=0077
+ExecStart=/opt/reticulumpi/current/.venv/bin/reticulumpi --config /etc/reticulumpi/config.yaml
 # Restart=always ensures reticulumpi recovers when rnsd restarts
 # (rnsd restart closes the shared instance socket, causing a clean exit)
 Restart=always
 RestartSec=10
 KillMode=mixed
-TimeoutStopSec=30
+TimeoutStartSec=120
+TimeoutStopSec=60
 
-# Security hardening
-# NOTE: NoNewPrivileges is intentionally omitted. The dashboard's
-# "Restart Services" button needs to run:
-#   sudo systemctl restart rnsd
-#   sudo systemctl restart reticulumpi
-# via the /etc/sudoers.d/reticulumpi-services NOPASSWD rule.
-# NoNewPrivileges=yes blocks sudo entirely ("no new privileges" flag error).
-# The reticulumpi user is already unprivileged, and the sudoers rule
-# restricts escalation to exactly those two systemctl commands.
+# Security hardening. Privileged operations go through the root-owned,
+# peer-credential-checking reticulumpi-control socket; the service itself can
+# never gain privileges; upgrades remove every legacy runtime sudo rule.
+NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/var/lib/reticulumpi /home/reticulumpi/.reticulum /home/reticulumpi/.config/reticulumpi /home/reticulumpi/.local/share/reticulumpi /home/reticulumpi/.nomadnet /home/reticulumpi/.nomadnet-tui /opt/reticulumpi/meshchat/storage /etc/chrony/conf.d /etc/dnsmasq.d /etc/reticulumpi /run/sudo
+ProtectHome=true
+StateDirectory=reticulumpi
+StateDirectoryMode=0750
+CacheDirectory=reticulumpi
+CacheDirectoryMode=0750
+ReadWritePaths=/var/lib/reticulumpi /var/cache/reticulumpi
 PrivateTmp=yes
 RuntimeDirectory=reticulumpi
+RuntimeDirectoryMode=0750
 
 # Resource limits — prevent runaway plugins from starving the system
 # MemoryHigh triggers kernel reclaim pressure before the hard MemoryMax

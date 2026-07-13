@@ -3,17 +3,27 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     volumes:
-      - ./config:/config
+      - ./config/config.yaml:/config/config.yaml:ro
       - reticulumpi-data:/data
-      - nomadnet-data:/home/reticulumpi/.nomadnet
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /cache:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700
+      - /run/reticulumpi:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
     # Host networking required for Reticulum UDP/TCP interfaces
     network_mode: host
     restart: unless-stopped
+    stop_grace_period: 60s
     # Uncomment to pass through serial devices (LoRa radio, etc.)
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
 
 volumes:
   reticulumpi-data:
-  nomadnet-data:

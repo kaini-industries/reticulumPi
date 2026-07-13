@@ -139,7 +139,7 @@ class MeshCoreObserver(PluginBase):
         _patch_paho_websocket()
 
         self._lock = threading.Lock()
-        self._start_time = time.time()
+        self._start_monotonic = time.monotonic()
 
         # Stats
         self._packets_captured = 0
@@ -511,7 +511,7 @@ class MeshCoreObserver(PluginBase):
             self._sleep_while_active(5)
 
     def _try_attach_to_gateway(self) -> None:
-        gw = self.app.get_plugin("meshcore_gateway")
+        gw = self.get_ready_plugin("meshcore_gateway")
         if gw is None:
             return
         gw_status = gw.get_status()
@@ -702,7 +702,7 @@ class MeshCoreObserver(PluginBase):
                     self.log.exception("Error publishing packet")
 
                 # Periodic status publish
-                now = time.time()
+                now = time.monotonic()
                 if now - last_status_time >= status_interval:
                     self._publish_status()
                     last_status_time = now
@@ -785,8 +785,8 @@ class MeshCoreObserver(PluginBase):
         self._mqtt_client = client
 
         # Wait briefly for connection to establish
-        deadline = time.time() + 10
-        while time.time() < deadline and not self._connected_mqtt and self._active:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not self._connected_mqtt and self._active:
             time.sleep(0.2)
 
         if not self._connected_mqtt:
@@ -908,12 +908,14 @@ class MeshCoreObserver(PluginBase):
             return
         iata = self.config.get("iata", "XXX")
         topic = f"meshcore/{iata}/{self._public_key}/status"
+        now = time.monotonic()
+        started = getattr(self, "_start_monotonic", now)
         status = {
             "online": True,
             "firmware": self._device_info.get("ver"),
             "model": self._device_info.get("model"),
             "packets_captured": self._packets_captured,
-            "uptime": int(time.time() - self._start_time),
+            "uptime": int(max(0.0, now - started)),
         }
         try:
             self._mqtt_client.publish(topic, json.dumps(status), qos=0, retain=True)

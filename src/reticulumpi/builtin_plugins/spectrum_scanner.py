@@ -49,6 +49,12 @@ from typing import Any
 from reticulumpi import events
 from reticulumpi.builtin_plugins.lora_analysis import LoraChannelAnalyzer
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.process_supervisor import (
+    ManagedProcessGroup,
+    ProcessFailure,
+    ProcessSpec,
+    RestartPolicy,
+)
 
 
 EVENT_SPECTRUM_SWEEP = events.SPECTRUM_SWEEP
@@ -189,6 +195,7 @@ class SpectrumScanner(PluginBase):
         self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
         self._power_command = str(cfg.get("power_command", "rtl_power"))
         self._max_restarts = int(cfg.get("max_restarts", 5))
+        self._restart_limit = min(5, max(0, self._max_restarts))
         self._health_interval = float(cfg.get("health_check_interval", 5.0))
 
         self._snapshot_cache: tuple[int, dict[str, Any]] | None = None
@@ -366,6 +373,7 @@ class SpectrumScanner(PluginBase):
         self._state_lock = threading.Lock()
         self._supervisor_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
+        self._process_group: ManagedProcessGroup | None = None
         self._pid: int | None = None
         self._restart_count = 0
         self._sweep_count = 0
@@ -374,6 +382,7 @@ class SpectrumScanner(PluginBase):
         self._last_error: str | None = None
         self._status = "starting"
         self._resolved_index: int | None = None
+        self._device_lease = None
         self._event_sweep_topic = EVENT_SPECTRUM_SWEEP
         self._event_status_topic = EVENT_SPECTRUM_STATUS
 
@@ -401,9 +410,14 @@ class SpectrumScanner(PluginBase):
         self._current_ts: str | None = None
 
         try:
-            from reticulumpi.rtlsdr import resolve_device
+            from reticulumpi.rtlsdr import refresh_device_lease
 
-            self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
+            self._device_lease = refresh_device_lease(
+                self._device_lease,
+                self._device_id,
+                self.plugin_name,
+            )
+            self._resolved_index = self._device_lease.index
         except (RuntimeError, ValueError) as exc:
             self.log.error("RTL-SDR device resolution failed: %s", exc)
             self._set_status("error", str(exc))
@@ -454,12 +468,7 @@ class SpectrumScanner(PluginBase):
     def stop(self) -> None:
         self._active = False
         self._terminate_process()
-        try:
-            from reticulumpi.rtlsdr import release_device
-
-            release_device(self._device_id, caller=self.plugin_name)
-        except Exception:
-            self.log.debug("SDR device release failed", exc_info=True)
+        self._release_device_lease()
         self._join_threads(timeout=5.0)
         self._set_status("stopped")
 
@@ -652,96 +661,167 @@ class SpectrumScanner(PluginBase):
                 self._power_command,
                 self.plugin_name,
             )
+            self.mark_degraded(self._last_error or f"{self._power_command} unavailable")
+            self._release_device_lease()
             return
-
-        while self._active:
-            try:
-                self._launch_rtl_power()
-            except Exception as exc:
-                self._set_status("error", f"launch failed: {exc}")
-                self.log.exception("Failed to launch rtl_power")
-                break
-
-            parser = self._start_thread(self._parser_loop, name="spectrum-parser")
-
-            # Block until rtl_power exits, parser dies, or we're stopped.
-            while self._active and self._process is not None:
-                rc = self._process.poll()
-                if rc is not None:
-                    self.log.warning("rtl_power exited (code %s)", rc)
-                    break
-                if not parser.is_alive():
-                    self.log.warning("Parser thread exited unexpectedly")
-                    break
-                self._sleep_while_active(self._health_interval)
-
-            # Wait for parser to drain.
-            parser.join(timeout=2.0)
-            self._remove_thread(parser)
-            self._terminate_process()  # idempotent; cleans up zombies
-
-            if not self._active:
-                break
-
-            try:
-                from reticulumpi.rtlsdr import invalidate_cache, resolve_device
-
-                invalidate_cache()
-                self._resolved_index = resolve_device(self._device_id, caller=self.plugin_name)
-            except Exception:
-                self.log.debug("SDR device re-resolve failed", exc_info=True)
-
-            # Backoff + restart.
-            self._restart_count += 1
-            if self._restart_count > self._max_restarts:
-                self._set_status(
-                    "error",
-                    f"rtl_power exceeded max_restarts ({self._max_restarts})",
-                )
-                self.log.error(
-                    "rtl_power exceeded max_restarts (%d); giving up",
-                    self._max_restarts,
-                )
-                break
-
-            backoff = min(60.0, 2.0**self._restart_count)
-            self._set_status("restarting", f"backoff {backoff:.0f}s")
-            self.log.info(
-                "Restarting rtl_power in %.0fs (attempt %d/%d)",
-                backoff,
-                self._restart_count,
-                self._max_restarts,
-            )
-            self._sleep_while_active(backoff)
+        try:
+            if self._device_lease is None:
+                self._refresh_device_lease()
+            self._launch_rtl_power()
+        except Exception as exc:
+            self._set_status("error", f"launch failed: {exc}")
+            self.mark_degraded(str(exc))
+            self._release_device_lease()
+            self.log.exception("Failed to launch rtl_power")
 
     def _launch_rtl_power(self) -> None:
         cmd = self._build_cmd()
         self.log.debug("Launching: %s", " ".join(cmd))
-        # stderr merged onto stdout so crash tracebacks are captured;
-        # non-CSV lines are ignored by the parser.
-        self._process = subprocess.Popen(
-            cmd,
+        group: ManagedProcessGroup
+        group = ManagedProcessGroup(
+            [self._rtl_power_spec(cmd)],
+            restart_policy=RestartPolicy(max_restarts=self._restart_limit),
+            on_started=lambda processes, restarted: self._on_process_started(
+                group,
+                processes,
+                restarted,
+            ),
+            on_unexpected_exit=lambda failure: self._on_process_failure(group, failure),
+            on_restart=lambda attempt, delay: self._on_process_restart(
+                group,
+                attempt,
+                delay,
+            ),
+            on_restart_failed=lambda error, attempt: self._on_process_restart_failed(
+                group,
+                error,
+                attempt,
+            ),
+            on_exhausted=lambda failure: self._on_process_exhausted(group, failure),
+        )
+        self._process_group = group
+        try:
+            group.start()
+        except Exception:
+            if self._process_group is group:
+                self._process_group = None
+            raise
+
+    @staticmethod
+    def _rtl_power_spec(cmd: list[str]) -> ProcessSpec:
+        return ProcessSpec(
+            tuple(cmd),
+            name="rtl_power",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            # text mode enables proper line buffering; bufsize=1 only works
-            # with text streams (binary mode silently falls back to block
-            # buffering which would stall the parser until a large block
-            # fills).
             text=True,
             encoding="utf-8",
             errors="replace",
             bufsize=1,
         )
-        self._pid = self._process.pid
+
+    def _on_process_started(
+        self,
+        group: ManagedProcessGroup,
+        processes: tuple[subprocess.Popen[Any], ...],
+        restarted: bool,
+    ) -> None:
+        process = processes[0]
+        if self._process_group is not group or not self._active:
+            raise RuntimeError("stale rtl_power launch completed after scanner stop")
+        self._process = process
+        self._pid = process.pid
         self._current_ts = None
         self._segments = {}
+        self._restart_count = group.restart_count if restarted else 0
         self._set_status("running")
+        if self.plugin_state.value == "ready":
+            self.mark_ready()
+        self._start_thread(
+            lambda: self._parser_loop(process),
+            name="spectrum-parser",
+        )
         self.log.info(
             "Started rtl_power sweep %.2f-%.2f MHz (PID %d)",
             self._freq_start_mhz,
             self._freq_stop_mhz,
             self._pid,
         )
+
+    def _on_process_failure(
+        self,
+        group: ManagedProcessGroup,
+        failure: ProcessFailure,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._set_status(
+            "restarting",
+            f"{failure.stage_name or 'rtl_power'}: {failure.reason} (rc={failure.returncode})",
+        )
+        self.mark_degraded(self._last_error or failure.reason)
+        self._release_device_lease()
+
+    def _on_process_restart(
+        self,
+        group: ManagedProcessGroup,
+        attempt: int,
+        delay: float,
+    ) -> None:
+        if self._process_group is not group or not self._active:
+            raise RuntimeError("spectrum scanner stopped during restart backoff")
+        self._set_status("restarting", f"backoff {delay:.0f}s")
+        self._refresh_device_lease()
+        group.replace_specs([self._rtl_power_spec(self._build_cmd())])
+        self._restart_count = attempt
+
+    def _on_process_restart_failed(
+        self,
+        group: ManagedProcessGroup,
+        error: BaseException,
+        attempt: int,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._restart_count = attempt
+        self._set_status("restarting", f"restart {attempt} failed: {error}")
+        self.mark_degraded(self._last_error or str(error))
+        self._release_device_lease()
+
+    def _on_process_exhausted(
+        self,
+        group: ManagedProcessGroup,
+        failure: ProcessFailure,
+    ) -> None:
+        if self._process_group is not group:
+            return
+        self._restart_count = group.restart_count
+        self._set_status(
+            "error",
+            f"rtl_power exceeded restart limit ({self._restart_limit}): {failure.reason}",
+        )
+        self.mark_degraded(self._last_error or failure.reason)
+        self._release_device_lease()
+
+    def _refresh_device_lease(self) -> None:
+        from reticulumpi.rtlsdr import invalidate_cache, refresh_device_lease
+
+        invalidate_cache()
+        self._device_lease = refresh_device_lease(
+            self._device_lease,
+            self._device_id,
+            self.plugin_name,
+        )
+        self._resolved_index = self._device_lease.index
+
+    def _release_device_lease(self) -> None:
+        lease = getattr(self, "_device_lease", None)
+        self._device_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                self.log.debug("SDR device release failed", exc_info=True)
 
     def _build_cmd(self) -> list[str]:
         assert self._rtl_power_path is not None
@@ -764,41 +844,23 @@ class SpectrumScanner(PluginBase):
         return cmd
 
     def _terminate_process(self) -> None:
-        proc = self._process
+        group = getattr(self, "_process_group", None)
+        self._process_group = None
         self._process = None
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.log.warning("rtl_power did not stop; sending SIGKILL")
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        self.log.warning("rtl_power did not exit after SIGKILL")
-        except Exception:
-            self.log.exception("Error stopping rtl_power")
-        finally:
-            if proc.stdout:
-                try:
-                    proc.stdout.close()
-                except OSError:
-                    pass
+        self._pid = None
+        if group is not None:
+            group.stop()
 
     # --- parser --------------------------------------------------------------
 
-    def _parser_loop(self) -> None:
+    def _parser_loop(self, proc: subprocess.Popen[Any] | None = None) -> None:
         """Read rtl_power CSV from stdout, assembling one sweep per timestamp."""
-        proc = self._process
+        proc = proc or self._process
         if proc is None or proc.stdout is None:
             return
         fd = proc.stdout.fileno()
         try:
-            while self._active:
+            while self._active and self._process is proc and proc.poll() is None:
                 ready, _, _ = select.select([fd], [], [], 0.5)
                 if not ready:
                     continue
@@ -820,8 +882,12 @@ class SpectrumScanner(PluginBase):
             pass
         except Exception:
             self.log.exception("Parser loop crashed")
-
-        self._flush_current_sweep()
+        finally:
+            if self._process is proc:
+                self._flush_current_sweep()
+                group = self._process_group
+                if self._active and group is not None and group.running:
+                    group.notify_unexpected_eof(0, "rtl_power stdout reached EOF")
 
     def _handle_csv_line(self, line: str) -> None:
         # rtl_power CSV:

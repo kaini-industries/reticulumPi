@@ -21,7 +21,7 @@ Steps:
 
 4. **WebSocket connectivity:** `/ws/metrics` requires auth (401 without a token) — log in first:
    ```
-   PW=$(sudo cat /home/reticulumpi/.config/reticulumpi/dashboard_password.txt 2>/dev/null)
+   PW=$(sudo cat /var/lib/reticulumpi/.config/reticulumpi/dashboard_password.txt 2>/dev/null)
    .venv/bin/python - "$PW" <<'EOF'
    import asyncio, aiohttp, sys
    async def test():
@@ -43,7 +43,7 @@ Steps:
 
 5. **Auth secret:** Check that the dashboard secret file exists (dir is owned by the
    reticulumpi user, so use sudo):
-   `sudo ls -la /home/reticulumpi/.config/reticulumpi/dashboard_secret`
+   `sudo ls -la /var/lib/reticulumpi/.config/reticulumpi/dashboard_secret`
    - Default location is the `secret_dir` config option (`~/.config/reticulumpi`).
 
 6. **Static files:** Verify key frontend files exist:

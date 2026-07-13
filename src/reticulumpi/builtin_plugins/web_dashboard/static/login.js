@@ -2,12 +2,17 @@
   'use strict';
   var params = new URLSearchParams(window.location.search);
   var err = params.get('error');
+  var changed = params.get('password_changed');
   if (err) {
     var el = document.getElementById('error');
     if (err === 'rate_limited') el.textContent = 'Too many attempts. Please wait and try again.';
     else if (err === 'empty') el.textContent = 'Password is required.';
     else el.textContent = 'Invalid password.';
     el.hidden = false;
+  } else if (changed === '1') {
+    var changedEl = document.getElementById('error');
+    changedEl.textContent = 'Password changed. Sign in with your new password.';
+    changedEl.hidden = false;
   }
 
   // AJAX login — avoids full page reload, uses X-Requested-With for CSRF
@@ -27,19 +32,20 @@
       btn.textContent = 'Logging in...';
       errEl.hidden = true;
 
-      fetch('/api/auth/login', {
+      window.RPI.jsonFetch('/api/auth/login', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
           'Accept': 'application/json',
           'X-Requested-With': 'XMLHttpRequest'
         },
         credentials: 'same-origin',
-        body: JSON.stringify({ password: pw.value })
+        json: { password: pw.value }
       }).then(function(r) {
         if (r.ok) {
-          window.location.href = '/';
-          return;
+          return r.json().catch(function() { return {}; }).then(function(data) {
+            var required = data && data.data && data.data.password_change_required;
+            window.location.href = required ? '/?password_change=required' : '/';
+          });
         }
         return r.json().catch(function() { return {}; }).then(function(data) {
           if (r.status === 429) {

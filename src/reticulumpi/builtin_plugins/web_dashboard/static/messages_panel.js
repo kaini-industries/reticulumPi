@@ -1179,7 +1179,7 @@
           _addReadGrace(cid);
           api('/api/messages/read', {
             method: 'POST',
-            body: {contact_id: cid},
+            json: {contact_id: cid},
           });
         }
       }
@@ -1201,44 +1201,48 @@
     function _onDeleteConversation() {
       if (!_activeContactId) return;
       var name = _dom.threadName ? _dom.threadName.textContent : 'this conversation';
-      if (!window.confirm('Delete all messages in "' + name + '"? This cannot be undone.')) {
-        return;
-      }
-      var cid = _activeContactId;
-      _deletePending = cid;
-      _addReadGrace(cid);
-      api('/api/messages/conversation/' + encodeURIComponent(cid), {method: 'DELETE'})
-        .then(function (r) {
-          if (!r || !r.ok) {
-            _deletePending = null;
-            _setFeedback((r && r.error) || 'Delete failed', 'error');
-            return;
-          }
-          var deleted = (r.data && r.data.deleted) || 0;
-          _threadMessages = [];
-          if (_dom.chat) {
-            _dom.chat.innerHTML = '<div class="msg-deleted-notice">Deleted ' +
-              deleted + ' message' + (deleted === 1 ? '' : 's') +
-              ' from &ldquo;' + esc(name) + '&rdquo;</div>';
-          }
-          if (_unreadCounts[cid]) {
-            delete _unreadCounts[cid];
-            _updateUnreadUI();
-          }
-          _conversations = _conversations.filter(function (c) {
-            return c.contact_id !== cid;
-          });
-          _renderConversations();
-          _activeContactId = null;
-          _activeMsgType = null;
-          if (_dom.threadName) _dom.threadName.textContent = 'Select a conversation';
-          if (_dom.compose) _dom.compose.classList.add('hidden');
-          if (_dom.deleteBtn) _dom.deleteBtn.classList.add('hidden');
-          _goBack();
-          Promise.all([_fetchConversations(), _fetchUnread()])
-            .then(function () { _deletePending = null; })
-            .catch(function () { _deletePending = null; });
-        }).catch(function () { _deletePending = null; });
+      R.confirmDestructive(
+        'Delete conversation',
+        'Delete all messages in "' + name + '"? This cannot be undone.',
+        'Delete messages'
+      ).then(function(confirmed) {
+        if (!confirmed || !_activeContactId) return;
+        var cid = _activeContactId;
+        _deletePending = cid;
+        _addReadGrace(cid);
+        api('/api/messages/conversation/' + encodeURIComponent(cid), {method: 'DELETE'})
+          .then(function (r) {
+            if (!r || !r.ok) {
+              _deletePending = null;
+              _setFeedback((r && r.error) || 'Delete failed', 'error');
+              return;
+            }
+            var deleted = (r.data && r.data.deleted) || 0;
+            _threadMessages = [];
+            if (_dom.chat) {
+              _dom.chat.innerHTML = '<div class="msg-deleted-notice">Deleted ' +
+                deleted + ' message' + (deleted === 1 ? '' : 's') +
+                ' from &ldquo;' + esc(name) + '&rdquo;</div>';
+            }
+            if (_unreadCounts[cid]) {
+              delete _unreadCounts[cid];
+              _updateUnreadUI();
+            }
+            _conversations = _conversations.filter(function (c) {
+              return c.contact_id !== cid;
+            });
+            _renderConversations();
+            _activeContactId = null;
+            _activeMsgType = null;
+            if (_dom.threadName) _dom.threadName.textContent = 'Select a conversation';
+            if (_dom.compose) _dom.compose.classList.add('hidden');
+            if (_dom.deleteBtn) _dom.deleteBtn.classList.add('hidden');
+            _goBack();
+            Promise.all([_fetchConversations(), _fetchUnread()])
+              .then(function () { _deletePending = null; })
+              .catch(function () { _deletePending = null; });
+          }).catch(function () { _deletePending = null; });
+      });
     }
 
     function _toggleNewCompose() {
@@ -1294,27 +1298,7 @@
       return {destination: peer, msgType: 'direct'};
     }
 
-    function _onSend() {
-      if (_sending) return;
-      var target = _resolveSendTarget();
-      if (!_dom.text) return;
-      var text = _dom.text.value.trim();
-      if (!text || !target) return;
-      _sending = true;
-      if (_dom.sendBtn) _dom.sendBtn.disabled = true;
-      _setFeedback('Sending…', '');
-
-      if (_maxBytes && new TextEncoder().encode(text).length > _maxBytes) {
-        if (!window.confirm(
-          'Message exceeds ' + _maxBytes + ' bytes and will be truncated. Send anyway?'
-        )) {
-          _sending = false;
-          if (_dom.sendBtn) _dom.sendBtn.disabled = false;
-          _setFeedback('', '');
-          return;
-        }
-      }
-
+    function _sendResolved(target, text) {
       var body = {
         transport: cfg.transport,
         text: text,
@@ -1338,7 +1322,7 @@
         }
       }
 
-      api('/api/messages/send', {method: 'POST', body: body})
+      api('/api/messages/send', {method: 'POST', json: body})
         .then(function (r) {
           if (!r) { _setFeedback('Network error', 'error'); return; }
           if (!r.ok) { _setFeedback(r.error || 'Send failed', 'error'); return; }
@@ -1360,6 +1344,39 @@
           _sending = false;
           if (_dom.sendBtn) _dom.sendBtn.disabled = false;
         });
+    }
+
+    function _onSend() {
+      if (_sending) return;
+      var target = _resolveSendTarget();
+      if (!_dom.text) return;
+      var text = _dom.text.value.trim();
+      if (!text || !target) return;
+      _sending = true;
+      if (_dom.sendBtn) _dom.sendBtn.disabled = true;
+      _setFeedback('Sending…', '');
+
+      var confirmation = Promise.resolve(true);
+      if (_maxBytes && new TextEncoder().encode(text).length > _maxBytes) {
+        confirmation = R.confirmDestructive(
+          'Send truncated message',
+          'This message exceeds ' + _maxBytes + ' bytes and will be truncated.',
+          'Send anyway'
+        );
+      }
+      confirmation.then(function(confirmed) {
+        if (!confirmed) {
+          _sending = false;
+          if (_dom.sendBtn) _dom.sendBtn.disabled = false;
+          _setFeedback('', '');
+          return;
+        }
+        _sendResolved(target, text);
+      }).catch(function() {
+        _sending = false;
+        if (_dom.sendBtn) _dom.sendBtn.disabled = false;
+        _setFeedback('Confirmation failed', 'error');
+      });
     }
 
     function _onInsertGps() {
@@ -1659,7 +1676,7 @@
           _addReadGrace(row.contact_id);
           api('/api/messages/read', {
             method: 'POST',
-            body: {contact_id: row.contact_id},
+            json: {contact_id: row.contact_id},
           });
         }
       } else if (isReceived) {
@@ -1855,11 +1872,14 @@
   R.openChannelDialog = function () {
     var overlay = $('channel-dialog-overlay');
     if (!overlay) return;
-    overlay.style.display = 'flex';
+    if (typeof overlay.showModal === 'function') overlay.showModal();
+    else overlay.style.display = 'flex';
     // Always show fresh state when the dialog opens — a stale cache
     // here would mislead the user about what's currently configured.
     _invalidateChannels();
     _refreshChannelList();
+    var firstField = $('channel-join-url');
+    if (firstField) firstField.focus();
   };
 
   function _refreshChannelList() {
@@ -1891,7 +1911,10 @@
 
   function _closeChannelDialog() {
     var o = $('channel-dialog-overlay');
-    if (o) o.style.display = 'none';
+    if (o) {
+      if (typeof o.close === 'function' && o.open) o.close();
+      else o.style.display = 'none';
+    }
     ['channel-join-url', 'channel-join-name', 'channel-join-psk'].forEach(
       function (x) { var el = $(x); if (el) el.value = ''; },
     );
@@ -1915,7 +1938,7 @@
     _channelOpPending = true;
     var body = url ? {url: url} : {name: name, psk: psk || 'default'};
     if (fb) { fb.textContent = 'Joining…'; fb.className = 'msg-feedback'; }
-    api('/api/meshtastic/channels/join', {method: 'POST', body: body}).then(
+    api('/api/meshtastic/channels/join', {method: 'POST', json: body}).then(
       function (r) {
         _channelOpPending = false;
         if (!r || !r.ok) {
@@ -1934,23 +1957,29 @@
 
   function _deleteChannel(idx) {
     if (_channelOpPending) return;
-    if (!window.confirm('Leave this channel? The PSK may not be recoverable.')) return;
-    _channelOpPending = true;
-    var fb = $('channel-join-feedback');
-    api('/api/meshtastic/channels/' + idx, {method: 'DELETE'}).then(
-      function (r) {
-        _channelOpPending = false;
-        if (!r || !r.ok) {
-          if (fb) {
-            fb.textContent = (r && r.error) || 'Delete failed';
-            fb.className = 'msg-feedback error';
+    R.confirmDestructive(
+      'Leave Meshtastic channel',
+      'Leave this channel? Its pre-shared key may not be recoverable.',
+      'Leave channel'
+    ).then(function(confirmed) {
+      if (!confirmed) return;
+      _channelOpPending = true;
+      var fb = $('channel-join-feedback');
+      api('/api/meshtastic/channels/' + idx, {method: 'DELETE'}).then(
+        function (r) {
+          _channelOpPending = false;
+          if (!r || !r.ok) {
+            if (fb) {
+              fb.textContent = (r && r.error) || 'Delete failed';
+              fb.className = 'msg-feedback error';
+            }
+            return;
           }
-          return;
-        }
-        _notifyChannelChange();
-        _refreshChannelList();
-      },
-    ).catch(function () { _channelOpPending = false; });
+          _notifyChannelChange();
+          _refreshChannelList();
+        },
+      ).catch(function () { _channelOpPending = false; });
+    });
   }
 
   function _notifyChannelChange() {
@@ -1963,20 +1992,47 @@
     }
   }
 
-  // Wire dialog close/join buttons once the DOM is ready
-  document.addEventListener('DOMContentLoaded', function () {
+  var _messagesFeatureInitialized = false;
+  function _onChannelOverlayClick(e) {
+    if (e.target === e.currentTarget) _closeChannelDialog();
+  }
+  function _onChannelDialogCancel(e) {
+    e.preventDefault();
+    _closeChannelDialog();
+  }
+  function _onChannelListClick(e) {
+    var btn = e.target.closest('.channel-delete-btn');
+    if (btn) _deleteChannel(parseInt(btn.getAttribute('data-index'), 10));
+  }
+
+  // Explicit ESM lifecycle hook.  The feature bundle is imported after DOM
+  // readiness, so relying on DOMContentLoaded would permanently skip wiring.
+  R.initMessagesFeature = function () {
+    if (_messagesFeatureInitialized) return;
     var close = $('channel-dialog-close');
     var join = $('channel-join-btn');
     var overlay = $('channel-dialog-overlay');
     var list = $('channel-list');
     if (close) close.addEventListener('click', _closeChannelDialog);
     if (join) join.addEventListener('click', _joinChannel);
-    if (overlay) overlay.addEventListener('click', function (e) {
-      if (e.target === overlay) _closeChannelDialog();
-    });
-    if (list) list.addEventListener('click', function (e) {
-      var btn = e.target.closest('.channel-delete-btn');
-      if (btn) _deleteChannel(parseInt(btn.getAttribute('data-index'), 10));
-    });
-  });
+    if (overlay) overlay.addEventListener('click', _onChannelOverlayClick);
+    if (overlay) overlay.addEventListener('cancel', _onChannelDialogCancel);
+    if (list) list.addEventListener('click', _onChannelListClick);
+    _messagesFeatureInitialized = true;
+  };
+
+  R.disposeMessagesFeature = function () {
+    if (!_messagesFeatureInitialized) return;
+    var close = $('channel-dialog-close');
+    var join = $('channel-join-btn');
+    var overlay = $('channel-dialog-overlay');
+    var list = $('channel-list');
+    if (close) close.removeEventListener('click', _closeChannelDialog);
+    if (join) join.removeEventListener('click', _joinChannel);
+    if (overlay) overlay.removeEventListener('click', _onChannelOverlayClick);
+    if (overlay) overlay.removeEventListener('cancel', _onChannelDialogCancel);
+    if (list) list.removeEventListener('click', _onChannelListClick);
+    _closeChannelDialog();
+    _messagesFeatureInitialized = false;
+  };
 })();

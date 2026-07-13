@@ -338,7 +338,7 @@ class PathWarmerPlugin(PluginBase):
         """
         data_map: dict[str, dict[str, float]] = {}
         try:
-            conn_mon = self.app.get_plugin("connectivity_monitor")
+            conn_mon = self.get_ready_plugin("connectivity_monitor")
             if not conn_mon or not hasattr(conn_mon, "get_routing_data"):
                 return data_map
 
@@ -385,7 +385,7 @@ class PathWarmerPlugin(PluginBase):
             cutoff = time.time() - (recent_hours * 3600)
 
             try:
-                net_map = self.app.get_plugin("network_map")
+                net_map = self.get_ready_plugin("network_map")
                 if net_map and hasattr(net_map, "get_known_nodes"):
                     nodes = net_map.get_known_nodes()
                     recent = [n for n in nodes if n.get("last_seen", 0) > cutoff]

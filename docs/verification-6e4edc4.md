@@ -1,5 +1,9 @@
 # Verification Report: Commit 6e4edc4
 
+> **Historical / non-normative.** This is one commit-scoped review, not current release
+> evidence. The versioned records under `docs/release-verification/` and current security,
+> installation, and testing documentation take precedence.
+
 **Commit:** `6e4edc4` -- Fix node tracker map trails never auto-refreshing
 **Date:** 2026-06-08
 **Method:** 5-agent parallel workflow (Opus 4.6), 6 agents total including synthesis

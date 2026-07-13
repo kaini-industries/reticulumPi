@@ -63,11 +63,11 @@
     var rotation = (track != null) ? track : 0;
     var color = _isEmergency(squawk) ? '#ff1744' : _altColor(alt);
     var size = _isEmergency(squawk) ? 28 : 22;
-    var html = '<svg viewBox="0 0 24 24" width="' + size + '" height="' + size + '" '
-      + 'style="transform:rotate(' + rotation + 'deg)">'
+    var html = '<svg viewBox="0 0 24 24" width="' + size + '" height="' + size + '">'
+      + '<g transform="rotate(' + rotation + ' 12 12)">'
       + '<path d="M12 2 L10 9 L3 12 L10 13 L10 20 L8 22 L12 21 L16 22 L14 20 L14 13 L21 12 L14 9 Z" '
       + 'fill="' + color + '" stroke="#000" stroke-width="0.8" opacity="0.9"/>'
-      + '</svg>';
+      + '</g></svg>';
     return L.divIcon({
       className: 'adsb-marker',
       html: html,

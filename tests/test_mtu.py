@@ -33,7 +33,12 @@ class TestTruncateForMtu:
     def test_header_exceeds_mtu(self):
         header = "X" * 250
         result = truncate_for_mtu(header, "body", 237)
-        assert result == header
+        assert result == "X" * 237
+        assert len(result.encode("utf-8")) == 237
+
+    def test_tiny_budget_never_exceeds_mtu(self):
+        result = truncate_for_mtu("header", "body", 3)
+        assert len(result.encode("utf-8")) <= 3
 
 
 class TestTruncateBytes:

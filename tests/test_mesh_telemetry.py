@@ -138,6 +138,51 @@ def test_get_status(mock_dest, mock_transport, mock_app, plugin_config):
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
+def test_uptime_and_peer_ttl_ignore_wall_clock_jumps(
+    mock_dest,
+    mock_transport,
+    mock_app,
+    plugin_config,
+):
+    from reticulumpi.builtin_plugins.mesh_telemetry import MeshTelemetryPlugin
+    import RNS.vendor.umsgpack as umsgpack
+
+    plugin = MeshTelemetryPlugin(mock_app, plugin_config)
+    plugin.start()
+    plugin.stop()
+    clock = {"wall": 1_000.0, "monotonic": 100.0}
+    plugin._start_monotonic = 90.0
+    destination = b"\xaa" * 16
+
+    with (
+        patch(
+            "reticulumpi.builtin_plugins.mesh_telemetry.time.time",
+            side_effect=lambda: clock["wall"],
+        ),
+        patch(
+            "reticulumpi.builtin_plugins.mesh_telemetry.time.monotonic",
+            side_effect=lambda: clock["monotonic"],
+        ),
+    ):
+        plugin.record_peer_metrics(destination, umsgpack.packb({"name": "Peer"}))
+        assert plugin._peer_metrics[destination]["last_seen"] == 1_000.0
+
+        clock["wall"] = 9_999_999_999.0
+        clock["monotonic"] = 105.0
+        plugin._evict_stale_peers(10.0)
+        assert destination in plugin._peer_metrics
+
+        payload = umsgpack.unpackb(plugin._build_telemetry_payload())
+        assert payload["uptime"] == 15
+
+        clock["wall"] = -9_999_999_999.0
+        clock["monotonic"] = 111.0
+        plugin._evict_stale_peers(10.0)
+        assert destination not in plugin._peer_metrics
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
 def test_broadcast_cache_returns_cached_within_ttl(
     mock_dest, mock_transport, mock_app, plugin_config
 ):

@@ -3,13 +3,21 @@ Description=Reticulum Network Stack Daemon
 After=network.target i2pd.service
 # If i2pd is installed, wait for it to start (SAM API needs to be ready)
 # This is a soft dependency — rnsd still starts without i2pd
-After=i2pd.service
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
 User=reticulumpi
 Group=reticulumpi
-ExecStart=/opt/reticulumpi/.venv/bin/rnsd
+Environment=HOME=/var/lib/reticulumpi
+Environment=XDG_CONFIG_HOME=/var/lib/reticulumpi/.config
+Environment=XDG_DATA_HOME=/var/lib/reticulumpi/.local/share
+Environment=XDG_STATE_HOME=/var/lib/reticulumpi/.local/state
+Environment=XDG_CACHE_HOME=/var/cache/reticulumpi
+WorkingDirectory=/var/lib/reticulumpi
+UMask=0077
+ExecStart=/opt/reticulumpi/current/.venv/bin/rnsd
 
 # Ensure Python tracebacks and RNS logs appear in journalctl
 StandardOutput=journal
@@ -18,9 +26,6 @@ StandardError=journal
 # Restart policy with backoff to prevent crash-loop storms
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=10
-StartLimitIntervalSec=300
-
 # Give I2P interface time to connect to SAM API on restart
 ExecStartPre=/bin/sleep 3
 
@@ -34,8 +39,12 @@ TimeoutStartSec=120
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/home/reticulumpi/.reticulum /home/reticulumpi/.local/share
+ProtectHome=true
+StateDirectory=reticulumpi
+StateDirectoryMode=0750
+CacheDirectory=reticulumpi
+CacheDirectoryMode=0750
+ReadWritePaths=/var/lib/reticulumpi /var/cache/reticulumpi
 PrivateTmp=yes
 
 [Install]

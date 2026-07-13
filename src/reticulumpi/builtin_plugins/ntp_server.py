@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from reticulumpi import events
+from reticulumpi.control_client import DEFAULT_CONTROL_SOCKET, request_control
 from reticulumpi.plugin_base import PluginBase
 
 # chronyc -c tracking fields (comma-separated)
@@ -84,13 +85,14 @@ class NtpServerPlugin(PluginBase):
     def start(self) -> None:
         self._active = True
         self._lock = threading.Lock()
-        self._start_time = time.time()
+        self._start_time = time.monotonic()
         self._check_interval = self.config.get("check_interval", 30)
 
         # Sync state
         self._sync_state: str = "unknown"
         self._prev_sync_state: str = "unknown"
         self._last_synced_time: float = 0.0
+        self._sync_lost_since: float | None = None
         self._sync_lost_alerted = False
 
         # Chrony data
@@ -100,7 +102,7 @@ class NtpServerPlugin(PluginBase):
         self._check_errors = 0
 
         # Source recovery state
-        self._last_online_recovery: float = 0.0
+        self._last_online_recovery: float | None = None
         self._online_recovery_interval = self.config.get("online_recovery_interval", 300)
 
         # GPS refclock state
@@ -109,7 +111,12 @@ class NtpServerPlugin(PluginBase):
         self._manage_chrony = self.config.get("manage_chrony_config", True)
         self._conf_dir = self.config.get("chrony_conf_dir", "/etc/chrony/conf.d")
         self._conf_path = os.path.join(self._conf_dir, "reticulumpi-gps.conf")
-        self._use_sudo = self.config.get("sudo_chronyc", True)
+        self._control_socket = self.config.get("control_socket", str(DEFAULT_CONTROL_SOCKET))
+        if "sudo_chronyc" in self.config:
+            self.log.warning(
+                "ntp_server.sudo_chronyc is ignored; privileged chrony actions "
+                "require the ReticulumPi control broker"
+            )
 
         # Subscribe to GPS events for auto-configuration
         gps_cfg = self.config.get("gps_refclock", {})
@@ -144,10 +151,10 @@ class NtpServerPlugin(PluginBase):
                 "ref_id": self._tracking.get("ref_id_name"),
                 "offset_ms": self._tracking.get("system_time_offset_ms"),
                 "last_check_age_s": (
-                    round(time.time() - self._last_check, 1) if self._last_check else None
+                    round(time.monotonic() - self._last_check, 1) if self._last_check else None
                 ),
                 "check_errors": self._check_errors,
-                "uptime": time.time() - self._start_time,
+                "uptime": time.monotonic() - self._start_time,
             }
 
     def get_snapshot(self) -> dict[str, Any]:
@@ -172,7 +179,7 @@ class NtpServerPlugin(PluginBase):
                 with self._lock:
                     self._tracking = parsed_tracking
                     self._sources = parsed_sources
-                    self._last_check = time.time()
+                    self._last_check = time.monotonic()
                     self._prev_sync_state = self._sync_state
                     self._sync_state = self._determine_sync_state(
                         parsed_tracking,
@@ -200,8 +207,6 @@ class NtpServerPlugin(PluginBase):
 
     def _run_chronyc(self, command: str) -> str:
         cmd = ["chronyc", "-c", command]
-        if self._use_sudo:
-            cmd = ["sudo", "-n"] + cmd
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -331,8 +336,8 @@ class NtpServerPlugin(PluginBase):
             # Check for prolonged sync loss
             if curr == "unsynced" and not self._sync_lost_alerted:
                 threshold = self.config.get("sync_loss_threshold", 300)
-                if self._last_synced_time > 0:
-                    lost_duration = time.time() - self._last_synced_time
+                if self._sync_lost_since is not None:
+                    lost_duration = time.monotonic() - self._sync_lost_since
                     if lost_duration >= threshold and self.config.get("alert_on_sync_loss", True):
                         self._sync_lost_alerted = True
                         self.event_bus.publish(
@@ -351,6 +356,7 @@ class NtpServerPlugin(PluginBase):
         # State changed
         if curr in ("synced", "gps_disciplined"):
             self._last_synced_time = time.time()
+            self._sync_lost_since = None
             self._sync_lost_alerted = False
             self.event_bus.publish(
                 events.NTP_SYNC_ACQUIRED,
@@ -366,6 +372,7 @@ class NtpServerPlugin(PluginBase):
                 self._tracking.get("ref_id_name"),
             )
         elif curr == "unsynced" and prev in ("synced", "gps_disciplined"):
+            self._sync_lost_since = time.monotonic()
             self.log.warning("NTP sync state changed to unsynced")
 
     # ── Source recovery ─────────────────────────────────────────────────
@@ -379,8 +386,11 @@ class NtpServerPlugin(PluginBase):
         if any_reachable:
             return
 
-        now = time.time()
-        if now - self._last_online_recovery < self._online_recovery_interval:
+        now = time.monotonic()
+        if (
+            self._last_online_recovery is not None
+            and now - self._last_online_recovery < self._online_recovery_interval
+        ):
             return
 
         self._last_online_recovery = now
@@ -389,17 +399,28 @@ class NtpServerPlugin(PluginBase):
             len(network_sources),
         )
         try:
-            cmd = ["chronyc", "online"]
-            if self._use_sudo:
-                cmd = ["sudo", "-n"] + cmd
-            subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True)
+            request_control(
+                "chrony",
+                ["online"],
+                socket_path=self._control_socket,
+                timeout=15.0,
+            )
         except Exception:
-            self.log.debug("chronyc online failed", exc_info=True)
+            self.log.warning("Chrony online recovery rejected by control broker", exc_info=True)
 
     # ── GPS refclock management ────────────────────────────────────────
 
     def _on_gps_fix(self, event_type: str, data: dict[str, Any]) -> None:
         if self._gps_refclock_configured:
+            with self._lock:
+                was_active = self._gps_refclock_active
+                self._gps_refclock_active = True
+            if not was_active:
+                self.event_bus.publish(
+                    events.NTP_GPS_REFCLOCK_ACTIVE,
+                    {"recovered": True},
+                )
+                self.log.info("GPS fix recovered — configured refclock is active")
             return
         if not self._manage_chrony:
             return
@@ -434,16 +455,11 @@ class NtpServerPlugin(PluginBase):
             ("pps_precision", pps_precision),
         ]:
             if "\n" in val or "\r" in val:
-                raise ValueError(
-                    f"GPS refclock {name} must not contain newlines"
-                )
+                raise ValueError(f"GPS refclock {name} must not contain newlines")
 
         if pps_device:
             if not self._PPS_DEVICE_RE.match(pps_device):
-                raise ValueError(
-                    f"Invalid pps_device '{pps_device}': "
-                    "must match /dev/pps<N>"
-                )
+                raise ValueError(f"Invalid pps_device '{pps_device}': must match /dev/pps<N>")
 
         lines = [
             "# ReticulumPi GPS refclock — managed by ntp_server plugin",
@@ -466,42 +482,23 @@ class NtpServerPlugin(PluginBase):
         except OSError:
             pass
 
-        # Write config snippet
         try:
-            if self._use_sudo:
-                subprocess.run(
-                    ["sudo", "-n", "tee", self._conf_path],
-                    input=content,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=True,
-                )
-            else:
-                os.makedirs(self._conf_dir, exist_ok=True)
-                with open(self._conf_path, "w") as f:
-                    f.write(content)
-        except Exception as exc:
-            self.log.warning("Could not write chrony GPS config: %s", exc)
-            return
-
-        # Restart chrony to pick up the new config.
-        # chronyc reload sources returns "501 Not authorised" when called from
-        # inside systemd's ProtectSystem=strict mount namespace, so we go
-        # through systemctl which talks to PID-1 via D-Bus instead.
-        try:
-            restart_cmd = ["systemctl", "restart", "chrony"]
-            if self._use_sudo:
-                restart_cmd = ["sudo", "-n"] + restart_cmd
-            subprocess.run(
-                restart_cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=True,
+            request_control(
+                "chrony",
+                [
+                    "configure",
+                    str(shm_segment),
+                    precision,
+                    str(offset),
+                    str(delay),
+                    str(pps_device or "-"),
+                    pps_precision,
+                ],
+                socket_path=self._control_socket,
+                timeout=45.0,
             )
         except Exception as exc:
-            self.log.warning("Could not restart chrony: %s", exc)
+            self.log.warning("Could not configure chrony through control broker: %s", exc)
             return
 
         with self._lock:
@@ -516,34 +513,25 @@ class NtpServerPlugin(PluginBase):
             },
         )
         self.log.info(
-            "GPS refclock configured (SHM %d%s)",
+            "GPS refclock configured through control broker (SHM %d%s)",
             shm_segment,
             f" + PPS {pps_device}" if pps_device else "",
         )
 
     def _remove_gps_refclock(self) -> None:
         try:
-            if self._use_sudo:
-                subprocess.run(
-                    ["sudo", "-n", "rm", "-f", self._conf_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-            elif os.path.exists(self._conf_path):
-                os.remove(self._conf_path)
-
-            restart_cmd = ["systemctl", "restart", "chrony"]
-            if self._use_sudo:
-                restart_cmd = ["sudo", "-n"] + restart_cmd
-            subprocess.run(
-                restart_cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
+            request_control(
+                "chrony",
+                ["remove"],
+                socket_path=self._control_socket,
+                timeout=45.0,
             )
         except Exception:
-            self.log.debug("Error removing GPS refclock config", exc_info=True)
+            self.log.warning(
+                "Error removing GPS refclock through control broker",
+                exc_info=True,
+            )
+            return
 
         with self._lock:
             self._gps_refclock_configured = False

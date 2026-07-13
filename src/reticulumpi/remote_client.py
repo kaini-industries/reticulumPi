@@ -73,9 +73,9 @@ class RemoteClient:
             print(f"Requesting path to {RNS.prettyhexrep(dest_hash)}...")
             RNS.Transport.request_path(dest_hash)
             # Wait for path
-            deadline = time.time() + self._timeout
+            deadline = time.monotonic() + self._timeout
             while not RNS.Transport.has_path(dest_hash):
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     print("Error: path request timed out")
                     return False
                 time.sleep(0.5)
@@ -144,9 +144,9 @@ class RemoteClient:
         receipt = self._link.request(path, data=request_data, timeout=timeout)
 
         # Wait for response
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         while receipt.response is None and not receipt.timed_out:
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 break
             time.sleep(0.25)
 

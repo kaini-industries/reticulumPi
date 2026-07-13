@@ -1,6 +1,10 @@
 # Built-in Plugins
 
-ReticulumPi ships with 22 built-in plugins. Enable any combination in your `config.yaml`. For configuration syntax details, see the annotated `config/reticulumpi/config.example.yaml`.
+This guide explains configuration and operation for commonly deployed built-ins. The
+complete plugin count, names, versions, descriptions, and source files are generated from
+class metadata in the [built-in plugin inventory](generated-code-reference.md#built-in-plugins).
+Enable any combination in your `config.yaml`; see the annotated
+`config/reticulumpi/config.example.yaml` for syntax.
 
 For writing your own plugins, see the [Plugin Development Guide](plugin-development.md).
 
@@ -24,7 +28,7 @@ The plugin also **automatically selects the nearest LXMF propagation node** for 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `display_name` | \<node_name\> Echo | Name shown to message senders |
-| `storage_path` | ~/.local/share/reticulumpi/lxmf | LXMF message storage directory |
+| `storage_path` | /var/lib/reticulumpi/.local/share/reticulumpi/lxmf | LXMF message storage directory |
 
 Send a test message from another device using [Sideband](https://unsigned.io/sideband/) or `lxmf_send`.
 
@@ -35,7 +39,7 @@ Responds to LXMF command messages with information fetched from the internet. Se
 | Option | Default | Description |
 |--------|---------|-------------|
 | `display_name` | \<node_name\> Info | Name shown to message senders |
-| `storage_path` | ~/.local/share/reticulumpi/info_bot_lxmf | LXMF message and identity storage |
+| `storage_path` | /var/lib/reticulumpi/.local/share/reticulumpi/info_bot_lxmf | LXMF message and identity storage |
 
 Available commands:
 
@@ -67,7 +71,7 @@ Manages a [NomadNet](https://github.com/markqvist/NomadNet) daemon as a subproce
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `config_dir` | ~/.nomadnet | NomadNet config and storage directory |
+| `config_dir` | /var/lib/reticulumpi/.nomadnet | NomadNet config and storage directory |
 | `node_name` | \<node_name\> | NomadNet node name |
 | `enable_propagation` | false | Run as an LXMF propagation node |
 | `auto_restart` | true | Restart NomadNet if it crashes |
@@ -80,7 +84,10 @@ NomadNet supports executable `.mu` pages -- Python scripts that generate content
 ### Accessing the TUI over SSH
 
 ```bash
-sudo -u reticulumpi bash /opt/reticulumpi/scripts/nomadnet-tui.sh
+sudo -u reticulumpi /srv/reticulumpi/current/.venv/bin/nomadnet \
+  --textui \
+  --config /var/lib/reticulumpi/.nomadnet-tui \
+  --rnsconfig /var/lib/reticulumpi/.reticulum
 ```
 
 The TUI uses a separate browse-only config directory so the daemon continues serving pages uninterrupted.
@@ -89,13 +96,21 @@ The TUI uses a separate browse-only config directory so the daemon continues ser
 
 Manages a [MeshChat](https://github.com/liamcottle/reticulum-meshchat) web UI server as a subprocess. MeshChat provides browser-based messaging over Reticulum/LXMF.
 
-**Requires:** `--with-meshchat` during bootstrap
+**Requires:** a separately reviewed MeshChat checkout and virtual environment. The
+transactional installer does not install or update MeshChat.
+
+Production additionally requires the complete source and virtual-environment tree under a
+root-owned, non-writable path (the supported example is
+`/srv/reticulumpi-external/meshchat`) and a matching `kind: tree` record in the root-owned
+external-artifact manifest. Keep `storage_dir` under `/var/lib/reticulumpi`, outside that
+immutable tree. Missing, mutable, writable, moved, or digest-mismatched deployments are rejected
+before the plugin is constructed.
 
 **Important:** Set `use_shared_instance: true` when this plugin is enabled.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `install_dir` | /opt/reticulumpi/meshchat | MeshChat source directory |
+| `install_dir` | required | External MeshChat source directory |
 | `host` | 0.0.0.0 | Web UI listen address |
 | `port` | 8000 | Web UI port |
 | `storage_dir` | \<install_dir\>/storage | MeshChat data/identity storage |
@@ -122,7 +137,12 @@ Secure real-time web UI for monitoring your node. Shows system metrics, plugin s
 | `metrics_interval` | 5 | WebSocket push interval in seconds |
 | `max_websocket_clients` | 10 | Maximum concurrent WebSocket connections |
 
-Password is auto-generated on first start and logged once. To reset, delete `~/.config/reticulumpi/dashboard_secret` and restart.
+On first start, the generated password is written only to the mode-`0600`
+`/var/lib/reticulumpi/.config/reticulumpi/dashboard_password.txt` bootstrap file and is
+never logged. Login is
+restricted until that bootstrap value is durably replaced through the password-change flow;
+the file is removed only after the successful change. See
+[Dashboard Operations](dashboard-operations.md) for rotation and recovery.
 
 For the full API reference, see [API Reference](api-reference.md).
 
@@ -132,7 +152,7 @@ Passively monitors all Reticulum announces to build a live map of every reachabl
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `db_path` | ~/.local/share/reticulumpi/network_map.db | SQLite database path |
+| `db_path` | /var/lib/reticulumpi/.local/share/reticulumpi/network_map.db | SQLite database path |
 | `max_history_days` | 30 | Days to retain history |
 
 ## Mesh Telemetry
@@ -182,10 +202,15 @@ Send and receive files over Reticulum using `RNS.Resource` for chunked, compress
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `shared_dir` | ~/.local/share/reticulumpi/shared_files | Directory for shared files |
+| `shared_dir` | /var/lib/reticulumpi/.local/share/reticulumpi/shared_files | Directory for shared files |
 | `max_file_size_mb` | 50 | Maximum accepted file size |
-| `allowed_identities` | [] | Empty = accept from anyone |
+| `access_policy` | deny | Authorization mode: `deny`, `allowlist`, or intentional public `open` |
+| `allowed_identities` | [] | Exact hashes consulted only when `access_policy: allowlist` |
 | `auto_accept` | true | Automatically accept incoming files |
+
+New configurations fail closed with `access_policy: deny`. Use `allowlist` for normal
+authenticated exchange. `open` must be an explicit operator decision; an empty allowlist
+never silently opens a new endpoint.
 
 ## Sensor Framework
 
@@ -261,7 +286,7 @@ Monitors transport stack health -- rnsd, interfaces, I2P, and routing table. Pro
 | Option | Default | Description |
 |--------|---------|-------------|
 | `check_interval` | 30 | Seconds between diagnostic cycles |
-| `log_path` | ~/.local/share/reticulumpi/connectivity.log | Diagnostic log (5 MB rotating) |
+| `log_path` | /var/lib/reticulumpi/.local/share/reticulumpi/connectivity.log | Diagnostic log (5 MB rotating) |
 | `sam_port` | 7656 | i2pd SAM API port to probe |
 
 ## Path Warmer
@@ -283,7 +308,7 @@ Tracks reliability of transport (relay) nodes by analyzing routing table `via` f
 | Option | Default | Description |
 |--------|---------|-------------|
 | `check_interval` | 60 | Seconds between health checks |
-| `db_path` | ~/.local/share/reticulumpi/transport_health.db | SQLite database |
+| `db_path` | /var/lib/reticulumpi/.local/share/reticulumpi/transport_health.db | SQLite database |
 | `history_retention_hours` | 168 | Hours of history (7 days) |
 | `down_threshold_checks` | 3 | Consecutive absences = down |
 | `critical_path_count` | 5 | Min paths relayed to be "critical" |
@@ -327,10 +352,10 @@ Unified message store and chat UI. Bridges LXMF and Meshtastic into a single con
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `db_path` | ~/.local/share/reticulumpi/messaging_hub.db | Message database |
+| `db_path` | /var/lib/reticulumpi/.local/share/reticulumpi/messaging_hub.db | Message database |
 | `message_history_limit` | 500 | Max stored messages (0 = unlimited) |
 | `lxmf.enabled` | true | Enable LXMF adapter |
-| `lxmf.storage_path` | ~/.local/share/reticulumpi/messaging_hub_lxmf | LXMF storage |
+| `lxmf.storage_path` | /var/lib/reticulumpi/.local/share/reticulumpi/messaging_hub_lxmf | LXMF storage |
 | `lxmf.display_name` | \<node_name\> Messages | LXMF display name |
 | `meshtastic.enabled` | true | Enable Meshtastic adapter (requires gateway) |
 

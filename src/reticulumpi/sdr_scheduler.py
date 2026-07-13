@@ -53,6 +53,11 @@ class SignalSlot:
     is_active: bool = False
     last_acquired: float = 0.0
     last_yielded: float = 0.0
+    device_lease: Any | None = None
+    release_requested: bool = False
+    suspended: bool = False
+    registration_id: int = 0
+    allocation_generation: int = 0
 
 
 @dataclass
@@ -84,6 +89,7 @@ class SdrScheduler:
         self._dongles: dict[str, DongleState] = {}
         self._thread: threading.Thread | None = None
         self._running = False
+        self._next_registration_id = 0
         self._weather_override_lock = self._config.get(
             "weather_alerts_override_lock",
             True,
@@ -157,6 +163,9 @@ class SdrScheduler:
                 dongle = DongleState(serial=serial)
                 self._dongles[serial] = dongle
 
+            dongle.generation += 1
+            self._next_registration_id += 1
+
             slot = SignalSlot(
                 caller=caller,
                 serial=serial,
@@ -166,6 +175,7 @@ class SdrScheduler:
                 label=label,
                 continuous=continuous,
                 windows=list(windows) if windows else [],
+                registration_id=self._next_registration_id,
             )
             dongle.slots[caller] = slot
 
@@ -191,6 +201,8 @@ class SdrScheduler:
             slot = dongle.slots.get(caller)
             if slot and slot.is_active:
                 self._do_yield(dongle, caller, "", "", None)
+            if slot is not None:
+                dongle.generation += 1
             dongle.slots.pop(caller, None)
 
             if caller in dongle.bg_order:
@@ -299,11 +311,12 @@ class SdrScheduler:
 
     def _evaluate(self, serial: str) -> None:
         dongle = self._dongles[serial]
-        now = time.time()
+        wall_now = time.time()
+        monotonic_now = time.monotonic()
 
-        self._expire_windows(dongle, now)
+        self._expire_windows(dongle, wall_now)
 
-        winner = self._pick_winner(dongle, now)
+        winner = self._pick_winner(dongle, wall_now, monotonic_now)
         if winner is None and dongle.current_holder is None:
             return
         if winner == dongle.current_holder:
@@ -313,7 +326,7 @@ class SdrScheduler:
             current_slot = dongle.slots.get(dongle.current_holder)
             if current_slot and current_slot.priority == PRIORITY_SCHEDULED:
                 self._do_yield(dongle, dongle.current_holder, "", "", None)
-                bg = self._pick_background(dongle, now)
+                bg = self._pick_background(dongle, monotonic_now)
                 if bg:
                     self._do_acquire(dongle, bg)
             return
@@ -324,16 +337,23 @@ class SdrScheduler:
                 return
             winner_slot = dongle.slots.get(winner)
             winner_label = winner_slot.label if winner_slot else winner
-            winner_end = self._window_end(dongle, winner, now)
+            winner_end = self._window_end(dongle, winner, wall_now)
             self._do_yield(dongle, current, winner, winner_label, winner_end)
 
         self._do_acquire(dongle, winner)
 
-    def _pick_winner(self, dongle: DongleState, now: float) -> str | None:
+    def _pick_winner(
+        self,
+        dongle: DongleState,
+        wall_now: float,
+        monotonic_now: float,
+    ) -> str | None:
         best: str | None = None
         best_priority = 999
 
         for caller, slot in dongle.slots.items():
+            if slot.suspended:
+                continue
             if slot.priority == PRIORITY_CRITICAL and slot.continuous:
                 if slot.priority < best_priority:
                     best = caller
@@ -341,7 +361,7 @@ class SdrScheduler:
 
             elif slot.priority == PRIORITY_SCHEDULED:
                 for w in slot.windows:
-                    if w.start_ts <= now <= w.end_ts:
+                    if w.start_ts <= wall_now <= w.end_ts:
                         if slot.priority < best_priority:
                             best = caller
                             best_priority = slot.priority
@@ -350,7 +370,7 @@ class SdrScheduler:
         if best is not None:
             return best
 
-        return self._pick_background(dongle, now)
+        return self._pick_background(dongle, monotonic_now)
 
     def _pick_background(self, dongle: DongleState, now: float) -> str | None:
         bg = dongle.bg_order
@@ -373,8 +393,11 @@ class SdrScheduler:
             idx = dongle.bg_index % len(bg)
             candidate = bg[idx]
             slot = dongle.slots.get(candidate)
-            if slot is not None:
+            if slot is not None and not slot.suspended:
                 return candidate
+            if slot is not None:
+                dongle.bg_index += 1
+                continue
             bg.pop(idx)
             # After removal, adjust index so we don't skip the element
             # that slid into the vacated position.
@@ -460,8 +483,10 @@ class SdrScheduler:
         )
 
         slot.is_active = False
-        slot.last_yielded = time.time()
+        slot.last_yielded = time.monotonic()
+        slot.allocation_generation = 0
         dongle.current_holder = None
+        dongle.generation += 1
 
         was_locked = dongle.locked_by == caller
         if was_locked and preempted_by:
@@ -472,6 +497,8 @@ class SdrScheduler:
 
         yield_cb = slot.yield_cb
         serial = dongle.serial
+        lease = slot.device_lease
+        slot.device_lease = None
 
         self._condition.release()
         try:
@@ -480,10 +507,13 @@ class SdrScheduler:
             except Exception:
                 log.exception("yield_cb failed for %s", caller)
 
-            from reticulumpi.rtlsdr import release_device
-
             try:
-                release_device(serial, caller=caller)
+                if lease is not None:
+                    lease.release()
+                else:
+                    from reticulumpi.rtlsdr import release_device
+
+                    release_device(serial, caller=caller)
             except Exception:
                 log.debug("SDR device release failed for %s", caller, exc_info=True)
 
@@ -503,24 +533,31 @@ class SdrScheduler:
 
     def _do_acquire(self, dongle: DongleState, caller: str) -> None:
         slot = dongle.slots.get(caller)
-        if slot is None:
+        if slot is None or slot.suspended:
             return
 
         acquire_cb = slot.acquire_cb
         priority = slot.priority
         serial = dongle.serial
+        slot.release_requested = False
+        dongle.generation += 1
+        acquire_generation = dongle.generation
+        acquire_slot = slot
+        acquire_slot.allocation_generation = acquire_generation
 
         idx = None
+        lease = None
         acquire_ok = False
 
         self._condition.release()
         try:
             time.sleep(_USB_SETTLE_DELAY)
 
-            from reticulumpi.rtlsdr import resolve_device
+            from reticulumpi.rtlsdr import claim_device
 
             try:
-                idx = resolve_device(serial, caller=caller)
+                lease = claim_device(serial, caller=caller)
+                idx = lease.index
             except RuntimeError as exc:
                 log.error(
                     "Failed to claim dongle %s for %s: %s",
@@ -537,55 +574,46 @@ class SdrScheduler:
                 acquire_ok = True
             except Exception:
                 log.exception("acquire_cb failed for %s", caller)
-                from reticulumpi.rtlsdr import release_device
-
                 try:
-                    release_device(serial, caller=caller)
+                    lease.release()
                 except Exception:
                     log.debug("SDR device release failed for %s", caller, exc_info=True)
         finally:
             self._condition.acquire()
 
         if not acquire_ok:
+            if acquire_slot.allocation_generation == acquire_generation:
+                acquire_slot.allocation_generation = 0
             return
 
         if not self._running:
-            self._condition.release()
-            try:
-                from reticulumpi.rtlsdr import release_device
-
-                try:
-                    release_device(serial, caller=caller)
-                except Exception:
-                    log.debug("SDR device release failed for %s", caller, exc_info=True)
-            finally:
-                self._condition.acquire()
+            self._discard_successful_acquisition(acquire_slot, caller, lease)
             return
 
         slot = dongle.slots.get(caller)
         if slot is None:
             if dongle.relock_after == caller:
                 dongle.relock_after = None
-            self._condition.release()
-            try:
-                from reticulumpi.rtlsdr import release_device
+            self._discard_successful_acquisition(acquire_slot, caller, lease)
+            return
 
-                try:
-                    release_device(serial, caller=caller)
-                except Exception:
-                    log.debug("SDR device release failed for %s", caller, exc_info=True)
-            finally:
-                self._condition.acquire()
+        if slot is not acquire_slot or dongle.generation != acquire_generation:
+            self._discard_successful_acquisition(acquire_slot, caller, lease)
+            return
+
+        if slot.release_requested:
+            slot.release_requested = False
+            self._discard_successful_acquisition(acquire_slot, caller, lease)
             return
 
         dongle.device_index = idx
-        dongle.generation += 1
         slot.is_active = True
-        slot.last_acquired = time.time()
+        slot.device_lease = lease
+        slot.last_acquired = time.monotonic()
         dongle.current_holder = caller
 
         if priority == PRIORITY_BACKGROUND:
-            dongle.bg_last_rotation = time.time()
+            dongle.bg_last_rotation = time.monotonic()
             if caller in dongle.bg_order:
                 dongle.bg_index = dongle.bg_order.index(caller)
 
@@ -606,6 +634,37 @@ class SdrScheduler:
                 )
             except Exception:
                 log.debug("event publish failed", exc_info=True)
+        finally:
+            self._condition.acquire()
+
+    def _discard_successful_acquisition(
+        self,
+        slot: SignalSlot,
+        caller: str,
+        lease: Any | None,
+    ) -> None:
+        """Undo a callback that completed after its scheduler grant went stale.
+
+        ``acquire_cb`` may have launched a complete decoder pipeline.  Its
+        paired cleanup callback therefore has to run before the physical
+        lease is returned, otherwise another owner can open the same dongle
+        while the stale pipeline is still shutting down.
+
+        The scheduler condition is held on entry and restored on return.
+        """
+
+        slot.allocation_generation = 0
+        self._condition.release()
+        try:
+            try:
+                slot.yield_cb("", "", None)
+            except Exception:
+                log.exception("yield_cb failed while discarding stale acquire for %s", caller)
+            try:
+                if lease is not None:
+                    lease.release()
+            except Exception:
+                log.debug("SDR device release failed for %s", caller, exc_info=True)
         finally:
             self._condition.acquire()
 
@@ -630,6 +689,7 @@ class SdrScheduler:
                     slots_info[caller] = {
                         "priority": slot.priority,
                         "active": slot.is_active,
+                        "suspended": slot.suspended,
                         "continuous": slot.continuous,
                         "window_count": len(slot.windows),
                         "label": slot.label,
@@ -674,15 +734,120 @@ class SdrScheduler:
             dongle = self._dongles.get(serial)
             return dongle.generation if dongle is not None else 0
 
-    def dongle_released(self, serial: str, caller: str) -> None:
+    def get_allocation_generation(self, serial: str, caller: str) -> int:
+        """Return the current lease generation for one registered slot."""
+
+        with self._lock:
+            dongle = self._dongles.get(serial)
+            slot = dongle.slots.get(caller) if dongle is not None else None
+            return slot.allocation_generation if slot is not None else 0
+
+    def get_metrics(self) -> dict[str, int]:
+        """Return aggregate lease state without serials or caller names."""
+
+        with self._lock:
+            slots = [slot for dongle in self._dongles.values() for slot in dongle.slots.values()]
+            return {
+                "dongles": len(self._dongles),
+                "active_leases": sum(slot.device_lease is not None for slot in slots),
+                "active_slots": sum(slot.is_active for slot in slots),
+                "suspended_slots": sum(slot.suspended for slot in slots),
+            }
+
+    def dongle_released(
+        self,
+        serial: str,
+        caller: str,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        self._release_slot(serial, caller, suspend=False, generation=generation)
+
+    def suspend(
+        self,
+        serial: str,
+        caller: str,
+        *,
+        generation: int | None = None,
+    ) -> int | None:
+        """Release and suppress a failed slot until it is registered again."""
+
+        return self._release_slot(serial, caller, suspend=True, generation=generation)
+
+    def resume(
+        self,
+        serial: str,
+        caller: str,
+        *,
+        registration_id: int,
+    ) -> bool:
+        """Make a retrying slot eligible after its process backoff expires.
+
+        The registration token prevents a delayed retry worker from reviving a
+        slot that was unregistered and recreated while it slept.  Resuming only
+        restores eligibility; normal arbitration must grant ownership and run
+        ``acquire_cb`` before a decoder can restart.
+        """
+
+        with self._condition:
+            dongle = self._dongles.get(serial)
+            if dongle is None or not self._running:
+                return False
+            slot = dongle.slots.get(caller)
+            if slot is None or slot.registration_id != registration_id or not slot.suspended:
+                return False
+            slot.suspended = False
+            slot.release_requested = False
+            dongle.generation += 1
+            self._condition.notify_all()
+            return True
+
+    def _release_slot(
+        self,
+        serial: str,
+        caller: str,
+        *,
+        suspend: bool,
+        generation: int | None,
+    ) -> int | None:
+        lease = None
+        registration_id = None
         with self._condition:
             dongle = self._dongles.get(serial)
             if dongle is None:
-                return
+                return None
             slot = dongle.slots.get(caller)
+            if generation is not None and (
+                slot is None or generation != slot.allocation_generation
+            ):
+                log.debug(
+                    "Ignoring stale release for %s on %s (generation %d != %d)",
+                    caller,
+                    serial,
+                    generation,
+                    slot.allocation_generation if slot is not None else 0,
+                )
+                return None
             if slot is not None:
                 slot.is_active = False
+                slot.suspended = slot.suspended or suspend
+                slot.release_requested = True
+                lease = slot.device_lease
+                slot.device_lease = None
+                slot.allocation_generation = 0
+                registration_id = slot.registration_id
+                dongle.generation += 1
             if dongle.current_holder == caller:
                 dongle.current_holder = None
                 self._advance_bg_index(dongle)
+            if dongle.locked_by == caller:
+                dongle.locked_by = None
+            if dongle.relock_after == caller:
+                dongle.relock_after = None
             self._condition.notify_all()
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                log.debug("SDR device release failed for %s", caller, exc_info=True)
+        return registration_id

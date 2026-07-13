@@ -243,10 +243,21 @@
   // row 0 by sampling `powers` (nearest-neighbour) across `cols` pixels.
   // Colour-mapped through the turbo ramp using the caller-supplied dB
   // scale (so the caller can hold their own auto-scale state).
-  function paintRowToCanvas(ctx, canvas, powers, cols, rows, minDb, maxDb) {
+  function paintRowToCanvas(ctx, canvas, powers, cols, rows, minDb, maxDb, historyCapacity) {
     if (!ctx || !powers || !powers.length) return;
-    ctx.drawImage(canvas, 0, 0, cols, rows - 1, 0, 1, cols, rows - 1);
-    var img = ctx.createImageData(cols, 1);
+    // A waterfall has one logical row per stored sweep, while its backing
+    // canvas may contain multiple physical pixels per row on HiDPI screens.
+    // Keep the logical history depth stable and move the already-painted
+    // image by the corresponding physical distance.
+    var capacity = Math.max(1, historyCapacity || rows);
+    var rowHeight = Math.max(1, rows / capacity);
+    var paintHeight = Math.max(1, Math.ceil(rowHeight));
+    ctx.drawImage(
+      canvas,
+      0, 0, cols, Math.max(0, rows - rowHeight),
+      0, rowHeight, cols, Math.max(0, rows - rowHeight)
+    );
+    var img = ctx.createImageData(cols, paintHeight);
     var data = img.data;
     var n = powers.length;
     var lo = minDb, hi = maxDb;
@@ -272,11 +283,13 @@
       var lutIdx = (norm * 255 + 0.5) | 0;
       if (lutIdx > 255) lutIdx = 255;
       var lutOff = lutIdx * 3;
-      var off = x * 4;
-      data[off]     = _LUT[lutOff];
-      data[off + 1] = _LUT[lutOff + 1];
-      data[off + 2] = _LUT[lutOff + 2];
-      data[off + 3] = 255;
+      for (var y = 0; y < paintHeight; y++) {
+        var off = (y * cols + x) * 4;
+        data[off]     = _LUT[lutOff];
+        data[off + 1] = _LUT[lutOff + 1];
+        data[off + 2] = _LUT[lutOff + 2];
+        data[off + 3] = 255;
+      }
     }
     ctx.putImageData(img, 0, 0);
   }
@@ -286,20 +299,27 @@
   // drawImage() scrolls from repeated paintRowToCanvas() calls (each scroll
   // is a full-canvas copy — 256 of them during a zoom was ~100ms of jank).
   // `rows` is oldest→newest; newest lands at y=0.
-  function paintHistoryToCanvas(ctx, canvas, rows, cols, maxRows, minDb, maxDb) {
+  function paintHistoryToCanvas(
+    ctx, canvas, rows, cols, maxRows, minDb, maxDb, historyCapacity
+  ) {
     if (!ctx || !rows || !rows.length) return;
     var img = ctx.createImageData(cols, maxRows);
     var data = img.data;
     var lo = minDb, hi = maxDb;
     var range = hi - lo;
     if (range < 1) range = 1;
-    var count = rows.length < maxRows ? rows.length : maxRows;
-    // Newest at y=0 → iterate newest first
-    for (var r = 0; r < count; r++) {
+    var capacity = Math.max(1, historyCapacity || maxRows);
+    var count = rows.length < capacity ? rows.length : capacity;
+    var rowHeight = maxRows / capacity;
+    var paintedRows = Math.min(maxRows, Math.ceil(count * rowHeight));
+    // Newest at y=0. Map each physical backing row to a logical sweep row
+    // so a 256-sweep history fills the same visual height at every DPR.
+    for (var y = 0; y < paintedRows; y++) {
+      var r = Math.min(count - 1, Math.floor(y / rowHeight));
       var powers = rows[rows.length - 1 - r];
       if (!powers || !powers.length) continue;
       var n = powers.length;
-      var rowOff = r * cols * 4;
+      var rowOff = y * cols * 4;
       for (var x = 0; x < cols; x++) {
         var srcF = (n > 1) ? (x * (n - 1)) / (cols - 1) : 0;
         var srcLo = Math.floor(srcF);
