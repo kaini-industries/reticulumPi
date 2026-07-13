@@ -335,6 +335,7 @@ class TestSnapshot:
             "2025-01-01, 12:00:00, 88000000, 90000000, 500000, 1, -55.5, -54.4, -53.3, -52.2"
         )
         p._flush_current_sweep()
+        after = _t.time()
 
         snap = p.get_snapshot()
         assert snap["sweep_count"] == 1
@@ -344,12 +345,14 @@ class TestSnapshot:
         assert len(snap["waterfall_tail"]) == 1
         assert snap["freq_start_hz"] == 88_000_000
         assert snap["freq_stop_hz"] == 108_000_000
-        # Sibling timestamp array stays aligned with waterfall_tail; value is
-        # captured inside _flush_current_sweep so it sits between `before`
-        # and "now" with plenty of slack.
+        # The raw timestamp is captured during the flush.  The wire timestamp
+        # is rounded to milliseconds, so validate timing before rounding and
+        # validate the serialization precision separately.
         assert len(snap["waterfall_tail_times"]) == 1
         ts = snap["waterfall_tail_times"][0]
-        assert before <= ts <= _t.time() + 1.0
+        assert p._last_sweep_at is not None
+        assert before <= p._last_sweep_at <= after
+        assert ts == round(p._last_sweep_at, 3)
 
     def test_snapshot_tail_caps_at_configured_length(self):
         """Plugin may retain hundreds of sweeps internally, but the snapshot

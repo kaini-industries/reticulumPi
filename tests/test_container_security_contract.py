@@ -42,10 +42,26 @@ def test_container_matrix_preserves_both_architecture_results() -> None:
     strategy = workflow["jobs"]["container"]["strategy"]
 
     assert strategy["fail-fast"] is False
-    assert {(entry["platform"], entry["suffix"]) for entry in strategy["matrix"]["include"]} == {
-        ("linux/amd64", "amd64"),
-        ("linux/arm64", "arm64"),
+    assert {
+        (
+            entry["platform"],
+            entry["suffix"],
+            entry["pytest_workers"],
+            entry["pytest_timeout"],
+        )
+        for entry in strategy["matrix"]["include"]
+    } == {
+        ("linux/amd64", "amd64", 2, 60),
+        ("linux/arm64", "arm64", 0, 180),
     }
+
+    test_build = next(
+        step for step in _container_steps() if step.get("name") == "Build test target"
+    )
+    assert test_build["with"]["build-args"].splitlines() == [
+        "PYTEST_WORKERS=${{ matrix.pytest_workers }}",
+        "PYTEST_TIMEOUT=${{ matrix.pytest_timeout }}",
+    ]
 
 
 def test_container_scans_publish_full_evidence_before_enforcing_actionable_gate() -> None:

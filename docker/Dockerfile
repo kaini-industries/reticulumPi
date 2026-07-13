@@ -39,8 +39,10 @@ RUN set -eu; \
 # keeps repository-level tests such as tools/check_docs.py honest inside Trixie.
 COPY --chown=reticulumpi-test:reticulumpi-test . .
 USER reticulumpi-test
+ARG PYTEST_WORKERS=2
+ARG PYTEST_TIMEOUT=60
 RUN python -c "from importlib.resources import files; p = files('reticulumpi.builtin_plugins.web_dashboard').joinpath('static/index.html'); assert p.is_file(), p" && \
-    pytest tests/ -q --tb=short
+    pytest tests/ -q --tb=short -n "$PYTEST_WORKERS" --timeout="$PYTEST_TIMEOUT"
 
 FROM python-patched AS runtime
 

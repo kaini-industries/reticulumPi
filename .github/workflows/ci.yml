@@ -418,8 +418,12 @@ jobs:
         include:
           - platform: linux/amd64
             suffix: amd64
+            pytest_workers: 2
+            pytest_timeout: 60
           - platform: linux/arm64
             suffix: arm64
+            pytest_workers: 0
+            pytest_timeout: 180
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -435,6 +439,9 @@ jobs:
           file: docker/Dockerfile
           target: test
           platforms: ${{ matrix.platform }}
+          build-args: |
+            PYTEST_WORKERS=${{ matrix.pytest_workers }}
+            PYTEST_TIMEOUT=${{ matrix.pytest_timeout }}
           push: false
           tags: reticulumpi-test:${{ matrix.suffix }}
       - name: Build runtime target from the same wheel

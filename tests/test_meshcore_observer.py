@@ -137,6 +137,7 @@ def observer_plugin(mock_app, obs_config):
 @pytest.fixture
 def shared_observer_plugin(mock_app, shared_config):
     """Started observer plugin (shared mode)."""
+    mock_app.get_plugin.return_value = None
     yield from _make_started_plugin(mock_app, shared_config)
 
 
@@ -542,7 +543,6 @@ class TestSharedMode:
         mock_mc.subscribe.assert_called_once()
 
     def test_attach_fails_when_gateway_missing(self, shared_observer_plugin, mock_app):
-        # Reset any auto-attachment from the watcher thread
         shared_observer_plugin._detach_from_gateway()
         mock_app.get_plugin.return_value = None
         shared_observer_plugin._try_attach_to_gateway()

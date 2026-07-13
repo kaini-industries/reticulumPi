@@ -143,7 +143,11 @@ def test_container_test_stage_runs_as_nonroot_and_runtime_stays_wheel_only():
 
     assert "COPY --chown=reticulumpi-test:reticulumpi-test . ." in test_stage
     assert "USER reticulumpi-test" in test_stage
-    assert "pytest tests/ -q --tb=short" in test_stage
+    assert "ARG PYTEST_WORKERS=2" in test_stage
+    assert "ARG PYTEST_TIMEOUT=60" in test_stage
+    assert (
+        'pytest tests/ -q --tb=short -n "$PYTEST_WORKERS" --timeout="$PYTEST_TIMEOUT"' in test_stage
+    )
     assert "COPY --from=wheel-artifact" in runtime_stage
     assert "COPY . ." not in runtime_stage
     assert "gcc" not in runtime_stage
