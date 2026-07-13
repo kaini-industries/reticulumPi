@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=tools/systemd_fixture_health.sh
+source "$(dirname "${BASH_SOURCE[0]}")/systemd_fixture_health.sh"
+
 if [[ $(id -u) -ne 0 ]]; then
     echo "Noble systemd integration must run as root" >&2
     exit 1
@@ -29,21 +32,7 @@ test "$(dpkg-query -W -f='${X-ReticulumPi-Platform-Profile}' reticulumpi-admin)"
 test "$(stat -c '%U:%G %a' /usr/sbin/reticulumpi-admin)" = "root:root 755"
 /usr/sbin/reticulumpi-admin --help >/dev/null
 
-started=$SECONDS
-while [[ $(systemctl is-system-running 2>/dev/null || true) == starting ]]; do
-    if (( SECONDS - started >= 60 )); then
-        echo "systemd did not finish booting within 60 seconds" >&2
-        systemctl --failed --no-pager >&2 || true
-        exit 1
-    fi
-    sleep 1
-done
-state=$(systemctl is-system-running 2>/dev/null || true)
-if [[ $state != running ]]; then
-    echo "Noble systemd fixture is not healthy: $state" >&2
-    systemctl --failed --no-pager >&2 || true
-    exit 1
-fi
+wait_for_systemd_running "Noble" 60
 
 probe=/etc/systemd/system/reticulumpi-ci-probe.service
 cleanup() {
