@@ -1,5 +1,4 @@
-usage: reticulumpi-admin [-h]
-                         {install,upgrade,rollback,status,doctor,external-artifact,db} ...
+usage: reticulumpi-admin [-h] {install,upgrade,rollback,status,doctor,external-artifact,db} ...
 
 positional arguments:
   {install,upgrade,rollback,status,doctor,external-artifact,db}

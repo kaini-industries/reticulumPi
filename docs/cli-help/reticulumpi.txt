@@ -1,9 +1,7 @@
-usage: reticulumpi [-h] [--version] [--config CONFIG]
-                   [--reticulum-config RETICULUM_CONFIG] [--log-level 0-7]
-                   [--check] [--list-plugins] [--hash-password]
-                   [--backup-identity PATH] [--restore-identity PATH]
-                   [--log-format {text,json}] [--remote HASH]
-                   [--command COMMAND] [--timeout TIMEOUT]
+usage: reticulumpi [-h] [--version] [--config CONFIG] [--reticulum-config RETICULUM_CONFIG]
+                   [--log-level 0-7] [--check] [--list-plugins] [--hash-password]
+                   [--backup-identity PATH] [--restore-identity PATH] [--log-format {text,json}]
+                   [--remote HASH] [--command COMMAND] [--timeout TIMEOUT]
                    [--mesh-bridge {status,pause,resume}]
 
 ReticulumPi - An extensible Reticulum network node
@@ -12,30 +10,24 @@ options:
   -h, --help            show this help message and exit
   --version, -V         show program's version number and exit
   --config CONFIG, -c CONFIG
-                        Path to reticulumPi config YAML (default:
-                        ~/.config/reticulumpi/config.yaml)
+                        Path to reticulumPi config YAML (default: ~/.config/reticulumpi/config.yaml)
   --reticulum-config RETICULUM_CONFIG
-                        Path to Reticulum config directory (overrides config
-                        file setting)
-  --log-level 0-7       Log level: 0=critical, 1=error, 2-3=warning, 4=info,
-                        5-7=debug (overrides config)
-  --check               Validate configuration and plugin discovery without
-                        starting (dry run)
+                        Path to Reticulum config directory (overrides config file setting)
+  --log-level 0-7       Log level: 0=critical, 1=error, 2-3=warning, 4=info, 5-7=debug (overrides
+                        config)
+  --check               Validate configuration and plugin discovery without starting (dry run)
   --list-plugins        List all discoverable plugins and exit
-  --hash-password       Generate a password hash for the web_dashboard plugin
-                        and exit
+  --hash-password       Generate a password hash for the web_dashboard plugin and exit
   --backup-identity PATH
                         Back up the node identity file to PATH and exit
   --restore-identity PATH
                         Restore the node identity file from PATH and exit
   --log-format {text,json}
                         Log output format (overrides config; default: text)
-  --remote HASH         Connect to a remote ReticulumPi node via Reticulum
-                        Link for management
-  --command COMMAND     Execute a single remote command (use with --remote).
-                        Without this, opens interactive shell.
+  --remote HASH         Connect to a remote ReticulumPi node via Reticulum Link for management
+  --command COMMAND     Execute a single remote command (use with --remote). Without this, opens
+                        interactive shell.
   --timeout TIMEOUT     Timeout in seconds for remote operations (default: 30)
   --mesh-bridge {status,pause,resume}
-                        Control the Meshtastic↔MeshCore bridge via the local
-                        dashboard API. Requires RETICULUMPI_DASHBOARD_PASSWORD
-                        env var or prompts for it.
+                        Control the Meshtastic↔MeshCore bridge via the local dashboard API. Requires
+                        RETICULUMPI_DASHBOARD_PASSWORD env var or prompts for it.

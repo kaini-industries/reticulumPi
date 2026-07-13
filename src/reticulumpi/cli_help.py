@@ -5,8 +5,14 @@ from __future__ import annotations
 import argparse
 
 
+STABLE_HELP_WIDTH = 100
+
+
 class StableHelpFormatter(argparse.HelpFormatter):
     """Keep optional-argument rendering stable across supported Python versions."""
+
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, width=STABLE_HELP_WIDTH)
 
     def _format_action_invocation(self, action: argparse.Action) -> str:
         if not action.option_strings:
