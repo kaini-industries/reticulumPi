@@ -23,9 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-
 TRUSTED_OWNER_UID = 0
 MAX_MANIFEST_BYTES = 1_048_576
 MAX_TREE_ENTRIES = 100_000
@@ -49,30 +46,6 @@ _TREE_CACHE_NAMES = frozenset({".git", ".pytest_cache", "__pycache__"})
 
 class ArtifactPolicyError(ValueError):
     """Raised when an external artifact is untrusted or does not match policy."""
-
-
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """Safe YAML loader which rejects ambiguous duplicate mapping keys."""
-
-
-def _construct_unique_mapping(
-    loader: _UniqueKeyLoader,
-    node: yaml.MappingNode,
-    deep: bool = False,
-) -> dict[Any, Any]:
-    mapping: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        if key in mapping:
-            raise ArtifactPolicyError(f"duplicate manifest key: {key!r}")
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
-
-_UniqueKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
 
 
 @dataclass(frozen=True)
@@ -175,8 +148,10 @@ def tree_sha256(
 
     Git metadata and generated Python/test caches are excluded.  The MeshChat
     virtual environment is intentionally included.  Directory symlinks must
-    stay inside the tree; file symlinks include both their link target and the
-    digest of the resolved immutable file.
+    stay inside the tree and may not resolve into an excluded tree; their
+    logical and resolved targets are both bound into the digest.  File symlinks
+    include both their link target and the digest of the resolved immutable
+    file.
     """
 
     requested = Path(path).expanduser().absolute()
@@ -226,14 +201,24 @@ def tree_sha256(
                     raise ArtifactPolicyError(
                         f"artifact directory symlink escapes deployment tree: {child}"
                     )
+                target_relative = target.relative_to(root)
+                if any(part in _TREE_CACHE_NAMES for part in target_relative.parts):
+                    raise ArtifactPolicyError(
+                        f"artifact directory symlink targets an excluded tree: {child}"
+                    )
                 if require_trusted:
                     _validate_trusted_ancestry(target)
+                payload = (
+                    os.fsencode(os.readlink(child))
+                    + b"\0"
+                    + os.fsencode(target_relative.as_posix())
+                )
                 _feed_tree_record(
                     digest,
                     "directory-link",
                     child.relative_to(root),
                     0,
-                    os.fsencode(os.readlink(child)),
+                    payload,
                 )
                 entries += 1
             else:
@@ -287,6 +272,32 @@ def tree_sha256(
 
 
 def _read_manifest(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ArtifactPolicyError("PyYAML is required to read an artifact manifest") from exc
+
+    class _UniqueKeyLoader(yaml.SafeLoader):
+        """Safe YAML loader which rejects ambiguous duplicate mapping keys."""
+
+    def construct_unique_mapping(
+        loader: _UniqueKeyLoader,
+        node,
+        deep: bool = False,
+    ) -> dict[Any, Any]:
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise ArtifactPolicyError(f"duplicate manifest key: {key!r}")
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    _UniqueKeyLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        construct_unique_mapping,
+    )
+
     if not path.is_absolute():
         raise ArtifactPolicyError("production artifact manifest path must be absolute")
     _validate_trusted_ancestry(path)

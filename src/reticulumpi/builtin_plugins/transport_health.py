@@ -7,11 +7,11 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from pathlib import Path
 from typing import Any
 
 from reticulumpi import events
-from reticulumpi.migrations import Migration, MigrationTarget
+from reticulumpi.migration_catalog import migration_targets
+from reticulumpi.migrations import MigrationTarget
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.runtime_metrics import instrument_sqlite_class
 
@@ -41,37 +41,7 @@ class TransportHealthPlugin(PluginBase):
     broadcast_keys = "transport_health"
 
     def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
-        path = Path(os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH)))
-        statements = (
-            """CREATE TABLE IF NOT EXISTS transport_nodes (
-                hash TEXT PRIMARY KEY,
-                first_seen REAL,
-                last_seen REAL,
-                paths_via INTEGER,
-                max_paths_via INTEGER,
-                total_appearances INTEGER,
-                total_checks INTEGER,
-                availability_pct REAL,
-                interface TEXT,
-                status TEXT,
-                node_name TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS transport_node_history (
-                hash TEXT,
-                timestamp REAL,
-                paths_via INTEGER,
-                status TEXT,
-                PRIMARY KEY (hash, timestamp)
-            )""",
-            "CREATE INDEX IF NOT EXISTS idx_history_ts ON transport_node_history(timestamp)",
-        )
-        return (
-            MigrationTarget(
-                "transport_health",
-                path,
-                (Migration(1, "adopt transport health schema", statements),),
-            ),
-        )
+        return migration_targets(self.plugin_name, self.config)
 
     def validate_config(self) -> None:
         interval = self.config.get("check_interval", _DEFAULT_CHECK_INTERVAL)

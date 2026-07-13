@@ -55,7 +55,12 @@ def _python_artifacts(directory: Path) -> tuple[Path, Path, Path]:
         archive.writestr("reticulumpi/__init__.py", b"")
         archive.writestr("reticulumpi/admin_cli.py", b"def main(): return 0\n")
         archive.writestr("reticulumpi/cli_help.py", b"class StableHelpFormatter: pass\n")
+        archive.writestr("reticulumpi/external_artifacts.py", b"")
+        archive.writestr("reticulumpi/migration_catalog.py", b"")
+        archive.writestr("reticulumpi/migrations.py", b"")
         archive.writestr("reticulumpi/platform_policy.py", b"PROFILE = 'fixture'\n")
+        archive.writestr("reticulumpi/recovery_config.py", b"")
+        archive.writestr("reticulumpi/runtime_metrics.py", b"")
 
     sdist = directory / f"reticulumpi-{VERSION}.tar.gz"
     root = f"reticulumpi-{VERSION}"

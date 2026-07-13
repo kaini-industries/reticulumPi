@@ -7,14 +7,14 @@ import re
 import sqlite3
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 import RNS
 import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi import events
-from reticulumpi.migrations import Migration, MigrationTarget
+from reticulumpi.migration_catalog import migration_targets
+from reticulumpi.migrations import MigrationTarget
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.runtime_metrics import instrument_sqlite_class
 
@@ -296,35 +296,7 @@ class SensorFrameworkPlugin(PluginBase):
     broadcast_keys = "sensors"
 
     def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
-        storage = self.config.get("storage", {})
-        if not isinstance(storage, dict) or storage.get("type", "sqlite") != "sqlite":
-            return ()
-        path = Path(
-            os.path.expanduser(storage.get("path", "~/.local/share/reticulumpi/sensor_data.db"))
-        )
-        return (
-            MigrationTarget(
-                "sensor_framework",
-                path,
-                (
-                    Migration(
-                        1,
-                        "create sensor reading history",
-                        (
-                            """CREATE TABLE IF NOT EXISTS sensor_readings (
-                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                sensor_name TEXT NOT NULL,
-                                reading_name TEXT NOT NULL,
-                                value REAL NOT NULL,
-                                timestamp REAL NOT NULL
-                            )""",
-                            "CREATE INDEX IF NOT EXISTS idx_readings_sensor_time "
-                            "ON sensor_readings(sensor_name, timestamp)",
-                        ),
-                    ),
-                ),
-            ),
-        )
+        return migration_targets(self.plugin_name, self.config)
 
     def validate_config(self) -> None:
         sensors = self.config.get("sensors", [])

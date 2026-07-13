@@ -257,7 +257,12 @@ def inspect_admin_deb(path: Path, *, version: str, profile: str, wheel: Path) ->
         "usr/lib/reticulumpi-admin/build.json",
         "usr/lib/reticulumpi-admin/site-packages/reticulumpi/admin_cli.py",
         "usr/lib/reticulumpi-admin/site-packages/reticulumpi/cli_help.py",
+        "usr/lib/reticulumpi-admin/site-packages/reticulumpi/external_artifacts.py",
+        "usr/lib/reticulumpi-admin/site-packages/reticulumpi/migration_catalog.py",
+        "usr/lib/reticulumpi-admin/site-packages/reticulumpi/migrations.py",
         "usr/lib/reticulumpi-admin/site-packages/reticulumpi/platform_policy.py",
+        "usr/lib/reticulumpi-admin/site-packages/reticulumpi/recovery_config.py",
+        "usr/lib/reticulumpi-admin/site-packages/reticulumpi/runtime_metrics.py",
     }
     data_paths, data = _inspect_deb_tar(
         members["data.tar.gz"],

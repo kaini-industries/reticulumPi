@@ -12,11 +12,11 @@ import os
 import sqlite3
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from reticulumpi import events
-from reticulumpi.migrations import Migration, MigrationTarget
+from reticulumpi.migration_catalog import migration_targets
+from reticulumpi.migrations import MigrationTarget
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.runtime_metrics import instrument_sqlite_class, record_sqlite_failure
 
@@ -32,31 +32,7 @@ class NodeLocationTrackerPlugin(PluginBase):
     plugin_version = "1.0.0"
 
     def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
-        path = Path(os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH)))
-        return (
-            MigrationTarget(
-                "node_location_tracker",
-                path,
-                (
-                    Migration(
-                        1,
-                        "create node position history",
-                        (
-                            """CREATE TABLE IF NOT EXISTS node_positions (
-                                node_key TEXT NOT NULL,
-                                timestamp REAL NOT NULL,
-                                latitude REAL NOT NULL,
-                                longitude REAL NOT NULL,
-                                source TEXT NOT NULL,
-                                name TEXT,
-                                PRIMARY KEY (node_key, timestamp)
-                            )""",
-                            "CREATE INDEX IF NOT EXISTS idx_np_ts ON node_positions(timestamp)",
-                        ),
-                    ),
-                ),
-            ),
-        )
+        return migration_targets(self.plugin_name, self.config)
 
     def validate_config(self) -> None:
         interval = self.config.get("sample_interval", 120)

@@ -659,6 +659,7 @@ def test_db_migrate_dry_run_uses_clone_and_is_non_mutating(
     assert admin._db_migrate(args) == 0
     output = capsys.readouterr().out
     assert "dry_run=true pending=1" in output
+    assert f"checksums={target.migrations[0].stable_checksum}" in output
     assert "Dry run only" in output
     assert not target.path.parent.exists()
 

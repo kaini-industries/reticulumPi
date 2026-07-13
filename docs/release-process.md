@@ -57,12 +57,14 @@ Minisign signature and exact hash manifest before bundle Python is built or inst
 ### Building the recovery-administrator Debian package
 
 `tools/build_admin_deb.py` packages the already validated ReticulumPi wheel independently of an
-install candidate. The administrator import surface is standard-library-only, so the builder
-requires an exact empty site-packages directory and an exact zero-byte SHA-256 manifest. Any file,
-symlink, special entry, or even empty subdirectory is rejected; wheelhouse mode is unsupported.
-This removes third-party dependency resolution, ABI selection, and import shadowing from the
-root recovery package. The builder does not invoke pip, access the network, install the result, or
-hold release signing keys.
+install candidate. The administrator import surface consists only of the Python standard library
+and reviewed first-party modules extracted from that wheel. Its separate third-party runtime must
+therefore be an exact empty site-packages directory with an exact zero-byte SHA-256 manifest. Any
+file, symlink, special entry, or even empty subdirectory is rejected; wheelhouse mode is
+unsupported. Adding first-party recovery code does not authorize adding PyYAML, RNS, LXMF, or any
+other distribution to that runtime. This removes third-party dependency resolution, ABI selection,
+and import shadowing from the root recovery package. The builder does not invoke pip, access the
+network, install the result, or hold release signing keys.
 
 Both supported profiles are built from the same validated wheel with non-colliding filenames:
 
@@ -92,21 +94,29 @@ setuptools-scm development versions, so both systemd lanes exercise the package 
 Protected publication still accepts only the exact stable version derived from the signed release
 tag.
 
-The package installs its root-owned payload below `/usr/lib/reticulumpi-admin`, including
-`admin_cli.py`, `cli_help.py`, and `platform_policy.py` from the exact wheel. The fixed
-`/usr/sbin/reticulumpi-admin` wrapper runs `/usr/bin/python3 -I -S` with a fixed launcher; it does
-not consult `PYTHONPATH`, the working directory, `PATH`, an install candidate, or `current`.
+The package installs its root-owned payload below `/usr/lib/reticulumpi-admin`, including the
+administrator, stable-help formatter, platform policy, external-artifact digest implementation,
+dependency-free migration catalog and configuration projection, migration engine, and runtime
+counters from the exact wheel. The fixed `/usr/sbin/reticulumpi-admin` wrapper runs
+`/usr/bin/python3 -I -S` with a fixed launcher; it does not consult `PYTHONPATH`, the working
+directory, `PATH`, an install candidate, or `current`. `external-artifact digest`, `db plan`, and
+`db migrate --dry-run` consequently remain available before the normal release environment and its
+third-party dependencies exist. Migration configuration is projected fail-closed from the trusted
+system file; the recovery administrator does not import the normal PyYAML loader, a full plugin
+implementation, or an external plugin path as root.
 
 Each package emits a matching `.deb.sha256` sidecar. The `recovery-admin` CI job uploads both
 profile packages and both sidecars. The corresponding ARM64 systemd lane installs its package
 with `dpkg`, checks the embedded platform profile, and executes
 `/usr/sbin/reticulumpi-admin --help` through the isolated launcher before installation, recovery,
 and rollback tests use that path. Release staging revalidates each sidecar, Debian archive
-structure, profile-correct dependency metadata, embedded wheel digest, and empty-runtime manifest
-digest. It then includes all four files in the global `SHA256SUMS`; the normal Minisign step signs
-that manifest and GitHub publication uploads the packages with the other exact assets. Release
-signing remains separate from the builder; a per-package `.minisig` produced by the builder would
-be a release failure.
+structure, profile-correct dependency metadata, embedded wheel digest, required first-party
+recovery modules, and empty-runtime manifest digest. Each installed-package lane invokes the fixed
+wrapper from outside the source checkout, computes external-artifact digests, and exercises a real
+enabled-plugin database plan and clone-only dry run before candidate installation. It then includes
+all four files in the global `SHA256SUMS`; the normal Minisign step signs that manifest and GitHub
+publication uploads the packages with the other exact assets. Release signing remains separate
+from the builder; a per-package `.minisig` produced by the builder would be a release failure.
 
 ## Quality thresholds
 
@@ -144,7 +154,12 @@ Changed-line comparison is also fail-closed. Coverage checkout uses full history
 - pull requests use `pull_request.base.sha`;
 - ordinary branch pushes use `before`;
 - a release tag compares with the newest lower strict SemVer tag reachable from the candidate;
-  the first release compares with Git's empty tree so every production source line is changed;
+- the initial `v0.3.2` release is bootstrapped from the exact historical 0.2.4 version-boundary
+  commit `89249b8b58cb86ac14ff7179abbbca3cb762d2a4`. The gate requires that commit to
+  declare version 0.2.4 and be a strict first-parent ancestor of the candidate. This is a
+  coverage baseline, not a retroactive tag, release, or claim of signed 0.2.4 provenance;
+- any other first release without an explicit version-controlled bootstrap compares with Git's
+  empty tree so every production source line is changed;
 - a newly created branch whose `before` is all zeroes uses the checked-out commit's first parent;
 - a root initial push with no parent, an unavailable event commit, a deleted ref, malformed
   payload, or a push whose `after` does not match `HEAD` fails instead of silently skipping
@@ -155,8 +170,13 @@ For a local comparison, supply a base revision directly:
 ```bash
 python tools/check_coverage_gate.py origin/main \
   --coverage-xml coverage.xml \
-  --release-version 0.3.0
+  --release-version 0.3.2
 ```
+
+For `v0.3.2`, the pinned bootstrap still enforces 90% changed-line coverage across every
+executable line changed since the 0.2.4 boundary, in addition to the 70% aggregate line, 60%
+aggregate branch, and 90% line-and-branch critical-module gates. It is deliberately embedded in
+the reviewed gate rather than supplied through a mutable environment variable or CLI override.
 
 Input/report failures exit 2, a coverage-policy failure exits 1, and a complete pass exits 0.
 
@@ -226,13 +246,15 @@ tree, `rtl_test`, `dump1090`, `rtl_fm`, and `rtl_power`.
 Generate reviewed values without executing the artifact:
 
 ```bash
-python -m reticulumpi.external_artifacts --kind file /usr/bin/rtl_fm
-python -m reticulumpi.external_artifacts --kind tree /srv/reticulumpi-external/meshchat
+reticulumpi-admin external-artifact digest --kind file /usr/bin/rtl_fm
+reticulumpi-admin external-artifact digest --kind tree /srv/reticulumpi-external/meshchat
 ```
 
-Install the manifest as `root:reticulumpi` mode `0640`. MeshChat's digest includes its virtual
-environment, and first-party radio plugins preflight their complete tool list plus `rtl_test`.
-Mutable labels such as `latest`, `main`, and `nightly` are rejected.
+This recovery command uses the same no-follow file and deterministic tree algorithm as runtime
+verification without importing PyYAML or executing the artifact. Install the manifest as
+`root:reticulumpi` mode `0640`. MeshChat's digest includes its virtual environment, and first-party
+radio plugins preflight their complete tool list plus `rtl_test`. Mutable labels such as `latest`,
+`main`, and `nightly` are rejected.
 
 Regenerate all four locks with the reviewed uv version and one explicit cutoff date. Change the
 cutoff only in a dependency-update change that reviews the resulting diff:
@@ -267,6 +289,13 @@ python3.11 -m venv /tmp/reticulumpi-release-venv
   --requirements constraints/production-universal-dashboard-nomadnet.txt
 ```
 
+The canonical production install archive contains that qualified prebuilt wheel, so the target
+does not need a Python build backend. The signed unpacked-source compatibility path instead runs
+`python -m pip wheel --no-deps`; before using it, pip's isolated build resolver must have reviewed
+offline access to the exact build prerequisites declared by `pyproject.toml` and locked in
+`constraints/production-universal-build.txt`. Do not resolve them from the network during a
+maintenance window. Prefer the install archive whenever it is available.
+
 CI uploads this wheel once. Each architecture-specific Docker build downloads and consumes that
 artifact; `docker/Dockerfile` never builds a second wheel. The local `make package-wheel` target
 provides the same prerequisite for Docker/Compose development builds.
@@ -278,14 +307,19 @@ contain a compiler for reviewed source distributions; no compiler is copied into
 The digest-pinned `docker/noble-systemd-ci.Dockerfile` independently exercises fresh installation,
 recovery, readiness failure, rollback, and both supported install roots on Ubuntu 24.04/Python
 3.12. Its additional production-shaped bridge starts from mutable `/opt` code, service-home state,
-legacy rnsd/watchdog units and sudoers, and MeshChat storage. It installs the exact production
-feature selection from the all-features hash lock into an immutable `/srv` release, verifies the
-persisted Noble platform profile plus identity and MeshChat continuity, and qualifies the root-owned
-schema-1 manifest for the immutable `/srv/reticulumpi-external/meshchat` tree and safe fixtures for
-`rtl_test`, `dump1090`, `rtl_fm`, and `rtl_power`. The gate starts only a signal-aware MeshChat stub
-through the packaged launcher, runs the packaged config preflight for all five categories without
-opening SDR hardware, proves unrelated dependent services were not restarted, and then verifies
-`rollback --to legacy` restores the predecessor exactly. Release promotion requires both systemd
+legacy rnsd/watchdog units and sudoers, and a legacy MeshChat configuration whose install and
+storage paths both name that mutable layout. A reviewed MeshChat stub is independently pre-staged as
+a root-owned immutable `/srv/reticulumpi-external/meshchat` tree; the bridge never promotes the
+mutable checkout into that trust domain. It installs the exact production feature selection from
+the all-features hash lock into an immutable `/srv` release, atomically rewrites MeshChat's
+`install_dir` and `storage_dir`, verifies the persisted Noble platform profile plus identity and
+storage continuity, and qualifies the schema-1 manifest for that immutable tree and safe fixtures
+for `rtl_test`, `dump1090`, `rtl_fm`, and `rtl_power`. The gate computes those values through the
+installed recovery administrator, runs a dependency-free database plan/dry run, starts only a
+signal-aware MeshChat stub through the packaged launcher, runs packaged config preflight without
+opening SDR hardware, and proves unrelated dependent services were not restarted. Finally,
+`rollback --to legacy` restores the exact configuration and storage while verifying the retained
+legacy code and virtual environment were never changed. Release promotion requires both systemd
 lanes. Real MeshChat, radio reception, USB behavior, and RF output remain hardware-in-the-loop gates.
 
 ## ARM64 install-bundle contract
@@ -326,6 +360,14 @@ extraction. Publication CI must build this layout from the frozen tag, verify bo
 run the administrator's dry run against the exact archive, and complete the apply/rollback test
 with that archive during hardware qualification. The Bookworm fixture separately runs every
 transactional apply/failure/recovery regression before candidate signing.
+
+An operator must also perform a filesystem-capacity gate before apply. The administrator's apply
+path rejects less than `max(256 MiB, 2 * bundle bytes + 2 * current /var/lib bytes)` free on the
+filesystem containing the install root, but that is a minimum corruption-prevention check, not a
+complete capacity planner. The dry run does not perform it. Manually include the expanded candidate
+virtual environment, private input snapshot, every discovered legacy and canonical state backup,
+temporary SQLite clones, and source-build workspace when the compatibility source path is used.
+Check the install, backup, state, and temporary filesystems separately when they are distinct mounts.
 
 ## Protected tag publication
 

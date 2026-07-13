@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -101,6 +102,14 @@ class CoveragePolicy:
 
 
 @dataclass(frozen=True)
+class ReleaseBootstrapBaseline:
+    """One exact historical version boundary approved for a first release."""
+
+    historical_version: str
+    commit: str
+
+
+@dataclass(frozen=True)
 class AggregateResult:
     """Aggregate coverage counts evaluated against a release policy."""
 
@@ -173,6 +182,14 @@ class GateResult:
     @property
     def passed(self) -> bool:
         return not self.failures
+
+
+_RELEASE_BOOTSTRAP_BASELINES = {
+    "v0.3.2": ReleaseBootstrapBaseline(
+        historical_version="0.2.4",
+        commit="89249b8b58cb86ac14ff7179abbbca3cb762d2a4",
+    ),
+}
 
 
 def _percent(covered: int, total: int) -> float:
@@ -454,6 +471,43 @@ def _release_version_tuple(tag: str) -> tuple[int, int, int]:
     return tuple(int(match.group(name)) for name in ("major", "minor", "patch"))
 
 
+def _bootstrap_release_base(repo_root: Path, current_tag: str, current_commit: str) -> str | None:
+    baseline = _RELEASE_BOOTSTRAP_BASELINES.get(current_tag)
+    if baseline is None:
+        return None
+    commit = _base_commit(repo_root, baseline.commit)
+    try:
+        raw_history = _run_git(repo_root, "rev-list", "--first-parent", current_commit).decode(
+            "ascii", errors="strict"
+        )
+    except UnicodeDecodeError as exc:
+        raise CoverageGateError("Git returned a non-ASCII first-parent history") from exc
+    history = raw_history.splitlines()
+    if not history or history[0] != current_commit:
+        raise CoverageGateError("Git returned an inconsistent first-parent history")
+    if commit == current_commit or commit not in history[1:]:
+        raise CoverageGateError(
+            f"release bootstrap baseline {commit} is not a strict first-parent ancestor of HEAD"
+        )
+    try:
+        raw_pyproject = _run_git(repo_root, "show", f"{commit}:pyproject.toml").decode(
+            "utf-8", errors="strict"
+        )
+        pyproject = tomllib.loads(raw_pyproject)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise CoverageGateError(
+            f"release bootstrap baseline {commit} has an invalid pyproject.toml"
+        ) from exc
+    project = pyproject.get("project")
+    version = project.get("version") if isinstance(project, dict) else None
+    if version != baseline.historical_version:
+        raise CoverageGateError(
+            f"release bootstrap baseline {commit} declares project version {version!r}; "
+            f"expected {baseline.historical_version!r}"
+        )
+    return commit
+
+
 def _previous_release_base(repo_root: Path, ref: str, current_commit: str) -> str:
     """Return the prior reachable release commit, or the empty-tree sentinel."""
 
@@ -461,6 +515,9 @@ def _previous_release_base(repo_root: Path, ref: str, current_commit: str) -> st
     current_version = _release_version_tuple(current_tag)
     if _base_commit(repo_root, current_tag) != current_commit:
         raise CoverageGateError(f"release tag {current_tag!r} does not identify checked-out HEAD")
+    bootstrap = _bootstrap_release_base(repo_root, current_tag, current_commit)
+    if bootstrap is not None:
+        return bootstrap
     try:
         raw_tags = _run_git(repo_root, "tag", "--merged", "HEAD", "--list", "v*").decode(
             "utf-8", errors="strict"

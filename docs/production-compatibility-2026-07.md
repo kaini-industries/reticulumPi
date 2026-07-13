@@ -27,8 +27,12 @@ The target layout is:
 - verified, root-only backups and the transaction journal under `/var/backups/reticulumpi`; and
 - no runtime writes to the legacy `/opt` or `/home` application trees after cutover.
 
-MeshChat must be split during migration. Its reviewed code and virtual environment belong in a
-root-owned immutable external tree, such as `/srv/reticulumpi-external/meshchat`; its storage,
+MeshChat must be split during migration. The production-shaped predecessor has both its configured
+`install_dir` and `storage_dir` under the mutable legacy `/opt` layout. Before the bridge, stage the
+reviewed code and virtual environment independently as the root-owned immutable
+`/srv/reticulumpi-external/meshchat` tree; do not copy the mutable checkout into that trust domain.
+The administrator then plans the `install_dir` change together with the `storage_dir` change to
+`/var/lib/reticulumpi/meshchat/storage` and applies both from one locked configuration hash. Storage,
 database, configuration, and identity remain writable durable state under `/var/lib/reticulumpi`.
 Never place MeshChat storage inside the hashed code tree.
 
@@ -63,6 +67,18 @@ Resolve each executable to an absolute path without executing it while generatin
 Activation must fail closed if an enabled feature's record is missing, mutable, or does not match
 the installed bytes.
 
+Generate the reviewed values through the independently installed recovery administrator, before a
+candidate environment is trusted:
+
+```bash
+reticulumpi-admin external-artifact digest --kind tree /srv/reticulumpi-external/meshchat
+reticulumpi-admin external-artifact digest --kind file /absolute/path/to/rtl_fm
+```
+
+The command shares runtime's deterministic digest implementation but uses only the standard
+library and signed first-party recovery modules. It does not execute the target or import the
+normal PyYAML configuration loader.
+
 ## Migration gates
 
 ### 1. Read-only capture
@@ -85,6 +101,8 @@ The exact signed candidate must pass:
 
 - hash-locked installation and `pip check` on the production Python baseline;
 - dry-run migration with every source and destination path listed;
+- dependency-free `db plan` and clone-only `db migrate --dry-run` through the installed recovery
+  administrator, with one enabled built-in migration target and no candidate environment;
 - systemd verification, startup readiness, shutdown deadlines, watchdog behavior, and reboot;
 - database clone migration, integrity checks, and compatibility with the rollback release;
 - all five external-artifact checks;
@@ -92,10 +110,15 @@ The exact signed candidate must pass:
 - representative RNode, Meshtastic, MeshCore, GPS, SDR, Dashboard, NomadNet, networking, and
   captive-portal behavior.
 
-The Noble ARM64 systemd lane covers the manifest/config portion of this requirement with a
-root-owned immutable MeshChat stub tree and fail-fast dummy `rtl_test`, `dump1090`, `rtl_fm`, and
-`rtl_power` files. It starts only the MeshChat stub through the packaged launcher and never executes
-the radio fixtures. Real MeshChat behavior and every SDR/RF assertion remain HIL requirements.
+The Noble ARM64 systemd lane covers the manifest/config portion of this requirement with a mutable
+legacy MeshChat code/virtual-environment fixture, both legacy MeshChat configuration paths under
+`/opt`, an independently staged root-owned immutable MeshChat stub tree, and fail-fast dummy
+`rtl_test`, `dump1090`, `rtl_fm`, and `rtl_power` files. It computes manifest values and runs the
+database plan/dry run through the installed recovery package, verifies the two MeshChat path
+rewrites are atomic, starts only the immutable stub through the packaged launcher, and never
+executes the radio fixtures. Exact legacy rollback must restore the original configuration and
+storage and prove the retained legacy code and virtual environment stayed byte-identical. Real
+MeshChat behavior and every SDR/RF assertion remain HIL requirements.
 
 On 2026-07-12, the production-shaped lane passed locally against one consistent working-tree
 candidate in all three modes: fresh `/opt`, fresh `/srv`, and legacy `/opt` plus service-home state
@@ -109,6 +132,12 @@ Before activation, create and verify a full snapshot of `/etc/reticulumpi`, ever
 legacy state root, the canonical `/var/lib/reticulumpi` target, relevant managed units/drop-ins,
 and prior service states. The transaction journal must exist outside all state roots that rollback
 can replace.
+
+The mutable legacy MeshChat code and virtual environment are retained in place rather than treated
+as state to migrate. Backup and rollback cover its nested storage separately, while a deterministic
+manifest proves the retained code tree did not change. This lets `rollback --to legacy` restore the
+exact predecessor without trusting a reconstructed checkout; the independently staged `/srv` tree
+remains immutable and inactive after rollback.
 
 Cutover passes only when:
 
@@ -126,19 +155,28 @@ warning-only condition.
 ## Staged production rollout
 
 1. Install the independently signed, root-owned recovery administrator before using a candidate.
-2. Verify the exact signed ARM64/Ubuntu 24.04/Python 3.12 candidate and its dependency and external-
+2. Independently stage the reviewed MeshChat code/virtual environment under
+   `/srv/reticulumpi-external`, compute its recovery-administrator digest, and install the trusted
+   external-artifact manifest. Never derive this tree by promoting the mutable predecessor during
+   the application transaction.
+3. Verify the exact signed ARM64/Ubuntu 24.04/Python 3.12 candidate and its dependency and external-
    artifact manifests in a private staging directory.
-3. Run administrator and database dry-runs. Review path mappings, feature selection, service-state
-   preservation, disk-space requirements, and rollback evidence.
-4. Stop services only inside the approved maintenance window, create verified backups, then stage
+4. Run administrator and database dry-runs. Review both MeshChat path rewrites, every state mapping,
+   feature selection, service-state preservation, and rollback evidence. The dry run does not
+   perform the apply-time disk check, so manually verify capacity for the expanded candidate,
+   private input snapshot, all legacy/canonical backups, and temporary SQLite clones. The automated
+   apply minimum is the greater of 256 MiB or twice the bundle plus twice current `/var/lib` bytes
+   on the install-root filesystem; separately check backup, state, and temporary filesystems when
+   they are distinct mounts.
+5. Stop services only inside the approved maintenance window, create verified backups, then stage
    the candidate side-by-side under `/srv/reticulumpi`.
-5. Switch atomically, apply state migrations, restore the recorded service relationships, and run
+6. Switch atomically, apply state migrations, restore the recorded service relationships, and run
    every acceptance gate above.
-6. On failure, stop candidate processes, restore the full legacy code/configuration/state layout
+7. On failure, stop candidate processes, restore the full legacy code/configuration/state layout
    and exact prior service states, verify identity and database continuity, then restart the former
    environment. A first migration must support this complete legacy restore even when no earlier
    immutable release exists.
-7. Retain the legacy installation and verified backups until the exact candidate completes a
+8. Retain the legacy installation and verified backups until the exact candidate completes a
    **72-hour soak** with no failed units, identity drift, database integrity errors, orphaned
    processes, OOM kills, unexpected restarts, resource leaks, or peripheral recovery failures.
 

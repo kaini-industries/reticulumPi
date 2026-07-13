@@ -112,6 +112,36 @@ def _write_event(repo: Path, payload: object) -> Path:
     return path
 
 
+def _bootstrap_release_repo(
+    tmp_path: Path,
+    *,
+    historical_version: str = "0.2.4",
+) -> tuple[Path, str, str, Path]:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "pyproject.toml").write_text(
+        f'[project]\nname = "reticulumpi"\nversion = "{historical_version}"\n',
+        encoding="utf-8",
+    )
+    module = repo / "src/reticulumpi/app.py"
+    module.write_text("value = 1\n", encoding="utf-8")
+    baseline = _commit(repo, "historical version boundary")
+    module.write_text("value = 2\n", encoding="utf-8")
+    head = _commit(repo, "release")
+    _git(repo, "tag", "v0.3.2", head)
+    event = _write_event(
+        repo,
+        {
+            "ref": "refs/tags/v0.3.2",
+            "before": "0" * 40,
+            "after": head,
+            "created": True,
+            "deleted": False,
+        },
+    )
+    return repo, baseline, head, event
+
+
 def test_parse_coverage_xml_normalizes_source_and_recomputes_counts(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     source = repo / "src"
@@ -783,6 +813,145 @@ def test_first_release_tag_compares_every_source_file_with_empty_tree(tmp_path: 
         ),
     )
     assert changes.base_commit == _git(repo, "hash-object", "-t", "tree", "/dev/null")
+
+
+def test_v032_bootstrap_uses_pinned_version_boundary_over_lower_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, baseline, head, event = _bootstrap_release_repo(tmp_path)
+    _git(repo, "tag", "v0.3.1", head)
+    monkeypatch.setattr(
+        coverage_gate,
+        "_RELEASE_BOOTSTRAP_BASELINES",
+        {
+            "v0.3.2": coverage_gate.ReleaseBootstrapBaseline(
+                historical_version="0.2.4",
+                commit=baseline,
+            )
+        },
+    )
+
+    assert resolve_github_base(repo, "push", event) == baseline
+
+
+def test_v032_bootstrap_fails_when_pinned_object_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _baseline, _head, event = _bootstrap_release_repo(tmp_path)
+    monkeypatch.setattr(
+        coverage_gate,
+        "_RELEASE_BOOTSTRAP_BASELINES",
+        {
+            "v0.3.2": coverage_gate.ReleaseBootstrapBaseline(
+                historical_version="0.2.4",
+                commit="0" * 40,
+            )
+        },
+    )
+
+    with pytest.raises(CoverageGateError, match="does not resolve to a commit"):
+        resolve_github_base(repo, "push", event)
+
+
+def test_v032_bootstrap_requires_strict_ancestor_and_historical_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, baseline, head, event = _bootstrap_release_repo(tmp_path)
+    monkeypatch.setattr(
+        coverage_gate,
+        "_RELEASE_BOOTSTRAP_BASELINES",
+        {
+            "v0.3.2": coverage_gate.ReleaseBootstrapBaseline(
+                historical_version="0.2.4",
+                commit=head,
+            )
+        },
+    )
+    with pytest.raises(CoverageGateError, match="not a strict first-parent ancestor"):
+        resolve_github_base(repo, "push", event)
+
+    monkeypatch.setattr(
+        coverage_gate,
+        "_RELEASE_BOOTSTRAP_BASELINES",
+        {
+            "v0.3.2": coverage_gate.ReleaseBootstrapBaseline(
+                historical_version="0.2.3",
+                commit=baseline,
+            )
+        },
+    )
+    with pytest.raises(CoverageGateError, match="expected '0.2.3'"):
+        resolve_github_base(repo, "push", event)
+
+
+def test_v032_bootstrap_rejects_second_parent_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    module = repo / "src/reticulumpi/app.py"
+    module.write_text("value = 1\n", encoding="utf-8")
+    root = _commit(repo, "root")
+    main_branch = _git(repo, "branch", "--show-current")
+    _git(repo, "checkout", "-q", "-b", "historical-boundary")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "reticulumpi"\nversion = "0.2.4"\n',
+        encoding="utf-8",
+    )
+    second_parent = _commit(repo, "historical version boundary")
+    _git(repo, "checkout", "-q", main_branch)
+    module.write_text("value = 2\n", encoding="utf-8")
+    _commit(repo, "main change")
+    _git(repo, "merge", "--no-ff", "--no-edit", "historical-boundary")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "tag", "v0.3.2", head)
+    event = _write_event(
+        repo,
+        {
+            "ref": "refs/tags/v0.3.2",
+            "before": root,
+            "after": head,
+            "created": True,
+            "deleted": False,
+        },
+    )
+    monkeypatch.setattr(
+        coverage_gate,
+        "_RELEASE_BOOTSTRAP_BASELINES",
+        {
+            "v0.3.2": coverage_gate.ReleaseBootstrapBaseline(
+                historical_version="0.2.4",
+                commit=second_parent,
+            )
+        },
+    )
+
+    with pytest.raises(CoverageGateError, match="not a strict first-parent ancestor"):
+        resolve_github_base(repo, "push", event)
+
+
+def test_post_bootstrap_release_uses_reachable_prior_tag(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    module = repo / "src/reticulumpi/app.py"
+    module.write_text("value = 1\n", encoding="utf-8")
+    previous = _commit(repo, "v0.3.2")
+    _git(repo, "tag", "v0.3.2", previous)
+    module.write_text("value = 2\n", encoding="utf-8")
+    head = _commit(repo, "v0.3.3")
+    _git(repo, "tag", "v0.3.3", head)
+    event = _write_event(
+        repo,
+        {
+            "ref": "refs/tags/v0.3.3",
+            "before": previous,
+            "after": head,
+            "created": True,
+            "deleted": False,
+        },
+    )
+
+    assert resolve_github_base(repo, "push", event) == previous
 
 
 def test_resolve_github_base_fails_closed_for_root_initial_push(tmp_path: Path) -> None:
