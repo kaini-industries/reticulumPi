@@ -45,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Audit hash-locked production profiles
-        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        uses: pypa/gh-action-pip-audit@fb241f581674a1bb995061d62504857a9ea4b69e # post-v1.1.0 stable disable-pip input
         with:
           inputs: >-
             constraints/production-universal-core.txt
@@ -413,6 +413,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: package
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
@@ -448,12 +449,34 @@ jobs:
           provenance: false
           sbom: false
           tags: reticulumpi:${{ matrix.suffix }}
-      - name: Scan runtime image
+      - name: Report all runtime image vulnerabilities
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: reticulumpi:${{ matrix.suffix }}
+          fail-build: false
+          severity-cutoff: high
+          only-fixed: false
+          output-format: json
+          output-file: grype-all-${{ matrix.suffix }}.json
+          grype-version: 0.110.0
+          cache-db: true
+      - name: Upload complete runtime vulnerability report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vulnerability-report-${{ matrix.suffix }}
+          path: grype-all-${{ matrix.suffix }}.json
+          if-no-files-found: error
+      - name: Enforce actionable high-severity vulnerability gate
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: reticulumpi:${{ matrix.suffix }}
           fail-build: true
           severity-cutoff: high
+          only-fixed: true
+          output-format: table
+          grype-version: 0.110.0
+          vex: docker/security/cve-2026-15308.openvex.json
+          cache-db: true
       - name: Verify minimal runtime, readiness, shutdown, and durable recreation
         run: >-
           tools/verify_container_runtime.sh

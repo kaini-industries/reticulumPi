@@ -1,10 +1,15 @@
 # Container Deployment
 
 The production image consumes an already-built ReticulumPi wheel and installs it into a
-compiler-free Bookworm/Python 3.11 runtime with hash-locked Dashboard/NomadNet dependencies.
+compiler-free Debian Trixie/Python 3.14 runtime with hash-locked Dashboard/NomadNet dependencies.
 It does not build from the source tree. It runs as fixed UID/GID 10001 under `tini`. All stages
-share the multi-architecture digest pinned by `PYTHON_BOOKWORM_IMAGE`; updating that digest is
+share the multi-architecture digest pinned by `PYTHON_TRIXIE_IMAGE`; updating that digest is
 an explicit release change and requires rebuilding and qualifying both ARM64 and AMD64 images.
+
+The final runtime removes pip, setuptools, wheel, and `ensurepip` after the wheel and its locked
+dependencies pass `pip check`. CI retains a complete vulnerability report, while the release
+gate blocks high/critical findings that have an available remediation. A narrowly scoped VEX
+record documents any verified source-level backport applied to the pinned interpreter image.
 
 From a development checkout, build exactly one wheel before invoking Compose:
 

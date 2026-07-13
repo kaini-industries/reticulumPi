@@ -135,8 +135,23 @@ docker run --rm \
     ! command -v cc
     ! command -v gcc
     ! command -v make
+    ! command -v pip
+    ! command -v pip3
     ! command -v sudo
     ! command -v systemctl
+    python -c '\''
+import importlib.util
+from hashlib import sha256
+from pathlib import Path
+
+for name in ("ensurepip", "pip", "setuptools", "wheel"):
+    assert importlib.util.find_spec(name) is None, name
+
+parser_path = Path("/usr/local/lib/python3.14/html/parser.py")
+assert sha256(parser_path.read_bytes()).hexdigest() == (
+    "951b46301862483dbcb3debbbd39b4cef3b85ebe488f86cc2ff667f834dfe523"
+)
+'\''
     test ! -e /src
     test ! -e /workspace
     test ! -e /run/reticulumpi-control.sock

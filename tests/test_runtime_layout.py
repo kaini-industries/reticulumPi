@@ -139,9 +139,7 @@ def test_container_test_context_excludes_local_secrets_and_tooling():
 
 def test_container_test_stage_runs_as_nonroot_and_runtime_stays_wheel_only():
     dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
-    test_stage, runtime_stage = dockerfile.split(
-        "FROM ${PYTHON_BOOKWORM_IMAGE} AS runtime", maxsplit=1
-    )
+    test_stage, runtime_stage = dockerfile.split("FROM python-patched AS runtime", maxsplit=1)
 
     assert "COPY --chown=reticulumpi-test:reticulumpi-test . ." in test_stage
     assert "USER reticulumpi-test" in test_stage

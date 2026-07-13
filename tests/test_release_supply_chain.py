@@ -145,6 +145,24 @@ def test_ci_pins_security_actions_and_runs_supply_chain_gates():
     assert generate_sbom["with"]["path"] == "${{ runner.temp }}/reticulumpi-wheel-root"
 
 
+def test_dependency_audit_uses_verified_disable_pip_action_interface():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    audit_steps = [
+        step
+        for step in workflow["jobs"]["dependency-audit"]["steps"]
+        if str(step.get("uses", "")).startswith("pypa/gh-action-pip-audit@")
+    ]
+
+    assert len(audit_steps) == 1
+    audit_step = audit_steps[0]
+    assert audit_step["uses"] == (
+        "pypa/gh-action-pip-audit@fb241f581674a1bb995061d62504857a9ea4b69e"
+    )
+    assert audit_step["with"]["disable-pip"] is True
+    assert audit_step["with"]["require-hashes"] is True
+    assert "internal-be-careful-extra-flags" not in audit_step["with"]
+
+
 def test_container_job_loads_then_validates_and_exports_one_runtime_image():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     steps = workflow["jobs"]["container"]["steps"]
@@ -152,13 +170,31 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
     ordered_names = [step.get("name") for step in steps]
 
     build_name = "Build runtime target from the same wheel"
-    scan_name = "Scan runtime image"
+    report_name = "Report all runtime image vulnerabilities"
+    report_upload_name = "Upload complete runtime vulnerability report"
+    gate_name = "Enforce actionable high-severity vulnerability gate"
     verify_name = "Verify minimal runtime, readiness, shutdown, and durable recreation"
     export_name = "Export the exact validated runtime image"
     assert [
-        ordered_names.index(name) for name in (build_name, scan_name, verify_name, export_name)
+        ordered_names.index(name)
+        for name in (
+            build_name,
+            report_name,
+            report_upload_name,
+            gate_name,
+            verify_name,
+            export_name,
+        )
     ] == sorted(
-        ordered_names.index(name) for name in (build_name, scan_name, verify_name, export_name)
+        ordered_names.index(name)
+        for name in (
+            build_name,
+            report_name,
+            report_upload_name,
+            gate_name,
+            verify_name,
+            export_name,
+        )
     )
 
     build = named_steps[build_name]
@@ -175,10 +211,32 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
         "tags": "reticulumpi:${{ matrix.suffix }}",
     }
 
-    scan = named_steps[scan_name]
-    assert scan["with"]["image"] == "reticulumpi:${{ matrix.suffix }}"
-    assert scan["with"]["fail-build"] is True
-    assert scan["with"]["severity-cutoff"] == "high"
+    report = named_steps[report_name]
+    assert report["with"] == {
+        "image": "reticulumpi:${{ matrix.suffix }}",
+        "fail-build": False,
+        "severity-cutoff": "high",
+        "only-fixed": False,
+        "output-format": "json",
+        "output-file": "grype-all-${{ matrix.suffix }}.json",
+        "grype-version": "0.110.0",
+        "cache-db": True,
+    }
+    report_upload = named_steps[report_upload_name]
+    assert report_upload["with"]["path"] == "grype-all-${{ matrix.suffix }}.json"
+    assert report_upload["with"]["if-no-files-found"] == "error"
+
+    gate = named_steps[gate_name]
+    assert gate["with"] == {
+        "image": "reticulumpi:${{ matrix.suffix }}",
+        "fail-build": True,
+        "severity-cutoff": "high",
+        "only-fixed": True,
+        "output-format": "table",
+        "grype-version": "0.110.0",
+        "vex": "docker/security/cve-2026-15308.openvex.json",
+        "cache-db": True,
+    }
     assert "reticulumpi:${{ matrix.suffix }}" in named_steps[verify_name]["run"]
     export = named_steps[export_name]["run"]
     assert 'docker save "reticulumpi:${{ matrix.suffix }}"' in export

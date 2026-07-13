@@ -1,6 +1,7 @@
 """Tests for the SensorFramework plugin."""
 
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from unittest.mock import MagicMock, patch
@@ -273,33 +274,20 @@ def test_event_published_on_read(mock_dest, mock_app, plugin_config):
     plugin_config["read_interval"] = 3600
 
     plugin = SensorFrameworkPlugin(mock_app, plugin_config)
-    plugin.start()
-
-    # Wait for the background loop's initial read to complete so it doesn't
-    # race with our subscription.  _last_readings is populated once the first
-    # iteration finishes.
-    deadline = time.monotonic() + 2.0
-    while not plugin._last_readings and time.monotonic() < deadline:
-        time.sleep(0.01)
-
     events_received = []
-    mock_app.event_bus.subscribe("sensor.reading", lambda e, d: events_received.append(d))
+    delivered = threading.Event()
 
-    # Manually trigger a read cycle for the command driver
-    for sensor_cfg, driver in plugin._drivers:
-        reading = driver.read()
-        reading["timestamp"] = time.time()
-        plugin._last_readings[sensor_cfg["name"]] = reading
-        plugin.event_bus.publish(
-            "sensor.reading",
-            {
-                "sensor": sensor_cfg["name"],
-                "driver": sensor_cfg["driver"],
-                "reading": reading,
-            },
-        )
+    def capture_reading(_event, data):
+        events_received.append(data)
+        delivered.set()
+
+    subscription = mock_app.event_bus.subscribe("sensor.reading", capture_reading)
+    try:
+        plugin.start()
+        assert delivered.wait(2.0), "background sensor read did not publish an event"
+    finally:
+        plugin.stop()
+        subscription.cancel()
 
     assert len(events_received) == 1
     assert events_received[0]["sensor"] == "test_temp"
-
-    plugin.stop()

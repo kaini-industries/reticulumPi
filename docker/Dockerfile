@@ -1,10 +1,19 @@
 # syntax=docker/dockerfile:1.7
-ARG PYTHON_BOOKWORM_IMAGE=python:3.11-slim-bookworm@sha256:f5cf0344c9886ff24d34797578d5d7dd6e8911ae0fe5962bb55d0f89603ec361
+ARG PYTHON_TRIXIE_IMAGE=python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 
 FROM scratch AS wheel-artifact
 COPY dist/reticulumpi-*.whl /wheels/
 
-FROM ${PYTHON_BOOKWORM_IMAGE} AS test
+FROM ${PYTHON_TRIXIE_IMAGE} AS python-patched
+
+# Python 3.14.6 predates the upstream fix for CVE-2026-15308. Apply the
+# verified CPython 3.14 backport fail-closed until a patched stable image is
+# available, then record that exact remediation in the release VEX document.
+COPY --chown=root:root docker/security/patch_cpython_html_parser.py /tmp/
+RUN python /tmp/patch_cpython_html_parser.py /usr/local/lib/python3.14/html/parser.py && \
+    rm -f /tmp/patch_cpython_html_parser.py
+
+FROM python-patched AS test
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -27,13 +36,13 @@ RUN set -eu; \
     python -m pip check
 # The test target intentionally carries the repository fixtures and documentation.
 # Runtime remains wheel-only below.  Copying the complete (dockerignored) context
-# keeps repository-level tests such as tools/check_docs.py honest inside Bookworm.
+# keeps repository-level tests such as tools/check_docs.py honest inside Trixie.
 COPY --chown=reticulumpi-test:reticulumpi-test . .
 USER reticulumpi-test
 RUN python -c "from importlib.resources import files; p = files('reticulumpi.builtin_plugins.web_dashboard').joinpath('static/index.html'); assert p.is_file(), p" && \
     pytest tests/ -q --tb=short
 
-FROM ${PYTHON_BOOKWORM_IMAGE} AS runtime
+FROM python-patched AS runtime
 
 ARG RETICULUMPI_UID=10001
 ARG RETICULUMPI_GID=10001
@@ -65,7 +74,11 @@ RUN set -eu; \
     test "$#" -eq 1; \
     python -m pip install --no-deps "${1}"; \
     python -m pip check; \
-    rm -rf /tmp/wheels /tmp/constraints
+    python -m pip uninstall --yes setuptools wheel pip; \
+    rm -rf \
+        /tmp/wheels \
+        /tmp/constraints \
+        /usr/local/lib/python3.14/ensurepip
 COPY --chown=root:root docker/entrypoint.sh /usr/local/bin/reticulumpi-entrypoint
 RUN chmod 0755 /usr/local/bin/reticulumpi-entrypoint
 

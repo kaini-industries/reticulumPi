@@ -570,7 +570,7 @@ make docker-test-arm64    # test on ARM64 (Pi architecture, uses QEMU on x86)
 ```
 
 The Make targets build one project wheel, install its runtime dependencies from the hashed
-universal production profile in a Bookworm/Python 3.11 container, install that wheel, and run
+universal production profile in a Debian Trixie/Python 3.14 container, install that wheel, and run
 the test suite.
 
 ## Configuration
