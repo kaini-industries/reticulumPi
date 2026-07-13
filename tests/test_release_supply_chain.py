@@ -26,6 +26,11 @@ from tools.verify_sbom import SbomValidationError, validate_sbom
 
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_PATHS = tuple(
+    sorted(
+        path for path in (ROOT / ".github/workflows").iterdir() if path.suffix in {".yaml", ".yml"}
+    )
+)
 CONSTRAINT_PROFILES = (
     "production-universal-core",
     "production-universal-dashboard-nomadnet",
@@ -97,19 +102,38 @@ def test_cyclonedx_release_sbom_is_verified_fail_closed(tmp_path):
 def test_ci_pins_security_actions_and_runs_supply_chain_gates():
     workflow_path = ROOT / ".github/workflows/ci.yml"
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-    steps = [
-        step
-        for job in workflow["jobs"].values()
-        for step in job.get("steps", [])
-        if isinstance(step, dict)
-    ]
-    actions = [step["uses"] for step in steps if "uses" in step]
+    workflow_actions = []
+    workflow_sources = []
+    for path in WORKFLOW_PATHS:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert isinstance(document, dict), f"{path.name} is not a workflow mapping"
+        workflow_sources.append(path.read_text(encoding="utf-8"))
+        for job in document["jobs"].values():
+            if "uses" in job:
+                workflow_actions.append((path.name, job["uses"]))
+            workflow_actions.extend(
+                (path.name, step["uses"])
+                for step in job.get("steps", [])
+                if isinstance(step, dict) and "uses" in step
+            )
 
-    assert actions
-    assert all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in actions)
+    assert workflow_actions
+    unpinned = [
+        f"{filename}: {action}"
+        for filename, action in workflow_actions
+        if re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) is None
+    ]
+    assert not unpinned, "workflow actions must use exact commit SHAs:\n" + "\n".join(unpinned)
+    actions = [action for _filename, action in workflow_actions]
     assert any(action.startswith("pypa/gh-action-pip-audit@") for action in actions)
     assert any(action.startswith("anchore/sbom-action@") for action in actions)
     assert any(action.startswith("anchore/scan-action@") for action in actions)
+
+    all_workflow_source = "\n".join(workflow_sources)
+    assert "MINISIGN_SECRET_KEY" not in all_workflow_source
+    assert "--signing-key" not in all_workflow_source
+    assert "sign-request" not in all_workflow_source
+    assert re.search(r"(^|[;&|]\s*)minisign\s+-S(?:\s|$)", all_workflow_source) is None
 
     source = workflow_path.read_text(encoding="utf-8")
     assert "gitleaks/gitleaks-action@" not in source
@@ -163,25 +187,26 @@ def test_dependency_audit_uses_verified_disable_pip_action_interface():
     assert "internal-be-careful-extra-flags" not in audit_step["with"]
 
 
-def test_ci_inline_shell_steps_have_valid_bash_syntax():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+def test_workflow_inline_shell_steps_have_valid_bash_syntax():
     failures = []
 
-    for job_name, job in workflow["jobs"].items():
-        for step in job.get("steps", []):
-            script = step.get("run")
-            if not isinstance(script, str):
-                continue
-            result = subprocess.run(
-                ["bash", "-n"],
-                input=script,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if result.returncode:
-                step_name = step.get("name", "<unnamed>")
-                failures.append(f"{job_name}/{step_name}: {result.stderr.strip()}")
+    for path in WORKFLOW_PATHS:
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_name, job in workflow["jobs"].items():
+            for step in job.get("steps", []):
+                script = step.get("run")
+                if not isinstance(script, str):
+                    continue
+                result = subprocess.run(
+                    ["bash", "-n"],
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if result.returncode:
+                    step_name = step.get("name", "<unnamed>")
+                    failures.append(f"{path.name}:{job_name}/{step_name}: {result.stderr.strip()}")
 
     assert not failures, "\n".join(failures)
 

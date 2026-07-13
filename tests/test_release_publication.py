@@ -296,6 +296,16 @@ def test_release_staging_rejects_drift_and_writes_one_global_manifest(
     }
     admin_directory = tmp_path / "recovery-admin"
     admin_artifacts = _admin_artifacts(admin_directory, wheel)
+    provenance = tmp_path / prepare_release_assets.RELEASE_PROVENANCE_NAME
+    provenance.write_text(
+        json.dumps(
+            {"commit": "a" * 40, "schema": 1, "tag": f"v{VERSION}"},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="ascii",
+    )
 
     output = tmp_path / "release-assets"
     staged = prepare_release_assets.prepare_release_assets(
@@ -303,6 +313,7 @@ def test_release_staging_rejects_drift_and_writes_one_global_manifest(
         python_directory=python_directory,
         image_directories=image_directories,
         recovery_admin_directory=admin_directory,
+        provenance=provenance,
         install_bundle=bundle,
         output_directory=output,
     )
@@ -314,6 +325,7 @@ def test_release_staging_rejects_drift_and_writes_one_global_manifest(
         f"reticulumpi-container-{VERSION}-amd64.tar.gz",
         f"reticulumpi-container-{VERSION}-arm64.tar.gz",
         bundle.name,
+        prepare_release_assets.RELEASE_PROVENANCE_NAME,
         *(path.name for path in admin_artifacts),
         "SHA256SUMS",
     }
@@ -328,6 +340,7 @@ def test_release_staging_rejects_drift_and_writes_one_global_manifest(
     assert set(manifest_entries) == expected_names - {"SHA256SUMS"}
     assert all(_sha256(output / name) == digest for name, digest in manifest_entries.items())
     assert (output / wheel.name).read_bytes() == wheel.read_bytes()
+    assert (output / provenance.name).read_bytes() == provenance.read_bytes()
 
     with pytest.raises(prepare_release_assets.ReleaseAssetError, match="arm64"):
         prepare_release_assets.inspect_image_archive(image_archives["amd64"], "arm64")
@@ -413,21 +426,30 @@ def test_container_probe_rejects_links_modes_and_corrupt_databases(
 def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -> None:
     workflow_path = ROOT / ".github/workflows/ci.yml"
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-    release = workflow["jobs"]["release"]
-    release_source = json.dumps(release)
-    candidate = workflow["jobs"]["release-candidate"]
+    candidate_path = ROOT / ".github/workflows/release-candidate.yml"
+    candidate_workflow = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+    release_path = ROOT / ".github/workflows/release.yml"
+    release_workflow = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    release_inputs = workflow["jobs"]["release-inputs"]
+    release_inputs_source = json.dumps(release_inputs)
+    global_request = candidate_workflow["jobs"]["global-signing-request"]
+    global_request_source = json.dumps(global_request)
+    candidate = release_workflow["jobs"]["release-candidate"]
     candidate_source = json.dumps(candidate)
+    release = release_workflow["jobs"]["release"]
+    release_source = json.dumps(release)
     tag_trust = workflow["jobs"]["release-tag-trust"]
     tag_trust_source = json.dumps(tag_trust)
+    all_workflow_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in (workflow_path, candidate_path, release_path)
+    )
 
-    assert "github.ref_type == 'tag'" in release["if"]
-    assert "needs['release-tag-trust'].result == 'success'" in release["if"]
-    assert "needs['dashboard-performance'].result == 'success'" in release["if"]
-    assert "needs['bookworm-systemd'].result == 'success'" in release["if"]
-    assert "needs['noble-systemd'].result == 'success'" in release["if"]
-    assert "needs['release-candidate'].result == 'success'" in release["if"]
-    assert release["environment"] == "release"
-    assert set(release["needs"]) >= {
+    assert "github.ref_type == 'tag'" in release_inputs["if"]
+    assert "needs['release-tag-trust'].result == 'success'" in release_inputs["if"]
+    assert "needs['dashboard-performance'].result == 'success'" in release_inputs["if"]
+    assert "needs['bookworm-systemd'].result == 'success'" in release_inputs["if"]
+    assert "needs['noble-systemd'].result == 'success'" in release_inputs["if"]
+    assert set(release_inputs["needs"]) >= {
         "package",
         "recovery-admin",
         "container",
@@ -437,8 +459,50 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
         "bookworm-systemd",
         "noble-systemd",
         "release-tag-trust",
-        "release-candidate",
     }
+    assert release_inputs["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    assert "environment" not in release_inputs
+    assert "tools.offline_release prepare-inputs" in release_inputs_source
+    assert "release-signing-input-${{ github.ref_name }}" in release_inputs_source
+    assert "RELEASE-INPUTS.SHA256SUMS" in release_inputs_source
+    assert "actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26" in (release_inputs_source)
+
+    assert "workflow_dispatch:" in candidate_path.read_text(encoding="utf-8")
+    assert candidate_workflow["permissions"] == {
+        "contents": "read",
+        "actions": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    assert "environment" not in global_request
+    assert "tools.offline_release stage-global-request" in global_request_source
+    assert "release-signing-input-${{ inputs.tag }}" in global_request_source
+    assert "global-signing-request-${{ inputs.tag }}" in global_request_source
+    assert "--input-manifest-sha256" in global_request_source
+    assert "--paginate --slurp" in global_request_source
+    assert ".github/workflows/ci.yml" in global_request_source
+    assert "verify-tag --raw" in global_request_source
+    assert "docker push" not in global_request_source
+    assert "gh release create" not in global_request_source
+
+    assert candidate["environment"] == "release-signing"
+    assert candidate["permissions"] == {"contents": "read", "actions": "read"}
+    assert "tools.offline_release finalize-candidate" in candidate_source
+    assert "global-signing-request-${{ inputs.tag }}" in candidate_source
+    assert "signed-release-candidate-${{ inputs.tag }}" in candidate_source
+    assert "--input-manifest-sha256" in candidate_source
+    assert "--paginate --slurp" in candidate_source
+    assert "reticulumpi.admin_cli install" in candidate_source
+    assert "--dry-run" in candidate_source
+    assert "docker push" not in candidate_source
+    assert "gh release create" not in candidate_source
+
+    assert release["environment"] == "release"
+    assert release["needs"] == "release-candidate"
     assert release["permissions"] == {
         "contents": "write",
         "packages": "write",
@@ -446,30 +510,13 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
         "attestations": "write",
     }
     assert workflow["concurrency"]["cancel-in-progress"] == "${{ github.ref_type != 'tag' }}"
+    assert release_workflow["concurrency"]["cancel-in-progress"] is False
     assert "docker build" not in release_source
     assert "python -m build" not in release_source
-    assert "MINISIGN_SECRET_KEY" not in release_source
-    assert "signed-release-candidate-${{ github.ref_name }}" in release_source
-    assert candidate["environment"] == "release-signing"
-    assert candidate["permissions"] == {"contents": "read"}
-    assert set(candidate["needs"]) >= {
-        "package",
-        "recovery-admin",
-        "container",
-        "dashboard-performance",
-        "bookworm-systemd",
-        "noble-systemd",
-        "release-tag-trust",
-    }
-    assert "docker build" not in candidate_source
-    assert "docker push" not in candidate_source
-    assert "gh release create" not in candidate_source
-    assert "python -m build" not in candidate_source
-    assert "minisign -S -W" in candidate_source
-    assert "MINISIGN_SECRET_KEY" in candidate_source
-    assert "reticulumpi.admin_cli install" in candidate_source
-    assert "--dry-run" in candidate_source
-    assert "signed-release-candidate-${{ github.ref_name }}" in candidate_source
+    assert "tools.offline_release verify-candidate" in release_source
+    assert "signed-release-candidate-${{ inputs.tag }}" in release_source
+    assert "MINISIGN_SECRET_KEY" not in all_workflow_source
+    assert "minisign -S" not in all_workflow_source
     assert tag_trust["if"] == "github.ref_type == 'tag'"
     assert tag_trust["permissions"] == {"contents": "read"}
     assert "RELEASE_TAG_PUBLIC_KEY" in tag_trust_source
@@ -603,8 +650,8 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert "--runtime-manifest admin-runtime.SHA256SUMS" in recovery_source
     assert "--platform-profile" in recovery_source
     assert "--source-date-epoch" in recovery_source
-    assert "recovery-administrators" in candidate_source
-    assert "--recovery-admin-directory" in candidate_source
+    assert "recovery-administrators" in release_inputs_source
+    assert "release-input/recovery-admin" in release_inputs_source
 
     noble_fixture = (ROOT / "tools/verify_noble_systemd.sh").read_text(encoding="utf-8")
     assert "VERSION_CODENAME:-} != noble" in noble_fixture

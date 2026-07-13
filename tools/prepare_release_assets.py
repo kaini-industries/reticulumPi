@@ -12,7 +12,8 @@ import re
 import shutil
 import stat
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -31,10 +32,26 @@ else:
 ARCHITECTURES = ("amd64", "arm64")
 SHA256_LINE = re.compile(r"^(?P<digest>[0-9a-f]{64})  (?P<name>[^/\r\n]+)\n$")
 EMPTY_MANIFEST_SHA256 = hashlib.sha256(b"").hexdigest()
+RELEASE_PROVENANCE_NAME = "RELEASE-PROVENANCE.json"
+MAX_RELEASE_PROVENANCE_BYTES = 64 * 1024
 
 
 class ReleaseAssetError(ValueError):
     """Raised when a validated-build artifact set is incomplete or ambiguous."""
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedReleaseInputs:
+    """Immutable paths selected from one validated release-input set."""
+
+    version: str
+    wheel: Path
+    sdist: Path
+    sbom: Path
+    amd64_image: Path
+    arm64_image: Path
+    recovery_artifacts: tuple[Path, ...]
+    provenance: Path
 
 
 def _hash_stream(handle: BinaryIO) -> str:
@@ -58,6 +75,53 @@ def _regular_file(path: Path, root: Path, label: str) -> Path:
         raise ReleaseAssetError(f"{label} escapes its artifact directory: {path}") from exc
     if not relative.parts or not stat.S_ISREG(metadata.st_mode):
         raise ReleaseAssetError(f"{label} must be a regular file: {path}")
+    return path
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant {value}")
+
+
+def _validate_release_provenance(path: Path) -> Path:
+    if path.name != RELEASE_PROVENANCE_NAME:
+        raise ReleaseAssetError(f"release provenance must be named {RELEASE_PROVENANCE_NAME}")
+    _regular_file(path, path.parent, "release provenance")
+    try:
+        metadata = path.lstat()
+        if metadata.st_size > MAX_RELEASE_PROVENANCE_BYTES:
+            raise ReleaseAssetError(
+                f"release provenance exceeds {MAX_RELEASE_PROVENANCE_BYTES} bytes"
+            )
+        payload = path.read_bytes()
+        if len(payload) != metadata.st_size:
+            raise ReleaseAssetError("release provenance changed while being read")
+        document = json.loads(
+            payload.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+    except ReleaseAssetError:
+        raise
+    except (OSError, RecursionError, ValueError) as exc:
+        raise ReleaseAssetError(f"release provenance is not valid JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ReleaseAssetError("release provenance JSON root must be an object")
+    try:
+        canonical = (
+            json.dumps(
+                document,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("ascii")
+    except (RecursionError, ValueError) as exc:
+        raise ReleaseAssetError(f"release provenance is not valid JSON: {exc}") from exc
+    if payload != canonical:
+        raise ReleaseAssetError(
+            "release provenance must use canonical sorted compact JSON with one trailing newline"
+        )
     return path
 
 
@@ -503,32 +567,22 @@ def inspect_install_bundle(bundle: Path, version: str, wheel: Path) -> None:
         if name not in {manifest_name, signature_name}
     }
     if expected_hashes != actual_hashes:
-        raise ReleaseAssetError("install bundle inner manifest is not an exact tree manifest")
+        raise ReleaseAssetError("install bundle inner manifest is not an exact file manifest")
 
 
-def _copy_exact(source: Path, destination: Path) -> None:
-    if destination.exists() or destination.is_symlink():
-        raise ReleaseAssetError(f"release output already exists: {destination}")
-    with source.open("rb") as incoming, destination.open("xb") as outgoing:
-        shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
-        outgoing.flush()
-        os.fsync(outgoing.fileno())
-    destination.chmod(0o644)
-    if _sha256(source) != _sha256(destination):
-        destination.unlink(missing_ok=True)
-        raise ReleaseAssetError(f"release artifact copy verification failed: {source}")
-
-
-def prepare_release_assets(
+def validate_release_inputs(
     *,
     tag: str,
     python_directory: Path,
-    image_directories: dict[str, Path],
+    image_directories: Mapping[str, Path],
     recovery_admin_directory: Path,
-    install_bundle: Path,
-    output_directory: Path,
-) -> list[Path]:
+    provenance: Path,
+) -> ValidatedReleaseInputs:
+    """Validate and select the exact CI artifacts used to assemble one release."""
+
     version = version_from_tag(tag)
+    provenance = _validate_release_provenance(provenance)
+
     python_files = _artifact_files(python_directory, "Python distribution artifact")
     wheel = _one_matching(python_files, lambda path: path.suffix == ".whl", "wheel")
     sdist = _one_matching(
@@ -553,10 +607,14 @@ def prepare_release_assets(
             raise ReleaseAssetError(f"missing {architecture} image artifact directory")
         files = _artifact_files(directory, f"{architecture} image artifact")
         expected_archive = f"reticulumpi-{architecture}.tar.gz"
-        archive = _one_matching(files, lambda path: path.name == expected_archive, "image archive")
+        archive = _one_matching(
+            files,
+            lambda path, name=expected_archive: path.name == name,
+            "image archive",
+        )
         sidecar = _one_matching(
             files,
-            lambda path: path.name == f"{expected_archive}.sha256",
+            lambda path, name=f"{expected_archive}.sha256": path.name == name,
             "image checksum",
         )
         if set(files) != {archive, sidecar}:
@@ -565,12 +623,8 @@ def prepare_release_assets(
         inspect_image_archive(archive, architecture)
         images[architecture] = archive
 
-    bundle_root = install_bundle.parent
-    _regular_file(install_bundle, bundle_root, "ARM64 install bundle")
-    inspect_install_bundle(install_bundle, version, wheel)
-
     recovery_files = _artifact_files(recovery_admin_directory, "recovery administrator artifact")
-    recovery_packages: list[tuple[Path, Path]] = []
+    recovery_artifacts: list[Path] = []
     expected_recovery_files: set[Path] = set()
     for profile in SUPPORTED_PLATFORM_PYTHON:
         expected_name = admin_deb_filename(version, profile)
@@ -586,10 +640,57 @@ def prepare_release_assets(
         )
         _verify_sidecar(package, sidecar)
         inspect_admin_deb(package, version=version, profile=profile, wheel=wheel)
-        recovery_packages.append((package, sidecar))
+        recovery_artifacts.extend((package, sidecar))
         expected_recovery_files.update({package, sidecar})
     if set(recovery_files) != expected_recovery_files:
         raise ReleaseAssetError("recovery administrator artifact contains unexpected files")
+
+    return ValidatedReleaseInputs(
+        version=version,
+        wheel=wheel,
+        sdist=sdist,
+        sbom=sbom,
+        amd64_image=images["amd64"],
+        arm64_image=images["arm64"],
+        recovery_artifacts=tuple(recovery_artifacts),
+        provenance=provenance,
+    )
+
+
+def _copy_exact(source: Path, destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise ReleaseAssetError(f"release output already exists: {destination}")
+    with source.open("rb") as incoming, destination.open("xb") as outgoing:
+        shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
+        outgoing.flush()
+        os.fsync(outgoing.fileno())
+    destination.chmod(0o644)
+    if _sha256(source) != _sha256(destination):
+        destination.unlink(missing_ok=True)
+        raise ReleaseAssetError(f"release artifact copy verification failed: {source}")
+
+
+def prepare_release_assets(
+    *,
+    tag: str,
+    python_directory: Path,
+    image_directories: Mapping[str, Path],
+    recovery_admin_directory: Path,
+    provenance: Path,
+    install_bundle: Path,
+    output_directory: Path,
+) -> list[Path]:
+    inputs = validate_release_inputs(
+        tag=tag,
+        python_directory=python_directory,
+        image_directories=image_directories,
+        recovery_admin_directory=recovery_admin_directory,
+        provenance=provenance,
+    )
+
+    bundle_root = install_bundle.parent
+    _regular_file(install_bundle, bundle_root, "ARM64 install bundle")
+    inspect_install_bundle(install_bundle, inputs.version, inputs.wheel)
     if output_directory.exists():
         if (
             output_directory.is_symlink()
@@ -601,14 +702,21 @@ def prepare_release_assets(
 
     staged: list[Path] = []
     destinations = [
-        (wheel, wheel.name),
-        (sdist, sdist.name),
-        (sbom, f"reticulumpi-{version}.cdx.json"),
-        (images["amd64"], f"reticulumpi-container-{version}-amd64.tar.gz"),
-        (images["arm64"], f"reticulumpi-container-{version}-arm64.tar.gz"),
+        (inputs.wheel, inputs.wheel.name),
+        (inputs.sdist, inputs.sdist.name),
+        (inputs.sbom, f"reticulumpi-{inputs.version}.cdx.json"),
+        (
+            inputs.amd64_image,
+            f"reticulumpi-container-{inputs.version}-amd64.tar.gz",
+        ),
+        (
+            inputs.arm64_image,
+            f"reticulumpi-container-{inputs.version}-arm64.tar.gz",
+        ),
         (install_bundle, install_bundle.name),
+        (inputs.provenance, RELEASE_PROVENANCE_NAME),
     ]
-    destinations.extend((path, path.name) for pair in recovery_packages for path in pair)
+    destinations.extend((path, path.name) for path in inputs.recovery_artifacts)
     for source, name in destinations:
         destination = output_directory / name
         _copy_exact(source, destination)
@@ -630,6 +738,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--amd64-image-directory", required=True, type=Path)
     parser.add_argument("--arm64-image-directory", required=True, type=Path)
     parser.add_argument("--recovery-admin-directory", required=True, type=Path)
+    parser.add_argument("--provenance", required=True, type=Path)
     parser.add_argument("--install-bundle", required=True, type=Path)
     parser.add_argument("--output-directory", required=True, type=Path)
     args = parser.parse_args(argv)
@@ -642,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
                 "arm64": args.arm64_image_directory,
             },
             recovery_admin_directory=args.recovery_admin_directory,
+            provenance=args.provenance,
             install_bundle=args.install_bundle,
             output_directory=args.output_directory,
         )

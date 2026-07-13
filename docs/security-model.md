@@ -75,7 +75,19 @@ systemctl cat reticulumpi-control.socket reticulumpi-control@.service
 
 Release code and virtual environments are immutable and root-owned. Upgrades build a new
 release, verify dependencies, back up state, switch atomically, and roll back on activation
-failure. CI verifies installed wheels rather than relying only on editable checkouts.
+failure. CI verifies installed wheels rather than relying only on editable checkouts. Production
+updates consume signed release artifacts only; neither a source checkout nor `git pull` is an
+authorized deployment mechanism.
+
+The Minisign release private key remains on a trusted offline workstation. GitHub stores only the
+independently distributed public key, and neither the `release-signing` nor `release` environment
+contains the private key. Tag CI first attests an exact input manifest. The workstation verifies
+that attestation and its repository, tag, commit, run ID, and run-attempt bindings before signing
+the install manifest. A tag-bound workflow then emits and attests the exact global release
+manifest; the workstation verifies the complete nested payload and both run bindings before
+signing that manifest. Only the two public detached signatures are sent back as workflow inputs.
+The protected jobs re-verify every binding and exact asset allowlist before candidate assembly or
+publication.
 
 Containers run as fixed UID/GID with `HOME=/data`, a read-only configuration mount, a
 single durable data volume, a disposable cache, and `tini`. Containers contain no compiler,

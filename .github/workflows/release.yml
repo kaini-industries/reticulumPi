@@ -1,0 +1,454 @@
+name: Promote offline-signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact signed vMAJOR.MINOR.PATCH tag
+        required: true
+        type: string
+      source_run_id:
+        description: Successful tag CI run that produced the original signing inputs
+        required: true
+        type: string
+      candidate_run_id:
+        description: Successful candidate-finalization run that produced the global manifest
+        required: true
+        type: string
+      input_manifest_sha256:
+        description: Offline-verified SHA-256 of RELEASE-INPUTS.SHA256SUMS
+        required: true
+        type: string
+      global_signature_b64:
+        description: Base64-encoded detached Minisign signature for the global release manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release-candidate:
+    name: Assemble exact offline-signed candidate
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    outputs:
+      source_run_attempt: ${{ steps.release-runs.outputs.source_run_attempt }}
+      candidate_run_attempt: ${{ steps.release-runs.outputs.candidate_run_attempt }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the exact trusted signed tag before repository code
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG_PUBLIC_KEY: ${{ vars.RELEASE_TAG_PUBLIC_KEY }}
+          RELEASE_TAG_FINGERPRINT: ${{ vars.RELEASE_TAG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG_PUBLIC_KEY"
+          test -n "$RELEASE_TAG_FINGERPRINT"
+          [[ $INPUT_TAG =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "$INPUT_TAG"
+          test "$GITHUB_REF" = "refs/tags/$INPUT_TAG"
+          test "$(command -v git)" = /usr/bin/git
+          test "$(command -v gpg)" = /usr/bin/gpg
+          test "$(git rev-parse "refs/tags/${INPUT_TAG}^{}")" = "$GITHUB_SHA"
+
+          tag_key="$RUNNER_TEMP/reticulumpi-release-tag.asc"
+          tag_keyring="$RUNNER_TEMP/reticulumpi-release-tag-keyring"
+          tag_status="$RUNNER_TEMP/reticulumpi-release-tag.status"
+          printf '%s\n' "$RELEASE_TAG_PUBLIC_KEY" > "$tag_key"
+          chmod 0644 "$tag_key"
+          mkdir -m 0700 "$tag_keyring"
+          cleanup_tag_key() {
+            rm -f "$tag_key" "$tag_status"
+            rm -rf "$tag_keyring"
+          }
+          trap cleanup_tag_key EXIT
+
+          expected=${RELEASE_TAG_FINGERPRINT//[[:space:]]/}
+          expected=${expected^^}
+          [[ $expected =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]]
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch --with-colons \
+            --import-options show-only --import "$tag_key" |
+            awk -F: '$1 == "fpr" {print toupper($10)}' |
+            grep --fixed-strings --line-regexp "$expected" >/dev/null
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch \
+            --import "$tag_key" >/dev/null 2>&1
+          if ! GNUPGHOME="$tag_keyring" /usr/bin/git \
+            -c gpg.format=openpgp \
+            -c gpg.program=/usr/bin/gpg \
+            verify-tag --raw "$INPUT_TAG" >"$tag_status" 2>&1; then
+            echo "release tag failed cryptographic verification" >&2
+            exit 1
+          fi
+          awk -v expected="$expected" '
+            $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+              for (field = 3; field <= NF; field++) {
+                if (toupper($field) == expected) found = 1
+              }
+            }
+            END { exit(found ? 0 : 1) }
+          ' "$tag_status" || {
+            echo "release tag was not signed by the configured fingerprint" >&2
+            exit 1
+          }
+      - name: Require the exact successful source and candidate-finalization runs
+        id: release-runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          INPUT_MANIFEST_SHA256: ${{ inputs.input_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ $SOURCE_RUN_ID =~ ^[1-9][0-9]*$ ]]
+          [[ $CANDIDATE_RUN_ID =~ ^[1-9][0-9]*$ ]]
+          [[ $INPUT_MANIFEST_SHA256 =~ ^[0-9a-f]{64}$ ]]
+          source_json="$RUNNER_TEMP/source-run.json"
+          source_workflow_json="$RUNNER_TEMP/source-workflow.json"
+          run_json="$RUNNER_TEMP/candidate-run.json"
+          workflow_json="$RUNNER_TEMP/candidate-workflow.json"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$source_json"
+          jq -e \
+            --arg run_id "$SOURCE_RUN_ID" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg sha "$GITHUB_SHA" \
+            '(.id | tostring) == $run_id and
+             .status == "completed" and
+             .conclusion == "success" and
+             .event == "push" and
+             .head_branch == $tag and
+             .head_sha == $sha and
+             .repository.full_name == $repository and
+             .head_repository.full_name == $repository' \
+            "$source_json" >/dev/null
+          source_workflow_id=$(jq -er \
+            '.workflow_id | select(type == "number")' "$source_json")
+          gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$source_workflow_id" \
+            > "$source_workflow_json"
+          jq -e '.path == ".github/workflows/ci.yml"' "$source_workflow_json" >/dev/null
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$run_json"
+          jq -e \
+            --arg run_id "$CANDIDATE_RUN_ID" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg sha "$GITHUB_SHA" \
+            '(.id | tostring) == $run_id and
+             .status == "completed" and
+             .conclusion == "success" and
+             .event == "workflow_dispatch" and
+             .head_branch == $tag and
+             .head_sha == $sha and
+             .repository.full_name == $repository and
+             .head_repository.full_name == $repository' \
+            "$run_json" >/dev/null
+          workflow_id=$(jq -er '.workflow_id | select(type == "number")' "$run_json")
+          gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
+            > "$workflow_json"
+          jq -e '.path == ".github/workflows/release-candidate.yml"' \
+            "$workflow_json" >/dev/null
+          source_run_attempt=$(jq -er \
+            '.run_attempt | select(type == "number" and . > 0)' "$source_json")
+          candidate_run_attempt=$(jq -er \
+            '.run_attempt | select(type == "number" and . > 0)' "$run_json")
+          artifacts_json="$RUNNER_TEMP/candidate-artifacts.json"
+          gh api --paginate --slurp \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" \
+            > "$artifacts_json"
+          jq -e \
+            --arg name "global-signing-request-$GITHUB_REF_NAME" \
+            '[.[].artifacts[] | select(.name == $name and .expired == false)] | length == 1' \
+            "$artifacts_json" >/dev/null
+          printf 'source_run_attempt=%s\n' "$source_run_attempt" >> "$GITHUB_OUTPUT"
+          printf 'candidate_run_attempt=%s\n' "$candidate_run_attempt" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: global-signing-request-${{ inputs.tag }}
+          path: global-signing-request
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Decode the canonical public global signature
+        env:
+          GLOBAL_SIGNATURE_B64: ${{ inputs.global_signature_b64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -I - "$RUNNER_TEMP/global-SHA256SUMS.minisig" <<'PY'
+          import base64
+          import os
+          import sys
+
+          raw = os.environ.get("GLOBAL_SIGNATURE_B64", "")
+          if not 1 <= len(raw) <= 4096:
+              raise SystemExit("global signature envelope has an invalid size")
+          try:
+              decoded = base64.b64decode(raw, validate=True)
+          except Exception as exc:
+              raise SystemExit("global signature envelope is not strict base64") from exc
+          if base64.b64encode(decoded).decode("ascii") != raw:
+              raise SystemExit("global signature envelope is not canonical base64")
+          if not 128 <= len(decoded) <= 2048 or b"\x00" in decoded or b"\r" in decoded:
+              raise SystemExit("global signature payload is malformed")
+          decoded.decode("ascii")
+          if not decoded.endswith(b"\n"):
+              raise SystemExit("global signature payload must end with a newline")
+          flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+          flags |= getattr(os, "O_NOFOLLOW", 0)
+          descriptor = os.open(sys.argv[1], flags, 0o600)
+          with os.fdopen(descriptor, "wb") as handle:
+              handle.write(decoded)
+              handle.flush()
+              os.fsync(handle.fileno())
+          PY
+      - name: Install pinned Minisign verifier
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign=0.11-1
+          test "$(command -v minisign)" = /usr/bin/minisign
+          test "$(dpkg-query -W -f='${Version}' minisign)" = 0.11-1
+      - name: Finalize, verify, and dry-run the exact signed candidate
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          INPUT_MANIFEST_SHA256: ${{ inputs.input_manifest_sha256 }}
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$MINISIGN_PUBLIC_KEY"
+          public_key="$RUNNER_TEMP/reticulumpi-release.pub"
+          printf '%s\n' "$MINISIGN_PUBLIC_KEY" > "$public_key"
+          chmod 0644 "$public_key"
+          cleanup_candidate() {
+            rm -f "$public_key" "$RUNNER_TEMP/global-SHA256SUMS.minisig"
+            sudo rm -f /usr/share/reticulumpi/release.pub
+          }
+          trap cleanup_candidate EXIT
+
+          python -m tools.offline_release finalize-candidate \
+            --tag "$GITHUB_REF_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-run-attempt "${{ steps.release-runs.outputs.source_run_attempt }}" \
+            --input-manifest-sha256 "$INPUT_MANIFEST_SHA256" \
+            --candidate-run-id "$CANDIDATE_RUN_ID" \
+            --candidate-run-attempt "${{ steps.release-runs.outputs.candidate_run_attempt }}" \
+            --request-directory global-signing-request \
+            --global-signature "$RUNNER_TEMP/global-SHA256SUMS.minisig" \
+            --public-key "$public_key" \
+            --minisign /usr/bin/minisign \
+            --output-directory release-assets
+          minisign -Vm release-assets/SHA256SUMS \
+            -x release-assets/SHA256SUMS.minisig -p "$public_key"
+          (cd release-assets && sha256sum --check --strict SHA256SUMS)
+
+          version=${GITHUB_REF_NAME#v}
+          install_bundle="release-assets/reticulumpi-install-arm64-${version}.tar.gz"
+          test -f "$install_bundle"
+          test ! -L "$install_bundle"
+          test ! -e /usr/share/reticulumpi/release.pub
+          sudo install -d -o root -g root -m 0755 /usr/share/reticulumpi
+          sudo install -o root -g root -m 0644 \
+            "$public_key" /usr/share/reticulumpi/release.pub
+          PYTHONPATH=src python -m reticulumpi.admin_cli install \
+            --bundle "$install_bundle" \
+            --install-root /srv/reticulumpi \
+            --dry-run
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-candidate-${{ inputs.tag }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Promote exact signed candidate
+    needs: release-candidate
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reverify the exact trusted signed tag after release approval
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG_PUBLIC_KEY: ${{ vars.RELEASE_TAG_PUBLIC_KEY }}
+          RELEASE_TAG_FINGERPRINT: ${{ vars.RELEASE_TAG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG_PUBLIC_KEY"
+          test -n "$RELEASE_TAG_FINGERPRINT"
+          [[ $INPUT_TAG =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "$INPUT_TAG"
+          test "$GITHUB_REF" = "refs/tags/$INPUT_TAG"
+          test "$(command -v git)" = /usr/bin/git
+          test "$(command -v gpg)" = /usr/bin/gpg
+          test "$(git rev-parse "refs/tags/${INPUT_TAG}^{}")" = "$GITHUB_SHA"
+
+          tag_key="$RUNNER_TEMP/reticulumpi-release-tag.asc"
+          tag_keyring="$RUNNER_TEMP/reticulumpi-release-tag-keyring"
+          tag_status="$RUNNER_TEMP/reticulumpi-release-tag.status"
+          printf '%s\n' "$RELEASE_TAG_PUBLIC_KEY" > "$tag_key"
+          chmod 0644 "$tag_key"
+          mkdir -m 0700 "$tag_keyring"
+          cleanup_tag_key() {
+            rm -f "$tag_key" "$tag_status"
+            rm -rf "$tag_keyring"
+          }
+          trap cleanup_tag_key EXIT
+
+          expected=${RELEASE_TAG_FINGERPRINT//[[:space:]]/}
+          expected=${expected^^}
+          [[ $expected =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]]
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch --with-colons \
+            --import-options show-only --import "$tag_key" |
+            awk -F: '$1 == "fpr" {print toupper($10)}' |
+            grep --fixed-strings --line-regexp "$expected" >/dev/null
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch \
+            --import "$tag_key" >/dev/null 2>&1
+          if ! GNUPGHOME="$tag_keyring" /usr/bin/git \
+            -c gpg.format=openpgp \
+            -c gpg.program=/usr/bin/gpg \
+            verify-tag --raw "$INPUT_TAG" >"$tag_status" 2>&1; then
+            echo "release tag failed cryptographic verification" >&2
+            exit 1
+          fi
+          awk -v expected="$expected" '
+            $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+              for (field = 3; field <= NF; field++) {
+                if (toupper($field) == expected) found = 1
+              }
+            }
+            END { exit(found ? 0 : 1) }
+          ' "$tag_status" || {
+            echo "release tag was not signed by the configured fingerprint" >&2
+            exit 1
+          }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-candidate-${{ inputs.tag }}
+          path: release-assets
+      - name: Verify the exact signed candidate after approval
+        env:
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+          INPUT_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          INPUT_MANIFEST_SHA256: ${{ inputs.input_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "$INPUT_TAG"
+          test -n "$MINISIGN_PUBLIC_KEY"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign=0.11-1
+          test "$(command -v minisign)" = /usr/bin/minisign
+          test "$(dpkg-query -W -f='${Version}' minisign)" = 0.11-1
+          public_key="$RUNNER_TEMP/reticulumpi-release.pub"
+          printf '%s\n' "$MINISIGN_PUBLIC_KEY" > "$public_key"
+          chmod 0644 "$public_key"
+          trap 'rm -f "$public_key"' EXIT
+          minisign -Vm release-assets/SHA256SUMS \
+            -x release-assets/SHA256SUMS.minisig -p "$public_key"
+          (cd release-assets && sha256sum --check --strict SHA256SUMS)
+          python -m tools.offline_release verify-candidate \
+            --tag "$GITHUB_REF_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-run-attempt "${{ needs['release-candidate'].outputs.source_run_attempt }}" \
+            --input-manifest-sha256 "$INPUT_MANIFEST_SHA256" \
+            --candidate-run-id "$CANDIDATE_RUN_ID" \
+            --candidate-run-attempt "${{ needs['release-candidate'].outputs.candidate_run_attempt }}" \
+            --directory release-assets \
+            --public-key "$public_key" \
+            --minisign /usr/bin/minisign
+      - name: Resolve release metadata
+        id: release-meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Refuse an existing GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +e
+          response=$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>&1)
+          status=$?
+          set -e
+          if (( status == 0 )); then
+            echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [[ $response != *"HTTP 404"* ]]; then
+            echo "could not prove release tag is unpublished" >&2
+            echo "$response" >&2
+            exit 1
+          fi
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push validated per-architecture images and manifest
+        id: images
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version=${GITHUB_REF_NAME#v}
+          tools/publish_validated_images.sh release-assets "$image" "$version"
+      - name: Attest release artifact provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: release-assets/SHA256SUMS
+      - name: Attest wheel SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: release-assets/*.whl
+          sbom-path: release-assets/reticulumpi-${{ steps.release-meta.outputs.version }}.cdx.json
+      - name: Attest published multi-architecture image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ steps.images.outputs.image }}
+          subject-digest: ${{ steps.images.outputs.digest }}
+          push-to-registry: true
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.images.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.images.outputs.digest }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Validated container: \`$IMAGE@$IMAGE_DIGEST\`"
+            echo
+            echo "Verify downloaded assets with \`minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -p release.pub\` and then \`sha256sum --check SHA256SUMS\`."
+          } > "$notes"
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --verify-tag \
+            --generate-notes \
+            --notes-file "$notes" \
+            --title "ReticulumPi ${GITHUB_REF_NAME#v}"
