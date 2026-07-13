@@ -484,10 +484,11 @@ jobs:
           ${{ matrix.platform }}
       - name: Export the exact validated runtime image
         run: |
+          set -euo pipefail
+          archive="reticulumpi-${{ matrix.suffix }}.tar.gz"
           docker save "reticulumpi:${{ matrix.suffix }}" |
-            gzip -9n > "reticulumpi-${{ matrix.suffix }}.tar.gz"
-          sha256sum "reticulumpi-${{ matrix.suffix }}.tar.gz" >
-            "reticulumpi-${{ matrix.suffix }}.tar.gz.sha256"
+            gzip -9n > "$archive"
+          sha256sum "$archive" > "${archive}.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-image-${{ matrix.suffix }}

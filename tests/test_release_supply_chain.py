@@ -163,6 +163,29 @@ def test_dependency_audit_uses_verified_disable_pip_action_interface():
     assert "internal-be-careful-extra-flags" not in audit_step["with"]
 
 
+def test_ci_inline_shell_steps_have_valid_bash_syntax():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    failures = []
+
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            script = step.get("run")
+            if not isinstance(script, str):
+                continue
+            result = subprocess.run(
+                ["bash", "-n"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode:
+                step_name = step.get("name", "<unnamed>")
+                failures.append(f"{job_name}/{step_name}: {result.stderr.strip()}")
+
+    assert not failures, "\n".join(failures)
+
+
 def test_container_job_loads_then_validates_and_exports_one_runtime_image():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     steps = workflow["jobs"]["container"]["steps"]
@@ -239,8 +262,10 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
     }
     assert "reticulumpi:${{ matrix.suffix }}" in named_steps[verify_name]["run"]
     export = named_steps[export_name]["run"]
+    assert export.startswith("set -euo pipefail\n")
+    assert 'archive="reticulumpi-${{ matrix.suffix }}.tar.gz"' in export
     assert 'docker save "reticulumpi:${{ matrix.suffix }}"' in export
-    assert 'sha256sum "reticulumpi-${{ matrix.suffix }}.tar.gz"' in export
+    assert 'sha256sum "$archive" > "${archive}.sha256"' in export
 
 
 @pytest.mark.parametrize("profile", CONSTRAINT_PROFILES)
