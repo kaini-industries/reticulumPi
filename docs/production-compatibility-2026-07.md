@@ -154,6 +154,14 @@ warning-only condition.
 
 ## Staged production rollout
 
+Acquire the production candidate only from the protected offline-signing release workflow. Record
+its signed tag commit, source CI run ID/attempt, global-signing-request run ID/attempt, and release
+workflow run ID. Verify its global and nested Minisign signatures, exact provenance, attestations,
+and every manifest digest before transferring the ARM64 archive into a private staging directory.
+The production host never receives the Minisign private key, a repository credential, or a source
+checkout, and deployment never uses `git pull`. All installation and rollback operations below use
+the already-qualified signed artifact without rebuilding it.
+
 1. Install the independently signed, root-owned recovery administrator before using a candidate.
 2. Independently stage the reviewed MeshChat code/virtual environment under
    `/srv/reticulumpi-external`, compute its recovery-administrator digest, and install the trusted
@@ -179,6 +187,8 @@ warning-only condition.
 8. Retain the legacy installation and verified backups until the exact candidate completes a
    **72-hour soak** with no failed units, identity drift, database integrity errors, orphaned
    processes, OOM kills, unexpected restarts, resource leaks, or peripheral recovery failures.
+   Keep the protected GitHub `release` environment unapproved throughout the soak; approve the
+   existing waiting workflow only after the signed qualification record is complete.
 
 ## SDR recovery and remaining physical preflight
 

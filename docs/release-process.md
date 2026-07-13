@@ -34,8 +34,9 @@ python tools/check_docs.py
    qualification.
 5. Build both container architectures from that exact wheel. Test TERM handling and persistent
    identity across recreation.
-6. Generate SHA-256 manifest, CycloneDX SBOM, provenance, Minisign signature, and release
-   notes.
+6. Generate the SHA-256 manifests, CycloneDX SBOM, provenance, and release notes. Verify and
+   sign the two exact manifests on the offline release-signing workstation; CI never receives
+   the Minisign private key.
 7. Qualify the exact artifacts on the hardware fixture and complete the 72-hour soak.
 8. Promote those artifacts without rebuilding. A failed candidate version is never retagged or
    reused; fix the issue and choose a new version.
@@ -114,9 +115,10 @@ structure, profile-correct dependency metadata, embedded wheel digest, required 
 recovery modules, and empty-runtime manifest digest. Each installed-package lane invokes the fixed
 wrapper from outside the source checkout, computes external-artifact digests, and exercises a real
 enabled-plugin database plan and clone-only dry run before candidate installation. It then includes
-all four files in the global `SHA256SUMS`; the normal Minisign step signs that manifest and GitHub
-publication uploads the packages with the other exact assets. Release signing remains separate
-from the builder; a per-package `.minisig` produced by the builder would be a release failure.
+all four files in the global `SHA256SUMS`; the offline release signer signs that manifest and
+GitHub publication uploads the packages with the other exact assets. Release signing remains
+separate from the builder; a per-package `.minisig` produced by the builder would be a release
+failure.
 
 ## Quality thresholds
 
@@ -371,57 +373,90 @@ Check the install, backup, state, and temporary filesystems separately when they
 
 ## Protected tag publication
 
-The `release-candidate` and `release` jobs in `.github/workflows/ci.yml` run only for a strict
-release tag and depend on every static-analysis, browser, performance, Bookworm/systemd, test,
-coverage, package, and container job. They consume the wheel, sdist, CycloneDX SBOM, and both
-architecture-specific Docker save archives produced by those jobs. Neither invokes a package
-or container build.
+The tag-only `release-inputs` job in `.github/workflows/ci.yml` depends on every static-analysis,
+browser, performance, Bookworm/systemd, Noble/systemd, test, coverage, package, recovery-package,
+and container job. It consumes the wheel, sdist, CycloneDX SBOM, both recovery-administrator
+packages, and both architecture-specific Docker save archives produced by those jobs. It validates
+the exact allowlisted tree, writes `RELEASE-INPUTS.SHA256SUMS`, `INSTALL-SHA256SUMS`, and canonical
+`RELEASE-PROVENANCE.json`, attests the input manifest, and uploads
+`release-signing-input-vMAJOR.MINOR.PATCH`. It does not build an install archive or sign anything.
 
 Configure repository variables `RELEASE_TAG_PUBLIC_KEY`, `RELEASE_TAG_FINGERPRINT`, and
 `MINISIGN_PUBLIC_KEY` with the trusted OpenPGP tag-signing key/fingerprint and independently
 distributed Minisign release public key. The read-only `release-tag-trust` job uses only pinned
 checkout plus system Git/GPG commands; it does not execute repository code before verifying the
 tag. An unsigned tag or a tag from any other signer cannot reach the privileged Bookworm fixture
-or candidate-signing job.
+or offline-signing input job.
 
-Configure the GitHub `release-signing` environment with the passwordless Minisign secret
-`MINISIGN_SECRET_KEY`. Restrict it to release tags and signing owners. This environment has only
-read-only repository permission; it can produce a signed workflow artifact but cannot publish a
-release or container.
+Configure the GitHub `release-signing` environment as a tag-restricted reviewer gate. It stores no
+Minisign private key. Its job receives only the already-public detached global signature, validates
+the exact source and global-request run identities, assembles and dry-runs the signed candidate,
+and uploads it without permission to publish a release or container.
 
 Configure the separate GitHub `release` environment before enabling publication:
 
-- require approval from the release owners after the exact workflow artifacts have passed the
+- require approval from the release owners after the exact signed workflow artifact has passed the
   Pi 5 and representative-device qualification;
 - prevent unreviewed branches or non-release tags from deploying to the environment.
 
-Generate the CI signing key once on a trusted, offline workstation with the pinned Minisign
-version and `minisign -G -W`. Protect the secret as a release credential, retain an offline
-recovery copy, and publish the public key independently. The workflow writes the secret only
-to a mode-`0600` runner file, passes `-W` to every signing operation, never prints the key, and
-deletes the runner file on exit. A password-protected interactive key is intentionally
-incompatible with this non-interactive lane. The `release` environment receives no signing
-secret.
+Generate the passwordless release key once on a trusted offline workstation with the pinned
+Minisign version and `minisign -G -W`. Keep the secret key in a private owner-controlled directory
+as one regular, single-link, mode-`0600` file; retain a separately protected recovery copy and
+publish the public key independently. The secret key never enters GitHub, a workflow input,
+environment, artifact, production host, or repository. `tools/offline_release.py sign-request`
+performs no network access. It copies the complete request into a private temporary snapshot,
+requires the recorded attested input-manifest digest, re-verifies the snapshot and run identity,
+then signs only that verified manifest. It derives the public key from the secret, requires it to
+match the configured public key, applies the required trusted comment, verifies the result against
+the unchanged live manifest, and emits a canonical base64 envelope containing only the public
+detached signature. Allow enough temporary disk space for a second copy of the request while the
+signing command runs.
 
-The gated workflow then:
+The release uses two offline signing rounds because the final install archive and global release
+manifest do not exist until GitHub combines the tag CI artifacts with the first signature:
 
-1. imports only the configured tag public key into an isolated temporary keyring, runs
-   cryptographic `git verify-tag`, and requires the configured full signer fingerprint;
-2. in the read-only signing job, assembles the deterministic ARM64 install bundle from the exact
-   validated sdist and wheel;
-3. verifies the install bundle's inner signature and exact-tree manifest;
-4. stages the exact wheel, sdist, SBOM, install bundle, and AMD64/ARM64 image archives;
-5. writes and verifies one global `SHA256SUMS` plus `SHA256SUMS.minisig`, runs the administrator
-   dry run, and uploads one immutable signed-candidate workflow artifact;
-6. pauses at the protected `release` environment while operators test that exact signed
-   candidate and attach the hardware/soak record;
-7. after approval, downloads the same workflow artifact and re-verifies its Minisign signature
-   and every SHA-256 digest;
-8. loads the two validated image archives, refuses existing version tags, pushes per-architecture
-   tags, and creates the versioned multi-architecture GHCR manifest without rebuilding;
-9. creates GitHub artifact provenance, wheel SBOM, and registry image attestations; and
-10. creates the immutable GitHub release with generated notes, verification instructions, the
-   exact assets, and the promoted image digest.
+1. The tag CI run cryptographically verifies the annotated tag and signer fingerprint, completes
+   every gate, and emits the attested `release-signing-input-<TAG>` artifact.
+2. On the trusted workstation, download that artifact from the exact successful source run, verify
+   its GitHub attestation and exact repository/tag/commit/run/run-attempt provenance. Record the
+   SHA-256 of `RELEASE-INPUTS.SHA256SUMS`, then use `sign-request --kind install` with the complete
+   request directory and recorded identity to verify again and sign only `INSTALL-SHA256SUMS`.
+3. Dispatch `.github/workflows/release-candidate.yml` at the tag itself, passing the exact source
+   run ID and base64 public signature. The workflow re-verifies the tag and source run, verifies
+   the inner signature, builds the deterministic install archive without rebuilding its wheel,
+   stages every exact release asset, and emits an attested
+   `global-signing-request-<TAG>` artifact containing the unsigned global `SHA256SUMS`.
+4. On the trusted workstation, download that artifact from the exact candidate-finalization run,
+   verify its attestation, nested install signature, exact asset tree, bound source/candidate run
+   identities, and the previously recorded input-manifest digest. Then use
+   `sign-request --kind release` with that complete request directory and identity to verify again
+   and sign only `SHA256SUMS`.
+5. Dispatch `.github/workflows/release.yml` at the same tag, passing both exact run IDs, the
+   recorded input-manifest digest, and the base64 public global signature. Approve the
+   tag-restricted `release-signing` environment only after reviewing those bindings. Its read-only
+   job attaches the signature, verifies the nested and global manifests, runs the administrator dry
+   run, and uploads
+   `signed-release-candidate-<TAG>`.
+6. Leave the separate protected `release` environment unapproved while operators download that
+   exact artifact from the release workflow run, qualify it on hardware, complete the 72-hour soak,
+   and attach the signed verification record. Do not dispatch a second publication run.
+7. After approval, the waiting publication job downloads the same workflow artifact, re-verifies
+   the signed tag, provenance, nested/global Minisign signatures, exact asset allowlist, and every
+   SHA-256 digest.
+8. It loads the two validated image archives, refuses existing version tags, pushes
+   per-architecture tags, and creates the versioned multi-architecture GHCR manifest without
+   rebuilding.
+9. It creates GitHub artifact provenance, wheel SBOM, and registry image attestations, then creates
+   the immutable GitHub release with generated notes, verification instructions, exact assets, and
+   promoted image digest.
+
+Both manual workflows must be dispatched with `--ref <TAG>`, not from `main`; their protected
+environments accept only release tags. Record the source CI run ID/attempt, candidate-finalization
+run ID/attempt, release workflow run ID, tag commit, attestation verification results, and local
+manifest digests in `docs/release-verification/<version>.md`. Keep signature outputs outside the
+verified request directories. Use the command-specific help for `tools/offline_release.py` rather
+than manually modifying either manifest. Never sign a manifest until its preceding attestation and
+fail-closed local verification both succeed.
 
 The publication script fails closed if the registry cannot prove all three version tags are
 absent. The GitHub release step likewise refuses an existing release. Never delete and reuse a

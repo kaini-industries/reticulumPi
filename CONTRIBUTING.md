@@ -193,8 +193,15 @@ operator interface.
 3. Freeze the release commit; create and locally verify a signed annotated
    `vMAJOR.MINOR.PATCH` tag. Never edit a version string in package files.
 4. Push the immutable tag so CI builds the wheel, sdist, containers, checksums, SBOM, and
-   provenance once using the committed hash-locked dependency profiles.
-5. Promote those exact artifacts after hardware qualification; do not rebuild or move the tag.
+   provenance once using the committed hash-locked dependency profiles, then emits an attested
+   offline-signing input artifact.
+5. On the trusted offline workstation, verify and sign the install manifest. Dispatch the
+   tag-bound candidate workflow, verify its attested global-manifest request, and sign that
+   manifest. Never upload or expose the Minisign private key to GitHub.
+6. Assemble the exact signed candidate through the protected `release-signing` gate. Keep the
+   separate `release` gate waiting during hardware qualification and the 72-hour soak.
+7. Approve the waiting publication job only after qualification; do not rebuild, move the tag, or
+   start a replacement publication run.
 
 See [docs/release-process.md](docs/release-process.md) for the complete gate.
 

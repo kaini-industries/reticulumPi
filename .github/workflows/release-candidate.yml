@@ -1,0 +1,221 @@
+name: Finalize offline-signed release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact signed vMAJOR.MINOR.PATCH tag
+        required: true
+        type: string
+      source_run_id:
+        description: Successful tag CI run that produced the signing inputs
+        required: true
+        type: string
+      inner_signature_b64:
+        description: Base64-encoded detached Minisign signature for the install manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-candidate-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  global-signing-request:
+    name: Assemble global release-manifest signing request
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the exact trusted signed tag before repository code
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG_PUBLIC_KEY: ${{ vars.RELEASE_TAG_PUBLIC_KEY }}
+          RELEASE_TAG_FINGERPRINT: ${{ vars.RELEASE_TAG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG_PUBLIC_KEY"
+          test -n "$RELEASE_TAG_FINGERPRINT"
+          [[ $INPUT_TAG =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "$INPUT_TAG"
+          test "$GITHUB_REF" = "refs/tags/$INPUT_TAG"
+          test "$(command -v git)" = /usr/bin/git
+          test "$(command -v gpg)" = /usr/bin/gpg
+          test "$(git rev-parse "refs/tags/${INPUT_TAG}^{}")" = "$GITHUB_SHA"
+
+          tag_key="$RUNNER_TEMP/reticulumpi-release-tag.asc"
+          tag_keyring="$RUNNER_TEMP/reticulumpi-release-tag-keyring"
+          tag_status="$RUNNER_TEMP/reticulumpi-release-tag.status"
+          printf '%s\n' "$RELEASE_TAG_PUBLIC_KEY" > "$tag_key"
+          chmod 0644 "$tag_key"
+          mkdir -m 0700 "$tag_keyring"
+          cleanup_tag_key() {
+            rm -f "$tag_key" "$tag_status"
+            rm -rf "$tag_keyring"
+          }
+          trap cleanup_tag_key EXIT
+
+          expected=${RELEASE_TAG_FINGERPRINT//[[:space:]]/}
+          expected=${expected^^}
+          [[ $expected =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]]
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch --with-colons \
+            --import-options show-only --import "$tag_key" |
+            awk -F: '$1 == "fpr" {print toupper($10)}' |
+            grep --fixed-strings --line-regexp "$expected" >/dev/null
+          GNUPGHOME="$tag_keyring" /usr/bin/gpg --batch \
+            --import "$tag_key" >/dev/null 2>&1
+          if ! GNUPGHOME="$tag_keyring" /usr/bin/git \
+            -c gpg.format=openpgp \
+            -c gpg.program=/usr/bin/gpg \
+            verify-tag --raw "$INPUT_TAG" >"$tag_status" 2>&1; then
+            echo "release tag failed cryptographic verification" >&2
+            exit 1
+          fi
+          awk -v expected="$expected" '
+            $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+              for (field = 3; field <= NF; field++) {
+                if (toupper($field) == expected) found = 1
+              }
+            }
+            END { exit(found ? 0 : 1) }
+          ' "$tag_status" || {
+            echo "release tag was not signed by the configured fingerprint" >&2
+            exit 1
+          }
+      - name: Require the exact successful tag CI run
+        id: source-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          [[ $SOURCE_RUN_ID =~ ^[1-9][0-9]*$ ]]
+          run_json="$RUNNER_TEMP/source-run.json"
+          workflow_json="$RUNNER_TEMP/source-workflow.json"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$run_json"
+          jq -e \
+            --arg run_id "$SOURCE_RUN_ID" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg sha "$GITHUB_SHA" \
+            '(.id | tostring) == $run_id and
+             .status == "completed" and
+             .conclusion == "success" and
+             .event == "push" and
+             .head_branch == $tag and
+             .head_sha == $sha and
+             .repository.full_name == $repository and
+             .head_repository.full_name == $repository' \
+            "$run_json" >/dev/null
+          workflow_id=$(jq -er '.workflow_id | select(type == "number")' "$run_json")
+          source_run_attempt=$(jq -er '.run_attempt | select(type == "number" and . > 0)' \
+            "$run_json")
+          gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
+            > "$workflow_json"
+          jq -e '.path == ".github/workflows/ci.yml"' "$workflow_json" >/dev/null
+          artifacts_json="$RUNNER_TEMP/source-artifacts.json"
+          gh api --paginate --slurp \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+            > "$artifacts_json"
+          jq -e \
+            --arg name "release-signing-input-$GITHUB_REF_NAME" \
+            '[.[].artifacts[] | select(.name == $name and .expired == false)] | length == 1' \
+            "$artifacts_json" >/dev/null
+          printf 'source_run_attempt=%s\n' "$source_run_attempt" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-signing-input-${{ inputs.tag }}
+          path: release-input
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Decode the canonical public inner signature
+        env:
+          INNER_SIGNATURE_B64: ${{ inputs.inner_signature_b64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -I - "$RUNNER_TEMP/inner-SHA256SUMS.minisig" <<'PY'
+          import base64
+          import os
+          import sys
+
+          raw = os.environ.get("INNER_SIGNATURE_B64", "")
+          if not 1 <= len(raw) <= 4096:
+              raise SystemExit("inner signature envelope has an invalid size")
+          try:
+              decoded = base64.b64decode(raw, validate=True)
+          except Exception as exc:
+              raise SystemExit("inner signature envelope is not strict base64") from exc
+          if base64.b64encode(decoded).decode("ascii") != raw:
+              raise SystemExit("inner signature envelope is not canonical base64")
+          if not 128 <= len(decoded) <= 2048 or b"\x00" in decoded or b"\r" in decoded:
+              raise SystemExit("inner signature payload is malformed")
+          decoded.decode("ascii")
+          if not decoded.endswith(b"\n"):
+              raise SystemExit("inner signature payload must end with a newline")
+          flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+          flags |= getattr(os, "O_NOFOLLOW", 0)
+          descriptor = os.open(sys.argv[1], flags, 0o600)
+          with os.fdopen(descriptor, "wb") as handle:
+              handle.write(decoded)
+              handle.flush()
+              os.fsync(handle.fileno())
+          PY
+      - name: Install pinned Minisign verifier
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign=0.11-1
+          test "$(command -v minisign)" = /usr/bin/minisign
+          test "$(dpkg-query -W -f='${Version}' minisign)" = 0.11-1
+      - name: Verify the inner signature and stage the global signing request
+        env:
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$MINISIGN_PUBLIC_KEY"
+          input_manifest_sha256=$(sha256sum release-input/RELEASE-INPUTS.SHA256SUMS | \
+            awk '{print $1}')
+          [[ $input_manifest_sha256 =~ ^[0-9a-f]{64}$ ]]
+          public_key="$RUNNER_TEMP/reticulumpi-release.pub"
+          printf '%s\n' "$MINISIGN_PUBLIC_KEY" > "$public_key"
+          chmod 0644 "$public_key"
+          trap 'rm -f "$public_key" "$RUNNER_TEMP/inner-SHA256SUMS.minisig"' EXIT
+          python -m tools.offline_release stage-global-request \
+            --tag "$GITHUB_REF_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-run-attempt "${{ steps.source-run.outputs.source_run_attempt }}" \
+            --input-manifest-sha256 "$input_manifest_sha256" \
+            --candidate-run-id "$GITHUB_RUN_ID" \
+            --candidate-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --input-directory release-input \
+            --inner-signature "$RUNNER_TEMP/inner-SHA256SUMS.minisig" \
+            --public-key "$public_key" \
+            --minisign /usr/bin/minisign \
+            --output-directory release-assets
+          test -f release-assets/SHA256SUMS
+          test ! -L release-assets/SHA256SUMS
+          test ! -e release-assets/SHA256SUMS.minisig
+      - name: Attest the exact global release manifest signing request
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: release-assets/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: global-signing-request-${{ inputs.tag }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 30

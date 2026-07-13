@@ -16,10 +16,14 @@ Record model/serial identifiers without publishing private Reticulum identities 
 
 ## Qualification sequence
 
-Download the `signed-release-candidate-vMAJOR.MINOR.PATCH` workflow artifact produced by the
-trusted tag run. Verify its global Minisign manifest with the independently provisioned release
-key, record every digest, and use only those files for the sequence below. Do not rebuild the
-wheel, install archive, or container images on the fixture.
+After the first, `release-signing` environment gate has assembled the candidate, leave the
+separate `release` environment unapproved. Download
+`signed-release-candidate-vMAJOR.MINOR.PATCH` from that exact waiting release workflow run. Record
+the signed tag commit plus the source CI, global-signing-request, and release workflow run IDs and
+attempts. Verify the global Minisign manifest with the independently provisioned release key and
+run `tools/offline_release.py verify-candidate` with the recorded repository/tag/commit/source-run
+and candidate-run bindings. Record every digest and use only those files for the sequence below.
+Do not rebuild the wheel, install archive, recovery packages, or container images on the fixture.
 
 1. Fresh default (`/srv/reticulumpi`) and explicit `/opt/reticulumpi` compatibility installs;
    idempotent re-run and exact ownership.
@@ -52,10 +56,12 @@ or descriptor count, or more than 10% RSS growth after warm-up. Record temperatu
 throttling, reboots, plugin restarts, database checks, and resource high-water marks in the
 release-verification file.
 
-Hardware-only checks cannot be certified by CI. Until a human completes and signs this
-record, the artifact remains a release candidate. Release owners approve the protected GitHub
+Hardware-only checks cannot be certified by CI. Until a human completes and signs this record, the
+artifact remains a release candidate. Release owners approve the already-waiting protected GitHub
 `release` environment only after attaching the signed record; the publication job then downloads
-and re-verifies the same workflow artifact.
+and re-verifies the artifact from its own unchanged workflow run. Never start a replacement
+publication run after qualification because that would create a different workflow-artifact
+identity.
 The CI precursor for these installation checks runs in an ARM64 Bookworm systemd container. It
 uses ephemeral Minisign keys solely to prove the production verification path, applies signed
 fixture releases, injects both an interrupted pre-backup transaction and a service-start failure,

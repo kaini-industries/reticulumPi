@@ -653,8 +653,8 @@ jobs:
             test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
           done
 
-  release-candidate:
-    name: Assemble signed release candidate
+  release-inputs:
+    name: Prepare offline release-signing inputs
     if: >-
       github.ref_type == 'tag' &&
       needs['release-tag-trust'].result == 'success' &&
@@ -677,9 +677,10 @@ jobs:
       - bookworm-systemd
       - noble-systemd
     runs-on: ubuntu-24.04
-    environment: release-signing
     permissions:
       contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -701,214 +702,27 @@ jobs:
         with:
           name: recovery-administrators
           path: release-input/recovery-admin
-      - name: Install pinned Minisign verifier
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign=0.11-1
-          test "$(command -v minisign)" = /usr/bin/minisign
-          test "$(dpkg-query -W -f='${Version}' minisign)" = 0.11-1
-      - name: Validate, bundle, and sign exact release artifacts
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+      - name: Validate exact artifacts and prepare the offline signing request
         run: |
           set -euo pipefail
-          umask 077
-          test -n "$MINISIGN_SECRET_KEY"
-          test -n "$MINISIGN_PUBLIC_KEY"
-          secret_key="$RUNNER_TEMP/reticulumpi-release.key"
-          public_key="$RUNNER_TEMP/reticulumpi-release.pub"
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$secret_key"
-          printf '%s\n' "$MINISIGN_PUBLIC_KEY" > "$public_key"
-          chmod 0600 "$secret_key"
-          chmod 0644 "$public_key"
-          cleanup_key() {
-            rm -f "$secret_key" "$public_key"
-            sudo rm -f /usr/share/reticulumpi/release.pub
-          }
-          trap cleanup_key EXIT
-
-          version=${GITHUB_REF_NAME#v}
           source_date_epoch=$(git show -s --format=%ct HEAD)
-          set -- release-input/python/*.whl
-          test "$#" -eq 1
-          wheel=$1
-          set -- release-input/python/reticulumpi-*.tar.gz
-          test "$#" -eq 1
-          sdist=$1
-          python tools/verify_release_tag.py --require-signature \
-            "$GITHUB_REF_NAME" "$wheel" "$sdist"
-
-          install_bundle="release-input/reticulumpi-install-arm64-${version}.tar.gz"
-          python -m tools.build_install_bundle \
-            --sdist "$sdist" \
-            --wheel "$wheel" \
-            --output "$install_bundle" \
-            --version "$version" \
-            --signing-key "$secret_key" \
-            --minisign /usr/bin/minisign \
-            --source-date-epoch "$source_date_epoch"
-
-          inner_dir="$RUNNER_TEMP/install-signature-check"
-          mkdir -m 0700 "$inner_dir"
-          tar -xOf "$install_bundle" "reticulumpi-${version}/SHA256SUMS" \
-            > "$inner_dir/SHA256SUMS"
-          tar -xOf "$install_bundle" "reticulumpi-${version}/SHA256SUMS.minisig" \
-            > "$inner_dir/SHA256SUMS.minisig"
-          minisign -Vm "$inner_dir/SHA256SUMS" \
-            -x "$inner_dir/SHA256SUMS.minisig" -p "$public_key"
-
-          python -m tools.prepare_release_assets \
+          python -m tools.offline_release prepare-inputs \
             --tag "$GITHUB_REF_NAME" \
-            --python-directory release-input/python \
-            --amd64-image-directory release-input/images/amd64 \
-            --arm64-image-directory release-input/images/arm64 \
-            --recovery-admin-directory release-input/recovery-admin \
-            --install-bundle "$install_bundle" \
-            --output-directory release-assets
-          minisign -S -W -s "$secret_key" \
-            -t "ReticulumPi ${version} release asset manifest" \
-            -m release-assets/SHA256SUMS \
-            -x release-assets/SHA256SUMS.minisig
-          minisign -Vm release-assets/SHA256SUMS \
-            -x release-assets/SHA256SUMS.minisig -p "$public_key"
-          (cd release-assets && sha256sum --check --strict SHA256SUMS)
-          test ! -e /usr/share/reticulumpi/release.pub
-          sudo install -d -o root -g root -m 0755 /usr/share/reticulumpi
-          sudo install -o root -g root -m 0644 \
-            "$public_key" /usr/share/reticulumpi/release.pub
-          PYTHONPATH=src python -m reticulumpi.admin_cli install \
-            --bundle "release-assets/$(basename "$install_bundle")" \
-            --install-root /srv/reticulumpi \
-            --dry-run
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --source-run-id "$GITHUB_RUN_ID" \
+            --source-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-date-epoch "$source_date_epoch" \
+            --input-directory release-input
+          test -f release-input/RELEASE-INPUTS.SHA256SUMS
+          test ! -L release-input/RELEASE-INPUTS.SHA256SUMS
+      - name: Attest the exact offline-signing input manifest
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: release-input/RELEASE-INPUTS.SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: signed-release-candidate-${{ github.ref_name }}
-          path: release-assets/
+          name: release-signing-input-${{ github.ref_name }}
+          path: release-input/
           if-no-files-found: error
           retention-days: 30
-
-  release:
-    name: Promote exact signed candidate
-    if: >-
-      github.ref_type == 'tag' &&
-      needs['release-tag-trust'].result == 'success' &&
-      needs['dashboard-performance'].result == 'success' &&
-      needs['bookworm-systemd'].result == 'success' &&
-      needs['noble-systemd'].result == 'success' &&
-      needs['recovery-admin'].result == 'success' &&
-      needs['release-candidate'].result == 'success'
-    needs:
-      - secret-scan
-      - dependency-audit
-      - static-analysis
-      - dashboard-browser
-      - dashboard-performance
-      - test
-      - coverage
-      - release-tag-trust
-      - package
-      - recovery-admin
-      - container
-      - bookworm-systemd
-      - noble-systemd
-      - release-candidate
-    runs-on: ubuntu-24.04
-    environment: release
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: signed-release-candidate-${{ github.ref_name }}
-          path: release-assets
-      - name: Verify the exact signed candidate after approval
-        env:
-          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$MINISIGN_PUBLIC_KEY"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign=0.11-1
-          test "$(command -v minisign)" = /usr/bin/minisign
-          test "$(dpkg-query -W -f='${Version}' minisign)" = 0.11-1
-          public_key="$RUNNER_TEMP/reticulumpi-release.pub"
-          printf '%s\n' "$MINISIGN_PUBLIC_KEY" > "$public_key"
-          chmod 0644 "$public_key"
-          trap 'rm -f "$public_key"' EXIT
-          minisign -Vm release-assets/SHA256SUMS \
-            -x release-assets/SHA256SUMS.minisig -p "$public_key"
-          (cd release-assets && sha256sum --check --strict SHA256SUMS)
-      - name: Resolve release metadata
-        id: release-meta
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - name: Refuse an existing GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          set +e
-          response=$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>&1)
-          status=$?
-          set -e
-          if (( status == 0 )); then
-            echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
-            exit 1
-          fi
-          if [[ $response != *"HTTP 404"* ]]; then
-            echo "could not prove release tag is unpublished" >&2
-            echo "$response" >&2
-            exit 1
-          fi
-      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push validated per-architecture images and manifest
-        id: images
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          version=${GITHUB_REF_NAME#v}
-          tools/publish_validated_images.sh release-assets "$image" "$version"
-      - name: Attest release artifact provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
-        with:
-          subject-checksums: release-assets/SHA256SUMS
-      - name: Attest wheel SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
-        with:
-          subject-path: release-assets/*.whl
-          sbom-path: release-assets/reticulumpi-${{ steps.release-meta.outputs.version }}.cdx.json
-      - name: Attest published multi-architecture image
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
-        with:
-          subject-name: ${{ steps.images.outputs.image }}
-          subject-digest: ${{ steps.images.outputs.digest }}
-          push-to-registry: true
-      - name: Publish immutable GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ${{ steps.images.outputs.image }}
-          IMAGE_DIGEST: ${{ steps.images.outputs.digest }}
-        run: |
-          set -euo pipefail
-          notes="$RUNNER_TEMP/release-notes.md"
-          {
-            echo "Validated container: \`$IMAGE@$IMAGE_DIGEST\`"
-            echo
-            echo "Verify downloaded assets with \`minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -p release.pub\` and then \`sha256sum --check SHA256SUMS\`."
-          } > "$notes"
-          gh release create "$GITHUB_REF_NAME" release-assets/* \
-            --verify-tag \
-            --generate-notes \
-            --notes-file "$notes" \
-            --title "ReticulumPi ${GITHUB_REF_NAME#v}"
