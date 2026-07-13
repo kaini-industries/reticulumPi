@@ -638,7 +638,7 @@ async def handle_plugin_detail(request: aiohttp.web.Request) -> aiohttp.web.Resp
     )
 
 
-_last_restart_time: float = 0.0
+_last_restart_time: float | None = None
 _RESTART_COOLDOWN = 60.0
 _MAX_RESTART_OPERATIONS = 20
 
@@ -680,7 +680,7 @@ async def handle_services_restart(
         return _error("Password confirmation failed", 403)
 
     now = time.monotonic()
-    if now - _last_restart_time < _RESTART_COOLDOWN:
+    if _last_restart_time is not None and now - _last_restart_time < _RESTART_COOLDOWN:
         return _error("Service restart already in progress", 429)
     _last_restart_time = now
 

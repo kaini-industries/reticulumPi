@@ -550,7 +550,7 @@ def _restart_request(owner):
 
 def test_restart_initializes_bounded_operation_state_and_task_set(monkeypatch):
     owner = _dashboard_owner(_auth=SimpleNamespace(_password_hash="hash"))
-    monkeypatch.setattr(dashboard_api, "_last_restart_time", 0.0)
+    monkeypatch.setattr(dashboard_api, "_last_restart_time", None)
     monkeypatch.setattr(
         dashboard_api,
         "_run_auth_work",
@@ -575,6 +575,43 @@ def test_restart_initializes_bounded_operation_state_and_task_set(monkeypatch):
     assert owner._restart_tasks == set()
 
 
+def test_restart_accepts_low_uptime_first_attempt_then_enforces_cooldown(monkeypatch):
+    owner = _dashboard_owner(
+        _auth=SimpleNamespace(_password_hash="hash"),
+        _restart_operations={},
+        _restart_tasks=set(),
+    )
+    monotonic_values = iter((0.25, 1.0))
+    monkeypatch.setattr(dashboard_api, "_last_restart_time", None)
+    monkeypatch.setattr(
+        dashboard_api,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values), time=time.time),
+    )
+    monkeypatch.setattr(
+        dashboard_api,
+        "_run_auth_work",
+        AsyncMock(return_value=(True, True)),
+    )
+    monkeypatch.setattr(dashboard_api.asyncio, "sleep", AsyncMock())
+    broker = MagicMock(return_value={"ok": True, "operation": "restart_services"})
+    monkeypatch.setattr("reticulumpi.control_client.request_control", broker)
+
+    async def run():
+        first = await dashboard_api.handle_services_restart(_restart_request(owner))
+        await asyncio.gather(*list(owner._restart_tasks))
+        second = await dashboard_api.handle_services_restart(_restart_request(owner))
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first.status == 202
+    assert second.status == 429
+    assert _payload(second)["error"] == "Service restart already in progress"
+    assert dashboard_api._last_restart_time == 0.25
+    broker.assert_called_once()
+
+
 def test_restart_operation_history_evicts_oldest_record(monkeypatch):
     operations = {
         f"old-{index}": {"created_at": float(index), "state": "scheduled"} for index in range(20)
@@ -584,7 +621,7 @@ def test_restart_operation_history_evicts_oldest_record(monkeypatch):
         _restart_operations=operations,
         _restart_tasks=set(),
     )
-    monkeypatch.setattr(dashboard_api, "_last_restart_time", 0.0)
+    monkeypatch.setattr(dashboard_api, "_last_restart_time", None)
     monkeypatch.setattr(dashboard_api.secrets, "token_hex", lambda _size: "new-operation")
     monkeypatch.setattr(
         dashboard_api,
@@ -616,7 +653,7 @@ def test_restart_cancellation_is_exposed_in_operation_status(monkeypatch):
         _restart_operations={},
         _restart_tasks=set(),
     )
-    monkeypatch.setattr(dashboard_api, "_last_restart_time", 0.0)
+    monkeypatch.setattr(dashboard_api, "_last_restart_time", None)
     monkeypatch.setattr(
         dashboard_api,
         "_run_auth_work",

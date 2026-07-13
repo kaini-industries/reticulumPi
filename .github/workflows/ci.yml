@@ -445,8 +445,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: false
           load: true
-          provenance: mode=max
-          sbom: true
+          provenance: false
+          sbom: false
           tags: reticulumpi:${{ matrix.suffix }}
       - name: Scan runtime image
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0

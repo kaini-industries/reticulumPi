@@ -478,6 +478,32 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert "sbom-path" in release_source
     assert "push-to-registry" in release_source
     assert release_source.count("actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26") == 3
+    release_steps = {step.get("name"): step for step in release["steps"] if step.get("name")}
+    attest_action = "actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26"
+    assert release_steps["Attest release artifact provenance"] == {
+        "name": "Attest release artifact provenance",
+        "uses": attest_action,
+        "with": {"subject-checksums": "release-assets/SHA256SUMS"},
+    }
+    assert release_steps["Attest wheel SBOM"] == {
+        "name": "Attest wheel SBOM",
+        "uses": attest_action,
+        "with": {
+            "subject-path": "release-assets/*.whl",
+            "sbom-path": (
+                "release-assets/reticulumpi-${{ steps.release-meta.outputs.version }}.cdx.json"
+            ),
+        },
+    }
+    assert release_steps["Attest published multi-architecture image"] == {
+        "name": "Attest published multi-architecture image",
+        "uses": attest_action,
+        "with": {
+            "subject-name": "${{ steps.images.outputs.image }}",
+            "subject-digest": "${{ steps.images.outputs.digest }}",
+            "push-to-registry": True,
+        },
+    }
     bookworm = workflow["jobs"]["bookworm-systemd"]
     bookworm_source = json.dumps(bookworm)
     assert set(bookworm["needs"]) == {"package", "recovery-admin", "release-tag-trust"}

@@ -122,7 +122,6 @@ def test_ci_pins_security_actions_and_runs_supply_chain_gates():
     assert "sudo visudo --check" not in source
     assert "node --check" in source
     assert "tools/verify_sbom.py" in source
-    assert "provenance: mode=max" in source
 
     privileged_step = next(
         step
@@ -144,6 +143,46 @@ def test_ci_pins_security_actions_and_runs_supply_chain_gates():
         step for step in package_steps if step.get("name") == "Generate exact-wheel CycloneDX SBOM"
     )
     assert generate_sbom["with"]["path"] == "${{ runner.temp }}/reticulumpi-wheel-root"
+
+
+def test_container_job_loads_then_validates_and_exports_one_runtime_image():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["container"]["steps"]
+    named_steps = {step["name"]: step for step in steps if "name" in step}
+    ordered_names = [step.get("name") for step in steps]
+
+    build_name = "Build runtime target from the same wheel"
+    scan_name = "Scan runtime image"
+    verify_name = "Verify minimal runtime, readiness, shutdown, and durable recreation"
+    export_name = "Export the exact validated runtime image"
+    assert [
+        ordered_names.index(name) for name in (build_name, scan_name, verify_name, export_name)
+    ] == sorted(
+        ordered_names.index(name) for name in (build_name, scan_name, verify_name, export_name)
+    )
+
+    build = named_steps[build_name]
+    assert build["uses"].startswith("docker/build-push-action@")
+    assert build["with"] == {
+        "context": ".",
+        "file": "docker/Dockerfile",
+        "target": "runtime",
+        "platforms": "${{ matrix.platform }}",
+        "push": False,
+        "load": True,
+        "provenance": False,
+        "sbom": False,
+        "tags": "reticulumpi:${{ matrix.suffix }}",
+    }
+
+    scan = named_steps[scan_name]
+    assert scan["with"]["image"] == "reticulumpi:${{ matrix.suffix }}"
+    assert scan["with"]["fail-build"] is True
+    assert scan["with"]["severity-cutoff"] == "high"
+    assert "reticulumpi:${{ matrix.suffix }}" in named_steps[verify_name]["run"]
+    export = named_steps[export_name]["run"]
+    assert 'docker save "reticulumpi:${{ matrix.suffix }}"' in export
+    assert 'sha256sum "reticulumpi-${{ matrix.suffix }}.tar.gz"' in export
 
 
 @pytest.mark.parametrize("profile", CONSTRAINT_PROFILES)

@@ -1282,7 +1282,7 @@ class TestAuthGateNegative:
         request.headers = {"X-Confirm-Password": "confirm-me"}
 
         async def run():
-            dashboard_api._last_restart_time = 0.0
+            dashboard_api._last_restart_time = None
             with (
                 patch.object(dashboard_api.asyncio, "sleep", new_callable=AsyncMock),
                 patch(
@@ -1317,7 +1317,7 @@ class TestAuthGateNegative:
         request.headers = {"X-Confirm-Password": "confirm-me"}
 
         async def run():
-            dashboard_api._last_restart_time = 0.0
+            dashboard_api._last_restart_time = None
             with (
                 patch.object(dashboard_api.asyncio, "sleep", new_callable=AsyncMock),
                 patch(
