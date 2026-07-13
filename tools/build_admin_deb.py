@@ -526,8 +526,9 @@ def _control(version: str, profile: str, installed_size: int) -> str:
     )
 
 
-def _publish(source: Path, destination: Path) -> tuple[int, int]:
-    """Publish without replacement and return the created file's device/inode identity."""
+@contextlib.contextmanager
+def _publish(source: Path, destination: Path) -> Iterator[tuple[int, int]]:
+    """Publish without replacement and pin the created inode for the caller's scope."""
 
     temporary = destination.with_name(f".{destination.name}.tmp")
     if temporary.exists() or temporary.is_symlink():
@@ -535,18 +536,19 @@ def _publish(source: Path, destination: Path) -> tuple[int, int]:
     created = False
     linked = False
     identity: tuple[int, int] | None = None
+    guard: BinaryIO | None = None
     try:
         with _open_regular(source, "built administrator artifact") as incoming:
-            with temporary.open("xb") as outgoing:
-                created = True
-                shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
-                outgoing.flush()
-                os.fsync(outgoing.fileno())
+            guard = temporary.open("xb")
+            created = True
+            shutil.copyfileobj(incoming, guard, length=1024 * 1024)
+            guard.flush()
+            os.fsync(guard.fileno())
         temporary.chmod(0o644)
         # The temporary is deliberately in the destination directory. A hard link is an atomic,
         # no-replace publication primitive: a destination created after preflight makes link(2)
         # fail instead of being overwritten.
-        metadata = temporary.lstat()
+        metadata = os.fstat(guard.fileno())
         identity = metadata.st_dev, metadata.st_ino
         os.link(temporary, destination, follow_symlinks=False)
         linked = True
@@ -555,14 +557,23 @@ def _publish(source: Path, destination: Path) -> tuple[int, int]:
         if (published.st_dev, published.st_ino) != identity:
             raise OSError("published administrator artifact was replaced during publication")
     except OSError as exc:
-        if created:
-            temporary.unlink(missing_ok=True)
-        if linked and identity is not None:
-            _unlink_if_same(destination, identity)
+        try:
+            if created:
+                temporary.unlink(missing_ok=True)
+            if linked and identity is not None:
+                _unlink_if_same(destination, identity)
+        finally:
+            if guard is not None:
+                guard.close()
         raise AdminDebError(f"cannot publish administrator artifact: {destination}") from exc
     if identity is None:  # pragma: no cover - successful copy always records an identity
         raise AdminDebError(f"cannot identify published administrator artifact: {destination}")
-    return identity
+    if guard is None:  # pragma: no cover - successful publication always opens the guard
+        raise AdminDebError(f"cannot guard published administrator artifact: {destination}")
+    try:
+        yield identity
+    finally:
+        guard.close()
 
 
 def _unlink_if_same(path: Path, identity: tuple[int, int]) -> None:
@@ -685,12 +696,13 @@ def build_admin_deb(
         )
         built_checksum.chmod(0o644)
 
-        output_identity = _publish(built_package, output)
-        try:
-            _publish(built_checksum, checksum)
-        except AdminDebError:
-            _unlink_if_same(output, output_identity)
-            raise
+        with _publish(built_package, output) as output_identity:
+            try:
+                with _publish(built_checksum, checksum):
+                    pass
+            except AdminDebError:
+                _unlink_if_same(output, output_identity)
+                raise
     return AdminDebArtifacts(package=output, sha256=checksum)
 
 

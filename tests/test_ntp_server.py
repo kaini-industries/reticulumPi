@@ -36,7 +36,7 @@ def _make_plugin(config: dict | None = None) -> NtpServerPlugin:
     plugin._sources = []
     plugin._last_check = 0.0
     plugin._check_errors = 0
-    plugin._last_online_recovery = 0.0
+    plugin._last_online_recovery = None
     plugin._online_recovery_interval = plugin.config.get("online_recovery_interval", 300)
     plugin._gps_refclock_active = False
     plugin._gps_refclock_configured = False
@@ -310,13 +310,16 @@ class TestSourceRecovery:
     def test_recovery_fails_closed_without_broker(self, mock_run, mock_control):
         mock_control.side_effect = ControlError("broker unavailable")
         p = _make_plugin()
-        p._last_online_recovery = 0.0
         p._online_recovery_interval = 300
         sources = [
             {"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"},
             {"mode": "^", "state": "?", "reach": 0, "name": "ntp.ubuntu.com"},
         ]
-        p._check_source_recovery(sources)
+        with patch(
+            "reticulumpi.builtin_plugins.ntp_server.time.monotonic",
+            return_value=5.0,
+        ):
+            p._check_source_recovery(sources)
         mock_control.assert_called_once_with(
             "chrony",
             ["online"],
@@ -328,10 +331,13 @@ class TestSourceRecovery:
     @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
     def test_recovery_uses_control_broker(self, mock_control):
         p = _make_plugin()
-        p._last_online_recovery = 0.0
         sources = [{"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"}]
 
-        p._check_source_recovery(sources)
+        with patch(
+            "reticulumpi.builtin_plugins.ntp_server.time.monotonic",
+            return_value=5.0,
+        ):
+            p._check_source_recovery(sources)
 
         mock_control.assert_called_once_with(
             "chrony",
@@ -340,39 +346,41 @@ class TestSourceRecovery:
             timeout=15.0,
         )
 
-    def test_recovery_skipped_when_some_reachable(self):
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_recovery_skipped_when_some_reachable(self, mock_control):
         p = _make_plugin()
-        p._last_online_recovery = 0.0
         p._online_recovery_interval = 300
         sources = [
             {"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"},
             {"mode": "^", "state": "+", "reach": 377, "name": "ntp.ubuntu.com"},
         ]
-        with patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run") as mock_run:
-            p._check_source_recovery(sources)
-        mock_run.assert_not_called()
+        p._check_source_recovery(sources)
+        mock_control.assert_not_called()
 
-    def test_recovery_cooldown(self):
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_recovery_cooldown(self, mock_control):
         p = _make_plugin()
-        p._last_online_recovery = time.time()
+        p._last_online_recovery = 1_000.0
         p._online_recovery_interval = 300
         sources = [
             {"mode": "^", "state": "?", "reach": 0, "name": "pool.ntp.org"},
         ]
-        with patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run") as mock_run:
+        with patch(
+            "reticulumpi.builtin_plugins.ntp_server.time.monotonic",
+            return_value=1_100.0,
+        ):
             p._check_source_recovery(sources)
-        mock_run.assert_not_called()
+        mock_control.assert_not_called()
 
-    def test_recovery_ignores_refclock_sources(self):
+    @patch("reticulumpi.builtin_plugins.ntp_server.request_control")
+    def test_recovery_ignores_refclock_sources(self, mock_control):
         p = _make_plugin()
-        p._last_online_recovery = 0.0
         p._online_recovery_interval = 300
         sources = [
             {"mode": "#", "state": "*", "reach": 377, "name": "GPS"},
         ]
-        with patch("reticulumpi.builtin_plugins.ntp_server.subprocess.run") as mock_run:
-            p._check_source_recovery(sources)
-        mock_run.assert_not_called()
+        p._check_source_recovery(sources)
+        mock_control.assert_not_called()
 
 
 class TestGetStatusAndSnapshot:

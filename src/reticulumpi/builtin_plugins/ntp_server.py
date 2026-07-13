@@ -102,7 +102,7 @@ class NtpServerPlugin(PluginBase):
         self._check_errors = 0
 
         # Source recovery state
-        self._last_online_recovery: float = 0.0
+        self._last_online_recovery: float | None = None
         self._online_recovery_interval = self.config.get("online_recovery_interval", 300)
 
         # GPS refclock state
@@ -387,7 +387,10 @@ class NtpServerPlugin(PluginBase):
             return
 
         now = time.monotonic()
-        if now - self._last_online_recovery < self._online_recovery_interval:
+        if (
+            self._last_online_recovery is not None
+            and now - self._last_online_recovery < self._online_recovery_interval
+        ):
             return
 
         self._last_online_recovery = now

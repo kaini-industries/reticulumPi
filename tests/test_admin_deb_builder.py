@@ -210,6 +210,8 @@ def test_admin_deb_is_deterministic_isolated_and_minisign_ready(tmp_path: Path) 
         f"{_sha256(first.package)}  {first.package.name}\n"
     )
     assert not list(first.package.parent.glob("*.minisig"))
+    assert not list(first.package.parent.glob(".*.tmp"))
+    assert not list(second.package.parent.glob(".*.tmp"))
 
     ar = _ar_members(first.package)
     assert list(ar) == ["debian-binary", "control.tar.gz", "data.tar.gz"]
@@ -574,6 +576,8 @@ def test_checksum_publication_race_rolls_back_only_our_package(
         )
     assert not output.exists()
     assert checksum.read_bytes() == b"racing checksum"
+    assert not output.with_name(f".{output.name}.tmp").exists()
+    assert not checksum.with_name(f".{checksum.name}.tmp").exists()
 
 
 def test_package_publication_race_never_overwrites_destination(
@@ -608,6 +612,7 @@ def test_package_publication_race_never_overwrites_destination(
         )
     assert output.read_bytes() == replacement
     assert not output.with_name(f"{output.name}.sha256").exists()
+    assert not output.with_name(f".{output.name}.tmp").exists()
 
 
 def test_checksum_race_does_not_remove_a_replacement_package(
@@ -649,3 +654,5 @@ def test_checksum_race_does_not_remove_a_replacement_package(
         )
     assert output.read_bytes() == replacement
     assert checksum.read_bytes() == b"racing checksum"
+    assert not output.with_name(f".{output.name}.tmp").exists()
+    assert not checksum.with_name(f".{checksum.name}.tmp").exists()

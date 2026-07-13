@@ -108,10 +108,21 @@ def test_migration_target_normalizes_relative_path():
 
 def test_migration_target_rejects_invalid_unsafe_and_nondirectory_ancestors(tmp_path, monkeypatch):
     real_lstat = Path.lstat
+    lexical_tmp_path = Path(os.path.abspath(tmp_path))
+    resolved_tmp_path = tmp_path.resolve(strict=True)
+    trusted_ancestors = {
+        lexical_tmp_path,
+        *lexical_tmp_path.parents,
+        resolved_tmp_path,
+        *resolved_tmp_path.parents,
+    }
 
     def root_owned_components(path):
         result = real_lstat(path)
-        return SimpleNamespace(st_mode=result.st_mode, st_uid=0)
+        mode = result.st_mode
+        if path in trusted_ancestors:
+            mode &= ~0o022
+        return SimpleNamespace(st_mode=mode, st_uid=0)
 
     monkeypatch.setattr(Path, "lstat", root_owned_components)
     dangling = tmp_path / "dangling"
