@@ -513,7 +513,7 @@ jobs:
       needs.package.result == 'success' &&
       needs['recovery-admin'].result == 'success' &&
       (github.ref_type != 'tag' || needs['release-tag-trust'].result == 'success')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     needs:
       - package
       - recovery-admin
@@ -528,9 +528,6 @@ jobs:
         with:
           name: recovery-administrators
           path: admin-dist
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          platforms: arm64
       - name: Install and import the complete hash-locked ARM64 feature profile
         run: |
           docker build \
@@ -590,7 +587,7 @@ jobs:
       needs.package.result == 'success' &&
       needs['recovery-admin'].result == 'success' &&
       (github.ref_type != 'tag' || needs['release-tag-trust'].result == 'success')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     needs:
       - package
       - recovery-admin
@@ -605,9 +602,6 @@ jobs:
         with:
           name: recovery-administrators
           path: admin-dist
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          platforms: arm64
       - name: Build the digest-pinned Ubuntu Noble systemd fixture
         run: >-
           docker build

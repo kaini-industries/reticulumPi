@@ -506,6 +506,11 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     }
     bookworm = workflow["jobs"]["bookworm-systemd"]
     bookworm_source = json.dumps(bookworm)
+    assert bookworm["runs-on"] == "ubuntu-24.04-arm"
+    assert not any(
+        str(step.get("uses", "")).startswith("docker/setup-qemu-action@")
+        for step in bookworm["steps"]
+    )
     assert set(bookworm["needs"]) == {"package", "recovery-admin", "release-tag-trust"}
     assert "github.event_name == 'push'" in bookworm["if"]
     assert "needs['release-tag-trust'].result == 'success'" in bookworm["if"]
@@ -544,6 +549,10 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
 
     noble = workflow["jobs"]["noble-systemd"]
     noble_source = json.dumps(noble)
+    assert noble["runs-on"] == "ubuntu-24.04-arm"
+    assert not any(
+        str(step.get("uses", "")).startswith("docker/setup-qemu-action@") for step in noble["steps"]
+    )
     assert set(noble["needs"]) == {"package", "recovery-admin", "release-tag-trust"}
     assert "github.event_name == 'push'" in noble["if"]
     assert "needs['release-tag-trust'].result == 'success'" in noble["if"]
