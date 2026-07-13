@@ -242,11 +242,18 @@ def test_migration_target_inspection_and_missing_backup_listing_fail_closed(
     assert admin._db_backups(SimpleNamespace()) == 0
 
 
-def test_database_discovery_and_migration_registry_fail_closed(admin_paths, monkeypatch):
+def test_database_discovery_and_migration_registry_avoids_plugin_imports(admin_paths, monkeypatch):
     unsafe = admin_paths.data / "directory.db"
     unsafe.mkdir(parents=True)
     with pytest.raises(admin.AdminError, match="unsafe database path"):
         admin._databases()
+
+    admin.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    admin.CONFIG_FILE.write_text(
+        "reticulumpi:\n  plugins:\n    messaging_hub:\n      enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(admin, "_service_home", lambda: admin_paths.data)
 
     real_import = builtins.__import__
 
@@ -256,8 +263,8 @@ def test_database_discovery_and_migration_registry_fail_closed(admin_paths, monk
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", reject_builtin_plugin)
-    with pytest.raises(admin.AdminError, match="cannot load built-in migration declarations"):
-        admin._migration_plugin_classes()
+    targets = admin._load_enabled_migration_targets()
+    assert [target.name for target in targets] == ["messaging_hub"]
 
 
 def test_service_home_rejects_nonabsolute_resolution(monkeypatch):

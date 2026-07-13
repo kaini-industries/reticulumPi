@@ -15,7 +15,6 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import RNS
@@ -23,7 +22,8 @@ import RNS.vendor.umsgpack as umsgpack
 
 from reticulumpi import events
 from reticulumpi.lxmf_compat import create_lxm_router
-from reticulumpi.migrations import Migration, MigrationTarget
+from reticulumpi.migration_catalog import migration_targets
+from reticulumpi.migrations import MigrationTarget
 from reticulumpi.plugin_base import PluginBase, resolve_ready_plugin
 from reticulumpi.runtime_metrics import instrument_sqlite_class
 
@@ -1812,37 +1812,7 @@ class MessagingHubPlugin(PluginBase):
         be adopted without guessing which optional backfill already ran.
         """
 
-        path = Path(os.path.expanduser(self.config.get("db_path", _DEFAULT_DB_PATH)))
-        return (
-            MigrationTarget(
-                "messaging_hub",
-                path,
-                (
-                    Migration(
-                        1,
-                        "adopt legacy message store",
-                        (
-                            """CREATE TABLE IF NOT EXISTS messages (
-                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                timestamp REAL NOT NULL,
-                                transport TEXT NOT NULL,
-                                direction TEXT NOT NULL,
-                                msg_type TEXT NOT NULL,
-                                from_id TEXT,
-                                from_name TEXT,
-                                to_id TEXT,
-                                to_name TEXT,
-                                text TEXT NOT NULL,
-                                status TEXT DEFAULT 'sent',
-                                metadata TEXT
-                            )""",
-                            "CREATE INDEX IF NOT EXISTS idx_msg_ts ON messages(timestamp)",
-                            "CREATE INDEX IF NOT EXISTS idx_msg_transport ON messages(transport)",
-                        ),
-                    ),
-                ),
-            ),
-        )
+        return migration_targets(self.plugin_name, self.config)
 
     def validate_config(self) -> None:
         limit = self.config.get("message_history_limit", _DEFAULT_HISTORY_LIMIT)

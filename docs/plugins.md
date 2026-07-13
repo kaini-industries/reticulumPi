@@ -8,6 +8,20 @@ Enable any combination in your `config.yaml`; see the annotated
 
 For writing your own plugins, see the [Plugin Development Guide](plugin-development.md).
 
+Built-in SQLite migrations for Messaging Hub, Network Map, Node Location Tracker, Sensor Framework,
+and Transport Health can be inspected before the normal runtime environment exists:
+
+```bash
+reticulumpi-admin db plan
+reticulumpi-admin db migrate --dry-run
+```
+
+The recovery administrator projects only each enabled built-in's migration-relevant configuration
+and loads immutable first-party declarations. It does not import PyYAML, RNS, LXMF, a full plugin
+implementation, or an external plugin path. Unsupported YAML features that could make this narrow
+projection ambiguous fail closed. The dry run migrates a temporary SQLite clone and leaves the live
+database and its directory unchanged.
+
 ## Heartbeat Announce
 
 Periodically announces the node's presence on the Reticulum network. Other nodes running `rnstatus` or transport-aware applications will see your node.
@@ -105,6 +119,21 @@ root-owned, non-writable path (the supported example is
 external-artifact manifest. Keep `storage_dir` under `/var/lib/reticulumpi`, outside that
 immutable tree. Missing, mutable, writable, moved, or digest-mismatched deployments are rejected
 before the plugin is constructed.
+
+Stage and review that tree independently; the transactional administrator never installs MeshChat
+or promotes a mutable predecessor checkout into the external-artifact trust domain. Generate its
+manifest digest without executing MeshChat:
+
+```bash
+reticulumpi-admin external-artifact digest --kind tree /srv/reticulumpi-external/meshchat
+```
+
+During the first mutable-layout bridge, a legacy `install_dir` and nested `storage_dir` are planned
+together. From one locked config hash the administrator atomically points `install_dir` at the
+pre-staged `/srv` tree and `storage_dir` at `/var/lib/reticulumpi/meshchat/storage`. Only the writable
+storage tree is migrated. The predecessor code and virtual environment remain untouched so exact
+legacy rollback can restore the original config and storage and restart the retained checkout; the
+independently staged tree remains immutable and inactive.
 
 **Important:** Set `use_shared_instance: true` when this plugin is enabled.
 

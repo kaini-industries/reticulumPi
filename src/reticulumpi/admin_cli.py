@@ -48,6 +48,7 @@ from reticulumpi.platform_policy import (
 
 
 DEFAULT_INSTALL_ROOT = Path("/srv/reticulumpi")
+MESHCHAT_EXTERNAL_ROOT = Path("/srv/reticulumpi-external/meshchat")
 CONFIG_DIR = Path("/etc/reticulumpi")
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 DATA_DIR = Path("/var/lib/reticulumpi")
@@ -235,13 +236,22 @@ class LegacyConfigPathMigration:
 
 
 @dataclass(frozen=True)
-class MeshChatStoragePathMigration:
-    """A locked rewrite of only meshchat_server.storage_dir."""
+class MeshChatPathRewrite:
+    """One locked scalar rewrite inside the MeshChat plugin block."""
 
+    setting: str
     line_index: int
     source_path: str
     destination_path: str
+
+
+@dataclass(frozen=True)
+class MeshChatPathMigration:
+    """An atomic install/storage split planned from one configuration hash."""
+
+    rewrites: tuple[MeshChatPathRewrite, ...]
     source_sha256: str
+    external_tree_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1665,6 +1675,23 @@ def _discover_legacy_layout() -> LegacyLayout:
 
 def _legacy_home_candidates() -> tuple[Path, ...]:
     return _discover_legacy_layout().homes
+
+
+def _legacy_meshchat_install_candidates() -> tuple[Path, ...]:
+    found: list[Path] = []
+    for install_root in _discover_legacy_layout().install_roots:
+        if (install_root.name == "current" and install_root.is_symlink()) or (
+            install_root.parent.name == "releases"
+        ):
+            continue
+        candidate = install_root / "meshchat"
+        if not os.path.lexists(candidate):
+            continue
+        if candidate.resolve() == MESHCHAT_EXTERNAL_ROOT.resolve():
+            continue
+        if candidate not in found:
+            found.append(candidate)
+    return tuple(found)
 
 
 def _legacy_meshchat_storage_candidates() -> tuple[Path, ...]:
@@ -3680,7 +3707,7 @@ def _meshchat_server_block(
     return start, end, plugin_indent
 
 
-def _meshchat_storage_scalar(lines: list[str]) -> tuple[int, str] | None:
+def _meshchat_path_scalar(lines: list[str], setting: str) -> tuple[int, str] | None:
     block = _meshchat_server_block(lines)
     if block is None:
         return None
@@ -3698,25 +3725,27 @@ def _meshchat_storage_scalar(lines: list[str]) -> tuple[int, str] | None:
         for index, indentation, line in active
         if indentation == direct_indent
         and indentation > plugin_indent
-        and (parsed := _yaml_key_line(line, "storage_dir")) is not None
+        and (parsed := _yaml_key_line(line, setting)) is not None
     ]
     if len(values) > 1:
-        raise AdminError("meshchat_server.storage_dir is configured more than once")
+        raise AdminError(f"meshchat_server.{setting} is configured more than once")
     if not values:
         return None
     index, raw = values[0]
     try:
         parsed_values = shlex.split(raw, comments=True, posix=True)
     except ValueError as exc:
-        raise AdminError("meshchat_server.storage_dir is not a simple path") from exc
+        raise AdminError(f"meshchat_server.{setting} is not a simple path") from exc
     if len(parsed_values) != 1:
-        raise AdminError("meshchat_server.storage_dir is not a simple path")
+        raise AdminError(f"meshchat_server.{setting} is not a simple path")
     return index, parsed_values[0]
 
 
-def _plan_meshchat_storage_path_migration(
+def _plan_meshchat_path_migration(
     path: Path | None = None,
-) -> MeshChatStoragePathMigration | None:
+    *,
+    legacy_bridge: bool,
+) -> MeshChatPathMigration | None:
     path = CONFIG_FILE if path is None else path
     if not path.exists():
         return None
@@ -3725,61 +3754,128 @@ def _plan_meshchat_storage_path_migration(
     try:
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     except (OSError, UnicodeError) as exc:
-        raise AdminError(f"cannot inspect MeshChat storage in {path}: {exc}") from exc
-    scalar = _meshchat_storage_scalar(lines)
-    if scalar is None:
+        raise AdminError(f"cannot inspect MeshChat paths in {path}: {exc}") from exc
+
+    rewrites: list[MeshChatPathRewrite] = []
+    external_tree_sha256: str | None = None
+    install_scalar = _meshchat_path_scalar(lines, "install_dir")
+    if legacy_bridge and install_scalar is not None:
+        line_index, configured = install_scalar
+        configured_path = Path(os.path.expanduser(configured))
+        if not configured_path.is_absolute():
+            raise AdminError("meshchat_server.install_dir must be absolute for migration")
+        _reject_symlink_components(configured_path)
+        sources = {candidate.resolve() for candidate in _legacy_meshchat_install_candidates()}
+        source = configured_path.resolve()
+        if source in sources:
+            if not source.is_dir():
+                raise AdminError("MeshChat legacy install path is not a directory")
+            target = MESHCHAT_EXTERNAL_ROOT.resolve()
+            if _is_within(target, source) or _is_within(source, target):
+                raise AdminError("MeshChat legacy and external install trees overlap")
+            try:
+                from reticulumpi.external_artifacts import (
+                    ArtifactPolicyError,
+                    tree_sha256,
+                )
+
+                external_tree_sha256 = tree_sha256(target, require_trusted=True)
+            except (ArtifactPolicyError, OSError) as exc:
+                raise AdminError(f"MeshChat external tree is not trusted: {exc}") from exc
+            rewrites.append(
+                MeshChatPathRewrite(
+                    setting="install_dir",
+                    line_index=line_index,
+                    source_path=configured,
+                    destination_path=str(target),
+                )
+            )
+
+    storage_scalar = _meshchat_path_scalar(lines, "storage_dir")
+    if storage_scalar is not None:
+        line_index, configured = storage_scalar
+        configured_path = Path(os.path.expanduser(configured))
+        if not configured_path.is_absolute():
+            raise AdminError("meshchat_server.storage_dir must be absolute for migration")
+        _reject_symlink_components(configured_path)
+        sources = {candidate.resolve() for candidate in _legacy_meshchat_storage_candidates()}
+        if configured_path.resolve() in sources:
+            destination = (DATA_DIR / "meshchat/storage").resolve()
+            external = MESHCHAT_EXTERNAL_ROOT.resolve()
+            if _is_within(destination, external) or _is_within(external, destination):
+                raise AdminError("MeshChat external install and durable storage trees overlap")
+            rewrites.append(
+                MeshChatPathRewrite(
+                    setting="storage_dir",
+                    line_index=line_index,
+                    source_path=configured,
+                    destination_path=str(destination),
+                )
+            )
+
+    if not rewrites:
         return None
-    line_index, configured = scalar
-    configured_path = Path(os.path.expanduser(configured))
-    if not configured_path.is_absolute():
-        raise AdminError("meshchat_server.storage_dir must be absolute for migration")
-    sources = {candidate.resolve() for candidate in _legacy_meshchat_storage_candidates()}
-    if configured_path.resolve() not in sources:
-        return None
-    return MeshChatStoragePathMigration(
-        line_index=line_index,
-        source_path=str(configured_path.resolve()),
-        destination_path=str((DATA_DIR / "meshchat/storage").resolve()),
+    return MeshChatPathMigration(
+        rewrites=tuple(rewrites),
         source_sha256=_sha256(path),
+        external_tree_sha256=external_tree_sha256,
     )
 
 
-def _apply_meshchat_storage_path_migration(
-    migration: MeshChatStoragePathMigration,
+def _apply_meshchat_path_migration(
+    migration: MeshChatPathMigration,
     path: Path | None = None,
+    *,
+    legacy_bridge: bool,
 ) -> None:
     path = CONFIG_FILE if path is None else path
     if path.is_symlink() or not path.is_file() or _sha256(path) != migration.source_sha256:
-        raise AdminError("configuration changed after the MeshChat storage migration was planned")
+        raise AdminError("configuration changed after the MeshChat path migration was planned")
+    if migration.external_tree_sha256 is not None:
+        if not legacy_bridge:
+            raise AdminError("MeshChat install paths may only change during a legacy bridge")
+        try:
+            from reticulumpi.external_artifacts import (
+                ArtifactPolicyError,
+                tree_sha256,
+            )
+
+            actual = tree_sha256(MESHCHAT_EXTERNAL_ROOT, require_trusted=True)
+        except (ArtifactPolicyError, OSError) as exc:
+            raise AdminError(f"MeshChat external tree is not trusted: {exc}") from exc
+        if actual != migration.external_tree_sha256:
+            raise AdminError("MeshChat external tree changed after migration planning")
     original_stat = path.stat()
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    scalar = _meshchat_storage_scalar(lines)
-    if scalar != (migration.line_index, migration.source_path):
-        raise AdminError("meshchat_server.storage_dir changed before migration")
-    line = lines[migration.line_index]
-    if line.count(migration.source_path) != 1:
-        raise AdminError("meshchat_server.storage_dir source is ambiguous")
-    lines[migration.line_index] = line.replace(
-        migration.source_path,
-        migration.destination_path,
-        1,
-    )
+    for rewrite in migration.rewrites:
+        scalar = _meshchat_path_scalar(lines, rewrite.setting)
+        if scalar != (rewrite.line_index, rewrite.source_path):
+            raise AdminError(f"meshchat_server.{rewrite.setting} changed before migration")
+        line = lines[rewrite.line_index]
+        if line.count(rewrite.source_path) != 1:
+            raise AdminError(f"meshchat_server.{rewrite.setting} source is ambiguous")
+        lines[rewrite.line_index] = line.replace(
+            rewrite.source_path,
+            rewrite.destination_path,
+            1,
+        )
     _atomic_write(path, "".join(lines).encode("utf-8"), stat.S_IMODE(original_stat.st_mode))
     os.chown(path, original_stat.st_uid, original_stat.st_gid)
-    if _plan_meshchat_storage_path_migration(path) is not None:
-        raise AdminError("MeshChat storage path migration did not validate")
+    if _plan_meshchat_path_migration(path, legacy_bridge=legacy_bridge) is not None:
+        raise AdminError("MeshChat path migration did not validate")
 
 
-def _describe_meshchat_storage_path_migration(
-    migration: MeshChatStoragePathMigration | None,
+def _describe_meshchat_path_migration(
+    migration: MeshChatPathMigration | None,
 ) -> list[dict[str, object]]:
     if migration is None:
         return []
     return [
         {
-            "setting": "plugins.meshchat_server.storage_dir",
-            "value": migration.destination_path,
+            "setting": f"plugins.meshchat_server.{rewrite.setting}",
+            "value": rewrite.destination_path,
         }
+        for rewrite in migration.rewrites
     ]
 
 
@@ -4952,7 +5048,10 @@ def _apply_release_materialized(args: argparse.Namespace, operation: str) -> int
     if legacy_bridge:
         _validate_legacy_bridge_features(features, planning_config, None)
     planned_path_migration = _plan_legacy_config_path_migration(planning_config)
-    planned_meshchat_migration = _plan_meshchat_storage_path_migration(planning_config)
+    planned_meshchat_migration = _plan_meshchat_path_migration(
+        planning_config,
+        legacy_bridge=legacy_bridge,
+    )
     planned_config_migration = _plan_file_transfer_policy_migration(planning_config)
     planned_credential_migration = _plan_dashboard_credential_migration(
         source_replaces_unit=source is not None,
@@ -4994,7 +5093,7 @@ def _apply_release_materialized(args: argparse.Namespace, operation: str) -> int
         "legacy_config_source": str(legacy_config.path) if legacy_config is not None else None,
         "configuration_migrations": [
             *_describe_legacy_config_path_migration(planned_path_migration),
-            *_describe_meshchat_storage_path_migration(planned_meshchat_migration),
+            *_describe_meshchat_path_migration(planned_meshchat_migration),
             *_describe_file_transfer_policy_migration(planned_config_migration),
             *_describe_dashboard_credential_migration(planned_credential_migration),
             *_describe_dashboard_credential_dropins(planned_credential_dropins),
@@ -5142,9 +5241,14 @@ def _apply_release_materialized(args: argparse.Namespace, operation: str) -> int
             live_path_migration = _plan_legacy_config_path_migration()
             if live_path_migration is not None:
                 _apply_legacy_config_path_migration(live_path_migration)
-            live_meshchat_migration = _plan_meshchat_storage_path_migration()
+            live_meshchat_migration = _plan_meshchat_path_migration(
+                legacy_bridge=legacy_bridge,
+            )
             if live_meshchat_migration is not None:
-                _apply_meshchat_storage_path_migration(live_meshchat_migration)
+                _apply_meshchat_path_migration(
+                    live_meshchat_migration,
+                    legacy_bridge=legacy_bridge,
+                )
             live_config_migration = _plan_file_transfer_policy_migration()
             if live_config_migration is not None:
                 if live_config_migration.policy == "open" and (
@@ -5166,7 +5270,7 @@ def _apply_release_materialized(args: argparse.Namespace, operation: str) -> int
             ]
             journal["configuration_migrations"] = [
                 *_describe_legacy_config_path_migration(live_path_migration),
-                *_describe_meshchat_storage_path_migration(live_meshchat_migration),
+                *_describe_meshchat_path_migration(live_meshchat_migration),
                 *_describe_file_transfer_policy_migration(live_config_migration),
                 *_describe_dashboard_credential_migration(live_credential_migration),
                 *_describe_dashboard_credential_dropins(live_credential_dropins),
@@ -5891,32 +5995,6 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
 
 
-def _migration_plugin_classes() -> dict[str, type]:
-    """Return the fixed built-in migration registry.
-
-    Administration deliberately does not discover external plugins: importing
-    arbitrary plugin paths as root would turn configuration into code execution.
-    """
-
-    try:
-        from reticulumpi.builtin_plugins.messaging_hub import MessagingHubPlugin
-        from reticulumpi.builtin_plugins.network_map import NetworkMapPlugin
-        from reticulumpi.builtin_plugins.node_location_tracker import (
-            NodeLocationTrackerPlugin,
-        )
-        from reticulumpi.builtin_plugins.sensor_framework import SensorFrameworkPlugin
-        from reticulumpi.builtin_plugins.transport_health import TransportHealthPlugin
-    except ImportError as exc:
-        raise AdminError(f"cannot load built-in migration declarations: {exc}") from exc
-    return {
-        "messaging_hub": MessagingHubPlugin,
-        "network_map": NetworkMapPlugin,
-        "node_location_tracker": NodeLocationTrackerPlugin,
-        "sensor_framework": SensorFrameworkPlugin,
-        "transport_health": TransportHealthPlugin,
-    }
-
-
 def _service_home() -> Path:
     _service_account()
     home = DATA_DIR.resolve()
@@ -5981,28 +6059,30 @@ def _validate_migration_target(target, names: set[str], paths: set[Path]) -> Non
 
 
 def _load_enabled_migration_targets() -> tuple:
-    if CONFIG_FILE.is_symlink() or not CONFIG_FILE.is_file():
-        raise AdminError(f"system configuration is missing or unsafe: {CONFIG_FILE}")
+    from reticulumpi.migration_catalog import migration_targets
+    from reticulumpi.recovery_config import (
+        RecoveryConfigError,
+        load_migration_plugin_configs,
+    )
+
     try:
-        from reticulumpi.config import AppConfig, ConfigError
-
-        configured = AppConfig(str(CONFIG_FILE))
-    except (ConfigError, OSError) as exc:
+        configured = load_migration_plugin_configs(
+            CONFIG_FILE,
+            require_trusted=CONFIG_FILE == Path("/etc/reticulumpi/config.yaml"),
+        )
+    except RecoveryConfigError as exc:
         raise AdminError(f"cannot load migration configuration: {exc}") from exc
+    if not configured:
+        return ()
 
-    classes = _migration_plugin_classes()
     home = _service_home()
     targets = []
     names: set[str] = set()
     paths: set[Path] = set()
-    for name, plugin_config in configured.plugins.items():
-        if not plugin_config.get("enabled", False) or name not in classes:
-            continue
-        instance = object.__new__(classes[name])
-        instance.config = _normalize_migration_config(name, plugin_config, home)
+    for name, plugin_config in configured.items():
+        normalized = _normalize_migration_config(name, plugin_config, home)
         try:
-            instance.validate_config()
-            declared = instance.get_migration_targets()
+            declared = migration_targets(name, normalized)
         except (OSError, TypeError, ValueError) as exc:
             raise AdminError(f"invalid migration configuration for {name}: {exc}") from exc
         for target in declared:
@@ -6058,9 +6138,16 @@ def _db_migrate(args: argparse.Namespace) -> int:
             for target in targets:
                 result = _dry_run_migration(target)
                 versions = ",".join(str(version) for version in result.applied) or "none"
+                checksums_by_version = {
+                    migration.version: migration.stable_checksum for migration in target.migrations
+                }
+                checksums = (
+                    ",".join(checksums_by_version[version] for version in result.applied) or "none"
+                )
                 print(
                     f"{target.name}: path={target.path} from={result.from_version} "
-                    f"to={result.to_version} dry_run=true pending={versions}"
+                    f"to={result.to_version} dry_run=true pending={versions} "
+                    f"checksums={checksums}"
                 )
         except (MigrationError, OSError, sqlite3.Error) as exc:
             raise AdminError(f"migration dry run failed: {exc}") from exc
@@ -6209,6 +6296,23 @@ def _db_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _external_artifact_digest(args: argparse.Namespace) -> int:
+    """Hash one independently installed file or immutable deployment tree."""
+
+    from reticulumpi.external_artifacts import (
+        ArtifactPolicyError,
+        file_sha256,
+        tree_sha256,
+    )
+
+    try:
+        digest = file_sha256(args.path) if args.kind == "file" else tree_sha256(args.path)
+    except (ArtifactPolicyError, OSError) as exc:
+        raise AdminError(str(exc)) from exc
+    print(digest)
+    return 0
+
+
 def _add_apply_flags(parser: argparse.ArgumentParser) -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="show changes without applying them")
@@ -6238,6 +6342,16 @@ def _build_parser() -> argparse.ArgumentParser:
     status.set_defaults(handler=_status)
     doctor = subcommands.add_parser("doctor")
     doctor.set_defaults(handler=_doctor)
+
+    external_artifact = subcommands.add_parser("external-artifact")
+    external_commands = external_artifact.add_subparsers(
+        dest="external_artifact_command",
+        required=True,
+    )
+    digest = external_commands.add_parser("digest")
+    digest.add_argument("--kind", choices=("file", "tree"), required=True)
+    digest.add_argument("path")
+    digest.set_defaults(handler=_external_artifact_digest)
 
     db = subcommands.add_parser("db")
     db_commands = db.add_subparsers(dest="db_command", required=True)

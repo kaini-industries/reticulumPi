@@ -8,13 +8,13 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from pathlib import Path
 from typing import Any
 
 import RNS
 
 from reticulumpi import events
-from reticulumpi.migrations import Migration, MigrationTarget
+from reticulumpi.migration_catalog import migration_targets
+from reticulumpi.migrations import MigrationTarget
 from reticulumpi.plugin_base import PluginBase
 from reticulumpi.runtime_metrics import instrument_sqlite_class
 
@@ -60,49 +60,7 @@ class NetworkMapPlugin(PluginBase):
     broadcast_keys = "mesh"
 
     def get_migration_targets(self) -> tuple[MigrationTarget, ...]:
-        path = Path(
-            os.path.expanduser(
-                self.config.get("db_path", "~/.local/share/reticulumpi/network_map.db")
-            )
-        )
-        statements = (
-            """CREATE TABLE IF NOT EXISTS known_nodes (
-                destination_hash TEXT PRIMARY KEY,
-                app_name TEXT,
-                aspects TEXT,
-                hops INTEGER,
-                last_seen REAL,
-                first_seen REAL,
-                announce_count INTEGER,
-                app_data_str TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS interface_stats (
-                timestamp REAL,
-                name TEXT,
-                type TEXT,
-                online INTEGER,
-                rxb INTEGER,
-                txb INTEGER,
-                bitrate INTEGER,
-                peers INTEGER
-            )""",
-            "CREATE INDEX IF NOT EXISTS idx_known_nodes_app_name ON known_nodes(app_name)",
-            "CREATE INDEX IF NOT EXISTS idx_known_nodes_last_seen ON known_nodes(last_seen DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_known_nodes_announce_count "
-            "ON known_nodes(announce_count DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_known_nodes_hops ON known_nodes(hops)",
-            "CREATE INDEX IF NOT EXISTS idx_known_nodes_app_lastseen "
-            "ON known_nodes(app_name, last_seen DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_interface_stats_timestamp "
-            "ON interface_stats(timestamp)",
-        )
-        return (
-            MigrationTarget(
-                "network_map",
-                path,
-                (Migration(1, "adopt network map schema", statements),),
-            ),
-        )
+        return migration_targets(self.plugin_name, self.config)
 
     def validate_config(self) -> None:
         max_days = self.config.get("max_history_days", 30)

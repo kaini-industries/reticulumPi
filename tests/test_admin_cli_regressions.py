@@ -16,6 +16,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 import reticulumpi.admin_cli as admin
+from reticulumpi.external_artifacts import ArtifactPolicyError
 from reticulumpi.migrations import Migration, MigrationError, MigrationTarget
 
 
@@ -1597,13 +1598,6 @@ def test_service_paths_and_migration_config_are_canonical(admin_paths):
     assert "path" not in postgres["storage"]
     message = admin._normalize_migration_config("messaging_hub", {}, home)
     assert message["db_path"] == str(home / ".local/share/reticulumpi/messaging_hub.db")
-    assert set(admin._migration_plugin_classes()) == {
-        "messaging_hub",
-        "network_map",
-        "node_location_tracker",
-        "sensor_framework",
-        "transport_health",
-    }
 
 
 def test_migration_target_validation_rejects_duplicate_name_path_and_directory(tmp_path):
@@ -1623,10 +1617,10 @@ def test_migration_target_validation_rejects_duplicate_name_path_and_directory(t
         admin._validate_migration_target(invalid, set(), set())
 
 
-def test_migration_target_loading_rejects_missing_bad_config_and_plugin_validation(
+def test_migration_target_loading_rejects_missing_bad_config_and_catalog_validation(
     admin_paths, monkeypatch
 ):
-    with pytest.raises(admin.AdminError, match="missing or unsafe"):
+    with pytest.raises(admin.AdminError, match="unavailable or unsafe"):
         admin._load_enabled_migration_targets()
     admin_paths.config.mkdir(parents=True)
     admin.CONFIG_FILE.write_text("reticulumpi: [", encoding="utf-8")
@@ -1638,15 +1632,12 @@ def test_migration_target_loading_rejects_missing_bad_config_and_plugin_validati
         encoding="utf-8",
     )
 
-    class InvalidPlugin:
-        def validate_config(self):
-            raise ValueError("invalid path")
-
-        def get_migration_targets(self):
-            return ()
+    import reticulumpi.migration_catalog as migration_catalog
 
     monkeypatch.setattr(
-        admin, "_migration_plugin_classes", lambda: {"node_location_tracker": InvalidPlugin}
+        migration_catalog,
+        "migration_targets",
+        lambda *_args: (_ for _ in ()).throw(ValueError("invalid path")),
     )
     with pytest.raises(admin.AdminError, match="invalid migration configuration"):
         admin._load_enabled_migration_targets()
@@ -4171,9 +4162,9 @@ def test_legacy_meshchat_storage_is_backed_up_migrated_and_only_storage_scalar_r
 
     generic = admin._plan_legacy_config_path_migration()
     assert generic is None
-    meshchat = admin._plan_meshchat_storage_path_migration()
+    meshchat = admin._plan_meshchat_path_migration(legacy_bridge=False)
     assert meshchat is not None
-    admin._apply_meshchat_storage_path_migration(meshchat)
+    admin._apply_meshchat_path_migration(meshchat, legacy_bridge=False)
     migrated_config = admin.CONFIG_FILE.read_text(encoding="utf-8")
     assert f"install_dir: {legacy_root}/meshchat" in migrated_config
     assert (
@@ -4426,3 +4417,284 @@ def test_candidate_backup_records_legacy_only_roots_as_absent(admin_paths, tmp_p
 
 def test_admin_default_install_root_avoids_mutable_legacy_opt_tree():
     assert admin.DEFAULT_INSTALL_ROOT == Path("/srv/reticulumpi")
+
+
+def _prepare_dual_meshchat_path_migration(admin_paths, tmp_path, monkeypatch):
+    legacy_install = tmp_path / "opt/reticulumpi/meshchat"
+    legacy_storage = legacy_install / "storage"
+    legacy_storage.mkdir(parents=True)
+    (legacy_install / "meshchat.py").write_text("legacy code\n", encoding="utf-8")
+    external_install = tmp_path / "srv/reticulumpi-external/meshchat"
+    external_install.mkdir(parents=True)
+    (external_install / "meshchat.py").write_text("reviewed code\n", encoding="utf-8")
+    admin_paths.config.mkdir(parents=True)
+    admin.CONFIG_FILE.write_text(
+        "reticulumpi:\n"
+        "  plugins:\n"
+        "    meshchat_server:\n"
+        "      enabled: true\n"
+        f"      install_dir: {legacy_install}  # independently staged below\n"
+        f"      storage_dir: {legacy_storage}  # durable state\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(admin, "MESHCHAT_EXTERNAL_ROOT", external_install)
+    monkeypatch.setattr(
+        admin,
+        "_legacy_meshchat_install_candidates",
+        lambda: (legacy_install,),
+    )
+    monkeypatch.setattr(
+        admin,
+        "_legacy_meshchat_storage_candidates",
+        lambda: (legacy_storage,),
+    )
+    monkeypatch.setattr(admin.os, "chown", lambda *_args: None)
+    return legacy_install, legacy_storage, external_install
+
+
+def test_meshchat_legacy_install_and_storage_paths_plan_and_apply_atomically(
+    admin_paths, tmp_path, monkeypatch
+):
+    legacy_install, legacy_storage, external_install = _prepare_dual_meshchat_path_migration(
+        admin_paths, tmp_path, monkeypatch
+    )
+    import reticulumpi.external_artifacts as external_artifacts
+
+    digest = "d" * 64
+    hash_calls: list[tuple[Path, bool]] = []
+
+    def trusted_tree_hash(path, *, require_trusted=False):
+        hash_calls.append((Path(path), require_trusted))
+        return digest
+
+    monkeypatch.setattr(external_artifacts, "tree_sha256", trusted_tree_hash)
+    original_atomic_write = admin._atomic_write
+    writes: list[bytes] = []
+
+    def record_atomic_write(path, data, mode=0o600):
+        writes.append(data)
+        return original_atomic_write(path, data, mode)
+
+    monkeypatch.setattr(admin, "_atomic_write", record_atomic_write)
+
+    migration = admin._plan_meshchat_path_migration(legacy_bridge=True)
+
+    assert migration is not None
+    assert migration.external_tree_sha256 == digest
+    assert [
+        (rewrite.setting, rewrite.source_path, rewrite.destination_path)
+        for rewrite in migration.rewrites
+    ] == [
+        ("install_dir", str(legacy_install), str(external_install.resolve())),
+        (
+            "storage_dir",
+            str(legacy_storage),
+            str((admin.DATA_DIR / "meshchat/storage").resolve()),
+        ),
+    ]
+
+    admin._apply_meshchat_path_migration(migration, legacy_bridge=True)
+
+    expected = (
+        "reticulumpi:\n"
+        "  plugins:\n"
+        "    meshchat_server:\n"
+        "      enabled: true\n"
+        f"      install_dir: {external_install.resolve()}  # independently staged below\n"
+        f"      storage_dir: {(admin.DATA_DIR / 'meshchat/storage').resolve()}  # durable state\n"
+    )
+    assert admin.CONFIG_FILE.read_text(encoding="utf-8") == expected
+    assert writes == [expected.encode("utf-8")]
+    assert hash_calls == [
+        (external_install, True),
+        (external_install, True),
+    ]
+    assert admin._plan_meshchat_path_migration(legacy_bridge=True) is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(
+            ArtifactPolicyError("unsafe owner"),
+            id="policy-error",
+        ),
+        pytest.param(OSError("tree unavailable"), id="os-error"),
+    ],
+)
+def test_meshchat_plan_rejects_untrusted_or_unavailable_external_tree_before_write(
+    admin_paths, tmp_path, monkeypatch, failure
+):
+    _prepare_dual_meshchat_path_migration(admin_paths, tmp_path, monkeypatch)
+    import reticulumpi.external_artifacts as external_artifacts
+
+    original = admin.CONFIG_FILE.read_bytes()
+    monkeypatch.setattr(
+        external_artifacts,
+        "tree_sha256",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(admin.AdminError, match="MeshChat external tree is not trusted"):
+        admin._plan_meshchat_path_migration(legacy_bridge=True)
+
+    assert admin.CONFIG_FILE.read_bytes() == original
+
+
+def test_meshchat_apply_rejects_external_tree_digest_toctou_before_atomic_write(
+    admin_paths, tmp_path, monkeypatch
+):
+    _prepare_dual_meshchat_path_migration(admin_paths, tmp_path, monkeypatch)
+    import reticulumpi.external_artifacts as external_artifacts
+
+    digests = iter(("a" * 64, "b" * 64))
+    monkeypatch.setattr(
+        external_artifacts,
+        "tree_sha256",
+        lambda *_args, **_kwargs: next(digests),
+    )
+    migration = admin._plan_meshchat_path_migration(legacy_bridge=True)
+    assert migration is not None
+    original = admin.CONFIG_FILE.read_bytes()
+    monkeypatch.setattr(
+        admin,
+        "_atomic_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("configuration write must not begin")
+        ),
+    )
+
+    with pytest.raises(admin.AdminError, match="external tree changed after migration planning"):
+        admin._apply_meshchat_path_migration(migration, legacy_bridge=True)
+
+    assert admin.CONFIG_FILE.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(
+            ArtifactPolicyError("permissions changed"),
+            id="policy-error",
+        ),
+        pytest.param(OSError("tree disappeared"), id="os-error"),
+    ],
+)
+def test_meshchat_apply_revalidates_external_tree_trust_before_atomic_write(
+    admin_paths, tmp_path, monkeypatch, failure
+):
+    _prepare_dual_meshchat_path_migration(admin_paths, tmp_path, monkeypatch)
+    import reticulumpi.external_artifacts as external_artifacts
+
+    monkeypatch.setattr(external_artifacts, "tree_sha256", lambda *_args, **_kwargs: "a" * 64)
+    migration = admin._plan_meshchat_path_migration(legacy_bridge=True)
+    assert migration is not None
+    original = admin.CONFIG_FILE.read_bytes()
+    monkeypatch.setattr(
+        external_artifacts,
+        "tree_sha256",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+    monkeypatch.setattr(
+        admin,
+        "_atomic_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("configuration write must not begin")
+        ),
+    )
+
+    with pytest.raises(admin.AdminError, match="MeshChat external tree is not trusted"):
+        admin._apply_meshchat_path_migration(migration, legacy_bridge=True)
+
+    assert admin.CONFIG_FILE.read_bytes() == original
+
+
+def test_legacy_meshchat_install_candidates_exclude_managed_and_external_trees(
+    tmp_path, monkeypatch
+):
+    legacy_root = tmp_path / "opt/legacy-reticulumpi"
+    (legacy_root / "meshchat").mkdir(parents=True)
+    release = tmp_path / "srv/reticulumpi/releases/0.3.2"
+    (release / "meshchat").mkdir(parents=True)
+    current = release.parents[1] / "current"
+    current.symlink_to(release)
+    external = tmp_path / "srv/reticulumpi-external/meshchat"
+    external.mkdir(parents=True)
+    missing_root = tmp_path / "opt/missing"
+    layout = admin.LegacyLayout(
+        homes=(),
+        install_roots=(
+            legacy_root,
+            legacy_root,
+            current,
+            release,
+            external.parent,
+            missing_root,
+        ),
+        config_files=(),
+        evidence=(),
+    )
+    monkeypatch.setattr(admin, "MESHCHAT_EXTERNAL_ROOT", external)
+    monkeypatch.setattr(admin, "_discover_legacy_layout", lambda: layout)
+
+    assert admin._legacy_meshchat_install_candidates() == (legacy_root / "meshchat",)
+
+
+def test_external_artifact_digest_dispatches_file_and_tree_and_prints_only_digest(
+    tmp_path, monkeypatch, capsys
+):
+    import reticulumpi.external_artifacts as external_artifacts
+
+    file_path = tmp_path / "decoder"
+    tree_path = tmp_path / "meshchat"
+    calls: list[tuple[str, Path]] = []
+
+    def file_digest(path):
+        calls.append(("file", Path(path)))
+        return "1" * 64
+
+    def tree_digest(path):
+        calls.append(("tree", Path(path)))
+        return "2" * 64
+
+    monkeypatch.setattr(external_artifacts, "file_sha256", file_digest)
+    monkeypatch.setattr(external_artifacts, "tree_sha256", tree_digest)
+
+    parser = admin._build_parser()
+    file_args = parser.parse_args(["external-artifact", "digest", "--kind", "file", str(file_path)])
+    tree_args = parser.parse_args(["external-artifact", "digest", "--kind", "tree", str(tree_path)])
+
+    assert file_args.handler(file_args) == 0
+    assert capsys.readouterr().out == "1" * 64 + "\n"
+    assert tree_args.handler(tree_args) == 0
+    assert capsys.readouterr().out == "2" * 64 + "\n"
+    assert calls == [("file", file_path), ("tree", tree_path)]
+
+
+@pytest.mark.parametrize(
+    ("kind", "failure"),
+    [
+        pytest.param(
+            "file",
+            ArtifactPolicyError("unsafe decoder"),
+            id="policy-error",
+        ),
+        pytest.param("tree", OSError("meshchat unavailable"), id="os-error"),
+    ],
+)
+def test_external_artifact_digest_translates_hash_failures(kind, failure, tmp_path, monkeypatch):
+    import reticulumpi.external_artifacts as external_artifacts
+
+    monkeypatch.setattr(
+        external_artifacts,
+        "file_sha256",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+    monkeypatch.setattr(
+        external_artifacts,
+        "tree_sha256",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(admin.AdminError, match=str(failure)):
+        admin._external_artifact_digest(SimpleNamespace(kind=kind, path=tmp_path / "artifact"))

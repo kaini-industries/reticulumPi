@@ -392,7 +392,12 @@ def _validate_admin_payload(private_site: Path) -> None:
         "reticulumpi/__init__.py",
         "reticulumpi/admin_cli.py",
         "reticulumpi/cli_help.py",
+        "reticulumpi/external_artifacts.py",
+        "reticulumpi/migration_catalog.py",
+        "reticulumpi/migrations.py",
         "reticulumpi/platform_policy.py",
+        "reticulumpi/recovery_config.py",
+        "reticulumpi/runtime_metrics.py",
     )
     for relative in required:
         path = private_site / relative

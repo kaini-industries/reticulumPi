@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import stat
 from pathlib import Path
@@ -153,6 +154,19 @@ def test_manifest_rejects_duplicate_yaml_keys(trusted_tmp, tmp_path):
     manifest.chmod(0o600)
     with pytest.raises(artifacts.ArtifactPolicyError, match="duplicate manifest key"):
         artifacts.load_manifest(manifest)
+
+
+def test_manifest_loading_reports_missing_optional_yaml_dependency(monkeypatch):
+    real_import = builtins.__import__
+
+    def reject_yaml(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("recovery runtime intentionally has no PyYAML")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_yaml)
+    with pytest.raises(artifacts.ArtifactPolicyError, match="PyYAML is required"):
+        artifacts._read_manifest(Path("/unused/manifest.yaml"))
 
 
 def test_tree_digest_covers_source_venv_modes_and_ignores_generated_cache(tmp_path):
@@ -332,6 +346,14 @@ def test_tree_guard_branches_and_symlinks(trusted_tmp, monkeypatch, tmp_path):
     with pytest.raises(artifacts.ArtifactPolicyError, match="escapes deployment tree"):
         artifacts.tree_sha256(tree)
     (tree / "external-link").unlink()
+
+    excluded_target = tree / ".git" / "pkg"
+    excluded_target.mkdir(parents=True)
+    (excluded_target / "code.py").write_text("reviewed = True\n", encoding="utf-8")
+    (tree / "excluded-link").symlink_to(excluded_target, target_is_directory=True)
+    with pytest.raises(artifacts.ArtifactPolicyError, match="targets an excluded tree"):
+        artifacts.tree_sha256(tree)
+    (tree / "excluded-link").unlink()
 
     file_target = tree / "target-file"
     file_target.write_text("target", encoding="utf-8")

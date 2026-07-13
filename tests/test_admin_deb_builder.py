@@ -22,6 +22,18 @@ DEV_VERSION = "0.post1.dev215+unknown.g9e100ad40.d20260711"
 PROFILE = "linux-arm64-debian-bookworm-py311"
 EPOCH = 1_700_000_000
 
+ADMIN_MODULE_FIXTURES = {
+    "reticulumpi/__init__.py": b"",
+    "reticulumpi/admin_cli.py": b"def main(): return 0\n",
+    "reticulumpi/cli_help.py": b"class StableHelpFormatter: pass\n",
+    "reticulumpi/external_artifacts.py": b"class ArtifactPolicyError(ValueError): pass\n",
+    "reticulumpi/migration_catalog.py": b"def migration_targets(*_args): return ()\n",
+    "reticulumpi/migrations.py": b"class MigrationError(RuntimeError): pass\n",
+    "reticulumpi/platform_policy.py": b"PROFILE = 'bookworm'\n",
+    "reticulumpi/recovery_config.py": b"class RecoveryConfigError(ValueError): pass\n",
+    "reticulumpi/runtime_metrics.py": b"def record_sqlite_failure(): pass\n",
+}
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -64,13 +76,7 @@ def _reticulumpi_wheel(directory: Path, version: str = VERSION) -> Path:
         directory,
         "reticulumpi",
         version,
-        {
-            "reticulumpi/__init__.py": b"",
-            "reticulumpi/admin_cli.py": b"def main(): return 0\n",
-            "reticulumpi/cli_help.py": b"class StableHelpFormatter: pass\n",
-            # admin_cli imports this stdlib-only module in the independently packaged runtime.
-            "reticulumpi/platform_policy.py": b"PROFILE = 'bookworm'\n",
-        },
+        ADMIN_MODULE_FIXTURES,
     )
 
 
@@ -80,10 +86,7 @@ def test_recovery_extractor_ignores_hash_pinned_wheel_data_scheme(tmp_path: Path
         "reticulumpi",
         VERSION,
         {
-            "reticulumpi/__init__.py": b"",
-            "reticulumpi/admin_cli.py": b"def main(): return 0\n",
-            "reticulumpi/cli_help.py": b"class StableHelpFormatter: pass\n",
-            "reticulumpi/platform_policy.py": b"PROFILE = 'bookworm'\n",
+            **ADMIN_MODULE_FIXTURES,
             f"reticulumpi-{VERSION}.data/data/share/reticulumpi/page.mu": b"fixture\n",
         },
     )
@@ -256,6 +259,8 @@ def test_admin_deb_is_deterministic_isolated_and_minisign_ready(tmp_path: Path) 
         data["usr/lib/reticulumpi-admin/site-packages/reticulumpi/admin_cli.py"][1]
         == b"def main(): return 0\n"
     )
+    for relative, content in ADMIN_MODULE_FIXTURES.items():
+        assert data[f"usr/lib/reticulumpi-admin/site-packages/{relative}"][1] == content
     assert "usr/lib/reticulumpi-admin/site-packages/offline_dependency.py" not in data
     metadata = json.loads(data["usr/lib/reticulumpi-admin/build.json"][1])
     assert metadata["architecture"] == "arm64"
@@ -449,12 +454,7 @@ def test_wheel_metadata_has_a_bounded_read(tmp_path: Path) -> None:
     wheel.parent.mkdir()
     dist_info = f"reticulumpi-{VERSION}.dist-info"
     with zipfile.ZipFile(wheel, mode="w") as archive:
-        for name, content in {
-            "reticulumpi/__init__.py": b"",
-            "reticulumpi/admin_cli.py": b"def main(): return 0\n",
-            "reticulumpi/cli_help.py": b"class StableHelpFormatter: pass\n",
-            "reticulumpi/platform_policy.py": b"PROFILE = 'bookworm'\n",
-        }.items():
+        for name, content in ADMIN_MODULE_FIXTURES.items():
             _zip_file(archive, name, content)
         metadata = (
             f"Metadata-Version: 2.4\nName: reticulumpi\nVersion: {VERSION}\nSummary: ".encode()
@@ -472,18 +472,16 @@ def test_wheel_metadata_has_a_bounded_read(tmp_path: Path) -> None:
 
 
 def test_wheel_must_contain_the_complete_admin_import_surface(tmp_path: Path) -> None:
+    incomplete = dict(ADMIN_MODULE_FIXTURES)
+    incomplete.pop("reticulumpi/recovery_config.py")
     wheel = _wheel(
         tmp_path / "python",
         "reticulumpi",
         VERSION,
-        {
-            "reticulumpi/__init__.py": b"",
-            "reticulumpi/admin_cli.py": b"def main(): return 0\n",
-            "reticulumpi/cli_help.py": b"class StableHelpFormatter: pass\n",
-        },
+        incomplete,
     )
 
-    with pytest.raises(build_admin_deb.AdminDebError, match="platform_policy.py"):
+    with pytest.raises(build_admin_deb.AdminDebError, match="recovery_config.py"):
         _build(tmp_path, parent="incomplete-wheel", wheel=wheel)
 
 

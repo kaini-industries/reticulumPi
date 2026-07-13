@@ -9,28 +9,61 @@ environment, or overwrite the active release in place.
    provides a fixed, root-owned `/usr/sbin/reticulumpi-admin` (or `/usr/bin` equivalent). The
    compatibility launchers deliberately fail when this package is absent and never execute
    Python from the candidate bundle.
-2. Obtain the signed ARM64 install bundle through the release channel. An unpacked signed
-   source bundle or signed wheel plus its signed dependency profiles is accepted for recovery
-   and bridge workflows.
+2. Obtain the signed ARM64 install bundle through the release channel. It contains the exact
+   qualified prebuilt wheel and is the preferred production input. An unpacked signed source
+   bundle is a compatibility/recovery input: it invokes `python -m pip wheel --no-deps`, so pip's
+   isolated build resolver must have reviewed offline access to the exact prerequisites declared in
+   `pyproject.toml` and locked by `constraints/production-universal-build.txt`. Do not resolve build
+   tools from the network during the maintenance window. A signed wheel plus its signed
+   dependency profiles is accepted only for an already managed immutable upgrade, not a first
+   install or mutable-layout bridge.
 3. Read its changelog and security notices.
-4. Confirm free space covers the candidate release plus two copies of the captured system,
-   durable, and service-home state described below.
+4. Confirm free space covers the expanded candidate virtual environment, private input snapshot,
+   every legacy and canonical backup root, temporary SQLite clones, and a source-build workspace if
+   the compatibility source path is unavoidable. The dry run does not perform this disk check. At
+   apply time the administrator rejects less than `max(256 MiB, 2 * bundle bytes + 2 * current
+   /var/lib bytes)` free on the install-root filesystem, but that minimum is not a complete capacity
+   estimate for a production bridge. Check the filesystems containing the install root,
+   `/var/backups`, `/var/lib`, and temporary workspace separately when they are distinct mounts.
 5. Run diagnostics and a dry run:
 
 ```bash
 reticulumpi-admin doctor
 reticulumpi-admin upgrade --bundle /path/to/bundle --install-root /srv/reticulumpi --dry-run
+reticulumpi-admin db plan
+reticulumpi-admin db migrate --dry-run
 ```
 
 The dry run reports the version, selected hash-locked dependency profile, features, root,
-previous release, detected legacy layout, and prospective release.
-It does not stop services or write system state.
+previous release, detected legacy layout, prospective release, and configuration migrations.
+For a mutable-layout bridge, review both the MeshChat `install_dir` rewrite to the independently
+staged `/srv/reticulumpi-external/meshchat` tree and its `storage_dir` rewrite to
+`/var/lib/reticulumpi/meshchat/storage`. It does not stop services, write system state, or prove
+that enough disk remains for apply.
 
 If the installed legacy unit names a noncanonical configuration file, that unit path is
 authoritative. The path may remain under a service-owned legacy home, but it may not contain
 symlinks or overlap systemd, sudoers, backup, runtime, or other protected administration roots.
 The administrator imports the verified content and retains its exact bytes, ownership, and mode
 for rollback. A stale canonical file never silently overrides the unit's active configuration.
+
+## External artifacts
+
+MeshChat code/virtual-environment bytes and native radio tools are provisioned independently of the
+ReticulumPi release. Before a production bridge, stage the reviewed MeshChat tree as root-owned and
+non-group/other-writable under `/srv/reticulumpi-external`; never copy the mutable predecessor into
+that trust domain as part of the transaction. Generate manifest values without executing the
+artifacts:
+
+```bash
+reticulumpi-admin external-artifact digest --kind tree /srv/reticulumpi-external/meshchat
+reticulumpi-admin external-artifact digest --kind file /absolute/path/to/rtl_fm
+```
+
+The independently packaged recovery administrator supplies this deterministic no-follow digest
+before the candidate environment exists. Install the resulting schema-1 manifest as
+`root:reticulumpi` mode `0640` at `/etc/reticulumpi/external-artifacts.yaml`; runtime activation
+still verifies ownership, immutability, path, version label, and digest.
 
 ## Apply
 
@@ -52,6 +85,8 @@ records a root-only `preparing` transaction at
 `/var/backups/reticulumpi/admin/transaction.json` before creating the candidate release, its
 virtual environment, or installing packages. It installs the selected
 profile with `pip --require-hashes`, installs the wheel with `--no-deps`, and runs `pip check`.
+Immediately before transaction creation it also enforces the minimum install-root free-space gate
+described above. Passing that gate does not replace the operator's full capacity calculation.
 Only after candidate validation does it stop the prior services, create and verify a backup
 below `/var/backups/reticulumpi`, persist managed-file snapshots, and advance the journal to
 `backed_up`. System/configuration paths and migrations are mutated only after that checkpoint.
@@ -94,6 +129,13 @@ the historical default. It detects the old `.reticulum`, `.config/reticulumpi`,
 `.local/share/reticulumpi`, `.nomadnet`, and `.nomadnet-tui` trees, stages verified copies
 under `/var/lib/reticulumpi`, and validates identity continuity before activation. The 0.3
 services never write back to the legacy home.
+If the predecessor configures MeshChat beneath the mutable install layout, the administrator treats
+its code and virtual environment differently from writable state. The reviewed `/srv` tree must
+already exist and pass trusted tree hashing. One locked migration then rewrites `install_dir` to
+that tree and `storage_dir` to `/var/lib/reticulumpi/meshchat/storage` with one atomic configuration
+write. Only storage is copied and removed from the legacy tree; the old code and virtual environment
+remain in place. Qualification records and verifies their digest and metadata across upgrade and
+rollback.
 The first bridge backup, exact roots, managed integration files, and service-state evidence are
 carried across later immutable upgrades. They are not pruned automatically because only an
 operator can decide that the hardware qualification and soak period have completed.
@@ -114,6 +156,14 @@ verification fails, the administrator restores that snapshot and the former rele
 Database migrations remain additive through 0.4.x so supported prior code can read the newer
 schema.
 
+`rollback --to legacy --apply` is stronger than an ordinary immutable-release switch. It stops
+candidate and MeshChat processes, restores the original configuration bytes, MeshChat storage,
+identities, managed integration files, and recorded enabled/active service states, and restarts the
+retained mutable predecessor. Its code and virtual environment are restored by non-mutation; exact-
+rollback qualification must verify their recorded digest and metadata before accepting the restored
+legacy service. The independently staged `/srv/reticulumpi-external/meshchat` tree remains immutable
+but inactive.
+
 ## Database safety
 
 ```bash
@@ -131,10 +181,14 @@ sudo reticulumpi-admin db restore /var/backups/reticulumpi/db-.../messages.db \
 ```
 
 `db plan` loads only enabled built-in declarations from the validated root-owned system
-configuration and reports path, current/target version, pending versions, and checksums. It
-never imports external plugin paths as root. `db migrate` defaults to a full clone-based dry
-run that does not create the live target directory. Applying requires root and a stopped
-service; each target is locked, integrity checked, backed up under
+configuration and reports path, current/target version, pending versions, and checksums. The
+recovery package uses a deliberately narrow, fail-closed configuration projection plus immutable
+first-party migration declarations; it does not import PyYAML, RNS, LXMF, full plugin
+implementations, candidate code, or external plugin paths as root. Unsupported YAML constructs
+that could alter the projection are rejected. `db migrate` defaults to a full clone-based dry run
+that reports the pending versions and their checksums without creating the live target directory
+or modifying the live database. Applying requires root
+and a stopped service; each target is locked, integrity checked, backed up under
 `/var/backups/reticulumpi/databases`, migrated atomically, and retained with its newest three
 backups. Generic command-line SQL is unsupported. Restore also requires the stopped service,
 rejects service-owned path aliases and final-component symlinks for both backup and target,

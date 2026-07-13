@@ -64,6 +64,154 @@ esac
 fixture=/run/reticulumpi-systemd-fixture
 install -d -m 0700 "$fixture"
 umask 077
+
+# Prove the independently installed recovery administrator can load its
+# database planner before any candidate release or candidate virtualenv
+# exists.  A same-named package in both cwd and PYTHONPATH must be ignored by
+# the isolated /usr/sbin launcher, and both read-only commands must leave the
+# trusted configuration and all persistent roots untouched.
+recovery_gate=$fixture/hostile-recovery-imports
+install -d -o root -g root -m 0700 "$recovery_gate/reticulumpi"
+install -o root -g root -m 0600 /dev/stdin "$recovery_gate/reticulumpi/__init__.py" <<'PY'
+raise SystemExit("hostile cwd/PYTHONPATH ReticulumPi package was imported")
+PY
+getent group reticulumpi >/dev/null || groupadd --system reticulumpi
+id -u reticulumpi >/dev/null 2>&1 || useradd --system --create-home \
+    --home-dir /home/reticulumpi --shell /usr/sbin/nologin --gid reticulumpi reticulumpi
+install -d -o root -g root -m 0750 /etc/reticulumpi
+install -o root -g root -m 0644 /dev/stdin /etc/reticulumpi/config.yaml <<'EOF'
+reticulumpi:
+  plugins:
+    messaging_hub:
+      enabled: true
+      db_path: /var/lib/reticulumpi/recovery-admin-gate/messaging_hub.db
+EOF
+recovery_db_parent=/var/lib/reticulumpi/recovery-admin-gate
+recovery_db=$recovery_db_parent/messaging_hub.db
+recovery_sentinel=$recovery_db_parent/preserve.txt
+install -d -o reticulumpi -g reticulumpi -m 0750 \
+    /var/lib/reticulumpi "$recovery_db_parent"
+runuser -u reticulumpi -- python - "$recovery_db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute(
+        """CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            transport TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            msg_type TEXT NOT NULL,
+            from_id TEXT,
+            from_name TEXT,
+            to_id TEXT,
+            to_name TEXT,
+            text TEXT NOT NULL,
+            status TEXT DEFAULT 'sent',
+            metadata TEXT
+        )"""
+    )
+    connection.execute(
+        """INSERT INTO messages(
+            timestamp, transport, direction, msg_type, from_id, from_name,
+            to_id, to_name, text, status, metadata
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (1234.5, "lxmf", "in", "message", "source", "Source", "dest", "Dest",
+         "recovery gate row", "received", '{"fixture":true}'),
+    )
+    connection.execute("PRAGMA user_version = 0")
+PY
+chmod 0600 "$recovery_db"
+install -o reticulumpi -g reticulumpi -m 0600 /dev/stdin "$recovery_sentinel" <<'EOF'
+parent directory continuity marker
+EOF
+
+sqlite_gate_snapshot() {
+    python - "$recovery_db" <<'PY'
+import json
+import sqlite3
+import sys
+
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as connection:
+    schema = connection.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+    ).fetchall()
+    rows = connection.execute(
+        """SELECT id, timestamp, transport, direction, msg_type, from_id,
+                  from_name, to_id, to_name, text, status, metadata
+           FROM messages ORDER BY id"""
+    ).fetchall()
+    user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+print(json.dumps(
+    {"rows": rows, "schema": schema, "user_version": user_version},
+    separators=(",", ":"),
+    sort_keys=True,
+))
+PY
+}
+
+recovery_config_hash=$(sha256sum /etc/reticulumpi/config.yaml | cut -d ' ' -f 1)
+recovery_config_stat=$(stat -c '%U:%G %a' /etc/reticulumpi/config.yaml)
+recovery_db_hash=$(sha256sum "$recovery_db" | cut -d ' ' -f 1)
+recovery_sentinel_hash=$(sha256sum "$recovery_sentinel" | cut -d ' ' -f 1)
+recovery_db_snapshot=$(sqlite_gate_snapshot)
+recovery_db_stat=$(stat -c '%U:%G %a' "$recovery_db")
+recovery_parent_stat=$(stat -c '%U:%G %a' "$recovery_db_parent")
+recovery_parent_entries=$(find "$recovery_db_parent" -mindepth 1 -maxdepth 1 \
+    -printf '%f %y %i %U:%G %m\n' | LC_ALL=C sort)
+test "$recovery_db_stat" = "reticulumpi:reticulumpi 600"
+test "$recovery_parent_stat" = "reticulumpi:reticulumpi 750"
+test "$(python - "$recovery_db" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as connection:
+    print(connection.execute("PRAGMA user_version").fetchone()[0])
+PY
+)" = 0
+for sidecar in -journal -wal -shm; do
+    test ! -e "$recovery_db$sidecar"
+done
+test ! -e "$install_root/current"
+test ! -e "$install_root/releases"
+test ! -e /var/backups/reticulumpi
+recovery_plan_output=$(
+    cd "$recovery_gate"
+    PYTHONPATH="$recovery_gate" /usr/sbin/reticulumpi-admin db plan
+)
+recovery_dry_run_output=$(
+    cd "$recovery_gate"
+    PYTHONPATH="$recovery_gate" /usr/sbin/reticulumpi-admin db migrate --dry-run
+)
+messaging_hub_checksum=12b2e1c83e074d185961b16e54a658c4b3da4e060fe8c316527b42ced6c0a8f8
+test "$recovery_plan_output" = \
+    "messaging_hub: path=$recovery_db current=0 target=1 pending=1 checksums=$messaging_hub_checksum"
+test "$recovery_dry_run_output" = \
+    "messaging_hub: path=$recovery_db from=0 to=1 dry_run=true pending=1 checksums=$messaging_hub_checksum
+Dry run only; stop the service and rerun with --apply to migrate."
+printf '%s\n' "$recovery_plan_output" "$recovery_dry_run_output"
+test "$(sha256sum /etc/reticulumpi/config.yaml | cut -d ' ' -f 1)" = \
+    "$recovery_config_hash"
+test "$(stat -c '%U:%G %a' /etc/reticulumpi/config.yaml)" = "$recovery_config_stat"
+test "$(sha256sum "$recovery_db" | cut -d ' ' -f 1)" = "$recovery_db_hash"
+test "$(sha256sum "$recovery_sentinel" | cut -d ' ' -f 1)" = \
+    "$recovery_sentinel_hash"
+test "$(sqlite_gate_snapshot)" = "$recovery_db_snapshot"
+test "$(stat -c '%U:%G %a' "$recovery_db")" = "$recovery_db_stat"
+test "$(stat -c '%U:%G %a' "$recovery_db_parent")" = "$recovery_parent_stat"
+test "$(find "$recovery_db_parent" -mindepth 1 -maxdepth 1 \
+    -printf '%f %y %i %U:%G %m\n' | LC_ALL=C sort)" = "$recovery_parent_entries"
+for sidecar in -journal -wal -shm; do
+    test ! -e "$recovery_db$sidecar"
+done
+test ! -e "$install_root/current"
+test ! -e "$install_root/releases"
+test ! -e /var/backups/reticulumpi
+rm -f "$recovery_db" "$recovery_sentinel"
+rmdir "$recovery_db_parent" /var/lib/reticulumpi
+rm -f /etc/reticulumpi/config.yaml
+rmdir /etc/reticulumpi
+
 minisign -G -W -p "$fixture/release.pub" -s "$fixture/release.key" >/dev/null
 install -d -o root -g root -m 0755 /usr/share/reticulumpi
 install -o root -g root -m 0644 "$fixture/release.pub" /usr/share/reticulumpi/release.pub
