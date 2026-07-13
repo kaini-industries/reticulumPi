@@ -458,7 +458,7 @@ jobs:
           only-fixed: false
           output-format: json
           output-file: grype-all-${{ matrix.suffix }}.json
-          grype-version: 0.110.0
+          grype-version: v0.110.0
           cache-db: true
       - name: Upload complete runtime vulnerability report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -474,7 +474,7 @@ jobs:
           severity-cutoff: high
           only-fixed: true
           output-format: table
-          grype-version: 0.110.0
+          grype-version: v0.110.0
           vex: docker/security/cve-2026-15308.openvex.json
           cache-db: true
       - name: Verify minimal runtime, readiness, shutdown, and durable recreation

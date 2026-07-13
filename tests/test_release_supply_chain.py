@@ -219,7 +219,7 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
         "only-fixed": False,
         "output-format": "json",
         "output-file": "grype-all-${{ matrix.suffix }}.json",
-        "grype-version": "0.110.0",
+        "grype-version": "v0.110.0",
         "cache-db": True,
     }
     report_upload = named_steps[report_upload_name]
@@ -233,7 +233,7 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
         "severity-cutoff": "high",
         "only-fixed": True,
         "output-format": "table",
-        "grype-version": "0.110.0",
+        "grype-version": "v0.110.0",
         "vex": "docker/security/cve-2026-15308.openvex.json",
         "cache-db": True,
     }
