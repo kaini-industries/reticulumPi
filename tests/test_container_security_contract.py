@@ -39,21 +39,31 @@ def test_production_container_uses_digest_pinned_python_314_trixie() -> None:
 
 def test_container_matrix_preserves_both_architecture_results() -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    strategy = workflow["jobs"]["container"]["strategy"]
+    container = workflow["jobs"]["container"]
+    strategy = container["strategy"]
+    matrix = strategy["matrix"]["include"]
 
+    assert container["runs-on"] == "${{ matrix.runner }}"
     assert strategy["fail-fast"] is False
+    assert len(matrix) == 2
     assert {
         (
             entry["platform"],
             entry["suffix"],
+            entry["runner"],
             entry["pytest_workers"],
             entry["pytest_timeout"],
         )
-        for entry in strategy["matrix"]["include"]
+        for entry in matrix
     } == {
-        ("linux/amd64", "amd64", 2, 60),
-        ("linux/arm64", "arm64", 0, 180),
+        ("linux/amd64", "amd64", "ubuntu-24.04", 2, 60),
+        ("linux/arm64", "arm64", "ubuntu-24.04-arm", 0, 180),
     }
+
+    assert not any(
+        str(step.get("uses", "")).startswith("docker/setup-qemu-action@")
+        for step in container["steps"]
+    )
 
     test_build = next(
         step for step in _container_steps() if step.get("name") == "Build test target"

@@ -26,14 +26,25 @@ def _markers(tmp_path: Path, *, pid: int = 123) -> tuple[Path, Path, Path]:
 
 def test_container_health_requires_live_responsive_rnsd(monkeypatch, tmp_path):
     ready, pid_file, proc = _markers(tmp_path)
+    probe: dict[str, object] = {}
+
+    def successful_probe(command, **kwargs):
+        probe["command"] = command
+        probe.update(kwargs)
+        return SimpleNamespace(returncode=0)
+
     monkeypatch.setattr(health.os, "kill", lambda pid, signal: None)
-    monkeypatch.setattr(
-        health.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0),
-    )
+    monkeypatch.setattr(health.subprocess, "run", successful_probe)
 
     health.check_container_health(ready_file=ready, rnsd_pid_file=pid_file, proc_root=proc)
+    assert probe == {
+        "command": ["rnstatus"],
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "check": False,
+        "timeout": 3,
+    }
 
 
 @pytest.mark.parametrize(

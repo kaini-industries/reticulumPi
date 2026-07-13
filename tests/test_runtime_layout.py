@@ -118,9 +118,9 @@ def test_container_waits_for_rnsd_socket_before_starting_readiness_client():
     assert "rnsd.pid" in entrypoint
     assert 'rnsd_state" = "Z"' in entrypoint
     assert 'rm -f "$ready_file" "$rnsd_pid_file"' in entrypoint
-    assert "python -m reticulumpi.container_healthcheck" in (
-        ROOT / "docker" / "Dockerfile"
-    ).read_text(encoding="utf-8")
+    dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    assert "HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3" in dockerfile
+    assert "python -m reticulumpi.container_healthcheck" in dockerfile
 
 
 def test_container_test_context_excludes_local_secrets_and_tooling():
