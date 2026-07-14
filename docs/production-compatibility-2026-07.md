@@ -43,7 +43,8 @@ permission to disable one:
 
 - package/application features: `adsb`, `dashboard`, `gps`, `lora`, `meshcore`, `meshtastic`,
   `nomadnet`, `sensors`, and `space`;
-- integration and privilege features: `shared-rnsd`, `captive-portal`, and `chrony-control`; and
+- integration and privilege features: `shared-rnsd`, `captive-portal`, `chrony-control`, and
+  `offline-tools`; and
 - operational behavior: watchdog preservation across install, activation, and rollback.
 
 Preserve the service account's required supplementary groups: `dialout`, `plugdev`, `gpio`, `spi`,
@@ -62,6 +63,12 @@ SHA-256 records for all five required artifact categories:
 3. `dump1090`;
 4. `rtl_fm`; and
 5. `rtl_power`.
+
+The observed legacy configuration omits `external_artifacts` entirely. When that exact canonical
+production file is loaded by the candidate, required mode and the canonical manifest path are
+enforced in memory without rewriting its bytes; an explicit development policy remains invalid.
+The Noble bridge fixture preserves this omitted-key shape through candidate activation and exact
+legacy rollback.
 
 Resolve each executable to an absolute path without executing it while generating the manifest.
 Activation must fail closed if an enabled feature's record is missing, mutable, or does not match

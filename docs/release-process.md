@@ -146,7 +146,7 @@ executable lines and 90% line and branch coverage for each critical module:
 - `admin_cli.py`
 
 The optional `--release-version` selects the aggregate row in the table above. An omitted
-version uses the current 0.3.2 stabilization policy. CI uses that policy for pull requests and
+version uses the current 0.3.3 stabilization policy. CI uses that policy for pull requests and
 ordinary main pushes, then passes the exact `vMAJOR.MINOR.PATCH` name for a tag build so the
 candidate cannot avoid its release-specific line or branch threshold.
 
@@ -156,10 +156,12 @@ Changed-line comparison is also fail-closed. Coverage checkout uses full history
 - pull requests use `pull_request.base.sha`;
 - ordinary branch pushes use `before`;
 - a release tag compares with the newest lower strict SemVer tag reachable from the candidate;
-- the initial `v0.3.2` release is bootstrapped from the exact historical 0.2.4 version-boundary
-  commit `89249b8b58cb86ac14ff7179abbbca3cb762d2a4`. The gate requires that commit to
-  declare version 0.2.4 and be a strict first-parent ancestor of the candidate. This is a
-  coverage baseline, not a retroactive tag, release, or claim of signed 0.2.4 provenance;
+- the withdrawn `v0.3.2` attempt and its `v0.3.3` replacement are bootstrapped from the exact
+  historical 0.2.4 version-boundary commit
+  `89249b8b58cb86ac14ff7179abbbca3cb762d2a4`. The gate requires that commit to declare version
+  0.2.4 and be a strict first-parent ancestor of the candidate. Carrying the bootstrap forward
+  prevents the failed 0.3.2 tag from narrowing the replacement candidate's changed-code scope.
+  This is a coverage baseline, not a retroactive tag, release, or claim of signed 0.2.4 provenance;
 - any other first release without an explicit version-controlled bootstrap compares with Git's
   empty tree so every production source line is changed;
 - a newly created branch whose `before` is all zeroes uses the checked-out commit's first parent;
@@ -172,13 +174,13 @@ For a local comparison, supply a base revision directly:
 ```bash
 python tools/check_coverage_gate.py origin/main \
   --coverage-xml coverage.xml \
-  --release-version 0.3.2
+  --release-version 0.3.3
 ```
 
-For `v0.3.2`, the pinned bootstrap still enforces 90% changed-line coverage across every
-executable line changed since the 0.2.4 boundary, in addition to the 70% aggregate line, 60%
-aggregate branch, and 90% line-and-branch critical-module gates. It is deliberately embedded in
-the reviewed gate rather than supplied through a mutable environment variable or CLI override.
+For `v0.3.3`, the pinned bootstrap still enforces 90% changed-line coverage across every executable
+line changed since the 0.2.4 boundary, in addition to the 70% aggregate line, 60% aggregate branch,
+and 90% line-and-branch critical-module gates. It is deliberately embedded in the reviewed gate
+rather than supplied through a mutable environment variable or CLI override.
 
 Input/report failures exit 2, a coverage-policy failure exits 1, and a complete pass exits 0.
 

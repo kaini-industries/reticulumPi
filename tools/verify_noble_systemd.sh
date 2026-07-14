@@ -239,6 +239,7 @@ if [[ $scenario = legacy-bridge ]]; then
         meshcore
         meshtastic
         nomadnet
+        offline-tools
         sensors
         shared-rnsd
         space
@@ -433,9 +434,6 @@ reticulumpi:
   identity_path: /home/reticulumpi/.config/reticulumpi/identity
   log_level: 4
   plugin_paths: []
-  external_artifacts:
-    mode: required
-    manifest_path: /etc/reticulumpi/external-artifacts.yaml
   plugins:
     heartbeat_announce:
       enabled: true
@@ -529,6 +527,18 @@ EOF
 reticulumpi ALL=(root) NOPASSWD: /bin/true
 EOF
     done
+    install -o root -g root -m 0440 /dev/stdin \
+        /etc/sudoers.d/reticulumpi-offline <<'EOF'
+# Allow reticulumpi user to run offline simulation script
+reticulumpi ALL=(ALL) NOPASSWD: /opt/reticulumpi/scripts/simulate_offline.sh
+EOF
+
+    # Production has this stale policy but not its historical target.  The
+    # bridge must replace it with reviewed, root-owned candidate assets without
+    # ever executing either helper during qualification.
+    test ! -e /opt/reticulumpi/scripts/simulate_offline.sh
+    test ! -e /usr/libexec/reticulumpi/simulate_offline.sh
+    test ! -e /usr/share/reticulumpi/config/offline_profile.yaml
 
     systemctl daemon-reload
     systemctl enable --now "${dependent_services[@]}"
@@ -555,6 +565,8 @@ EOF
     legacy_rnsd_unit_hash=$(sha256sum /etc/systemd/system/rnsd.service | cut -d ' ' -f 1)
     legacy_watchdog_hash=$(sha256sum /etc/systemd/system/rnsd-watchdog.timer | cut -d ' ' -f 1)
     legacy_sudoers_hash=$(sha256sum /etc/sudoers.d/reticulumpi-chrony | cut -d ' ' -f 1)
+    legacy_offline_sudoers_hash=$(sha256sum /etc/sudoers.d/reticulumpi-offline | cut -d ' ' -f 1)
+    legacy_offline_sudoers_stat=$(stat -c '%U:%G %a' /etc/sudoers.d/reticulumpi-offline)
     mutable_app_hash=$(sha256sum /opt/reticulumpi/.venv/bin/reticulumpi | cut -d ' ' -f 1)
     mutable_rnsd_hash=$(sha256sum /opt/reticulumpi/.venv/bin/rnsd | cut -d ' ' -f 1)
     declare -A dependent_pids=()
@@ -604,6 +616,13 @@ PY
         "$legacy_meshchat_code_hash"
     test "$(sha256sum "$legacy_meshchat_python" | cut -d ' ' -f 1)" = \
         "$legacy_meshchat_python_hash"
+    test "$(sha256sum /etc/sudoers.d/reticulumpi-offline | cut -d ' ' -f 1)" = \
+        "$legacy_offline_sudoers_hash"
+    test "$(stat -c '%U:%G %a' /etc/sudoers.d/reticulumpi-offline)" = \
+        "$legacy_offline_sudoers_stat"
+    test ! -e /opt/reticulumpi/scripts/simulate_offline.sh
+    test ! -e /usr/libexec/reticulumpi/simulate_offline.sh
+    test ! -e /usr/share/reticulumpi/config/offline_profile.yaml
     test "$(/usr/sbin/reticulumpi-admin external-artifact digest \
         --kind tree "$meshchat_install")" = "$meshchat_digest"
 
@@ -628,6 +647,25 @@ PY
         "$legacy_meshchat_tree_stat"
     test "$(stat -c '%U:%G %a' /opt/reticulumpi/meshchat/.venv)" = \
         "$legacy_meshchat_venv_stat"
+    test ! -e /etc/sudoers.d/reticulumpi-offline
+    test ! -e /opt/reticulumpi/scripts/simulate_offline.sh
+    test "$(stat -c '%U:%G %a' /usr/libexec/reticulumpi/simulate_offline.sh)" = \
+        "root:root 755"
+    test "$(stat -c '%U:%G %a' /usr/share/reticulumpi/config/offline_profile.yaml)" = \
+        "root:root 644"
+    bash -n /usr/libexec/reticulumpi/simulate_offline.sh
+    "$install_root/current/.venv/bin/python" - <<'PY'
+from pathlib import Path
+
+import yaml
+
+profile = yaml.safe_load(
+    Path("/usr/share/reticulumpi/config/offline_profile.yaml").read_text(
+        encoding="utf-8"
+    )
+)
+assert isinstance(profile, dict), profile
+PY
     test "$(sha256sum /var/lib/reticulumpi/.config/reticulumpi/identity | cut -d ' ' -f 1)" = "$identity_hash"
     test "$(sha256sum /var/lib/reticulumpi/meshchat/storage/continuity.txt | cut -d ' ' -f 1)" = "$meshchat_hash"
     python - "${production_features[@]}" <<'PY'
@@ -782,6 +820,13 @@ PY
     test "$(sha256sum /etc/systemd/system/rnsd.service | cut -d ' ' -f 1)" = "$legacy_rnsd_unit_hash"
     test "$(sha256sum /etc/systemd/system/rnsd-watchdog.timer | cut -d ' ' -f 1)" = "$legacy_watchdog_hash"
     test "$(sha256sum /etc/sudoers.d/reticulumpi-chrony | cut -d ' ' -f 1)" = "$legacy_sudoers_hash"
+    test "$(sha256sum /etc/sudoers.d/reticulumpi-offline | cut -d ' ' -f 1)" = \
+        "$legacy_offline_sudoers_hash"
+    test "$(stat -c '%U:%G %a' /etc/sudoers.d/reticulumpi-offline)" = \
+        "$legacy_offline_sudoers_stat"
+    test ! -e /opt/reticulumpi/scripts/simulate_offline.sh
+    test ! -e /usr/libexec/reticulumpi/simulate_offline.sh
+    test ! -e /usr/share/reticulumpi/config/offline_profile.yaml
     test "$(sha256sum /opt/reticulumpi/.venv/bin/reticulumpi | cut -d ' ' -f 1)" = "$mutable_app_hash"
     test "$(sha256sum /opt/reticulumpi/.venv/bin/rnsd | cut -d ' ' -f 1)" = "$mutable_rnsd_hash"
     test "$(sha256sum "$legacy_meshchat_code" | cut -d ' ' -f 1)" = \

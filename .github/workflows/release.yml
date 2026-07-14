@@ -45,6 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.ref_type == 'tag' && github.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Require the exact trusted signed tag before repository code
@@ -288,6 +289,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.ref_type == 'tag' && github.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Reverify the exact trusted signed tag after release approval

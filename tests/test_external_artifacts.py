@@ -271,13 +271,15 @@ def test_app_config_wraps_artifact_policy_failures(tmp_path):
 
 def test_legacy_canonical_production_config_defaults_to_required(monkeypatch, tmp_path):
     config = tmp_path / "config.yaml"
-    config.write_text("reticulumpi:\n  plugins: {}\n", encoding="utf-8")
+    original = "reticulumpi:\n  plugins: {}\n"
+    config.write_text(original, encoding="utf-8")
     monkeypatch.setattr(config_module, "PRODUCTION_CONFIG_PATH", str(config))
     loaded = AppConfig(str(config))
     assert loaded.external_artifact_policy.required is True
     assert loaded.external_artifact_policy.manifest_path == Path(
         "/etc/reticulumpi/external-artifacts.yaml"
     )
+    assert config.read_text(encoding="utf-8") == original
 
 
 def test_canonical_production_config_cannot_opt_out(monkeypatch, tmp_path):
