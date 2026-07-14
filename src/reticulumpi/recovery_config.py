@@ -285,11 +285,41 @@ def _children(lines: list[_Line], start: _Line, *, boundary: int | None = None) 
     return selected
 
 
-def _direct_children(lines: list[_Line]) -> list[_Line]:
+def _direct_mapping_children(lines: list[_Line], *, relevant_keys: frozenset[str]) -> list[_Line]:
+    """Return direct mapping entries while skipping safe irrelevant sequences.
+
+    YAML permits a block sequence used as a mapping value to be indentationless,
+    so its ``-`` indicators can have the same indentation as the owning key.  A
+    sequence is irrelevant to the recovery projection only when it immediately
+    follows an empty-valued, projection-irrelevant mapping entry.  Everything
+    else remains fail-closed.
+    """
+
     if not lines:
         return []
-    indentation = min(line.indentation for line in lines)
-    return [line for line in lines if line.indentation == indentation]
+    direct_indentation = min(line.indentation for line in lines)
+    mappings: list[_Line] = []
+    sequence_owner: str | None = None
+    sequence_started = False
+    for line in lines:
+        if line.indentation > direct_indentation:
+            if sequence_owner is not None and not sequence_started:
+                sequence_owner = None
+            continue
+        if line.indentation < direct_indentation:
+            raise RecoveryConfigError(f"line {line.number}: malformed block mapping")
+        entry = _mapping_entry(line)
+        if entry is not None:
+            key, raw = entry
+            mappings.append(line)
+            sequence_owner = key if key not in relevant_keys and not raw.strip(" ") else None
+            sequence_started = False
+            continue
+        if sequence_owner is not None and re.match(r"^-(?: |$)", line.text.strip(" ")):
+            sequence_started = True
+            continue
+        raise RecoveryConfigError(f"line {line.number}: malformed block mapping")
+    return mappings
 
 
 def _one_field(lines: list[_Line], key: str, label: str) -> tuple[_Line, str] | None:
@@ -379,7 +409,12 @@ def _enabled(raw: str, *, label: str, line: int) -> bool:
 
 
 def _plugin_config(block: list[_Line], name: str) -> dict[str, object] | None:
-    direct = _direct_children(block)
+    relevant_keys = (
+        frozenset({"enabled", "storage"})
+        if name == "sensor_framework"
+        else frozenset({"enabled", "db_path"})
+    )
+    direct = _direct_mapping_children(block, relevant_keys=relevant_keys)
     enabled_field = _one_field(direct, "enabled", name)
     if enabled_field is None:
         return None
@@ -412,7 +447,7 @@ def _plugin_config(block: list[_Line], name: str) -> dict[str, object] | None:
             f"line {storage_line.number}: sensor_framework.storage must be a block mapping"
         )
     storage_block = _children(block, storage_line)
-    nested = _direct_children(storage_block)
+    nested = _direct_mapping_children(storage_block, relevant_keys=frozenset({"type", "path"}))
     storage: dict[str, object] = {}
     for key in ("type", "path"):
         field = _one_field(nested, key, "sensor_framework.storage")
@@ -447,7 +482,7 @@ def load_migration_plugin_configs(
     if _header(root, "reticulumpi"):
         raise RecoveryConfigError("reticulumpi must be a block mapping")
     root_children = _children(lines, root)
-    direct_root = _direct_children(root_children)
+    direct_root = _direct_mapping_children(root_children, relevant_keys=frozenset({"plugins"}))
     plugin_fields = [
         (line, value) for line in direct_root if (value := _header(line, "plugins")) is not None
     ]
@@ -461,7 +496,9 @@ def load_migration_plugin_configs(
     if plugins_raw.strip(" "):
         raise RecoveryConfigError("reticulumpi.plugins must be a block mapping")
     plugin_children = _children(root_children, plugins_line)
-    direct_plugins = _direct_children(plugin_children)
+    direct_plugins = _direct_mapping_children(
+        plugin_children, relevant_keys=frozenset(MIGRATION_PLUGIN_NAMES)
+    )
     blocks: dict[str, list[_Line]] = {}
     for index, line in enumerate(direct_plugins):
         entry = _mapping_entry(line)

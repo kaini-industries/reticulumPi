@@ -146,7 +146,7 @@ executable lines and 90% line and branch coverage for each critical module:
 - `admin_cli.py`
 
 The optional `--release-version` selects the aggregate row in the table above. An omitted
-version uses the current 0.3.3 stabilization policy. CI uses that policy for pull requests and
+version uses the current 0.3.4 stabilization policy. CI uses that policy for pull requests and
 ordinary main pushes, then passes the exact `vMAJOR.MINOR.PATCH` name for a tag build so the
 candidate cannot avoid its release-specific line or branch threshold.
 
@@ -174,7 +174,7 @@ For a local comparison, supply a base revision directly:
 ```bash
 python tools/check_coverage_gate.py origin/main \
   --coverage-xml coverage.xml \
-  --release-version 0.3.3
+  --release-version 0.3.4
 ```
 
 For `v0.3.3`, the pinned bootstrap still enforces 90% changed-line coverage across every executable
