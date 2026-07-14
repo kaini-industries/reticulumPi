@@ -8,6 +8,7 @@ import pytest
 
 from reticulumpi.rtlsdr import (
     claim_device,
+    configured_device,
     enumerate_devices,
     get_lease_metrics,
     invalidate_cache,
@@ -98,6 +99,20 @@ class TestResolveDevice:
             with pytest.raises(RuntimeError, match="not found"):
                 resolve_device("12345678")
 
+    def test_explicit_index_bypasses_matching_eight_digit_serial(self):
+        with _mock_rtl_test()[0], _mock_rtl_test()[1]:
+            assert resolve_device("00000001", selector="index") == 1
+
+    def test_explicit_serial_never_falls_back_to_numeric_index(self):
+        with _mock_rtl_test()[0], _mock_rtl_test()[1]:
+            with pytest.raises(RuntimeError, match="serial '1' not found"):
+                resolve_device("1", selector="serial")
+
+    def test_explicit_serial_remains_strict_without_enumerated_devices(self):
+        with patch("reticulumpi.rtlsdr.shutil.which", return_value=None):
+            with pytest.raises(RuntimeError, match="serial '00000001' not found"):
+                resolve_device("00000001", selector="serial")
+
     def test_eight_digit_fallback_no_devices(self):
         with patch("reticulumpi.rtlsdr.shutil.which", return_value=None):
             assert resolve_device("12345678") == 12345678
@@ -134,6 +149,20 @@ class TestResolveDevice:
             resolve_device("1", caller="ais_receiver")
             with pytest.raises(RuntimeError, match="already claimed"):
                 resolve_device("07143901", caller="spectrum_scanner")
+
+    def test_zero_padded_explicit_index_claims_the_indexed_device(self):
+        patches = _mock_rtl_test()
+        with patches[0], patches[1]:
+            lease = claim_device(
+                "00000001",
+                caller="spectrum_scanner",
+                selector="index",
+            )
+            assert lease.index == 1
+            assert lease.canonical_id == "serial:07143901"
+            with pytest.raises(RuntimeError, match="already claimed"):
+                resolve_device("07143901", caller="ais_receiver", selector="serial")
+            lease.release()
 
     def test_device_lease_releases_canonical_claim(self):
         patches = _mock_rtl_test()
@@ -205,6 +234,22 @@ class TestResolveDevice:
             release_device("00000001", caller="other_plugin")
             with pytest.raises(RuntimeError, match="already claimed"):
                 resolve_device("00000001", caller="spectrum_scanner")
+
+
+class TestConfiguredDevice:
+    def test_serial_takes_precedence_and_remains_explicit(self):
+        assert configured_device(
+            {"device_serial": "00000001", "device_index": "00000002"}
+        ) == ("00000001", "serial")
+
+    def test_zero_padded_index_remains_an_explicit_index(self):
+        assert configured_device({"device_index": "00000001"}) == (
+            "00000001",
+            "index",
+        )
+
+    def test_caller_can_suppress_the_default_index(self):
+        assert configured_device({}, default_index="") == ("", "index")
 
 
 # ---------------------------------------------------------------------------

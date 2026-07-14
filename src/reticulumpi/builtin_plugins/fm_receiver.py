@@ -221,7 +221,9 @@ class FMReceiver(PluginBase):
         self._auto_play = bool(cfg.get("auto_play", False))
         self._audio_buffer_seconds = max(1, int(cfg.get("audio_buffer_seconds", 4)))
 
-        self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
+        from reticulumpi.rtlsdr import configured_device
+
+        self._device_id, self._device_selector = configured_device(cfg)
 
         self._presets: dict[str, dict[str, Any]] = dict(_BUILTIN_PRESETS)
         user_presets = cfg.get("presets")
@@ -404,6 +406,7 @@ class FMReceiver(PluginBase):
                 yield_cb=self._on_scheduler_yield,
                 label="FM/AM Radio",
                 continuous=True,
+                device_selector=self._device_selector,
             )
         else:
             try:
@@ -413,6 +416,7 @@ class FMReceiver(PluginBase):
                     self._device_lease,
                     self._device_id,
                     self.plugin_name,
+                    selector=self._device_selector,
                 )
                 self._resolved_index = self._device_lease.index
                 self._dongle_active = True
@@ -1389,6 +1393,7 @@ class FMReceiver(PluginBase):
                 self._device_lease,
                 self._device_id,
                 self.plugin_name,
+                selector=self._device_selector,
             )
             self._resolved_index = self._device_lease.index
         group.replace_specs(

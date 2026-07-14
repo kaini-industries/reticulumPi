@@ -61,6 +61,31 @@ class TestRegistration:
         sched.register("NEW", "fm", PRIORITY_BACKGROUND, *_cb_pair(), continuous=True)
         assert "NEW" in sched.get_status()
 
+    def test_explicit_device_selector_is_forwarded_to_claim(self):
+        scheduler = _make_scheduler()
+        scheduler._running = True
+        lease = MagicMock(index=1)
+        scheduler.register(
+            "00000001",
+            "spectrum",
+            PRIORITY_BACKGROUND,
+            *_cb_pair(),
+            continuous=True,
+            device_selector="index",
+        )
+        with (
+            patch("reticulumpi.rtlsdr.claim_device", return_value=lease) as claim,
+            patch("reticulumpi.sdr_scheduler._USB_SETTLE_DELAY", 0),
+            scheduler._condition,
+        ):
+            scheduler._do_acquire(scheduler._dongles["00000001"], "spectrum")
+
+        claim.assert_called_once_with(
+            "00000001",
+            caller="spectrum",
+            selector="index",
+        )
+
     def test_unregister_removes_slot_and_bg_order(self, sched):
         sched.register(SERIAL, "ais", PRIORITY_BACKGROUND, *_cb_pair(), continuous=True)
         sched.unregister(SERIAL, "ais")

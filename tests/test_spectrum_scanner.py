@@ -79,6 +79,7 @@ class TestValidateConfig:
         assert p._ppm == 0
         assert p._waterfall_rows == 512
         assert p._device_id == "0"
+        assert p._device_selector == "index"
 
     def test_custom_config_overrides_defaults(self):
         p = _make_plugin(
@@ -101,6 +102,19 @@ class TestValidateConfig:
         assert p._ppm == -3
         assert p._waterfall_rows == 256
         assert p._device_id == "1"
+        assert p._device_selector == "index"
+
+    def test_device_serial_and_index_keep_distinct_semantics(self):
+        by_index = _make_plugin({"device_index": "00000001"})
+        by_serial = _make_plugin(
+            {"device_serial": "00000001", "device_index": "00000002"}
+        )
+
+        assert (by_index._device_id, by_index._device_selector) == ("00000001", "index")
+        assert (by_serial._device_id, by_serial._device_selector) == (
+            "00000001",
+            "serial",
+        )
 
     def test_null_gain_means_auto(self):
         p = _make_plugin({"gain_db": None})
@@ -877,6 +891,27 @@ class TestSpectrumSweepEvent:
 
 
 class TestManagedSpectrumLifecycle:
+    def test_zero_padded_device_index_resolves_as_index_not_matching_serial(self):
+        from reticulumpi.rtlsdr import reset_cache
+
+        reset_cache()
+        p = _make_plugin({"device_index": "00000001"})
+        try:
+            with (
+                patch(
+                    "reticulumpi.rtlsdr.enumerate_devices",
+                    return_value=[(0, "00000001"), (1, "07143901")],
+                ),
+                patch.object(p, "_start_thread"),
+                patch.object(p, "_join_threads"),
+            ):
+                p.start()
+                assert p._resolved_index == 1
+                assert p._device_lease.canonical_id == "serial:07143901"
+                p.stop()
+        finally:
+            reset_cache()
+
     def test_start_and_stop_own_one_device_lease(self):
         p = _make_plugin()
         lease = SimpleNamespace(index=7, release=MagicMock())
@@ -892,7 +927,12 @@ class TestManagedSpectrumLifecycle:
             start_thread.assert_called_once()
             p.stop()
 
-        refresh.assert_called_once_with(None, "0", "spectrum_scanner")
+        refresh.assert_called_once_with(
+            None,
+            "0",
+            "spectrum_scanner",
+            selector="index",
+        )
         lease.release.assert_called_once_with()
         join_threads.assert_called_once_with(timeout=5.0)
         assert p._device_lease is None
@@ -1067,7 +1107,12 @@ class TestManagedSpectrumLifecycle:
         ):
             p._refresh_device_lease()
         invalidate.assert_called_once_with()
-        refresh.assert_called_once_with(old, "0", "spectrum_scanner")
+        refresh.assert_called_once_with(
+            old,
+            "0",
+            "spectrum_scanner",
+            selector="index",
+        )
         assert p._resolved_index == 11
 
         p._release_device_lease()

@@ -47,6 +47,7 @@ class SignalSlot:
     priority: int
     acquire_cb: Callable[[str, int], None]
     yield_cb: Callable[[str, str, float | None], bool]
+    device_selector: str = "auto"
     label: str = ""
     continuous: bool = False
     windows: list[TimeWindow] = field(default_factory=list)
@@ -153,9 +154,12 @@ class SdrScheduler:
         label: str = "",
         windows: list[TimeWindow] | None = None,
         continuous: bool = False,
+        device_selector: str = "auto",
     ) -> None:
         if priority == PRIORITY_CRITICAL and not continuous:
             raise ValueError("P0/critical slots must be continuous")
+        if device_selector not in ("auto", "serial", "index"):
+            raise ValueError(f"Unknown RTL-SDR device selector: {device_selector!r}")
 
         with self._condition:
             dongle = self._dongles.get(serial)
@@ -169,6 +173,7 @@ class SdrScheduler:
             slot = SignalSlot(
                 caller=caller,
                 serial=serial,
+                device_selector=device_selector,
                 priority=priority,
                 acquire_cb=acquire_cb,
                 yield_cb=yield_cb,
@@ -513,7 +518,11 @@ class SdrScheduler:
                 else:
                     from reticulumpi.rtlsdr import release_device
 
-                    release_device(serial, caller=caller)
+                    release_device(
+                        serial,
+                        caller=caller,
+                        selector=slot.device_selector,
+                    )
             except Exception:
                 log.debug("SDR device release failed for %s", caller, exc_info=True)
 
@@ -556,7 +565,11 @@ class SdrScheduler:
             from reticulumpi.rtlsdr import claim_device
 
             try:
-                lease = claim_device(serial, caller=caller)
+                lease = claim_device(
+                    serial,
+                    caller=caller,
+                    selector=slot.device_selector,
+                )
                 idx = lease.index
             except RuntimeError as exc:
                 log.error(

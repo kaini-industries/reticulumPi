@@ -113,7 +113,9 @@ class AdsbRadarPlugin(PluginBase):
     def validate_config(self) -> None:
         cfg = self.config
         self._dump1090_bin = str(cfg.get("dump1090_bin", "dump1090"))
-        self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
+        from reticulumpi.rtlsdr import configured_device
+
+        self._device_id, self._device_selector = configured_device(cfg)
         self._gain = str(cfg.get("gain", "max"))
         self._ppm = int(cfg.get("ppm", 0))
         self._enable_bias_tee = bool(cfg.get("enable_bias_tee", False))
@@ -465,6 +467,7 @@ class AdsbRadarPlugin(PluginBase):
             getattr(self, "_device_lease", None),
             self._device_id,
             self.plugin_name,
+            selector=self._device_selector,
         )
         self._resolved_index = self._device_lease.index
 
@@ -632,6 +635,7 @@ class AdsbRadarPlugin(PluginBase):
                     getattr(self, "_device_lease", None),
                     self._device_id,
                     self.plugin_name,
+                    selector=self._device_selector,
                 )
                 self._resolved_index = self._device_lease.index
             except RuntimeError:

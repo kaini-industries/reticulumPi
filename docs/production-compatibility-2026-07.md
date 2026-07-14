@@ -199,6 +199,25 @@ the already-qualified signed artifact without rebuilding it.
 
 ## SDR recovery and remaining physical preflight
 
+### Withdrawn 0.3.4 selector behavior
+
+The exact signed 0.3.4 candidate completed CI and offline assembly, but production qualification
+found that configuration normalization discarded whether an RTL-SDR value came from
+`device_serial` or `device_index`. A zero-padded decimal value explicitly supplied as an index
+could consequently be interpreted as a serial. In the observed production case that serial was
+absent, so the required SDR utility did not launch; a lexical collision could instead select a
+different physical dongle. Stable promotion was therefore withheld and 0.3.4 was withdrawn. The
+protected publication job was never approved and was canceled before publication.
+
+The 0.3.5 replacement must carry the selector type through every affected plugin, scheduler slot,
+claim, refresh, and release operation. Explicit serial selection must fail closed when the serial
+is absent; explicit index selection must remain an index regardless of its string width. Tests
+must cover both meanings of the same numeric-looking value and canonical cross-selector contention.
+This is a replacement-candidate requirement, not evidence that any 0.3.5 CI, production, hardware,
+or soak gate has passed.
+
+### Existing hardware warning and replacement HIL
+
 An incorrectly quoted inspection command unintentionally launched a second SDR utility, which
 reset one dongle. The unintended processes were terminated immediately and every managed service
 retained its original PID with zero restarts. A final read-only USB inventory on 2026-07-12 showed

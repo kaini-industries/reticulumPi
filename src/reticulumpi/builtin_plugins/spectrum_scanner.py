@@ -192,7 +192,9 @@ class SpectrumScanner(PluginBase):
         if not 1.0 <= self._peak_threshold_db <= 30.0:
             raise ValueError(f"peak_threshold_db must be 1.0-30.0, got {self._peak_threshold_db}")
 
-        self._device_id = str(cfg.get("device_serial") or cfg.get("device_index", "0"))
+        from reticulumpi.rtlsdr import configured_device
+
+        self._device_id, self._device_selector = configured_device(cfg)
         self._power_command = str(cfg.get("power_command", "rtl_power"))
         self._max_restarts = int(cfg.get("max_restarts", 5))
         self._restart_limit = min(5, max(0, self._max_restarts))
@@ -416,6 +418,7 @@ class SpectrumScanner(PluginBase):
                 self._device_lease,
                 self._device_id,
                 self.plugin_name,
+                selector=self._device_selector,
             )
             self._resolved_index = self._device_lease.index
         except (RuntimeError, ValueError) as exc:
@@ -811,6 +814,7 @@ class SpectrumScanner(PluginBase):
             self._device_lease,
             self._device_id,
             self.plugin_name,
+            selector=self._device_selector,
         )
         self._resolved_index = self._device_lease.index
 

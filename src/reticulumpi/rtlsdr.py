@@ -9,7 +9,9 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any, Literal
 
 log = logging.getLogger("reticulumpi.rtlsdr")
 
@@ -22,6 +24,9 @@ _CACHE_TTL: float = 300.0
 _cache_lock = threading.Lock()
 _claim_lock = threading.Lock()
 _claimed: dict[str, str] = {}
+
+DeviceSelector = Literal["auto", "serial", "index"]
+ConfigDeviceSelector = Literal["serial", "index"]
 
 
 @dataclass(frozen=True)
@@ -126,32 +131,64 @@ def enumerate_devices() -> list[tuple[int, str]]:
         return devices
 
 
-def resolve_device(configured: str, caller: str = "") -> int:
-    """Resolve a config value (serial string or numeric index) to a device index.
+def configured_device(
+    config: Mapping[str, Any],
+    *,
+    default_index: str = "0",
+) -> tuple[str, ConfigDeviceSelector]:
+    """Return a configured device value together with its explicit selector type.
 
-    Tries serial match first against ``rtl_test`` output, then falls
-    back to interpreting *configured* as a literal integer index.
-    Raises ``RuntimeError`` if neither works and devices were enumerated.
+    ``device_serial`` retains precedence when it is non-empty.  Values read from
+    ``device_index`` remain indexes even when their string representation happens
+    to look like an eight-digit RTL-SDR serial (for example ``"00000001"``).
     """
+
+    serial = config.get("device_serial")
+    if serial:
+        return str(serial), "serial"
+    return str(config.get("device_index", default_index)), "index"
+
+
+def resolve_device(
+    configured: str,
+    caller: str = "",
+    *,
+    selector: DeviceSelector = "auto",
+) -> int:
+    """Resolve a serial string or numeric index to a device index.
+
+    ``selector="serial"`` requires an exact serial match and never falls back to
+    an integer index.  ``selector="index"`` always interprets *configured* as an
+    integer index, even when it contains eight decimal digits.  The default
+    ``"auto"`` mode preserves the legacy serial-first API behavior.
+    """
+    if selector not in ("auto", "serial", "index"):
+        raise ValueError(f"Unknown RTL-SDR device selector: {selector!r}")
+
     devices = enumerate_devices()
 
-    for idx, serial in devices:
-        if serial == configured:
-            _claim_device(f"serial:{serial}", configured, caller)
-            if str(idx) != configured:
-                log.info(
-                    "Resolved RTL-SDR serial '%s' → index %d (caller: %s)",
-                    serial,
-                    idx,
-                    caller or "?",
-                )
-            return idx
+    if selector != "index":
+        for idx, serial in devices:
+            if serial == configured:
+                _claim_device(f"serial:{serial}", configured, caller)
+                if str(idx) != configured:
+                    log.info(
+                        "Resolved RTL-SDR serial '%s' → index %d (caller: %s)",
+                        serial,
+                        idx,
+                        caller or "?",
+                    )
+                return idx
 
-    # Only fall back to numeric index if the value doesn't look like
-    # a serial number.  RTL-SDR serials are always 8 decimal digits;
-    # any other length is treated as a device index.  This prevents
-    # "00000001" from silently resolving to index 1 when the intended
-    # dongle is absent.
+        if selector == "serial":
+            available = ", ".join(f"{i}: SN {s}" for i, s in devices)
+            raise RuntimeError(
+                f"RTL-SDR serial '{configured}' not found. Available: [{available}]"
+            )
+
+    # Auto mode only falls back to a numeric index when the value does not look
+    # like a serial number.  Explicit index mode intentionally bypasses both
+    # serial matching and this ambiguity guard.
     known_serials = {s for _, s in devices}
     try:
         idx = int(configured)
@@ -161,8 +198,8 @@ def resolve_device(configured: str, caller: str = "") -> int:
     if (
         idx is not None
         and idx >= 0
-        and configured not in known_serials
-        and (len(configured) != 8 or not devices)
+        and (selector == "index" or configured not in known_serials)
+        and (selector == "index" or len(configured) != 8 or not devices)
     ):
         serial_for_index = next((serial for index, serial in devices if index == idx), None)
         canonical = f"serial:{serial_for_index}" if serial_for_index else f"index:{idx}"
@@ -186,50 +223,75 @@ def _claim_device(canonical: str, configured: str, caller: str) -> None:
         _claimed[canonical] = caller
 
 
-def _canonical_device(configured: str) -> str:
+def _canonical_device(configured: str, selector: DeviceSelector = "auto") -> str:
     devices = enumerate_devices()
-    for index, serial in devices:
-        if configured == serial:
-            return f"serial:{serial}"
-        try:
-            if int(configured) == index and configured == str(index):
+    if selector != "index":
+        for _index, serial in devices:
+            if configured == serial:
                 return f"serial:{serial}"
+
+    if selector != "serial":
+        try:
+            configured_index = int(configured)
         except ValueError:
-            pass
+            configured_index = None
+        if configured_index is not None:
+            for index, serial in devices:
+                if configured_index == index and (
+                    selector == "index" or configured == str(index)
+                ):
+                    return f"serial:{serial}"
+            return f"index:{configured_index}"
+
+    if selector == "serial":
+        return f"serial:{configured}"
+
     try:
         return f"index:{int(configured)}"
     except ValueError:
         return f"serial:{configured}"
 
 
-def claim_device(configured: str, caller: str) -> DeviceLease:
+def claim_device(
+    configured: str,
+    caller: str,
+    *,
+    selector: DeviceSelector = "auto",
+) -> DeviceLease:
     """Resolve and claim a device, returning an explicit release token."""
 
-    index = resolve_device(configured, caller=caller)
-    return DeviceLease(configured, _canonical_device(configured), index, caller)
+    index = resolve_device(configured, caller=caller, selector=selector)
+    return DeviceLease(configured, _canonical_device(configured, selector), index, caller)
 
 
 def refresh_device_lease(
     lease: DeviceLease | None,
     configured: str,
     caller: str,
+    *,
+    selector: DeviceSelector = "auto",
 ) -> DeviceLease:
     """Resolve a possibly re-enumerated device and retain one exact claim."""
 
-    index = resolve_device(configured, caller=caller)
-    canonical = _canonical_device(configured)
+    index = resolve_device(configured, caller=caller, selector=selector)
+    canonical = _canonical_device(configured, selector)
     refreshed = DeviceLease(configured, canonical, index, caller)
     if lease is not None and lease.canonical_id != canonical:
         _release_canonical(lease.canonical_id, lease.configured, lease.caller)
     return refreshed
 
 
-def release_device(configured: str, caller: str = "") -> None:
+def release_device(
+    configured: str,
+    caller: str = "",
+    *,
+    selector: DeviceSelector = "auto",
+) -> None:
     """Release a previously claimed device serial.
 
     Called during plugin stop() to allow another plugin to claim the device.
     """
-    canonical = _canonical_device(configured)
+    canonical = _canonical_device(configured, selector)
     _release_canonical(canonical, configured, caller)
 
 

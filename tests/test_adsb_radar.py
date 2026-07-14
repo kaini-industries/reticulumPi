@@ -79,6 +79,7 @@ class TestValidateConfig:
         p = _make_plugin()
         assert p._dump1090_bin == "dump1090"
         assert p._device_id == "0"
+        assert p._device_selector == "index"
         assert p._gain == "max"
         assert p._ppm == 0
         assert p._enable_bias_tee is False
@@ -546,10 +547,12 @@ class TestDeviceResolution:
     def test_device_serial_takes_precedence(self):
         p = _make_plugin({"device_serial": "00000001", "device_index": "99"})
         assert p._device_id == "00000001"
+        assert p._device_selector == "serial"
 
     def test_device_index_fallback(self):
         p = _make_plugin({"device_index": "14342860"})
         assert p._device_id == "14342860"
+        assert p._device_selector == "index"
 
 
 # ---------------------------------------------------------------------------

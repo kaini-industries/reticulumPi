@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.rtlsdr import configured_device
 from reticulumpi.sdr_scheduler import (
     PRIORITY_BACKGROUND,
 )
@@ -38,6 +39,7 @@ class SignalPluginBase(PluginBase):
     def __init__(self, app: "ReticulumPiApp", plugin_config: dict[str, Any]):
         super().__init__(app, plugin_config)
         self._dongle_serial: str = ""
+        self._dongle_selector = "index"
         self._dongle_index: int | None = None
         self._dongle_generation: int | None = None
         self._dongle_active = False
@@ -59,8 +61,9 @@ class SignalPluginBase(PluginBase):
     # ── lifecycle ────────────────────────────────────────────────────
 
     def start(self) -> None:
-        self._dongle_serial = str(
-            self.config.get("device_serial") or self.config.get("device_index", ""),
+        self._dongle_serial, self._dongle_selector = configured_device(
+            self.config,
+            default_index="",
         )
         self._active = True
         with self._sdr_retry_lock:
@@ -91,6 +94,7 @@ class SignalPluginBase(PluginBase):
                 yield_cb=self._on_yield,
                 label=self.signal_label or self.plugin_description,
                 continuous=self.signal_continuous,
+                device_selector=self._dongle_selector,
             )
 
         self._on_start()

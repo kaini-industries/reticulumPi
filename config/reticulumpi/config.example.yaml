@@ -648,6 +648,8 @@ reticulumpi:
     # are exclusive — only one process can claim each at a time).  Use
     # device_serial for stable binding across reboots (USB enumeration
     # order can change); device_index is a fragile fallback.
+    # The key determines interpretation: device_serial is always an exact
+    # serial, while device_index stays numeric even if quoted or zero-padded.
     #
     # Serials are resolved to numeric indices at plugin start via rtl_test.
     # Run `rtl_test -t` to list attached devices and their serial numbers.

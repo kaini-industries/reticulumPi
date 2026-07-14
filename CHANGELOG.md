@@ -10,12 +10,25 @@ installation, path, authentication, or security guidance.
 
 ## [Unreleased]
 
-The 0.2.5–0.3.1 entries and the current 0.3.4 entry are release candidates. They have not been
+The 0.2.5–0.3.1 entries and the current 0.3.5 entry are release candidates. They have not been
 promoted until their exact artifacts, signatures, CI records, hardware qualification, and approvals
-are complete. Versions 0.3.2 and 0.3.3 were withdrawn after failed qualification and will not be
+are complete. Versions 0.3.2–0.3.4 were withdrawn after failed qualification and will not be
 reused.
 
-## [0.3.4] - Unreleased
+## [0.3.5] - Unreleased
+
+### Fixed
+
+- Preserved whether an RTL-SDR selection came from `device_serial` or `device_index` through
+  plugin configuration, scheduler arbitration, device claims, refresh, and release. Zero-padded
+  index values remain indexes instead of being reinterpreted as serial numbers.
+
+### Pending promotion evidence
+
+- Signed tag CI, two-round offline Minisign assembly, production qualification, and the Pi 5
+  72-hour soak remain required. No 0.3.5 release gate has passed yet.
+
+## [0.3.4] - Withdrawn 2026-07-14
 
 ### Fixed
 
@@ -26,10 +39,14 @@ reused.
   mixed collections, duplicate relevant fields, and relevant-looking fields nested inside ignored
   sequence items.
 
-### Pending promotion evidence
+### Withdrawal
 
-- Signed tag CI, two-round offline Minisign assembly, production qualification, and the Pi 5
-  72-hour soak remain required.
+- Signed tag CI and two-round offline Minisign candidate assembly completed, but production
+  qualification found that a zero-padded value sourced from `device_index` could be interpreted as
+  an RTL-SDR serial rather than the explicitly configured index.
+- The protected `release` publication job remained unapproved and was canceled before executing
+  any publication step. No stable GitHub Release, versioned container promotion, hardware
+  qualification, or 72-hour soak occurred, and this version will not be moved or reused.
 
 ## [0.3.3] - Withdrawn 2026-07-14
 

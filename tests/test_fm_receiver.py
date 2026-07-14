@@ -1058,7 +1058,7 @@ class TestManagedLifecycle:
             assert p._dongle_active is True
             p.stop()
 
-        refresh.assert_called_once_with(None, "0", "fm_receiver")
+        refresh.assert_called_once_with(None, "0", "fm_receiver", selector="index")
         lease.release.assert_called_once_with()
         assert p._device_lease is None
         assert p._status == "stopped"
@@ -1078,6 +1078,7 @@ class TestManagedLifecycle:
 
         scheduler.register.assert_called_once()
         assert scheduler.register.call_args.kwargs["continuous"] is True
+        assert scheduler.register.call_args.kwargs["device_selector"] == "index"
         scheduler.unregister.assert_called_once_with("0", "fm_receiver")
 
     def test_status_reports_a_live_managed_process(self):
