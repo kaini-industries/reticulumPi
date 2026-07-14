@@ -106,9 +106,7 @@ class TestValidateConfig:
 
     def test_device_serial_and_index_keep_distinct_semantics(self):
         by_index = _make_plugin({"device_index": "00000001"})
-        by_serial = _make_plugin(
-            {"device_serial": "00000001", "device_index": "00000002"}
-        )
+        by_serial = _make_plugin({"device_serial": "00000001", "device_index": "00000002"})
 
         assert (by_index._device_id, by_index._device_selector) == ("00000001", "index")
         assert (by_serial._device_id, by_serial._device_selector) == (

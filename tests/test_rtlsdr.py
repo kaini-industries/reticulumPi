@@ -238,9 +238,10 @@ class TestResolveDevice:
 
 class TestConfiguredDevice:
     def test_serial_takes_precedence_and_remains_explicit(self):
-        assert configured_device(
-            {"device_serial": "00000001", "device_index": "00000002"}
-        ) == ("00000001", "serial")
+        assert configured_device({"device_serial": "00000001", "device_index": "00000002"}) == (
+            "00000001",
+            "serial",
+        )
 
     def test_zero_padded_index_remains_an_explicit_index(self):
         assert configured_device({"device_index": "00000001"}) == (

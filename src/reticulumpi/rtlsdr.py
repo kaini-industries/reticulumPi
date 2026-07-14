@@ -182,9 +182,7 @@ def resolve_device(
 
         if selector == "serial":
             available = ", ".join(f"{i}: SN {s}" for i, s in devices)
-            raise RuntimeError(
-                f"RTL-SDR serial '{configured}' not found. Available: [{available}]"
-            )
+            raise RuntimeError(f"RTL-SDR serial '{configured}' not found. Available: [{available}]")
 
     # Auto mode only falls back to a numeric index when the value does not look
     # like a serial number.  Explicit index mode intentionally bypasses both
@@ -237,9 +235,7 @@ def _canonical_device(configured: str, selector: DeviceSelector = "auto") -> str
             configured_index = None
         if configured_index is not None:
             for index, serial in devices:
-                if configured_index == index and (
-                    selector == "index" or configured == str(index)
-                ):
+                if configured_index == index and (selector == "index" or configured == str(index)):
                     return f"serial:{serial}"
             return f"index:{configured_index}"
 
