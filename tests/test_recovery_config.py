@@ -197,6 +197,183 @@ def test_projects_empty_and_default_sensor_storage(tmp_path: Path) -> None:
     }
 
 
+def test_projects_production_sensor_config_with_indentless_sequence(
+    tmp_path: Path,
+) -> None:
+    text = """reticulumpi:
+  plugins:
+    sensor_framework:
+      enabled: true
+      read_interval: 30
+      sensors:
+      - name: cpu_temperature
+        driver: sysfs
+        sysfs_path: /sys/class/thermal/thermal_zone0/temp
+        scale: 0.001
+        reading_name: temperature
+      - name: enclosure_temperature
+        driver: sysfs
+        sysfs_path: /sys/class/hwmon/hwmon0/temp1_input
+        scale: 0.001
+        reading_name: temperature
+      storage:
+        type: sqlite
+        path: /var/lib/reticulumpi/sensor_data.db
+        retention_days: 30
+"""
+
+    assert (
+        yaml.safe_load(text)["reticulumpi"]["plugins"]["sensor_framework"]["sensors"][0]["name"]
+        == "cpu_temperature"
+    )
+    assert _load(tmp_path, text) == {
+        "sensor_framework": {
+            "storage": {
+                "type": "sqlite",
+                "path": "/var/lib/reticulumpi/sensor_data.db",
+            }
+        }
+    }
+
+
+def test_relevant_keys_inside_irrelevant_indentless_sequence_are_not_projected(
+    tmp_path: Path,
+) -> None:
+    projected = _load(
+        tmp_path,
+        """reticulumpi:
+  plugins:
+    sensor_framework:
+      enabled: true
+      sensors:
+      - enabled: false
+        db_path: /must/not/be/projected.db
+        storage:
+          type: postgres
+          path: /must/not/be/projected.db
+      storage:
+        type: sqlite
+        path: /var/lib/reticulumpi/sensor_data.db
+""",
+    )
+
+    assert projected == {
+        "sensor_framework": {
+            "storage": {
+                "type": "sqlite",
+                "path": "/var/lib/reticulumpi/sensor_data.db",
+            }
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "reticulumpi:\n  - orphan\n  plugins: {}\n",
+        "reticulumpi:\n  plugins:\n  - messaging_hub: {}\n",
+        "reticulumpi:\n  plugins:\n    messaging_hub:\n    - enabled: true\n",
+        ("reticulumpi:\n  plugins:\n    messaging_hub:\n      enabled:\n      - true\n"),
+        (
+            "reticulumpi:\n  plugins:\n    messaging_hub:\n"
+            "      enabled: true\n      db_path:\n      - messages.db\n"
+        ),
+        (
+            "reticulumpi:\n  plugins:\n    sensor_framework:\n"
+            "      enabled: true\n      storage:\n      - type: sqlite\n"
+        ),
+        (
+            "reticulumpi:\n  plugins:\n    sensor_framework:\n"
+            "      enabled: true\n      storage:\n        type:\n"
+            "        - sqlite\n"
+        ),
+        (
+            "reticulumpi:\n  plugins:\n    sensor_framework:\n"
+            "      enabled: true\n      storage:\n        path:\n"
+            "        - sensors.db\n"
+        ),
+        (
+            "reticulumpi:\n  plugins:\n    sensor_framework:\n"
+            "      enabled: true\n      sensors: configured\n      - orphan\n"
+        ),
+        (
+            "reticulumpi:\n  plugins:\n    sensor_framework:\n"
+            "      enabled: true\n      sensors:\n      -foo\n"
+        ),
+        ("reticulumpi:\n  root_field:\n    nested: value\n  - illegal\n  plugins: {}\n"),
+        (
+            "reticulumpi:\n  plugins:\n    messaging_hub:\n"
+            "      enabled: true\n      hooks:\n        nested: value\n"
+            "      - illegal\n      db_path: messages.db\n"
+        ),
+        (
+            "reticulumpi:\n  plugins:\n    sensor_framework:\n"
+            "      enabled: true\n      storage:\n        options:\n"
+            "          nested: value\n        - illegal\n"
+            "        type: sqlite\n        path: sensors.db\n"
+        ),
+    ],
+)
+def test_rejects_unsafe_indentless_sequence_ownership(tmp_path: Path, text: str) -> None:
+    with pytest.raises(RecoveryConfigError, match="malformed block mapping"):
+        _load(tmp_path, text)
+
+
+def test_accepts_irrelevant_indentless_sequences_at_projection_scopes(
+    tmp_path: Path,
+) -> None:
+    projected = _load(
+        tmp_path,
+        """reticulumpi:
+  root_list:
+  - ignored
+  plugins:
+    third_party:
+    - enabled: true
+    messaging_hub:
+      enabled: true
+      hooks:
+      - enabled: false
+        db_path: /must/not/be-projected.db
+      db_path: /var/lib/reticulumpi/messages.db
+    sensor_framework:
+      enabled: true
+      storage:
+        options:
+        - type: postgres
+          path: /must/not/be-projected.db
+        type: sqlite
+        path: /var/lib/reticulumpi/sensors.db
+""",
+    )
+
+    assert projected == {
+        "messaging_hub": {"db_path": "/var/lib/reticulumpi/messages.db"},
+        "sensor_framework": {
+            "storage": {
+                "type": "sqlite",
+                "path": "/var/lib/reticulumpi/sensors.db",
+            }
+        },
+    }
+
+
+def test_duplicate_relevant_field_around_ignored_indentless_sequence_is_rejected(
+    tmp_path: Path,
+) -> None:
+    text = """reticulumpi:
+  plugins:
+    messaging_hub:
+      enabled: true
+      hooks:
+      - ignored
+      enabled: false
+"""
+
+    with pytest.raises(RecoveryConfigError, match="configured more than once"):
+        _load(tmp_path, text)
+
+
 @pytest.mark.parametrize(
     "text",
     [

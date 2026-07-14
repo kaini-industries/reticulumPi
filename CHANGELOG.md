@@ -10,11 +10,28 @@ installation, path, authentication, or security guidance.
 
 ## [Unreleased]
 
-The 0.2.5–0.3.1 entries and the current 0.3.3 entry are release candidates. They have not been
+The 0.2.5–0.3.1 entries and the current 0.3.4 entry are release candidates. They have not been
 promoted until their exact artifacts, signatures, CI records, hardware qualification, and approvals
-are complete. Version 0.3.2 was withdrawn after its tag-only CI failed and will not be reused.
+are complete. Versions 0.3.2 and 0.3.3 were withdrawn after failed qualification and will not be
+reused.
 
-## [0.3.3] - Unreleased
+## [0.3.4] - Unreleased
+
+### Fixed
+
+- Accepted YAML's valid indentationless block-sequence form when it belongs to a
+  projection-irrelevant recovery configuration field, including the production
+  `sensor_framework.sensors` shape emitted by PyYAML.
+- Kept recovery projection fail-closed for orphan sequences, relevant migration keys, malformed
+  mixed collections, duplicate relevant fields, and relevant-looking fields nested inside ignored
+  sequence items.
+
+### Pending promotion evidence
+
+- Signed tag CI, two-round offline Minisign assembly, production qualification, and the Pi 5
+  72-hour soak remain required.
+
+## [0.3.3] - Withdrawn 2026-07-14
 
 ### Fixed
 
@@ -25,10 +42,15 @@ are complete. Version 0.3.2 was withdrawn after its tag-only CI failed and will 
 - Matched the Noble legacy-bridge fixture to production's omitted external-artifact policy and
   qualified all 14 observed production features, including `offline-tools`.
 
-### Pending promotion evidence
+### Withdrawal
 
-- Signed tag CI, two-round offline Minisign assembly, production qualification, and the Pi 5
-  72-hour soak remain required.
+- The signed candidate completed CI and offline assembly but failed closed during production
+  preflight before any administrator transaction or runtime cutover: its dependency-free recovery
+  parser rejected the valid indentationless `sensor_framework.sensors` sequence in the legacy
+  configuration.
+- The deployment contingency restored the exact legacy configuration bytes and metadata, removed
+  the staged external manifest, and left the legacy service active. No cutover, hardware soak, or
+  stable promotion occurred, and this version will not be moved or reused.
 
 ## [0.3.2] - Withdrawn 2026-07-13
 
