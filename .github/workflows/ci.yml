@@ -218,7 +218,7 @@ jobs:
       - run: pytest tests/ -v -n0 --cov=src/reticulumpi --cov-branch --cov-report=term-missing --cov-report=xml
       - name: Enforce aggregate, changed-code, and critical-module coverage
         env:
-          COVERAGE_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.3.2' }}
+          COVERAGE_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.3.3' }}
         run: >-
           python tools/check_coverage_gate.py
           --coverage-xml coverage.xml
@@ -240,6 +240,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.ref_type == 'tag' && github.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Require the configured OpenPGP signer
@@ -299,7 +300,16 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.ref_type == 'tag' && github.ref || github.sha }}
           fetch-depth: 0
+      - name: Bind package build to the exact annotated tag
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"
+          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+          test "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{}")" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"

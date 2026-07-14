@@ -116,6 +116,7 @@ def _bootstrap_release_repo(
     tmp_path: Path,
     *,
     historical_version: str = "0.2.4",
+    release_tag: str = "v0.3.2",
 ) -> tuple[Path, str, str, Path]:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -128,11 +129,11 @@ def _bootstrap_release_repo(
     baseline = _commit(repo, "historical version boundary")
     module.write_text("value = 2\n", encoding="utf-8")
     head = _commit(repo, "release")
-    _git(repo, "tag", "v0.3.2", head)
+    _git(repo, "tag", release_tag, head)
     event = _write_event(
         repo,
         {
-            "ref": "refs/tags/v0.3.2",
+            "ref": f"refs/tags/{release_tag}",
             "before": "0" * 40,
             "after": head,
             "created": True,
@@ -834,6 +835,35 @@ def test_v032_bootstrap_uses_pinned_version_boundary_over_lower_tag(
     assert resolve_github_base(repo, "push", event) == baseline
 
 
+def test_v033_bootstrap_ignores_withdrawn_v032_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, baseline, head, event = _bootstrap_release_repo(tmp_path, release_tag="v0.3.3")
+    _git(repo, "tag", "v0.3.2", head)
+    monkeypatch.setattr(
+        coverage_gate,
+        "_RELEASE_BOOTSTRAP_BASELINES",
+        {
+            "v0.3.3": coverage_gate.ReleaseBootstrapBaseline(
+                historical_version="0.2.4",
+                commit=baseline,
+            )
+        },
+    )
+
+    assert resolve_github_base(repo, "push", event) == baseline
+
+
+def test_v033_bootstrap_is_locked_to_full_refactor_boundary() -> None:
+    assert coverage_gate.DEFAULT_RELEASE_VERSION == "0.3.3"
+    assert coverage_gate._RELEASE_BOOTSTRAP_BASELINES["v0.3.3"] == (
+        coverage_gate.ReleaseBootstrapBaseline(
+            historical_version="0.2.4",
+            commit="89249b8b58cb86ac14ff7179abbbca3cb762d2a4",
+        )
+    )
+
+
 def test_v032_bootstrap_fails_when_pinned_object_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -935,15 +965,15 @@ def test_post_bootstrap_release_uses_reachable_prior_tag(tmp_path: Path) -> None
     _init_repo(repo)
     module = repo / "src/reticulumpi/app.py"
     module.write_text("value = 1\n", encoding="utf-8")
-    previous = _commit(repo, "v0.3.2")
-    _git(repo, "tag", "v0.3.2", previous)
+    previous = _commit(repo, "v0.3.3")
+    _git(repo, "tag", "v0.3.3", previous)
     module.write_text("value = 2\n", encoding="utf-8")
-    head = _commit(repo, "v0.3.3")
-    _git(repo, "tag", "v0.3.3", head)
+    head = _commit(repo, "v0.3.4")
+    _git(repo, "tag", "v0.3.4", head)
     event = _write_event(
         repo,
         {
-            "ref": "refs/tags/v0.3.3",
+            "ref": "refs/tags/v0.3.4",
             "before": previous,
             "after": head,
             "created": True,
@@ -1291,4 +1321,4 @@ def test_ci_runs_fail_closed_gate_after_serial_coverage() -> None:
     assert "--release-version" in command
     assert "--github-event" in command
     assert "--github-event-name" in command
-    assert steps[gate_index]["env"]["COVERAGE_RELEASE_VERSION"].endswith("|| '0.3.2' }}")
+    assert steps[gate_index]["env"]["COVERAGE_RELEASE_VERSION"].endswith("|| '0.3.3' }}")

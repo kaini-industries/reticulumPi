@@ -10,10 +10,27 @@ installation, path, authentication, or security guidance.
 
 ## [Unreleased]
 
-The 0.2.5–0.3.2 entries are release candidates. They have not been promoted until their exact
-artifacts, signatures, CI records, hardware qualification, and approvals are complete.
+The 0.2.5–0.3.1 entries and the current 0.3.3 entry are release candidates. They have not been
+promoted until their exact artifacts, signatures, CI records, hardware qualification, and approvals
+are complete. Version 0.3.2 was withdrawn after its tag-only CI failed and will not be reused.
 
-## [0.3.2] - Unreleased
+## [0.3.3] - Unreleased
+
+### Fixed
+
+- Preserved annotated OpenPGP tag objects in every release workflow checkout and bound the package
+  build to the exact tag event commit before executing repository build code.
+- Preserved the pinned 0.2.4 full-refactor coverage boundary for 0.3.3 instead of treating the
+  withdrawn 0.3.2 tag as completed coverage evidence.
+- Matched the Noble legacy-bridge fixture to production's omitted external-artifact policy and
+  qualified all 14 observed production features, including `offline-tools`.
+
+### Pending promotion evidence
+
+- Signed tag CI, two-round offline Minisign assembly, production qualification, and the Pi 5
+  72-hour soak remain required.
+
+## [0.3.2] - Withdrawn 2026-07-13
 
 ### Added
 
@@ -25,10 +42,12 @@ artifacts, signatures, CI records, hardware qualification, and approvals are com
 - Removed first-party inline styles and handlers from the dashboard and enforced strict CSP
   through local static and cross-browser regression gates.
 
-### Pending promotion evidence
+### Withdrawal
 
-- Independent final audit, 18/20 dashboard score, release coverage, signed artifacts, and the
-  Pi 5 72-hour soak remain required.
+- The annotated tag was never published as a GitHub Release. Its tag-only CI failed closed because
+  the checkout action replaced the local annotated tag ref with the peeled commit before both tag
+  consumers verified it. No Minisign request or deployable candidate was produced, and this version
+  will not be moved or reused.
 
 ## [0.3.1] - Unreleased
 

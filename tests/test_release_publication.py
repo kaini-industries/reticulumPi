@@ -526,6 +526,34 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert "GNUPG:" in tag_trust_source
     assert "VALIDSIG" in tag_trust_source
     assert "tools/verify_release_tag.py" not in tag_trust_source
+    annotated_tag_ref = "${{ github.ref_type == 'tag' && github.ref || github.sha }}"
+    tag_object_jobs = (
+        workflow["jobs"]["release-tag-trust"],
+        workflow["jobs"]["package"],
+        candidate_workflow["jobs"]["global-signing-request"],
+        release_workflow["jobs"]["release-candidate"],
+        release_workflow["jobs"]["release"],
+    )
+    for job in tag_object_jobs:
+        checkout = next(
+            step
+            for step in job["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        assert checkout["with"]["ref"] == annotated_tag_ref
+    package_job_steps = workflow["jobs"]["package"]["steps"]
+    package_steps = {step.get("name"): step for step in package_job_steps if step.get("name")}
+    package_tag_binding = package_steps["Bind package build to the exact annotated tag"]
+    assert package_tag_binding["if"] == "github.ref_type == 'tag'"
+    assert "git cat-file -t" in package_tag_binding["run"]
+    assert "refs/tags/${GITHUB_REF_NAME}^{}" in package_tag_binding["run"]
+    assert "git rev-parse HEAD" in package_tag_binding["run"]
+    assert "GITHUB_SHA" in package_tag_binding["run"]
+    assert package_job_steps.index(package_tag_binding) < next(
+        index
+        for index, step in enumerate(package_job_steps)
+        if str(step.get("uses", "")).startswith("actions/setup-python@")
+    )
     assert "subject-checksums" in release_source
     assert "sbom-path" in release_source
     assert "push-to-registry" in release_source
@@ -683,6 +711,18 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert 'load_manifest("/etc/reticulumpi/external-artifacts.yaml")' in noble_fixture
     assert "root:reticulumpi 640" in noble_fixture
     assert '"root:root 555"' in noble_fixture
+    assert "/etc/sudoers.d/reticulumpi-offline" in noble_fixture
+    assert "/opt/reticulumpi/scripts/simulate_offline.sh" in noble_fixture
+    assert "/usr/libexec/reticulumpi/simulate_offline.sh" in noble_fixture
+    assert "/usr/share/reticulumpi/config/offline_profile.yaml" in noble_fixture
+    assert (
+        "reticulumpi ALL=(ALL) NOPASSWD: /opt/reticulumpi/scripts/simulate_offline.sh"
+        in noble_fixture
+    )
+    assert "legacy_offline_sudoers_hash" in noble_fixture
+    assert "legacy_offline_sudoers_stat" in noble_fixture
+    assert '"root:root 755"' in noble_fixture
+    assert '"root:root 644"' in noble_fixture
     for artifact in ("meshchat", "rtl_test", "dump1090", "rtl_fm", "rtl_power"):
         assert f"  {artifact}:\n" in noble_fixture
     for feature in (
@@ -695,6 +735,7 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
         "meshcore",
         "meshtastic",
         "nomadnet",
+        "offline-tools",
         "sensors",
         "shared-rnsd",
         "space",

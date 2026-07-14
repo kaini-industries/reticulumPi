@@ -23,7 +23,7 @@ from typing import Sequence
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = Path("src/reticulumpi")
 REQUIRED_PERCENT = 90
-DEFAULT_RELEASE_VERSION = "0.3.2"
+DEFAULT_RELEASE_VERSION = "0.3.3"
 _EMPTY_TREE_BASE = "reticulumpi:empty-tree"
 CRITICAL_MODULES = (
     Path("src/reticulumpi/identity_manager.py"),
@@ -186,6 +186,10 @@ class GateResult:
 
 _RELEASE_BOOTSTRAP_BASELINES = {
     "v0.3.2": ReleaseBootstrapBaseline(
+        historical_version="0.2.4",
+        commit="89249b8b58cb86ac14ff7179abbbca3cb762d2a4",
+    ),
+    "v0.3.3": ReleaseBootstrapBaseline(
         historical_version="0.2.4",
         commit="89249b8b58cb86ac14ff7179abbbca3cb762d2a4",
     ),
