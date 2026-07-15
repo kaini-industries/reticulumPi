@@ -79,6 +79,7 @@ class TestValidateConfig:
         p = _make_plugin()
         assert p._dump1090_bin == "dump1090"
         assert p._device_id == "0"
+        assert p._device_selector == "index"
         assert p._gain == "max"
         assert p._ppm == 0
         assert p._enable_bias_tee is False
@@ -546,10 +547,12 @@ class TestDeviceResolution:
     def test_device_serial_takes_precedence(self):
         p = _make_plugin({"device_serial": "00000001", "device_index": "99"})
         assert p._device_id == "00000001"
+        assert p._device_selector == "serial"
 
     def test_device_index_fallback(self):
         p = _make_plugin({"device_index": "14342860"})
         assert p._device_id == "14342860"
+        assert p._device_selector == "index"
 
 
 # ---------------------------------------------------------------------------
@@ -1006,29 +1009,40 @@ class TestPatienceMode:
         assert "not found" in (p._last_error or "")
 
     def test_patience_recovers_on_dongle_return(self):
+        from reticulumpi.rtlsdr import DeviceLease
+
         p = _make_plugin({"max_restarts": 1, "patience_interval": 0.1})
         p._active = True
         p._dump1090_path = "/usr/bin/dump1090"
 
         probe_count = [0]
 
-        def fake_resolve(*_a, **_kw):
+        def fake_refresh(*_a, **_kw):
             probe_count[0] += 1
             if probe_count[0] <= 2:
                 raise RuntimeError("not found")
-            return 2
+            return DeviceLease(
+                p._device_id,
+                "index:2",
+                2,
+                p.plugin_name,
+                p._device_selector,
+            )
 
-        with (
-            patch("reticulumpi.rtlsdr.resolve_device", side_effect=fake_resolve),
-            patch("reticulumpi.rtlsdr.invalidate_cache"),
-            patch.object(p, "_patience_sleep", return_value=False),
-            patch.object(p, "_publish"),
-        ):
-            p._enter_patience_mode(lambda: None)
+        try:
+            with (
+                patch("reticulumpi.rtlsdr.refresh_device_lease", side_effect=fake_refresh),
+                patch("reticulumpi.rtlsdr.invalidate_cache"),
+                patch.object(p, "_patience_sleep", return_value=False),
+                patch.object(p, "_publish"),
+            ):
+                p._enter_patience_mode(lambda: None)
 
-        assert p._restart_count == 0
-        assert p._patience_active is False
-        assert p._resolved_index == 2
+            assert p._restart_count == 0
+            assert p._patience_active is False
+            assert p._resolved_index == 2
+        finally:
+            p._release_device_lease()
 
     def test_patience_interval_configurable(self):
         p = _make_plugin({"patience_interval": 42})

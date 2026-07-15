@@ -41,6 +41,20 @@ def _make_plugin(config: dict | None = None) -> AISReceiver:
 
 
 class TestManagedDecoderLifecycle:
+    def test_zero_padded_device_index_stays_explicit_through_scheduler_registration(self):
+        app = _make_app()
+        scheduler = MagicMock()
+        app.sdr_scheduler = scheduler
+        plugin = AISReceiver(app, {"device_index": "00000001"})
+
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        assert plugin._dongle_serial == "00000001"
+        assert plugin._dongle_selector == "index"
+        scheduler.register.assert_called_once()
+        assert scheduler.register.call_args.kwargs["device_selector"] == "index"
+
     def test_launch_and_eof_use_managed_group(self):
         plugin = _make_plugin({"decoder_bin": "rtl_ais"})
         process = MagicMock(pid=1401, stdout=[])
