@@ -706,6 +706,7 @@ class TestGetMeshtasticNodes:
         assert gateway_plugin.get_meshtastic_nodes() == []
 
     def test_node_fields_present(self, gateway_plugin):
+        _quiesce_plugin_workers(gateway_plugin)
         gateway_plugin._connected = True
         gateway_plugin._mesh_interface = _make_mock_mesh_interface()
         nodes = gateway_plugin.get_meshtastic_nodes()
@@ -764,6 +765,7 @@ class TestGetMeshtasticNodes:
         assert nodes[0]["via_lora"] is False
 
     def test_merged_node_has_both_transport_flags(self, gateway_plugin):
+        _quiesce_plugin_workers(gateway_plugin)
         gateway_plugin._connected = True
         gateway_plugin._mesh_interface = _make_mock_mesh_interface()
         listener = MagicMock()
