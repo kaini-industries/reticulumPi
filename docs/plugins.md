@@ -358,13 +358,20 @@ Bridges [Meshtastic](https://meshtastic.org/) LoRa mesh with Reticulum/LXMF. Tex
 | Option | Default | Description |
 |--------|---------|-------------|
 | `mode` | serial | `serial` or `mqtt` |
-| `serial_port` | auto | Serial port (serial mode) |
+| `serial_port` | /dev/meshtastic | Stable `/dev/serial/by-id`/`by-path` entry or dedicated udev alias (serial mode); `auto`, `/dev/ttyUSBn`, and `/dev/ttyACMn` are rejected |
+| `mqtt.connack_timeout_seconds` | 10 | Seconds to wait for an accepted broker CONNACK (greater than zero, maximum 30) |
 | `meshtastic_channel` | 0 | Channel index (0--7) |
 | `display_name` | \<node_name\> Mesh Gateway | Gateway name |
 | `max_messages_per_minute` | 2 | LXMF-to-Meshtastic rate limit |
 | `lxmf_recipients` | [] | LXMF hashes to forward Meshtastic messages to |
 | `meshtastic_allow_list` | [] | Meshtastic node IDs to accept (empty = all) |
 | `lxmf_allow_list` | [] | LXMF senders allowed to forward (empty = all) |
+
+MQTT mode keeps its node number and crash-safe packet-ID allocator under `storage_path`. Treat the
+entire directory as one identity set when backing up or restoring it. The first upgrade from the
+legacy node-number-only layout rotates that MQTT identity once, before any packet is published, so
+encrypted messages cannot reuse a packet nonce across process restarts. Corrupt, missing, or
+mismatched members fail closed instead of silently creating a counter under an old identity.
 
 ### Dual-Radio Setup
 

@@ -499,8 +499,20 @@ To pass through a USB serial device, uncomment the `devices` section in `docker/
 
 ```yaml
 devices:
-  - /dev/ttyUSB0:/dev/ttyUSB0
+  - /dev/serial/by-id/usb-example-radio:/dev/meshtastic
 ```
+
+On a multi-radio node, give every RNode, Meshtastic, MeshCore, link-test, and direct GPS consumer
+its own stable `/dev/serial/by-id` path or udev symlink. ReticulumPi claims physical USB parents,
+not just tty names, and refuses conflicting opens so two protocol stacks cannot race or reset the
+same radio. Shared modes such as MeshCore Observer borrowing MeshCore Gateway use the owner's live
+client instead of opening the port again.
+
+Radio firmware is qualified as a board/firmware compatibility matrix rather than permanently
+pinned. The host-side Meshtastic Python SDK is release-locked because the active health adapter
+depends on its exact API; that host dependency does not restrict firmware installed on the radio.
+See [Hardware Validation](docs/hardware-validation.md) before rolling a new firmware tuple across a
+fleet.
 
 On **macOS with Docker Desktop**, USB serial passthrough is not supported. Use a native install or a Linux VM for LoRa hardware.
 
@@ -570,8 +582,8 @@ make docker-test-arm64    # test on ARM64 (Pi architecture, uses QEMU on x86)
 ```
 
 The Make targets build one project wheel, install its runtime dependencies from the hashed
-universal production profile in a Debian Trixie/Python 3.14 container, install that wheel, and run
-the test suite.
+universal production profile in a Debian Trixie/Python 3.14.7 container, install that wheel, and
+run the test suite.
 
 ## Configuration
 
@@ -747,7 +759,7 @@ A deployed ReticulumPi node has multiple Reticulum identities. Each LXMF plugin 
 | **info_bot** | Info bot -- responds to `!` commands | `/var/lib/reticulumpi/.local/share/reticulumpi/info_bot_lxmf/identity` |
 | **alert_system** | LXMF alerts -- separate identity for sending | Creates its own `RNS.Identity()` at runtime |
 | **meshtastic_gateway** | Meshtastic<>LXMF bridge -- receives LXMF messages to forward | `/var/lib/reticulumpi/.local/share/reticulumpi/meshtastic_gw_lxmf/identity` |
-| **meshtastic_gateway** (MQTT node) | Persistent Meshtastic node number for MQTT mode | `/var/lib/reticulumpi/.local/share/reticulumpi/meshtastic_gw_lxmf/meshtastic_node_num` |
+| **meshtastic_gateway** (MQTT node) | Persistent MQTT identity and crash-safe packet-ID reservation state; preserve the whole directory as one set | `/var/lib/reticulumpi/.local/share/reticulumpi/meshtastic_gw_lxmf/meshtastic_node_num` and `meshtastic_packet_ids.json` |
 | **NomadNet daemon** | Page server -- browsable via NomadNet TUI | `/var/lib/reticulumpi/.nomadnet/storage/identity` |
 | **NomadNet TUI** | Browse-only client (no node hosting) | `/var/lib/reticulumpi/.nomadnet-tui/storage/identity` |
 | **MeshChat** | Web UI chat over LXMF | `/var/lib/reticulumpi/meshchat/storage/identity` |

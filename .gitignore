@@ -23,6 +23,9 @@ htmlcov/
 !.claude/settings.json
 !.claude/commands/
 
+# Local Codex release/audit evidence (archived separately)
+.codex-*
+
 # OS
 .DS_Store
 Thumbs.db

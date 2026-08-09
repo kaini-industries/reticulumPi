@@ -8,10 +8,10 @@
       "integrity": "sha256-jWwkIyEy3KJOzxxH0VruKLpw1cND9OsrlV/okt+jvvE="
     },
     "spectrum.js": {
-      "path": "assets/spectrum-ASFS4YZU.js",
-      "bytes": 143569,
-      "sha256": "1e932acbc5c308ece94630a6a0fe5066b94c46ab4eedf2e1436801f86e394271",
-      "integrity": "sha256-HpMqy8XDCOzpRjCmoP5QZrlMRqtO7fLhQ2gB+G45QnE="
+      "path": "assets/spectrum-AGHVXE6R.js",
+      "bytes": 143735,
+      "sha256": "4b62b3135c59780c09168e7fe2db35670a6ec5006b7c0e443790594cb62e6848",
+      "integrity": "sha256-S2KzE1xZeAwJFo5/4ts1ZwpuxQBrfA5EN5BZTLYuaEg="
     },
     "login.js": {
       "path": "assets/login-XA2L5ZLL.js",
@@ -68,10 +68,10 @@
       "integrity": "sha256-d8WVk+PDeouwP0W8zjKoINuP29MJj7cZ/OuUE5bpc2k="
     },
     "feature-meshtastic.js": {
-      "path": "assets/feature-meshtastic-XNZW7CHH.js",
-      "bytes": 14464,
-      "sha256": "1306a1c10680aba374b684bd46ef01416315089f1abc10a7bc8bf14f7a3aa091",
-      "integrity": "sha256-EwahwQaAq6N0toS9Ru8BQWMVCJ8avBCnvIvxT3o6oJE="
+      "path": "assets/feature-meshtastic-ZZX7QPOM.js",
+      "bytes": 15514,
+      "sha256": "0a8b0027b4c4748490f41bad33d0896bf73dd891b27109503e02bf5b04a1b627",
+      "integrity": "sha256-CosAJ7TEdISQ9ButM9CJa/c92JGycQlQPgK/WwShtic="
     },
     "feature-meshcore.js": {
       "path": "assets/feature-meshcore-7D774HN3.js",
@@ -92,10 +92,10 @@
       "integrity": "sha256-jpnBaVRDPMr7va6kFFkeggzVNiO3y10W4gaXmG4tMy4="
     },
     "feature-link-tester.js": {
-      "path": "assets/feature-link-tester-WSQGTEZJ.js",
-      "bytes": 7299,
-      "sha256": "b038bb53eb47562b5b22ff80887cf22079bb1d37ad624f53327152387dae9da5",
-      "integrity": "sha256-sDi7U+tHVitbIv+AiHzyIHm7HTetYk9TMnFSOH2unaU="
+      "path": "assets/feature-link-tester-UIISASM7.js",
+      "bytes": 7465,
+      "sha256": "54499c1c3c69f3dd7233bbea6e5845d084e7a86794e0a8ea6b0aa47bcdb8db8a",
+      "integrity": "sha256-VEmcHDxp891yM7vqblhF0ITnqGeU4Kjqawqke82424o="
     },
     "feature-lora.js": {
       "path": "assets/feature-lora-DNKNAW6Q.js",

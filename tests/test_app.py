@@ -1497,6 +1497,38 @@ def test_lifecycle_v2_readiness_timeout_is_retained_as_hung(mock_app):
         app.disable_plugin("never_ready")
 
 
+def test_plugin_specific_start_timeout_is_opt_in_and_globally_bounded(mock_app):
+    class DefaultBudget(PluginBase):
+        plugin_name = "default_budget"
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class HardwareBudget(DefaultBudget):
+        plugin_name = "hardware_budget"
+        plugin_start_timeout_seconds = 75.0
+
+    class ExcessiveBudget(DefaultBudget):
+        plugin_name = "excessive_budget"
+        plugin_start_timeout_seconds = 999.0
+
+    class InvalidBudget(DefaultBudget):
+        plugin_name = "invalid_budget"
+        plugin_start_timeout_seconds = True
+
+    app = ReticulumPiApp()
+    app.PLUGIN_START_TIMEOUT = 30.0
+    app.STARTUP_TIMEOUT = 110.0
+
+    assert app._plugin_start_timeout(DefaultBudget(mock_app, {})) == 30.0
+    assert app._plugin_start_timeout(HardwareBudget(mock_app, {})) == 75.0
+    assert app._plugin_start_timeout(ExcessiveBudget(mock_app, {})) == 110.0
+    assert app._plugin_start_timeout(InvalidBudget(mock_app, {})) == 30.0
+
+
 def test_lifecycle_v2_explicit_start_failure_preserves_reason(mock_app):
     class FailedReadiness(PluginBase):
         plugin_name = "failed_readiness"

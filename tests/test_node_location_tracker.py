@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import sqlite3
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -177,6 +179,113 @@ class TestLifecycle:
             conn.close()
 
         plugin.stop()
+
+
+class TestThreadedConnections:
+    def test_storage_work_uses_connections_owned_by_distinct_threads(self, mock_app, base_config):
+        msh_gw = _mock_meshtastic_gateway(
+            nodes=[_meshtastic_node("!threaded", 40.7128, -74.0060, "ThreadedNode")]
+        )
+        mock_app.get_plugin = MagicMock(
+            side_effect=lambda name: {
+                "meshtastic_gateway": msh_gw,
+                "meshcore_gateway": None,
+            }.get(name)
+        )
+
+        plugin = _make_plugin(mock_app, base_config)
+        plugin._db_path = base_config["db_path"]
+        plugin._last_pos = {}
+        plugin._lock = threading.Lock()
+        plugin._no_gateways_logged = False
+        plugin._min_distance_m = 25.0
+        plugin._max_silence_s = 3600.0
+        plugin._retention_days = 1
+        plugin._max_rows = 500000
+
+        initialized = threading.Event()
+        collected = threading.Event()
+        pruned = threading.Event()
+        release_workers = threading.Event()
+
+        def wait_for(event, label):
+            if not event.wait(timeout=10):
+                raise AssertionError(f"timed out waiting for {label}")
+
+        def initialize_storage():
+            worker_id = threading.get_ident()
+            plugin._init_db()
+            conn = plugin._connect()
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO node_positions VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            "msh:!stale",
+                            time.time() - 2 * 86400,
+                            35.0,
+                            -90.0,
+                            "meshtastic",
+                            "StaleNode",
+                        ),
+                    )
+            finally:
+                conn.close()
+            initialized.set()
+            wait_for(release_workers, "worker release")
+            return worker_id
+
+        def collect_positions():
+            wait_for(initialized, "storage initialization")
+            worker_id = threading.get_ident()
+            plugin._collect_positions()
+            collected.set()
+            wait_for(release_workers, "worker release")
+            return worker_id
+
+        def prune_positions():
+            wait_for(collected, "position collection")
+            worker_id = threading.get_ident()
+            plugin._prune()
+            pruned.set()
+            wait_for(release_workers, "worker release")
+            return worker_id
+
+        def query_positions():
+            wait_for(pruned, "position pruning")
+            worker_id = threading.get_ident()
+            history = plugin.get_history(["msh:!threaded", "msh:!stale"], since=0)
+            summary = plugin.get_summary()
+            return worker_id, history, summary
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="node-loc-sqlite") as executor:
+            init_future = executor.submit(initialize_storage)
+            collect_future = executor.submit(collect_positions)
+            prune_future = executor.submit(prune_positions)
+            query_future = executor.submit(query_positions)
+            try:
+                query_id, history, summary = query_future.result(timeout=15)
+            finally:
+                release_workers.set()
+
+            init_id = init_future.result(timeout=5)
+            collect_id = collect_future.result(timeout=5)
+            prune_id = prune_future.result(timeout=5)
+
+        assert len({init_id, collect_id, prune_id, query_id}) == 4
+        assert history["msh:!stale"] == []
+        assert history["msh:!threaded"] == [
+            {
+                "timestamp": history["msh:!threaded"][0]["timestamp"],
+                "latitude": 40.7128,
+                "longitude": -74.0060,
+                "source": "meshtastic",
+                "name": "ThreadedNode",
+            }
+        ]
+        assert summary["total_nodes_tracked"] == 1
+        assert summary["total_positions"] == 1
+        assert summary["db_size_bytes"] > 0
 
 
 class TestPositionRecording:

@@ -42,20 +42,20 @@ runtime or hardware context.
 | `example_plugin` | `1.0.0` | Example scaffold — announces a destination and echoes packets | [`src/reticulumpi/builtin_plugins/example_plugin.py`](../src/reticulumpi/builtin_plugins/example_plugin.py) |
 | `file_transfer` | `1.0.0` | File transfer between nodes over Reticulum | [`src/reticulumpi/builtin_plugins/file_transfer.py`](../src/reticulumpi/builtin_plugins/file_transfer.py) |
 | `fm_receiver` | `0.1.0` | FM/AM radio receiver via RTL-SDR | [`src/reticulumpi/builtin_plugins/fm_receiver.py`](../src/reticulumpi/builtin_plugins/fm_receiver.py) |
-| `gps_telemetry` | `1.0.0` | NMEA GPS receiver telemetry | [`src/reticulumpi/builtin_plugins/gps_telemetry.py`](../src/reticulumpi/builtin_plugins/gps_telemetry.py) |
+| `gps_telemetry` | `1.0.1` | NMEA GPS receiver telemetry | [`src/reticulumpi/builtin_plugins/gps_telemetry.py`](../src/reticulumpi/builtin_plugins/gps_telemetry.py) |
 | `heartbeat_announce` | `1.0.0` | Periodically announces node presence on the Reticulum network | [`src/reticulumpi/builtin_plugins/heartbeat_announce.py`](../src/reticulumpi/builtin_plugins/heartbeat_announce.py) |
 | `hotspot_monitor` | `1.0.0` | Monitors Wi-Fi hotspot (hostapd) status and clients | [`src/reticulumpi/builtin_plugins/hotspot_monitor.py`](../src/reticulumpi/builtin_plugins/hotspot_monitor.py) |
 | `info_bot` | `2.0.0` | Responds to LXMF commands with internet-sourced information | [`src/reticulumpi/builtin_plugins/info_bot.py`](../src/reticulumpi/builtin_plugins/info_bot.py) |
 | `ism_decoder` | `0.1.0` | ISM band decoder (rtl_433) | [`src/reticulumpi/builtin_plugins/ism_decoder.py`](../src/reticulumpi/builtin_plugins/ism_decoder.py) |
 | `lora_diagnostics` | `1.0.0` | LoRa traffic monitoring, announce beaconing, and peer tracking | [`src/reticulumpi/builtin_plugins/lora_diagnostics.py`](../src/reticulumpi/builtin_plugins/lora_diagnostics.py) |
-| `lora_link_tester` | `0.1.0` | Meshtastic LoRa link quality tester (dedicated radio) | [`src/reticulumpi/builtin_plugins/lora_link_tester.py`](../src/reticulumpi/builtin_plugins/lora_link_tester.py) |
+| `lora_link_tester` | `0.1.1` | Meshtastic LoRa link quality tester (dedicated radio) | [`src/reticulumpi/builtin_plugins/lora_link_tester.py`](../src/reticulumpi/builtin_plugins/lora_link_tester.py) |
 | `lora_scanner` | `0.2.0` | Dedicated RTL-SDR LoRa-band scanner with channel analysis | [`src/reticulumpi/builtin_plugins/lora_scanner.py`](../src/reticulumpi/builtin_plugins/lora_scanner.py) |
 | `mesh_bridge` | `1.0.0` | Relays broadcasts (and optionally DMs) between Meshtastic and MeshCore. | [`src/reticulumpi/builtin_plugins/mesh_bridge.py`](../src/reticulumpi/builtin_plugins/mesh_bridge.py) |
 | `mesh_telemetry` | `1.0.0` | Distributed mesh telemetry — broadcast and receive node metrics | [`src/reticulumpi/builtin_plugins/mesh_telemetry.py`](../src/reticulumpi/builtin_plugins/mesh_telemetry.py) |
 | `meshchat_server` | `1.0.0` | Manages a MeshChat web UI server as a subprocess | [`src/reticulumpi/builtin_plugins/meshchat_server.py`](../src/reticulumpi/builtin_plugins/meshchat_server.py) |
-| `meshcore_gateway` | `1.0.0` | Bridges MeshCore LoRa mesh with ReticulumPi | [`src/reticulumpi/builtin_plugins/meshcore_gateway.py`](../src/reticulumpi/builtin_plugins/meshcore_gateway.py) |
-| `meshcore_observer` | `1.0.0` | MeshCore companion observer for letsmesh.net analyzer | [`src/reticulumpi/builtin_plugins/meshcore_observer.py`](../src/reticulumpi/builtin_plugins/meshcore_observer.py) |
-| `meshtastic_gateway` | `1.2.0` | Bridges Meshtastic text messages with LXMF over Reticulum | [`src/reticulumpi/builtin_plugins/meshtastic_gateway.py`](../src/reticulumpi/builtin_plugins/meshtastic_gateway.py) |
+| `meshcore_gateway` | `1.0.3` | Bridges MeshCore LoRa mesh with ReticulumPi | [`src/reticulumpi/builtin_plugins/meshcore_gateway.py`](../src/reticulumpi/builtin_plugins/meshcore_gateway.py) |
+| `meshcore_observer` | `1.0.3` | MeshCore companion observer for letsmesh.net analyzer | [`src/reticulumpi/builtin_plugins/meshcore_observer.py`](../src/reticulumpi/builtin_plugins/meshcore_observer.py) |
+| `meshtastic_gateway` | `1.2.1` | Bridges Meshtastic text messages with LXMF over Reticulum | [`src/reticulumpi/builtin_plugins/meshtastic_gateway.py`](../src/reticulumpi/builtin_plugins/meshtastic_gateway.py) |
 | `meshtastic_responder` | `1.0.0` | Auto-replies to Meshtastic DMs with configurable commands | [`src/reticulumpi/builtin_plugins/meshtastic_responder.py`](../src/reticulumpi/builtin_plugins/meshtastic_responder.py) |
 | `message_echo` | `1.0.0` | Responds to incoming LXMF messages with an echo reply | [`src/reticulumpi/builtin_plugins/message_echo.py`](../src/reticulumpi/builtin_plugins/message_echo.py) |
 | `messaging_hub` | `1.1.0` | Unified message store and chat hub for LXMF, Meshtastic, and MeshCore | [`src/reticulumpi/builtin_plugins/messaging_hub.py`](../src/reticulumpi/builtin_plugins/messaging_hub.py) |

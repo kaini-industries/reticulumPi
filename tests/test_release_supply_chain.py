@@ -68,6 +68,119 @@ def test_pytest_treats_warnings_as_release_failures():
     assert project["tool"]["pytest"]["ini_options"]["filterwarnings"] == ["error"]
 
 
+def test_sdist_manifest_includes_container_scanner_state():
+    manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+
+    assert "include docker/security/README.md" in manifest
+    assert "include docker/security/*.openvex.json" in manifest
+
+
+def test_development_extra_covers_meshcore_signing_tests():
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)
+
+    assert "PyNaCl>=1.5,<2.0" in project["project"]["optional-dependencies"]["dev"]
+    assert "aiohttp>=3.14.3,<4.0" in project["project"]["optional-dependencies"]["dev"]
+    assert "cryptography>=50.0.0,<51.0" in project["project"]["optional-dependencies"]["dev"]
+
+
+def test_all_features_input_matches_production_optional_dependencies():
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)
+
+    optional = project["project"]["optional-dependencies"]
+    production_groups = (
+        "nomadnet",
+        "dashboard",
+        "lora",
+        "sensors",
+        "meshtastic",
+        "meshcore",
+        "space",
+        "gps",
+        "adsb",
+    )
+    expected = {requirement for group in production_groups for requirement in optional[group]}
+    source = (ROOT / "constraints/production-universal-all-features.in").read_text(encoding="utf-8")
+    actual = {
+        line.strip()
+        for line in source.splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "-r "))
+    }
+
+    assert actual == expected
+    assert "aiohttp>=3.14.3,<4.0" in actual
+    assert "cryptography>=50.0.0,<51.0" in actual
+    assert "meshtastic==2.7.10" in actual
+    assert "PyNaCl>=1.5,<2.0" in actual
+    lock = (ROOT / "constraints/production-universal-all-features.txt").read_text(encoding="utf-8")
+    assert re.search(r"^aiohttp==3\.14\.3 \\$", lock, re.MULTILINE)
+    assert re.search(r"^cryptography==50\.0\.0 \\$", lock, re.MULTILINE)
+    assert re.search(r"^meshtastic==2\.7\.10 \\$", lock, re.MULTILINE)
+    assert re.search(r"^pynacl==1\.6\.2 \\$", lock, re.MULTILINE)
+
+
+def test_lock_regeneration_uses_exact_reviewed_cutoff_timestamp():
+    cutoff = "--exclude-newer 2026-07-11T00:00:00Z"
+    aiohttp_cutoff = "--exclude-newer-package aiohttp=2026-07-23T01:57:28Z"
+    cryptography_cutoff = "--exclude-newer-package cryptography=2026-07-31T14:25:11Z"
+    expected_package_cutoffs = {
+        "production-universal-core": (cryptography_cutoff,),
+        "production-universal-dashboard-nomadnet": (aiohttp_cutoff, cryptography_cutoff),
+        "production-universal-all-features": (aiohttp_cutoff, cryptography_cutoff),
+        "production-universal-build": (),
+    }
+    for profile in CONSTRAINT_PROFILES:
+        header = (
+            (ROOT / "constraints" / f"{profile}.txt").read_text(encoding="utf-8").splitlines()[:3]
+        )
+        command = " ".join(header)
+        assert cutoff in command, profile
+        for package_cutoff in expected_package_cutoffs[profile]:
+            assert package_cutoff in command, profile
+        if profile == "production-universal-build":
+            assert "--exclude-newer-package" not in command
+
+    release_process = (ROOT / "docs/release-process.md").read_text(encoding="utf-8")
+    assert release_process.count(cutoff) == len(CONSTRAINT_PROFILES)
+    assert release_process.count(aiohttp_cutoff) == 2
+    assert release_process.count(cryptography_cutoff) == 3
+    assert release_process.count("--output-file constraints/production-universal-") == 4
+    assert "2026-07-23T01:57:27.037320Z" in release_process
+    assert "2026-07-31T14:25:10.110218Z" in release_process
+
+
+def test_runtime_locks_exclude_the_remediated_dependency_versions():
+    core_input = (ROOT / "constraints/production-universal-core.in").read_text(encoding="utf-8")
+    dashboard_input = (ROOT / "constraints/production-universal-dashboard-nomadnet.in").read_text(
+        encoding="utf-8"
+    )
+    runtime_locks = {
+        profile: (ROOT / "constraints" / f"{profile}.txt").read_text(encoding="utf-8")
+        for profile in (
+            "production-universal-core",
+            "production-universal-dashboard-nomadnet",
+            "production-universal-all-features",
+        )
+    }
+
+    assert "cryptography>=50.0.0,<51.0" in core_input
+    assert "aiohttp>=3.14.3,<4.0" in dashboard_input
+    assert re.search(
+        r"^cryptography==50\.0\.0 \\$", runtime_locks["production-universal-core"], re.MULTILINE
+    )
+    for profile in (
+        "production-universal-dashboard-nomadnet",
+        "production-universal-all-features",
+    ):
+        assert re.search(r"^aiohttp==3\.14\.3 \\$", runtime_locks[profile], re.MULTILINE)
+        assert re.search(r"^cryptography==50\.0\.0 \\$", runtime_locks[profile], re.MULTILINE)
+
+    combined = "\n".join(runtime_locks.values())
+    assert "aiohttp==3.14.1" not in combined
+    assert "cryptography==49.0.0" not in combined
+
+
 def test_cyclonedx_release_sbom_is_verified_fail_closed(tmp_path):
     sbom = tmp_path / "reticulumpi.cdx.json"
     sbom.write_text(
@@ -282,7 +395,7 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
         "only-fixed": True,
         "output-format": "table",
         "grype-version": "v0.110.0",
-        "vex": "docker/security/cve-2026-15308.openvex.json",
+        "vex": "docker/security/python-3.14.7-grype-db-bridge.openvex.json",
         "cache-db": True,
     }
     assert "reticulumpi:${{ matrix.suffix }}" in named_steps[verify_name]["run"]

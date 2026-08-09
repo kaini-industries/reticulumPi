@@ -54,9 +54,18 @@
   function _onStart() {
     var body = {};
     var target = _targetInput ? _targetInput.value.trim() : '';
-    var count = _countInput ? parseInt(_countInput.value, 10) : 20;
+    var rawCount = _countInput ? _countInput.value.trim() : '20';
+    var count = Number(rawCount);
+    if (!rawCount || !Number.isInteger(count) || count < 0) {
+      if (_countInput) {
+        _countInput.setCustomValidity('Enter a non-negative whole number (0 = unlimited).');
+        _countInput.reportValidity();
+      }
+      return;
+    }
+    if (_countInput) _countInput.setCustomValidity('');
     if (target) body.target = target;
-    if (count > 0) body.count = count;
+    body.count = count;
     api('/api/link_tester/start', {
       method: 'POST',
       json: body,
@@ -304,7 +313,7 @@
     var start = Math.max(0, _history.length - 50);
     for (var i = _history.length - 1; i >= start; i--) {
       var r = _history[i];
-      var cls = r.status === 'lost' ? ' class="lt-lost"' : '';
+      var cls = r.status !== 'ack' ? ' class="lt-lost"' : '';
       var t = r.time ? new Date(r.time * 1000) : null;
       var ts = t ? (t.getHours() + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2)) : '--';
       rows += '<tr' + cls + '>'

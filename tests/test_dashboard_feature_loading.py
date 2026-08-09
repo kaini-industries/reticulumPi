@@ -124,3 +124,28 @@ def test_spectrum_navigation_fails_closed_until_a_backing_plugin_is_ready():
     assert "spectrumLink.hidden = !spectrumAvailable" in source
     for plugin in ("spectrum_scanner", "lora_scanner", "lora_link_tester"):
         assert f"_pluginIsReady(plugins, '{plugin}')" in source
+
+
+def test_meshtastic_dashboard_treats_every_nonhealthy_recovery_state_as_warning():
+    source = (STATIC / "meshtastic.js").read_text()
+
+    assert "return state === 'healthy' || state === 'recovered';" in source
+    assert "recoveryUnhealthy = _fwWatchdog && !firmwareRecoveryIsHealthy(recoveryState)" in source
+    assert "else if (recoveryUnhealthy)" in source
+    assert "else if (!firmwareRecoveryIsHealthy(recoveryState))" in source
+    assert "stateLabel = firmwareRecoveryLabel(recoveryState)" in source
+
+
+def test_link_tester_dashboard_preserves_explicit_zero_as_unlimited():
+    source = (STATIC / "link_tester.js").read_text()
+    index = (STATIC / "index.html").read_text()
+    spectrum = (STATIC / "spectrum.html").read_text()
+
+    assert "var rawCount = _countInput ? _countInput.value.trim() : '20';" in source
+    assert "var count = Number(rawCount);" in source
+    assert "!rawCount || !Number.isInteger(count) || count < 0" in source
+    assert "body.count = count;" in source
+    assert 'id="link-tester-count"' in index
+    assert 'id="link-tester-count"' in spectrum
+    assert 'id="link-tester-count" class="lt-input lt-input-sm" value="20" min="0"' in index
+    assert 'id="link-tester-count" class="lt-input lt-input-sm" value="20" min="0"' in spectrum

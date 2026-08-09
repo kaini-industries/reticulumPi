@@ -693,11 +693,13 @@ assert "install_dir: /srv/reticulumpi-external/meshchat" in config
 PY
     "$install_root/current/.venv/bin/python" - <<'PY'
 from importlib.metadata import version
+import nacl.bindings  # noqa: F401
 
 for distribution in (
     "RPi.GPIO",
     "meshtastic",
     "meshcore",
+    "PyNaCl",
     "pyModeS",
     "pynmea2",
     "pyserial",

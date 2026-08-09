@@ -6,13 +6,23 @@ exercise RMC/GGA/GSA/GSV/VTG ingestion and the reconnect/stale code paths.
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def gps_serial_registry():
+    """Keep unit tests independent of host tty inventory."""
+
+    with patch("reticulumpi.builtin_plugins.gps_telemetry.serial_device_registry") as registry:
+        registry.claim.return_value = MagicMock(name="gps-serial-lease")
+        yield registry
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +107,7 @@ def _make_plugin(mock_app, config, *, start: bool = False):
 def gps_config():
     return {
         "enabled": True,
-        "serial_port": "/dev/ttyUSB0",
+        "serial_port": "/dev/gps-test",
         "baudrate": 4800,
         "read_timeout": 0.1,
         "reconnect_delay": 1,
@@ -117,9 +127,29 @@ class TestValidateConfig:
         plugin = _make_plugin(mock_app, gps_config)
         assert plugin.plugin_name == "gps_telemetry"
 
+    def test_default_serial_port_uses_stable_gps_alias(self, mock_app, gps_config):
+        gps_config.pop("serial_port")
+        plugin = _make_plugin(mock_app, gps_config)
+
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+            assert plugin._serial_port == "/dev/gps"
+            plugin.stop()
+
     def test_raises_for_empty_serial_port(self, mock_app, gps_config):
         gps_config["serial_port"] = ""
         with pytest.raises(ValueError, match="serial_port"):
+            _make_plugin(mock_app, gps_config)
+
+    @pytest.mark.parametrize("serial_port", ["/dev/ttyUSB0", "/dev/ttyACM17"])
+    def test_rejects_kernel_assigned_serial_indexes(
+        self,
+        mock_app,
+        gps_config,
+        serial_port,
+    ):
+        gps_config["serial_port"] = serial_port
+        with pytest.raises(ValueError, match="stable serial device path"):
             _make_plugin(mock_app, gps_config)
 
     def test_raises_for_bad_baudrate(self, mock_app, gps_config):
@@ -131,6 +161,28 @@ class TestValidateConfig:
         gps_config["read_timeout"] = 0
         with pytest.raises(ValueError, match="read_timeout"):
             _make_plugin(mock_app, gps_config)
+
+    def test_rejects_serial_silence_not_longer_than_read_timeout(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        gps_config["read_timeout"] = 5
+        gps_config["serial_silence_timeout"] = 5
+        with pytest.raises(ValueError, match="must exceed read_timeout"):
+            _make_plugin(mock_app, gps_config)
+
+    def test_gpsd_ignores_serial_only_silence_validation(self, mock_app, gps_config):
+        gps_config["source"] = "gpsd"
+        gps_config["serial_port"] = "/dev/ttyUSB0"
+        gps_config["serial_silence_timeout"] = "unused-in-gpsd"
+
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+            plugin.stop()
+
+        assert plugin._serial_silence_timeout == 30.0
 
     def test_raises_for_bad_reconnect_delay(self, mock_app, gps_config):
         gps_config["reconnect_delay"] = 0
@@ -151,6 +203,28 @@ class TestValidateConfig:
         with patch.dict(sys.modules, {"pynmea2": None}):
             with pytest.raises(ValueError, match="pynmea2"):
                 _make_plugin(mock_app, gps_config)
+
+    @pytest.mark.parametrize(
+        ("updates", "message"),
+        [
+            ({"source": "usb"}, "source must"),
+            ({"source": "gpsd", "gpsd_host": ""}, "gpsd_host"),
+            ({"source": "gpsd", "gpsd_port": 0}, "gpsd_port"),
+            ({"serial_silence_timeout": 4}, "serial_silence_timeout"),
+            ({"stale_check_interval": 0}, "stale_check_interval"),
+        ],
+    )
+    def test_rejects_remaining_invalid_runtime_settings(
+        self,
+        mock_app,
+        gps_config,
+        updates,
+        message,
+    ):
+        gps_config.update(updates)
+
+        with pytest.raises(ValueError, match=message):
+            _make_plugin(mock_app, gps_config)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +406,7 @@ class TestSentenceHandling:
         plugin._connected = True
         plugin._reconnect_failures = 0
         plugin._start_monotonic = time.monotonic()
-        plugin._serial_port = "/dev/ttyUSB0"
+        plugin._serial_port = "/dev/gps-test"
         plugin._baudrate = 4800
 
         # Need a valid fix first so GSA is applied to last_fix
@@ -373,7 +447,7 @@ class TestSnapshotShape:
         plugin._connected = True
         plugin._reconnect_failures = 0
         plugin._start_monotonic = time.monotonic()
-        plugin._serial_port = "/dev/ttyUSB0"
+        plugin._serial_port = "/dev/gps-test"
         plugin._baudrate = 4800
 
         plugin._handle_sentence(RMC_VALID)
@@ -427,7 +501,7 @@ class TestSnapshotShape:
         plugin._connected = False
         plugin._reconnect_failures = 0
         plugin._start_monotonic = time.monotonic()
-        plugin._serial_port = "/dev/ttyUSB0"
+        plugin._serial_port = "/dev/gps-test"
         plugin._baudrate = 4800
 
         snap = plugin.get_snapshot()
@@ -440,7 +514,7 @@ class TestSnapshotShape:
         plugin._active = True
         plugin._lock = threading.Lock()
         plugin._connected = True
-        plugin._serial_port = "/dev/ttyUSB0"
+        plugin._serial_port = "/dev/gps-test"
         plugin._baudrate = 4800
         plugin._msgs_received = 1
         plugin._sentences_parsed = 1
@@ -476,7 +550,7 @@ class TestReadLoopAndStaleness:
     def test_full_end_to_end_with_fake_serial(self, mock_app, gps_config):
         from reticulumpi import events
 
-        fake = FakeSerial("/dev/ttyUSB0", 4800, timeout=0.1)
+        fake = FakeSerial("/dev/gps-test", 4800, timeout=0.1)
         for s in (RMC_VALID, GGA_VALID, GSA_3D, GSV_1, GSV_2, GSV_3):
             fake.feed(s)
 
@@ -615,7 +689,7 @@ class TestReadLoopAndStaleness:
         Post-fix a dedicated `except TypeError` handler bails quietly when
         _active is False.
         """
-        fake = FakeSerial("/dev/ttyUSB0", 4800, timeout=0.1)
+        fake = FakeSerial("/dev/gps-test", 4800, timeout=0.1)
         plugin_holder: list[Any] = [None]
 
         def racing_readline() -> bytes:
@@ -665,6 +739,757 @@ class TestReadLoopAndStaleness:
                 plugin.stop()
         finally:
             threading.excepthook = original_hook
+
+    def test_claim_and_revalidate_happen_before_serial_open(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        order: list[str] = []
+        lease = MagicMock()
+        lease.revalidate.side_effect = lambda: order.append("revalidate")
+        gps_serial_registry.claim.side_effect = lambda *_args: order.append("claim") or lease
+        fake = FakeSerial("/dev/gps-test", 4800, timeout=0.1)
+
+        def open_serial(*_args, **_kwargs):
+            order.append("open")
+            return fake
+
+        with patch("serial.Serial", side_effect=open_serial):
+            plugin = _make_plugin(mock_app, gps_config, start=True)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and "open" not in order:
+                time.sleep(0.01)
+            plugin.stop()
+
+        assert order[:3] == ["claim", "revalidate", "open"]
+        lease.release.assert_called_once_with()
+
+    def test_registry_conflict_prevents_serial_constructor(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        from reticulumpi.serial_devices import SerialDeviceIdentityError
+
+        gps_config["max_reconnect_attempts"] = 1
+        gps_serial_registry.claim.side_effect = SerialDeviceIdentityError("device unavailable")
+
+        with patch("serial.Serial") as serial_ctor:
+            plugin = _make_plugin(mock_app, gps_config, start=True)
+            plugin._join_threads(timeout=2)
+            plugin.stop()
+
+        serial_ctor.assert_not_called()
+
+    def test_changed_lease_is_released_and_reclaimed(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        from reticulumpi.serial_devices import StaleSerialDeviceLeaseError
+
+        plugin = _make_plugin(mock_app, gps_config)
+        plugin._lock = threading.Lock()
+        plugin._serial_port = "/dev/gps-test"
+        old_lease = MagicMock()
+        old_lease.revalidate.side_effect = StaleSerialDeviceLeaseError("stale")
+        new_lease = MagicMock()
+        plugin._serial_device_lease = old_lease
+        gps_serial_registry.claim.return_value = new_lease
+
+        assert plugin._ensure_serial_device_lease() is new_lease
+        old_lease.release.assert_called_once_with()
+        new_lease.revalidate.assert_called_once_with()
+
+    def test_silent_serial_stream_is_closed_and_retried(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        plugin = _make_plugin(mock_app, gps_config)
+        plugin._source = "serial"
+        plugin._serial_port = "/dev/gps-test"
+        plugin._baudrate = 4800
+        plugin._read_timeout = 0.01
+        plugin._serial_silence_timeout = 0.03
+        plugin._reconnect_delay = 1
+        plugin._max_reconnect_attempts = 0
+        plugin._lock = threading.Lock()
+        plugin._serial_condition = threading.Condition(plugin._lock)
+        plugin._serial_generation = 1
+        plugin._serial_reader_live = False
+        plugin._serial_close_attempts = set()
+        plugin._unresolved_serial_handles = {}
+        plugin._lease_release_watcher = None
+        plugin._serial_teardown_complete = False
+        plugin._serial = None
+        plugin._serial_device_lease = None
+        plugin._connected = False
+        plugin._last_byte_monotonic = 0.0
+        plugin._reconnect_failures = 0
+        plugin._active = True
+        fake = FakeSerial("/dev/gps-test", 4800, timeout=0.01)
+
+        def stop_after_first_disconnect(_delay):
+            plugin._active = False
+
+        with (
+            patch("serial.Serial", return_value=fake),
+            patch.object(plugin, "_sleep_while_active", side_effect=stop_after_first_disconnect),
+        ):
+            plugin._read_loop()
+
+        assert fake.closed is True
+        assert plugin._connected is False
+
+    def test_stop_retains_lease_until_blocked_constructor_returns(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        constructor_entered = threading.Event()
+        return_handle = threading.Event()
+        fake = FakeSerial("/dev/gps-test", 4800, timeout=0.1)
+        lease = MagicMock(name="gps-lease")
+        gps_serial_registry.claim.return_value = lease
+
+        def blocked_constructor(*_args, **_kwargs):
+            constructor_entered.set()
+            assert return_handle.wait(timeout=3)
+            return fake
+
+        with patch("serial.Serial", side_effect=blocked_constructor):
+            plugin = _make_plugin(mock_app, gps_config, start=True)
+            assert constructor_entered.wait(timeout=2)
+            assert plugin._serial_reader_live
+
+            with patch.object(plugin, "_join_threads"):
+                plugin.stop()
+
+            lease.release.assert_not_called()
+            return_handle.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and lease.release.call_count == 0:
+                time.sleep(0.01)
+
+        assert fake.closed
+        lease.release.assert_called_once_with()
+        published = [call.args[0] for call in mock_app.event_bus.publish.call_args_list]
+        from reticulumpi import events
+
+        assert events.GPS_DEVICE_CONNECTED not in published
+
+    def test_stop_retains_lease_until_blocked_read_returns_without_silence_warning(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+        caplog,
+    ):
+        read_entered = threading.Event()
+        return_read = threading.Event()
+        lease = MagicMock(name="gps-lease")
+        gps_serial_registry.claim.return_value = lease
+
+        class BlockedReadSerial(FakeSerial):
+            def readline(self) -> bytes:
+                read_entered.set()
+                assert return_read.wait(timeout=3)
+                return b""
+
+        fake = BlockedReadSerial("/dev/gps-test", 4800, timeout=0.1)
+        with (
+            patch("serial.Serial", return_value=fake),
+            caplog.at_level(logging.WARNING, logger="reticulumpi.plugin.gps_telemetry"),
+        ):
+            plugin = _make_plugin(mock_app, gps_config, start=True)
+            assert read_entered.wait(timeout=2)
+
+            with patch.object(plugin, "_join_threads"):
+                plugin.stop()
+
+            assert fake.closed
+            lease.release.assert_not_called()
+            return_read.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and lease.release.call_count == 0:
+                time.sleep(0.01)
+
+        lease.release.assert_called_once_with()
+        assert "serial stream silent" not in caplog.text
+        assert "GPS read failed" not in caplog.text
+
+    def test_stop_bounds_hung_close_retains_handle_and_blocks_restart(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        close_entered = threading.Event()
+        finish_close = threading.Event()
+        released = threading.Event()
+
+        class HungCloseSerial(FakeSerial):
+            def close(self) -> None:
+                close_entered.set()
+                assert finish_close.wait(timeout=3)
+                super().close()
+
+        fake = HungCloseSerial("/dev/gps-test", 4800, timeout=0.1)
+        lease = MagicMock(name="gps-lease")
+        lease.release.side_effect = released.set
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+        plugin._serial = fake
+        plugin._serial_device_lease = lease
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.gps_telemetry._SERIAL_CLOSE_TIMEOUT",
+                0.02,
+            ),
+            patch("reticulumpi.builtin_plugins.gps_telemetry.record_hung_worker") as hung,
+            patch.object(plugin, "_join_threads") as join_threads,
+        ):
+            started = time.monotonic()
+            plugin.stop()
+            elapsed = time.monotonic() - started
+
+            assert close_entered.is_set()
+            assert elapsed < 0.5
+            join_threads.assert_called_once_with(timeout=5)
+            hung.assert_called_once_with()
+            assert plugin._unresolved_serial_handles == {id(fake): fake}
+            assert plugin._serial_close_attempts == {id(fake)}
+            assert plugin._serial_device_lease is lease
+            lease.release.assert_not_called()
+
+            with pytest.raises(RuntimeError, match="teardown is incomplete"):
+                plugin.start()
+
+            finish_close.set()
+            assert released.wait(timeout=2)
+
+        assert plugin._unresolved_serial_handles == {}
+        assert plugin._serial_close_attempts == set()
+        assert plugin._serial_device_lease is None
+
+    def test_stop_retries_transient_close_failure_and_allows_restart(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        released = threading.Event()
+        fake = FakeSerial("/dev/gps-test", 4800, timeout=0.1)
+        original_close = fake.close
+        close_calls = 0
+
+        def transient_close() -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                raise OSError("transient USB close failure")
+            original_close()
+
+        fake.close = transient_close  # type: ignore[method-assign]
+        lease = MagicMock(name="gps-lease")
+        lease.release.side_effect = released.set
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+        plugin._serial = fake
+        plugin._serial_device_lease = lease
+
+        with patch.object(plugin, "_join_threads"):
+            plugin.stop()
+
+        assert released.wait(timeout=2)
+        assert close_calls == 2
+        assert fake.closed
+        assert plugin._unresolved_serial_handles == {}
+        assert plugin._serial_device_lease is None
+
+        deadline = time.monotonic() + 2
+        while plugin._lease_release_watcher is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+            plugin.stop()
+
+    def test_nonempty_read_returned_after_stop_is_discarded(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        read_entered = threading.Event()
+        return_read = threading.Event()
+        lease = MagicMock(name="gps-lease")
+        gps_serial_registry.claim.return_value = lease
+
+        class LateReadSerial(FakeSerial):
+            def readline(self) -> bytes:
+                read_entered.set()
+                assert return_read.wait(timeout=3)
+                return (RMC_VALID + "\r\n").encode("ascii")
+
+        fake = LateReadSerial("/dev/gps-test", 4800, timeout=0.1)
+        with patch("serial.Serial", return_value=fake):
+            plugin = _make_plugin(mock_app, gps_config, start=True)
+            assert read_entered.wait(timeout=2)
+
+            with patch.object(plugin, "_join_threads"):
+                plugin.stop()
+
+            event_count_at_stop = mock_app.event_bus.publish.call_count
+            assert plugin._msgs_received == 0
+            assert plugin.last_fix is None
+
+            return_read.set()
+            deadline = time.monotonic() + 2
+            while plugin._serial_reader_live and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert plugin._serial_reader_live is False
+        assert plugin._msgs_received == 0
+        assert plugin.last_fix is None
+        assert mock_app.event_bus.publish.call_count == event_count_at_stop + 1
+        from reticulumpi import events
+
+        published_after_stop = [
+            call.args[0] for call in mock_app.event_bus.publish.call_args_list[event_count_at_stop:]
+        ]
+        assert published_after_stop == [events.GPS_DEVICE_DISCONNECTED]
+
+    def test_fresh_identity_change_is_retried_before_opening(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        from reticulumpi.serial_devices import (
+            SerialDeviceChangedError,
+            SerialDeviceIdentity,
+        )
+
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        expected = SerialDeviceIdentity("/dev/gps-test", "/dev/gps-test", 188, 0)
+        changed = SerialDeviceIdentity("/dev/gps-test", "/dev/ttyUSB1", 188, 1)
+        first_lease = MagicMock(name="changed-lease")
+        first_lease.revalidate.side_effect = SerialDeviceChangedError(
+            "/dev/gps-test",
+            expected,
+            changed,
+        )
+        second_lease = MagicMock(name="current-lease")
+        gps_serial_registry.claim.side_effect = [first_lease, second_lease]
+        fake = FakeSerial("/dev/gps-test", 4800, timeout=0.1)
+
+        def stop_on_read() -> bytes:
+            plugin._active = False
+            return b""
+
+        fake.readline = stop_on_read  # type: ignore[method-assign]
+        with (
+            patch("serial.Serial", return_value=fake) as serial_ctor,
+            patch.object(plugin, "_sleep_while_active"),
+        ):
+            plugin._read_loop(plugin._serial_generation)
+            plugin.stop()
+
+        first_lease.release.assert_called_once_with()
+        second_lease.release.assert_called_once_with()
+        serial_ctor.assert_called_once_with("/dev/gps-test", 4800, timeout=0.1)
+
+    def test_gpsd_mode_does_not_claim_a_tty(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        gps_config["source"] = "gpsd"
+        plugin = _make_plugin(mock_app, gps_config)
+
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+            plugin.stop()
+
+        gps_serial_registry.claim.assert_not_called()
+
+    def test_gpsd_blocked_read_is_fenced_closed_and_blocks_restart(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        import socket
+
+        gps_config.update(source="gpsd", read_timeout=0.1)
+        read_entered = threading.Event()
+        release_read = threading.Event()
+
+        class BlockingReader:
+            def __init__(self):
+                self.close_calls = 0
+
+            def readline(self) -> bytes:
+                read_entered.set()
+                assert release_read.wait(timeout=3)
+                return (RMC_VALID + "\r\n").encode("ascii")
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        class BlockingSocket:
+            def __init__(self, reader):
+                self.reader = reader
+                self.shutdown_calls: list[int] = []
+                self.close_calls = 0
+
+            def settimeout(self, _timeout) -> None:
+                pass
+
+            def connect(self, _address) -> None:
+                pass
+
+            def sendall(self, _payload) -> None:
+                pass
+
+            def makefile(self, _mode):
+                return self.reader
+
+            def shutdown(self, how) -> None:
+                self.shutdown_calls.append(how)
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        reader = BlockingReader()
+        sock = BlockingSocket(reader)
+
+        with patch("socket.socket", return_value=sock) as socket_ctor:
+            plugin = _make_plugin(mock_app, gps_config, start=True)
+            assert read_entered.wait(timeout=2)
+            assert plugin._gpsd_socket is sock
+            assert plugin._gpsd_reader_live is True
+
+            with patch.object(plugin, "_join_threads"):
+                plugin.stop()
+
+            event_count_at_stop = mock_app.event_bus.publish.call_count
+            assert sock.shutdown_calls == [socket.SHUT_RDWR]
+            assert sock.close_calls == 1
+            assert plugin._connected is False
+
+            with pytest.raises(RuntimeError, match="teardown is incomplete"):
+                plugin.start()
+            socket_ctor.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
+
+            release_read.set()
+            deadline = time.monotonic() + 2
+            while plugin._gpsd_reader_live and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert plugin._gpsd_reader_live is False
+        assert plugin._gpsd_socket is None
+        assert plugin._gpsd_reader is None
+        assert reader.close_calls == 1
+        assert plugin._msgs_received == 0
+        assert plugin.last_fix is None
+        assert mock_app.event_bus.publish.call_count == event_count_at_stop
+
+    def test_gpsd_connect_failure_gives_up_and_clears_exact_socket(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        gps_config.update(source="gpsd", max_reconnect_attempts=1)
+
+        class FailedSocket:
+            def settimeout(self, _timeout) -> None:
+                pass
+
+            def connect(self, _address) -> None:
+                raise OSError("gpsd unavailable")
+
+            def shutdown(self, _how) -> None:
+                raise OSError("already disconnected")
+
+            def close(self) -> None:
+                raise OSError("already closed")
+
+        sock = FailedSocket()
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        with patch("socket.socket", return_value=sock) as socket_ctor:
+            plugin._gpsd_read_loop(plugin._lifecycle_generation)
+
+        socket_ctor.assert_called_once()
+        assert plugin._active is False
+        assert plugin._reconnect_failures == 1
+        assert plugin._gpsd_socket is None
+        assert plugin._gpsd_reader_live is False
+
+    def test_gpsd_socket_factory_failure_uses_bounded_retry_policy(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        gps_config.update(source="gpsd", max_reconnect_attempts=1)
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        with patch("socket.socket", side_effect=OSError("socket table exhausted")):
+            plugin._gpsd_read_loop(plugin._lifecycle_generation)
+
+        assert plugin._active is False
+        assert plugin._reconnect_failures == 1
+        assert plugin._gpsd_socket is None
+        assert plugin._gpsd_reader_live is False
+
+    def test_gpsd_reader_without_generation_refuses_stopped_lifecycle(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        gps_config["source"] = "gpsd"
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+        plugin._active = False
+
+        with patch("socket.socket") as socket_ctor:
+            plugin._gpsd_read_loop()
+
+        socket_ctor.assert_not_called()
+        assert plugin._gpsd_reader_live is False
+
+    def test_gpsd_connect_failure_retries_then_publishes_clean_disconnect(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        from reticulumpi import events
+
+        gps_config.update(source="gpsd", max_reconnect_attempts=2)
+
+        class EmptyReader:
+            def __init__(self):
+                self.closed = False
+
+            def readline(self) -> bytes:
+                return b""
+
+            def close(self) -> None:
+                self.closed = True
+
+        class RetrySocket:
+            def __init__(self, *, fail_connect=False, reader=None):
+                self.fail_connect = fail_connect
+                self.reader = reader
+                self.closed = False
+
+            def settimeout(self, _timeout) -> None:
+                pass
+
+            def connect(self, _address) -> None:
+                if self.fail_connect:
+                    raise OSError("first attempt failed")
+
+            def sendall(self, _payload) -> None:
+                pass
+
+            def makefile(self, _mode):
+                return self.reader
+
+            def shutdown(self, _how) -> None:
+                pass
+
+            def close(self) -> None:
+                self.closed = True
+
+        reader = EmptyReader()
+        first = RetrySocket(fail_connect=True)
+        second = RetrySocket(reader=reader)
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        sleeps = 0
+
+        def stop_after_disconnect(_delay) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps == 2:
+                plugin._active = False
+
+        with (
+            patch("socket.socket", side_effect=[first, second]) as socket_ctor,
+            patch.object(plugin, "_sleep_while_active", side_effect=stop_after_disconnect),
+        ):
+            plugin._gpsd_read_loop(plugin._lifecycle_generation)
+
+        assert socket_ctor.call_count == 2
+        assert plugin._reconnect_failures == 1
+        assert first.closed is True
+        assert second.closed is True
+        assert reader.closed is True
+        published = [call.args[0] for call in mock_app.event_bus.publish.call_args_list]
+        assert events.GPS_DEVICE_CONNECTED in published
+        assert events.GPS_DEVICE_DISCONNECTED in published
+
+    def test_stale_monitor_finally_cannot_clear_newer_generation_owner(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        plugin = _make_plugin(mock_app, gps_config)
+        plugin._lock = threading.Lock()
+        plugin._lifecycle_generation = 7
+        plugin._stale_monitor_live = False
+        plugin._stale_monitor_generation = None
+        plugin._stale_check_interval = 1
+        plugin._have_fix = False
+        plugin.last_fix = None
+        plugin._active = True
+
+        def install_new_owner(_seconds) -> None:
+            with plugin._lock:
+                plugin._lifecycle_generation = 8
+                plugin._stale_monitor_generation = 8
+                plugin._stale_monitor_live = True
+
+        with patch.object(plugin, "_sleep_while_active", side_effect=install_new_owner):
+            plugin._stale_monitor(7)
+
+        assert plugin._stale_monitor_generation == 8
+        assert plugin._stale_monitor_live is True
+
+    def test_existing_lease_swap_during_revalidation_fails_closed(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        from reticulumpi.serial_devices import StaleSerialDeviceLeaseError
+
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        existing = MagicMock(name="existing-lease")
+        replacement = MagicMock(name="replacement-lease")
+
+        def swap_lease() -> None:
+            plugin._serial_device_lease = replacement
+
+        existing.revalidate.side_effect = swap_lease
+        plugin._serial_device_lease = existing
+
+        with pytest.raises(StaleSerialDeviceLeaseError, match="changed while validating"):
+            plugin._ensure_serial_device_lease()
+
+        assert plugin._serial_device_lease is replacement
+        existing.release.assert_not_called()
+
+    def test_stale_existing_lease_swap_does_not_release_new_owner(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        from reticulumpi.serial_devices import (
+            SerialDeviceChangedError,
+            SerialDeviceIdentity,
+            StaleSerialDeviceLeaseError,
+        )
+
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        existing = MagicMock(name="existing-lease")
+        replacement = MagicMock(name="replacement-lease")
+        claimed = MagicMock(name="losing-new-claim")
+        expected = SerialDeviceIdentity("/dev/gps-test", "/dev/ttyUSB0", 188, 0)
+        changed = SerialDeviceIdentity("/dev/gps-test", "/dev/ttyUSB1", 188, 1)
+
+        def swap_and_fail() -> None:
+            plugin._serial_device_lease = replacement
+            raise SerialDeviceChangedError("/dev/gps-test", expected, changed)
+
+        existing.revalidate.side_effect = swap_and_fail
+        plugin._serial_device_lease = existing
+        gps_serial_registry.claim.return_value = claimed
+
+        with pytest.raises(StaleSerialDeviceLeaseError, match="changed while claiming"):
+            plugin._ensure_serial_device_lease()
+
+        existing.release.assert_not_called()
+        claimed.release.assert_called_once_with()
+        assert plugin._serial_device_lease is replacement
+
+    def test_claim_swap_during_revalidation_releases_losing_claim(
+        self,
+        mock_app,
+        gps_config,
+        gps_serial_registry,
+    ):
+        from reticulumpi.serial_devices import StaleSerialDeviceLeaseError
+
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+
+        claimed = MagicMock(name="claimed-lease")
+        replacement = MagicMock(name="replacement-lease")
+
+        def swap_lease() -> None:
+            plugin._serial_device_lease = replacement
+
+        claimed.revalidate.side_effect = swap_lease
+        gps_serial_registry.claim.return_value = claimed
+
+        with pytest.raises(StaleSerialDeviceLeaseError, match="changed while claiming"):
+            plugin._ensure_serial_device_lease()
+
+        claimed.release.assert_called_once_with()
+        assert plugin._serial_device_lease is replacement
+
+    def test_close_worker_start_failure_is_retained_for_retry(
+        self,
+        mock_app,
+        gps_config,
+    ):
+        plugin = _make_plugin(mock_app, gps_config)
+        with patch.object(plugin, "_start_thread"):
+            plugin.start()
+        handle = MagicMock(name="serial-handle")
+
+        with (
+            patch(
+                "reticulumpi.builtin_plugins.gps_telemetry.threading.Thread.start",
+                side_effect=RuntimeError("thread unavailable"),
+            ),
+            patch("reticulumpi.builtin_plugins.gps_telemetry.record_hung_worker") as hung,
+        ):
+            assert plugin._close_serial_handle(handle) is False
+
+        assert plugin._unresolved_serial_handles == {id(handle): handle}
+        assert plugin._serial_close_attempts == set()
+        hung.assert_called_once_with()
+
+        assert plugin._retry_unresolved_serial_handles() is True
+        handle.close.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------

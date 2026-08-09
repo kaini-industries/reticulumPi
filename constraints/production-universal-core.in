@@ -4,3 +4,5 @@ rns>=1.2.5,<2.0
 lxmf>=0.9.4,<2.0
 pyyaml>=6.0,<8.0
 psutil>=5.9
+# Keep the shared RNS cryptography runtime above the reviewed security floor.
+cryptography>=50.0.0,<51.0

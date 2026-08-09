@@ -145,6 +145,8 @@ class TestStart:
         assert "enable_node = yes" in content
         assert "node_name = TestNode" in content
         assert "disable_propagation = yes" in content
+        assert "user_interface = none" in content
+        assert "user_interface = text" not in content
 
         plugin._active = False
         plugin._join_threads()
@@ -349,6 +351,31 @@ class TestHealthMonitor:
             plugin._active = False
 
         assert plugin._active is False
+
+    def test_disabled_auto_restart_is_not_reported_as_exhausted(
+        self, mock_app, nomadnet_config, caplog
+    ):
+        mock_app._reticulum_config_dir = None
+        nomadnet_config["auto_restart"] = False
+        plugin = _make_plugin(mock_app, nomadnet_config)
+
+        crashed = MagicMock()
+        crashed.poll.return_value = 255
+        crashed.returncode = 255
+        plugin._active = True
+        plugin._process = crashed
+        plugin._restart_count = 0
+
+        with (
+            caplog.at_level("ERROR", logger=plugin.log.name),
+            patch.object(plugin, "_sleep_while_active", return_value=None),
+        ):
+            plugin._health_monitor()
+
+        assert plugin._active is False
+        assert plugin._restart_count == 0
+        assert "automatic restart is disabled" in caplog.text
+        assert "exceeded max restarts" not in caplog.text
 
 
 class TestWriteDefaultConfig:

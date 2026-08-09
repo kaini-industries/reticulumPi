@@ -23,14 +23,31 @@ from reticulumpi.internet_probe import InternetProbe
 from reticulumpi.migrations import get_migration_metrics, migrate_target
 from reticulumpi.plugin_base import PluginBase, PluginHealth, PluginState
 from reticulumpi.plugin_loader import PluginLoader
+from reticulumpi.rns_config import RNSConfigError, parse_enabled_rns_serial_interfaces
 from reticulumpi.rtlsdr import get_lease_metrics
 from reticulumpi.runtime_metrics import get_runtime_metrics
 from reticulumpi.sdr_scheduler import SdrScheduler
+from reticulumpi.serial_devices import (
+    SerialDeviceIntentLease,
+    SerialDeviceLease,
+    serial_device_registry,
+)
 from reticulumpi.systemd_notify import ready as systemd_ready
 from reticulumpi.systemd_notify import set_readiness_file
 from reticulumpi.systemd_notify import stopping as systemd_stopping
 
 log = logging.getLogger(__name__)
+
+_RNS_SERIAL_INTERFACE_TYPES = frozenset(
+    {
+        "RNodeInterface",
+        "RNodeMultiInterface",
+        "SerialInterface",
+        "KISSInterface",
+        "AX25KISSInterface",
+        "WeaveInterface",
+    }
+)
 
 
 def run_db_migrations(
@@ -128,6 +145,9 @@ class ReticulumPiApp:
         }
         self._shutdown_event = threading.Event()
         self._shutting_down = threading.Event()
+        self._rns_serial_reservation_lock = threading.Lock()
+        self._rns_serial_reservations: list[SerialDeviceLease | SerialDeviceIntentLease] = []
+        self._rns_serial_config_paths_attempted: set[str] = set()
         self._plugin_loader = PluginLoader()
         self.event_bus = EventBus()
         self.announce_dispatcher = AnnounceDispatcher()
@@ -143,12 +163,25 @@ class ReticulumPiApp:
         set_readiness_file(False)
         log.info("Starting ReticulumPi v%s", self._get_version())
 
-        self.reticulum = RNS.Reticulum(
-            configdir=self._reticulum_config_dir,
-            loglevel=self._log_level,
-            require_shared_instance=self.config.use_shared_instance,
-        )
+        # With an explicit config directory, reserve built-in RNS serial ports
+        # before RNS can open them. When RNS selects its own default directory,
+        # the second call discovers the effective path from the live object.
+        self._reserve_rns_serial_devices()
+        try:
+            self.reticulum = RNS.Reticulum(
+                configdir=self._reticulum_config_dir,
+                loglevel=self._log_level,
+                require_shared_instance=self.config.use_shared_instance,
+            )
+        except BaseException:
+            self._release_rns_serial_reservations()
+            raise
         log.info("Reticulum initialized")
+        try:
+            self._reserve_rns_serial_devices()
+        except BaseException:
+            self._cleanup_rns()
+            raise
 
         self.identity = identity_manager.load_or_create(self.config.identity_path)
         log.info("Node identity hash: %s", RNS.prettyhexrep(self.identity.hash))
@@ -212,7 +245,7 @@ class ReticulumPiApp:
                 self._start_plugin_with_timeout(
                     name,
                     plugin,
-                    min(self.PLUGIN_START_TIMEOUT, remaining_startup),
+                    min(self._plugin_start_timeout(plugin), remaining_startup),
                 )
                 log.info("Started plugin: %s", name)
                 self._record_plugin_state(name, plugin)
@@ -272,6 +305,17 @@ class ReticulumPiApp:
     STARTUP_TIMEOUT: float = 110.0
     PLUGIN_STOP_TIMEOUT: float = 10.0
     PLUGIN_START_TIMEOUT: float = 30.0
+
+    def _plugin_start_timeout(self, plugin: PluginBase) -> float:
+        """Return a bounded start budget, honoring an explicit plugin opt-in."""
+
+        requested = getattr(type(plugin), "plugin_start_timeout_seconds", None)
+        if not isinstance(requested, (int, float)) or isinstance(requested, bool) or requested <= 0:
+            return self.PLUGIN_START_TIMEOUT
+        return min(
+            max(self.PLUGIN_START_TIMEOUT, float(requested)),
+            self.STARTUP_TIMEOUT,
+        )
 
     def _pre_stop_signal_subprocesses(self) -> None:
         """Send SIGTERM to all plugin subprocesses simultaneously.
@@ -560,13 +604,111 @@ class ReticulumPiApp:
     def _cleanup_rns(self) -> None:
         """Tear down the Reticulum instance if we own it."""
         if self.reticulum is None:
+            self._release_rns_serial_reservations()
             return
         try:
             RNS.Transport.exit_handler()
             log.info("Reticulum transport cleaned up")
         except Exception:
             log.warning("Reticulum transport cleanup failed", exc_info=True)
+            # RNS may still have an open serial endpoint.  Retain both the
+            # instance marker and every external reservation until a later
+            # cleanup attempt can prove teardown succeeded.
+            return
         self.reticulum = None
+        self._release_rns_serial_reservations()
+
+    def _rns_config_path(self) -> str | None:
+        """Return the explicit or RNS-selected config file path when concrete."""
+
+        if self._reticulum_config_dir:
+            config_dir = os.path.abspath(os.path.expanduser(self._reticulum_config_dir))
+            return os.path.join(config_dir, "config")
+
+        config_path = getattr(self.reticulum, "configpath", None)
+        # RNS exposes ``configpath`` as a string.  Requiring that concrete type
+        # keeps generic test doubles and partially initialized objects from
+        # accidentally being interpreted as filesystem paths.
+        if not isinstance(config_path, str):
+            return None
+        return os.path.abspath(os.path.expanduser(config_path))
+
+    def _reserve_rns_serial_devices(self) -> None:
+        """Reserve enabled RNS-owned serial ports before plugins can start.
+
+        Missing configuration is tolerated.  Currently absent serial devices
+        receive pending configured-path reservations so RNS hot-plug support
+        cannot create an ownership gap.  A claim conflict is not tolerated
+        because continuing would permit two protocol stacks to act on the same
+        physical USB device.
+        """
+
+        config_path = self._rns_config_path()
+        if config_path is None:
+            return
+        try:
+            interfaces = parse_enabled_rns_serial_interfaces(
+                config_path,
+                _RNS_SERIAL_INTERFACE_TYPES,
+            )
+        except FileNotFoundError:
+            log.debug("RNS config not present for serial reservation: %s", config_path)
+            return
+        except (OSError, UnicodeError, RNSConfigError) as exc:
+            raise RuntimeError(
+                f"Could not inspect RNS config for serial reservations: {config_path}"
+            ) from exc
+
+        with self._rns_serial_reservation_lock:
+            if config_path in self._rns_serial_config_paths_attempted:
+                return
+            if self._shutting_down.is_set():
+                return
+            self._rns_serial_config_paths_attempted.add(config_path)
+            acquired: list[SerialDeviceLease | SerialDeviceIntentLease] = []
+            try:
+                for interface in interfaces:
+                    lease = serial_device_registry.reserve_external_intent(
+                        interface.port,
+                        f"rns:{interface.name}",
+                    )
+                    acquired.append(lease)
+                    if lease.identity is None:
+                        log.info(
+                            "Reserved pending serial path %r for RNS interface %r",
+                            interface.port,
+                            interface.name,
+                        )
+                    else:
+                        log.info(
+                            "Reserved serial device for RNS interface %r",
+                            interface.name,
+                        )
+            except BaseException:
+                for lease in reversed(acquired):
+                    try:
+                        lease.release()
+                    except Exception:
+                        log.warning(
+                            "Could not roll back an RNS serial-device reservation",
+                            exc_info=True,
+                        )
+                self._rns_serial_config_paths_attempted.discard(config_path)
+                raise
+            self._rns_serial_reservations.extend(acquired)
+
+    def _release_rns_serial_reservations(self) -> None:
+        """Release every external RNS reservation exactly once."""
+
+        with self._rns_serial_reservation_lock:
+            reservations = self._rns_serial_reservations
+            self._rns_serial_reservations = []
+            self._rns_serial_config_paths_attempted.clear()
+        for lease in reversed(reservations):
+            try:
+                lease.release()
+            except Exception:
+                log.warning("Could not release an RNS serial-device reservation", exc_info=True)
 
     @property
     def offgrid_mode(self) -> bool:
@@ -1078,7 +1220,11 @@ class ReticulumPiApp:
                 )
                 raise RuntimeError(f"Cannot enable plugin '{name}': {reason}") from exc
             try:
-                self._start_plugin_with_timeout(name, instance, self.PLUGIN_START_TIMEOUT)
+                self._start_plugin_with_timeout(
+                    name,
+                    instance,
+                    self._plugin_start_timeout(instance),
+                )
             except Exception as exc:
                 reason = f"start() failed: {exc}"
                 self.event_bus.publish(

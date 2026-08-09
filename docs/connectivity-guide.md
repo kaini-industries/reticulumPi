@@ -113,7 +113,7 @@ Uncomment and edit the `[RNode LoRa Interface]` section in the production Reticu
 [[RNode LoRa Interface]]
   type = RNodeInterface
   enabled = yes
-  port = /dev/ttyUSB0
+  port = /dev/rnode
   frequency = 915000000
   bandwidth = 125000
   txpower = 7
@@ -125,7 +125,7 @@ Uncomment and edit the `[RNode LoRa Interface]` section in the production Reticu
 
 | Parameter | Description | Typical Values |
 |-----------|-------------|----------------|
-| `port` | Serial port where the RNode appears | `/dev/ttyUSB0`, `/dev/ttyACM0` |
+| `port` | Stable by-id path or dedicated udev symlink for the RNode | `/dev/rnode`, `/dev/serial/by-id/...` |
 | `frequency` | Center frequency in Hz | `915000000`, `868000000`, `433000000` |
 | `bandwidth` | LoRa bandwidth in Hz | `125000` (standard), `250000` (faster), `62500` (longer range) |
 | `txpower` | Transmit power in dBm | `2`--`17` (check local regulations) |
@@ -153,13 +153,22 @@ A real-world test achieved a **15.75 km usable SSH link at 2.6 kbps** using stan
 
 You can connect **multiple RNode devices** to a single Pi (one per USB port), each on a different frequency. Reticulum will mesh traffic across all of them.
 
+Use a stable `/dev/serial/by-id/...` path or dedicated udev symlink for every physical radio.
+ReticulumPi reserves enabled RNS serial interfaces and gives each application gateway exclusive
+ownership of its USB parent. A duplicate RNode, Meshtastic, MeshCore, link-tester, or direct-GPS
+assignment fails closed instead of letting two libraries contend for one device. Do not use tty
+auto-discovery on a multi-radio node. Direct serial configuration for GPS telemetry, the LoRa Link
+Tester, MeshCore Gateway, and a standalone MeshCore Observer also rejects kernel-assigned
+`/dev/ttyUSBn` and `/dev/ttyACMn` indexes. This validation is not applied to GPSD, MeshCore TCP, or
+shared-observer modes because those modes do not open the configured serial device.
+
 Alternatively, boards with RNode firmware **v1.74 or later** support **multi-channel mode** -- a single device operates on multiple frequencies simultaneously:
 
 ```ini
 [[RNode Multi Interface]]
   type = RNodeMultiInterface
   enabled = yes
-  port = /dev/ttyUSB0
+  port = /dev/rnode-multi
 
   [[RNode Multi Interface/Channel 1]]
     frequency = 915000000
@@ -175,6 +184,11 @@ Alternatively, boards with RNode firmware **v1.74 or later** support **multi-cha
     spreadingfactor = 8
     codingrate = 5
 ```
+
+Firmware is not frozen indefinitely. Qualify each board, bootloader, firmware, region, and modem
+configuration as described in [Hardware Validation](hardware-validation.md), then upgrade one radio
+at a time with a saved configuration and a known-good recovery image. Runtime watchdog recovery
+never flashes firmware automatically.
 
 ### Troubleshooting LoRa
 

@@ -1,15 +1,21 @@
 # Container Deployment
 
 The production image consumes an already-built ReticulumPi wheel and installs it into a
-compiler-free Debian Trixie/Python 3.14 runtime with hash-locked Dashboard/NomadNet dependencies.
+compiler-free Debian Trixie/Python 3.14.7 runtime with hash-locked Dashboard/NomadNet dependencies.
 It does not build from the source tree. It runs as fixed UID/GID 10001 under `tini`. All stages
-share the multi-architecture digest pinned by `PYTHON_TRIXIE_IMAGE`; updating that digest is
-an explicit release change and requires rebuilding and qualifying both ARM64 and AMD64 images.
+use the official multi-architecture image digest
+`sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910` pinned by
+`PYTHON_TRIXIE_IMAGE`; updating that digest is an explicit release change and requires rebuilding
+and qualifying both ARM64 and AMD64 images.
 
 The final runtime removes pip, setuptools, wheel, and `ensurepip` after the wheel and its locked
 dependencies pass `pip check`. CI retains a complete vulnerability report, while the release
-gate blocks high/critical findings that have an available remediation. A narrowly scoped VEX
-record documents any verified source-level backport applied to the pinned interpreter image.
+gate blocks high/critical findings that have an available remediation. Python 3.14.7 natively
+contains the reviewed CPython fixes required by this release, so the image applies no local
+interpreter patch. The complete report uses no VEX. Until Grype's current database recognizes
+those native fixes, only the actionable gate consumes the exact-product scanner bridge in
+`docker/security/python-3.14.7-grype-db-bridge.openvex.json`; its documented removal condition
+prevents the temporary bridge from becoming a permanent exception.
 
 From a development checkout, build exactly one wheel before invoking Compose:
 
@@ -57,13 +63,17 @@ Linux serial devices can be passed explicitly:
 
 ```yaml
 devices:
-  - /dev/ttyUSB0:/dev/ttyUSB0
+  # Replace the host path with the radio's actual persistent by-id entry.
+  - /dev/serial/by-id/usb-MeshCore_Companion_0001:/dev/meshcore
 group_add:
   - "20"  # host dialout GID; confirm on the host
 ```
 
-Do not use `privileged: true`. Docker Desktop on macOS cannot directly pass typical USB
-serial/SDR devices; use a Linux host or VM.
+Map each physical radio from a persistent host by-id/by-path entry or dedicated udev alias to a
+distinct stable `/dev` alias inside the container. Kernel-assigned `/dev/ttyUSBn` and
+`/dev/ttyACMn` indexes are rejected by direct-radio plugin validation. Do not use
+`privileged: true`. Docker Desktop on macOS cannot directly pass typical USB serial/SDR devices;
+use a Linux host or VM.
 
 ## Persistence verification
 

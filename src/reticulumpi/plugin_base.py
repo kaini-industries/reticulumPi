@@ -75,6 +75,10 @@ class PluginBase(ABC):
     # Existing plugins are lifecycle API v1: returning from start() means
     # ready.  API v2 plugins must call mark_ready() explicitly.
     plugin_lifecycle_api: int = 1
+    # Plugins with a legitimately longer, bounded hardware initialization may
+    # opt into a larger host-side start budget.  The application still clamps
+    # this value to its global startup deadline.
+    plugin_start_timeout_seconds: float | None = None
 
     broadcast_tier: int | None = None
     broadcast_keys: str | list[str] | None = None

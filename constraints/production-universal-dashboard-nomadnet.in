@@ -1,5 +1,5 @@
 # Container/runtime optional profile. Core dependencies are included so this
 # file can be installed independently in pip hash-checking mode.
 -r production-universal-core.in
-aiohttp>=3.14.1,<4.0
+aiohttp>=3.14.3,<4.0
 nomadnet>=0.5,<2.0

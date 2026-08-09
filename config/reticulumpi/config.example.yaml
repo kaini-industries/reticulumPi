@@ -395,15 +395,20 @@ reticulumpi:
     #meshtastic_gateway:
     #  enabled: false
     #  mode: serial                    # "serial" (USB device) or "mqtt" (network)
-    #  serial_port: "auto"             # Serial port or "auto" (serial mode only)
+    #  # Use a /dev/serial/by-id path or dedicated udev symlink. Automatic tty
+    #  # discovery is intentionally rejected so a multi-radio node cannot bind
+    #  # this gateway to a different protocol's device after re-enumeration.
+    #  serial_port: /dev/meshtastic    # Stable serial path (serial mode only)
     #  meshtastic_channel: 0           # Meshtastic channel index to use (0-7)
     #  storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/meshtastic_gw_lxmf
     #  display_name: "MyNode Mesh GW"  # Defaults to "<node_name> Mesh Gateway"
     #  short_name: "MNGW"             # 4-char Meshtastic abbreviation (auto-derived if omitted)
     #  max_messages_per_minute: 2      # Rate limit LXMF->Mesh sends (0=unlimited)
-    #  # MQTT Identity: On first run in MQTT mode, a persistent Meshtastic
-    #  # node number is generated and saved to storage_path/meshtastic_node_num.
-    #  # This ensures the gateway appears as the same node across restarts.
+    #  # MQTT identity: the node number and crash-safe packet-ID reservation
+    #  # state are kept together under storage_path. Back up/restore the whole
+    #  # storage directory; copying or deleting only one state file fails closed.
+    #  # A legacy node-number-only identity rotates once during enrollment so
+    #  # encrypted packets cannot reuse a (node number, packet ID) nonce.
     #  # The display_name is broadcast as the Meshtastic long_name.
     #  # MQTT mode settings (only used when mode: mqtt).
     #  # Connects to a Meshtastic MQTT broker — no hardware required.
@@ -414,6 +419,12 @@ reticulumpi:
     #  #   password: large4cats
     #  #   root_topic: "msh/US/2/e/LongFast"  # Region/channel topic
     #  #   channel_key: "AQ=="                 # Base64 channel encryption key
+    #  #   connack_timeout_seconds: 10          # Require broker acceptance (max 30s)
+    #  # Optional physical listener while MQTT is the primary connection.
+    #  # This receives local LoRa traffic and enables device health telemetry.
+    #  # device_probe_port: /dev/meshtastic
+    #  # device_probe_interval: 300
+    #  # device_probe_open_timeout: 30
     #  # LXMF destinations to forward Meshtastic messages to.
     #  # Get addresses from Sideband, MeshChat, or the dashboard.
     #  lxmf_recipients: []
@@ -430,7 +441,7 @@ reticulumpi:
     #  # Connection management
     #  health_check_interval: 15       # Seconds between health checks
     #  reconnect_delay: 10             # Seconds between reconnect attempts
-    #  max_reconnect_attempts: 10      # 0 = unlimited
+    #  max_reconnect_attempts: 0       # Retry indefinitely with bounded exponential backoff
     #  serial_retry_interval: 30       # Seconds between serial open retries (faster than probe)
     #  device_probe_startup_delay: 20  # Seconds to wait before first serial open (nRF52 boot time)
     #  reboot_device_on_stop: false    # Set true to reboot device on shutdown (flushes flash state)
@@ -447,9 +458,18 @@ reticulumpi:
     #    probe_timeout: 15             # Seconds to wait for probe response
     #    probe_interval: 0             # Seconds between proactive probes (0=only on silence)
     #    auto_reset: true              # Attempt device reset on confirmed hang
-    #    usb_power_cycle: false        # USB bus reset if soft reboot fails
+    #    usb_power_cycle: false        # USB bus reset (not hub power-off) after soft failure
     #    max_resets_per_hour: 3        # Circuit breaker (0=unlimited)
-    #    open_failure_threshold: 3    # Consecutive serial open timeouts before USB reset
+    #    open_failure_threshold: 3     # Consecutive serial open timeouts before USB reset
+    #    recovery_reopen_delay: 8      # Minimum reboot/re-enumeration delay before reopen
+    #    # Optional immutable USB identity guard. VID/PID are normalized lowercase
+    #    # hex; serial and sysfs_path values are exact and case-sensitive.
+    #    # expected_usb_identity:
+    #    #   vendor_id: "239a"
+    #    #   product_id: "8029"
+    #    #   serial: "0123456789abcdef"
+    #  # Radio firmware is not permanently pinned. Qualify each board/firmware
+    #  # combination with docs/hardware-validation.md before fleet rollout.
 
     # MeshCore Gateway — bridges MeshCore LoRa mesh with ReticulumPi.
     # Connects to a MeshCore companion radio over USB serial.
@@ -457,14 +477,17 @@ reticulumpi:
     # Flash the RAK4631 with MeshCore Companion Radio USB firmware.
     #meshcore_gateway:
     #  enabled: false
-    #  serial_port: /dev/meshcore     # Device path (use udev symlink)
+    #  # Kernel-assigned /dev/ttyUSBn and /dev/ttyACMn paths are rejected.
+    #  serial_port: /dev/meshcore     # Stable by-id/by-path entry or dedicated udev alias
     #  baudrate: 115200
     #  storage_path: /var/lib/reticulumpi/.local/share/reticulumpi/meshcore_gw
     #  max_messages_per_minute: 0     # Rate limit outbound sends (0=unlimited)
     #  health_check_interval: 30      # Seconds between health checks
+    #  health_query_timeout: 5        # Bounded active query to the companion radio
+    #  health_response_max_age: 60    # Grace for one missed query after a proven response
     #  health_failure_threshold: 3    # Consecutive failed checks before reconnect
     #  reconnect_delay: 10            # Seconds between reconnect attempts
-    #  max_reconnect_attempts: 10     # 0 = unlimited
+    #  max_reconnect_attempts: 0      # Retry indefinitely with bounded exponential backoff
     #  advert_interval: 900           # Seconds between advertisements (min 60)
 
     # MeshCore Observer — companion observer for letsmesh.net analyzer.
@@ -476,7 +499,8 @@ reticulumpi:
     #  enabled: false
     #  use_gateway_device: false      # true = share meshcore_gateway's device
     #  connection_type: serial        # serial or tcp (ignored when shared)
-    #  serial_port: /dev/ttyUSB1     # Separate port from meshcore_gateway
+    #  # Required only for standalone serial; ttyUSBn/ttyACMn indexes are rejected.
+    #  serial_port: /dev/meshcore-observer  # Stable path; separate radio from meshcore_gateway
     #  serial_baud: 115200
     #  iata: "XXX"                    # 3-letter IATA location code (nearest airport)
     #  mqtt_broker: mqtt-us-v1.letsmesh.net
@@ -484,8 +508,11 @@ reticulumpi:
     #  mqtt_transport: websockets
     #  publish_debug: false
     #  health_check_interval: 30
+    #  health_query_timeout: 5       # Bounded active query to the companion radio
+    #  health_response_max_age: 60   # Grace for one missed query after a proven response
+    #  health_failure_threshold: 3   # Consecutive failed health cycles before reconnect
     #  reconnect_delay: 10
-    #  max_reconnect_attempts: 10
+    #  max_reconnect_attempts: 0     # Retry indefinitely with bounded exponential backoff
     #  packet_queue_size: 1000
 
     # Messaging Hub — unified message store and chat UI.
@@ -816,7 +843,8 @@ reticulumpi:
     # The remote end needs no special firmware — stock Meshtastic ACKs suffice.
     #lora_link_tester:
     #  enabled: false
-    #  serial_port: /dev/ttyACM1           # Dedicated test radio (NOT the gateway radio)
+    #  # Kernel-assigned /dev/ttyUSBn and /dev/ttyACMn paths are rejected.
+    #  serial_port: /dev/lora-link-tester  # Stable path; dedicated radio (NOT the gateway radio)
     #  target_node_id: "!abcd1234"         # Default target node (optional, set via dashboard)
     #  channel_index: 0                    # Meshtastic channel slot (0-7)
     #  probe_interval: 30                  # Seconds between probes (min 10)
@@ -825,7 +853,7 @@ reticulumpi:
     #  max_history: 500                    # Rolling result buffer size
     #  hop_limit: null                     # null = device default (3)
     #  reconnect_delay: 10                 # Base backoff on device loss (seconds)
-    #  max_reconnect_attempts: 5           # Give up after N failures (0 = retry forever)
+    #  max_reconnect_attempts: 0           # Retry forever; use a positive cap only for diagnostics
 
     # --- GPS telemetry --------------------------------------------------------
     # Reads NMEA 0183 from a USB GPS receiver (e.g. GlobalSat BU-353N) and
@@ -841,11 +869,13 @@ reticulumpi:
     #gps_telemetry:
     #  enabled: false
     #  source: serial                   # serial | gpsd
-    #  serial_port: /dev/ttyUSB0        # Serial device (use a stable by-id/udev symlink where possible)
+    #  # Required only for serial source; ttyUSBn/ttyACMn indexes are rejected.
+    #  serial_port: /dev/gps             # Stable by-id path or dedicated udev symlink
     #  baudrate: 4800                   # BU-353N default is 4800; many other pucks use 9600
     #  gpsd_host: localhost             # gpsd TCP host (source: gpsd only)
     #  gpsd_port: 2947                  # gpsd TCP port (source: gpsd only)
     #  read_timeout: 2.0                # Serial/TCP read timeout (seconds)
+    #  serial_silence_timeout: 30       # Reopen a serial GPS that produces no bytes (must exceed read_timeout)
     #  reconnect_delay: 5               # Base backoff on device loss (seconds; exponential up to 300s)
     #  max_reconnect_attempts: 0        # 0 = retry forever
     #  fix_stale_seconds: 30            # Mark fix as lost if no RMC within this window

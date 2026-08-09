@@ -179,6 +179,15 @@
     }
   }
 
+  function firmwareRecoveryIsHealthy(state) {
+    return state === 'healthy' || state === 'recovered';
+  }
+
+  function firmwareRecoveryLabel(state) {
+    var label = String(state || 'unknown').replace(/_/g, ' ');
+    return label.charAt(0).toUpperCase() + label.slice(1);
+  }
+
   function updateMeshtastic(status, nodes) {
     var section = $('meshtastic-section');
     if (!section) return;
@@ -205,10 +214,19 @@
       _fwHangReason = null;
     }
     var hangDetected = _fwWatchdog && _fwWatchdog.hang_detected;
+    var recoveryPending = _fwWatchdog && _fwWatchdog.recovery_pending;
+    var recoveryState = _fwWatchdog && _fwWatchdog.recovery_state;
+    var recoveryUnhealthy = _fwWatchdog && !firmwareRecoveryIsHealthy(recoveryState);
     var openFailing = _fwWatchdog && _fwWatchdog.consecutive_open_failures > 0;
     if (badge) {
-      if (hangDetected) {
+      if (recoveryPending) {
+        badge.textContent = 'radio ' + String(recoveryState || 'recovering').replace(/_/g, ' ');
+        badge.className = 'count status-warn';
+      } else if (hangDetected) {
         badge.textContent = 'firmware hang';
+        badge.className = 'count status-warn';
+      } else if (recoveryUnhealthy) {
+        badge.textContent = 'radio ' + String(recoveryState || 'unknown').replace(/_/g, ' ');
         badge.className = 'count status-warn';
       } else if (openFailing) {
         badge.textContent = 'serial failing (' + _fwWatchdog.consecutive_open_failures + '/' + _fwWatchdog.open_failure_threshold + ')';
@@ -443,10 +461,14 @@
       html += buildFirmwareWatchdogHTML(_fwWatchdog);
     }
 
+    var recoveryPending = _fwWatchdog && _fwWatchdog.recovery_pending;
+    var rebootBusy = _rebootInProgress || recoveryPending;
+    var rebootLabel = recoveryPending ? 'Recovery in progress…'
+      : (_rebootInProgress ? 'Starting recovery…' : 'Reboot Device');
     html += '<div class="lora-radio-actions">'
       + '<button class="msh-reboot-btn"'
-      + (_rebootInProgress ? ' disabled' : '')
-      + '>' + (_rebootInProgress ? 'Rebooting…' : 'Reboot Device') + '</button>'
+      + (rebootBusy ? ' disabled' : '')
+      + '>' + rebootLabel + '</button>'
       + '</div>';
 
     html += '</div>';
@@ -463,16 +485,23 @@
     var silence = wd.silence_seconds;
     var timeout = wd.silence_timeout || 300;
     var hangDetected = wd.hang_detected;
+    var recoveryState = wd.recovery_state || 'healthy';
     var pct = silence != null ? Math.min(100, (silence / timeout) * 100) : 0;
 
     // Determine health state
     var state, stateLabel;
-    if (hangDetected) {
+    if (wd.recovery_pending) {
+      state = 'warn';
+      stateLabel = String(recoveryState).replace(/_/g, ' ');
+    } else if (hangDetected) {
       state = 'crit';
       stateLabel = 'Hang Detected';
       if (_fwHangReason && _FW_REASON_SHORT[_fwHangReason]) {
         stateLabel += ' — ' + _FW_REASON_SHORT[_fwHangReason];
       }
+    } else if (!firmwareRecoveryIsHealthy(recoveryState)) {
+      state = 'warn';
+      stateLabel = firmwareRecoveryLabel(recoveryState);
     } else if (pct > 75) {
       state = 'warn';
       stateLabel = 'Degraded';
@@ -529,13 +558,26 @@
     if (!wd.auto_reset) {
       stats.push({label: 'Auto-Reset', value: 'Off', cls: ''});
     }
+    if (wd.device_firmware_version) {
+      stats.push({label: 'Firmware', value: wd.device_firmware_version, cls: ''});
+    }
+    if (wd.last_probe_outcome) {
+      stats.push({
+        label: 'Last Probe',
+        value: String(wd.last_probe_outcome).replace(/_/g, ' '),
+        cls: wd.last_probe_outcome === 'verified' ? 'metric-ok' : 'metric-warn'
+      });
+    }
+    if (wd.reset_state_error) {
+      stats.push({label: 'Reset Guard', value: wd.reset_state_error, cls: 'metric-crit'});
+    }
 
     if (stats.length > 0) {
       h += '<div class="fw-stats">';
       for (var i = 0; i < stats.length; i++) {
         h += '<span class="fw-stat">'
           + '<span class="fw-stat-label">' + stats[i].label + '</span> '
-          + '<span class="fw-stat-value ' + stats[i].cls + '">' + stats[i].value + '</span>'
+          + '<span class="fw-stat-value ' + stats[i].cls + '">' + esc(stats[i].value) + '</span>'
           + '</span>';
       }
       h += '</div>';
@@ -570,10 +612,13 @@
       if (btn) { btn.disabled = true; btn.textContent = 'Rebooting…'; }
       api('/api/meshtastic/device/reset', {method: 'POST', timeout: 15000}).then(function(r) {
         _rebootInProgress = false;
-        if (btn) { btn.disabled = false; btn.textContent = 'Reboot Device'; }
         if (!r || !r.ok) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Reboot Device'; }
           var reason = (r && r.error) ? r.error : 'Reset failed';
           alert('Device reset failed: ' + reason);
+        } else if (btn) {
+          btn.disabled = true;
+          btn.textContent = r.verified ? 'Recovery verified' : 'Recovery started…';
         }
       });
     });

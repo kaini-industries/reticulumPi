@@ -21,9 +21,9 @@ services:
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 60s
-    # Uncomment to pass through serial devices (LoRa radio, etc.)
+    # Uncomment to pass through serial devices using persistent host identities.
     # devices:
-    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    #   - /dev/serial/by-id/usb-MeshCore_Companion_0001:/dev/meshcore
 
 volumes:
   reticulumpi-data:
