@@ -146,7 +146,7 @@ executable lines and 90% line and branch coverage for each critical module:
 - `admin_cli.py`
 
 The optional `--release-version` selects the aggregate row in the table above. An omitted
-version uses the current 0.3.6 stabilization policy. CI uses that policy for pull requests and
+version uses the current 0.3.7 stabilization policy. CI uses that policy for pull requests and
 ordinary main pushes, then passes the exact `vMAJOR.MINOR.PATCH` name for a tag build so the
 candidate cannot avoid its release-specific line or branch threshold.
 
@@ -174,7 +174,7 @@ For a local comparison, supply a base revision directly:
 ```bash
 python tools/check_coverage_gate.py origin/main \
   --coverage-xml coverage.xml \
-  --release-version 0.3.6
+  --release-version 0.3.7
 ```
 
 For `v0.3.3`, the pinned bootstrap still enforces 90% changed-line coverage across every executable
@@ -406,13 +406,16 @@ or offline-signing input job.
 Configure the GitHub `release-signing` environment as a tag-restricted reviewer gate. It stores no
 Minisign private key. Its job receives only the already-public detached global signature, validates
 the exact source and global-request run identities, assembles and dry-runs the signed candidate,
-and uploads it without permission to publish a release or container.
+and uploads it without permission to publish a release or container. For the v0.3.7 successor,
+admit only the exact `v0.3.7` tag and set `can_admins_bypass=false`.
 
 Configure the separate GitHub `release` environment before enabling publication:
 
 - require approval from the release owners after the exact signed workflow artifact has passed the
   Pi 5 and representative-device qualification;
 - prevent unreviewed branches or non-release tags from deploying to the environment.
+- for the v0.3.7 successor, admit only the exact `v0.3.7` tag and set
+  `can_admins_bypass=false`.
 
 Generate the passwordless release key once on a trusted offline workstation with the pinned
 Minisign version and `minisign -G -W`. Keep the secret key in a private owner-controlled directory
@@ -446,18 +449,27 @@ manifest do not exist until GitHub combines the tag CI artifacts with the first 
    identities, and the previously recorded input-manifest digest. Then use
    `sign-request --kind release` with that complete request directory and identity to verify again
    and sign only `SHA256SUMS`.
-5. Dispatch `.github/workflows/release.yml` at the same tag, passing both exact run IDs, the
+5. Dispatch `.github/workflows/release-v2.yml` at the same tag, passing both exact run IDs, the
    recorded input-manifest digest, and the base64 public global signature. Approve the
    tag-restricted `release-signing` environment only after reviewing those bindings. Its read-only
    job attaches the signature, verifies the nested and global manifests, runs the administrator dry
    run, and uploads
-   `signed-release-candidate-<TAG>`.
+   `signed-release-candidate-<TAG>`. Candidate assembly is restricted to workflow attempt 1; a
+   failed or cancelled attempt withdraws that version instead of replacing its signed-candidate
+   evidence through a rerun.
 6. Leave the separate protected `release` environment unapproved while operators download that
    exact artifact from the release workflow run, qualify it on hardware, complete the 72-hour soak,
-   and attach the signed verification record. Do not dispatch a second publication run.
+   and attach the signed verification record. Configure that environment with the required reviewer
+   and `can_admins_bypass=false`. Do not dispatch a second publication run.
 7. After approval, the waiting publication job downloads the same workflow artifact, re-verifies
    the signed tag, provenance, nested/global Minisign signatures, exact asset allowlist, and every
-   SHA-256 digest.
+   SHA-256 digest. The write-scoped job is eligible only on workflow attempt 1. Its first step checks
+   that invariant again, verifies the live environment identity, sole reviewer, disabled administrator
+   bypass, self-review setting, and exact `v0.3.7` successor-tag policy, then queries the current
+   workflow run's
+   approval history and requires exactly one unambiguous `release` environment review whose state is
+   exactly `approved` by that reviewer. Reruns and missing, skipped, rejected, duplicated, grouped, or
+   malformed reviews fail closed before checkout or registry authentication.
 8. It loads the two validated image archives, refuses existing version tags, pushes
    per-architecture tags, and creates the versioned multi-architecture GHCR manifest without
    rebuilding.
@@ -472,6 +484,10 @@ manifest digests in `docs/release-verification/<version>.md`. Keep signature out
 verified request directories. Use the command-specific help for `tools/offline_release.py` rather
 than manually modifying either manifest. Never sign a manifest until its preceding attestation and
 fail-closed local verification both succeed.
+
+The retired `.github/workflows/release.yml` path must remain absent. Only dispatch
+`.github/workflows/release-v2.yml` at a release tag that contains that hardened workflow; do not
+restore or invoke the legacy `v0.3.6` publication path.
 
 The publication script fails closed if the registry cannot prove all three version tags are
 absent. The GitHub release step likewise refuses an existing release. Never delete and reuse a

@@ -27,10 +27,120 @@ from tools import (
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "3.2.1"
+RELEASE_ENVIRONMENT_ID = 18095962050
+RELEASE_REVIEWER_ID = 8366523
+RELEASE_REVIEWER_LOGIN = "beatsforthemind"
+_DEFAULT_POLICY = object()
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _release_approval_validator() -> str:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/release-v2.yml").read_text(encoding="utf-8")
+    )
+    step = next(
+        step
+        for step in workflow["jobs"]["release"]["steps"]
+        if step.get("name") == "Require one explicit release environment approval"
+    )
+    source = step["run"]
+    marker = 'python3 -I - "$environment_policy" "$branch_policies" "$approval_history" <<\'PY\'\n'
+    before, separator, remainder = source.partition(marker)
+    assert before and separator
+    validator, separator, after = remainder.partition("\nPY\n")
+    assert validator and separator and not after
+    return validator
+
+
+def _release_environment_policy() -> dict[str, object]:
+    return {
+        "id": RELEASE_ENVIRONMENT_ID,
+        "name": "release",
+        "can_admins_bypass": False,
+        "deployment_branch_policy": {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+        },
+        "protection_rules": [
+            {
+                "type": "required_reviewers",
+                "prevent_self_review": False,
+                "reviewers": [
+                    {
+                        "type": "User",
+                        "reviewer": {
+                            "id": RELEASE_REVIEWER_ID,
+                            "login": RELEASE_REVIEWER_LOGIN,
+                        },
+                    }
+                ],
+            },
+            {"type": "branch_policy"},
+        ],
+    }
+
+
+def _release_branch_policy() -> dict[str, object]:
+    return {
+        "total_count": 1,
+        "branch_policies": [{"name": "v0.3.7", "type": "tag"}],
+    }
+
+
+def _release_review(
+    state: str = "approved",
+    *,
+    environment_id: int = RELEASE_ENVIRONMENT_ID,
+    reviewer_id: int = RELEASE_REVIEWER_ID,
+    reviewer_login: str = RELEASE_REVIEWER_LOGIN,
+) -> dict[str, object]:
+    return {
+        "state": state,
+        "user": {"id": reviewer_id, "login": reviewer_login},
+        "environments": [{"id": environment_id, "name": "release"}],
+    }
+
+
+def _run_release_approval_validator(
+    tmp_path: Path,
+    history: object,
+    *,
+    environment_policy: object = _DEFAULT_POLICY,
+    branch_policy: object = _DEFAULT_POLICY,
+) -> subprocess.CompletedProcess[str]:
+    environment_policy_path = tmp_path / "release-environment.json"
+    environment_policy_path.write_text(
+        json.dumps(
+            _release_environment_policy()
+            if environment_policy is _DEFAULT_POLICY
+            else environment_policy
+        ),
+        encoding="utf-8",
+    )
+    branch_policy_path = tmp_path / "release-branch-policies.json"
+    branch_policy_path.write_text(
+        json.dumps(_release_branch_policy() if branch_policy is _DEFAULT_POLICY else branch_policy),
+        encoding="utf-8",
+    )
+    approval_history = tmp_path / "release-approval-history.json"
+    approval_history.write_text(json.dumps(history), encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-",
+            str(environment_policy_path),
+            str(branch_policy_path),
+            str(approval_history),
+        ],
+        input=_release_approval_validator(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _tar_bytes(
@@ -423,13 +533,162 @@ def test_container_probe_rejects_links_modes_and_corrupt_databases(
         container_state_probe._database_state(database)
 
 
+def test_release_approval_validator_accepts_one_exact_approval(tmp_path: Path) -> None:
+    result = _run_release_approval_validator(
+        tmp_path,
+        [
+            {
+                "state": "approved",
+                "environments": [{"name": "release-signing"}],
+            },
+            _release_review(),
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("history", "expected_error"),
+    [
+        ([], "expected exactly one release environment review, found 0"),
+        (
+            [_release_review("skipped")],
+            "review state is 'skipped', not 'approved'",
+        ),
+        (
+            [_release_review(), _release_review()],
+            "expected exactly one release environment review, found 2",
+        ),
+        (
+            [
+                {
+                    "state": "approved",
+                    "environments": [
+                        {"name": "release-signing"},
+                        {"id": RELEASE_ENVIRONMENT_ID, "name": "release"},
+                    ],
+                }
+            ],
+            "release approval is ambiguous",
+        ),
+        (
+            [{"state": "approved", "environments": [{"name": "Release"}]}],
+            "expected exactly one release environment review, found 0",
+        ),
+        ([None], "approval history contains a non-object review"),
+        ([{"state": "approved"}], "approval history contains a malformed review"),
+        (
+            [{"state": "approved", "environments": [None]}],
+            "approval history contains a malformed environment",
+        ),
+        (
+            [_release_review("rejected")],
+            "review state is 'rejected', not 'approved'",
+        ),
+        (
+            [_release_review(environment_id=1)],
+            "release approval environment identity changed",
+        ),
+        (
+            [_release_review(reviewer_id=1)],
+            "release approval reviewer identity changed",
+        ),
+        (
+            [_release_review(reviewer_login="someone-else")],
+            "release approval reviewer identity changed",
+        ),
+        ({"state": "approved"}, "approval history is not an array"),
+    ],
+)
+def test_release_approval_validator_fails_closed(
+    tmp_path: Path, history: object, expected_error: str
+) -> None:
+    result = _run_release_approval_validator(tmp_path, history)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_error"),
+    [
+        ({"id": 1}, "release environment identity changed"),
+        ({"name": "Release"}, "release environment identity changed"),
+        ({"can_admins_bypass": True}, "permits administrator bypass"),
+        ({"protection_rules": []}, "release protection rule set changed"),
+        (
+            {
+                "deployment_branch_policy": {
+                    "protected_branches": True,
+                    "custom_branch_policies": False,
+                }
+            },
+            "release deployment branch policy mode changed",
+        ),
+    ],
+)
+def test_release_approval_validator_binds_live_environment_policy(
+    tmp_path: Path, changes: dict[str, object], expected_error: str
+) -> None:
+    policy = _release_environment_policy()
+    policy.update(changes)
+
+    result = _run_release_approval_validator(
+        tmp_path, [_release_review()], environment_policy=policy
+    )
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
+def test_release_approval_validator_binds_live_required_reviewer(tmp_path: Path) -> None:
+    policy = _release_environment_policy()
+    reviewer_rule = policy["protection_rules"][0]  # type: ignore[index]
+    reviewer = reviewer_rule["reviewers"][0]["reviewer"]  # type: ignore[index]
+    reviewer["id"] = 1
+
+    result = _run_release_approval_validator(
+        tmp_path, [_release_review()], environment_policy=policy
+    )
+
+    assert result.returncode != 0
+    assert "release reviewer identity changed" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "branch_policy",
+    [
+        {"total_count": 0, "branch_policies": []},
+        {"total_count": 1, "branch_policies": [{"name": "main", "type": "branch"}]},
+        {
+            "total_count": 1,
+            "branch_policies": [{"name": "v*.*.*", "type": "tag"}],
+        },
+    ],
+)
+def test_release_approval_validator_binds_exact_tag_policy(
+    tmp_path: Path, branch_policy: object
+) -> None:
+    result = _run_release_approval_validator(
+        tmp_path, [_release_review()], branch_policy=branch_policy
+    )
+
+    assert result.returncode != 0
+    assert "release branch policy" in result.stderr or "release tag policy" in result.stderr
+
+
 def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -> None:
     workflow_path = ROOT / ".github/workflows/ci.yml"
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     candidate_path = ROOT / ".github/workflows/release-candidate.yml"
     candidate_workflow = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
-    release_path = ROOT / ".github/workflows/release.yml"
+    retired_release_path = ROOT / ".github/workflows/release.yml"
+    release_path = ROOT / ".github/workflows/release-v2.yml"
+    assert not retired_release_path.exists()
+    assert release_path.is_file()
     release_workflow = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    assert release_workflow["name"] == "Promote offline-signed release v2"
     release_inputs = workflow["jobs"]["release-inputs"]
     release_inputs_source = json.dumps(release_inputs)
     global_request = candidate_workflow["jobs"]["global-signing-request"]
@@ -490,7 +749,10 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert "gh release create" not in global_request_source
 
     assert candidate["environment"] == "release-signing"
+    assert candidate["if"] == "${{ github.run_attempt == 1 }}"
     assert candidate["permissions"] == {"contents": "read", "actions": "read"}
+    assert candidate["steps"][0]["name"] == "Refuse workflow reruns before candidate assembly"
+    assert 'test "$GITHUB_RUN_ATTEMPT" = 1' in candidate["steps"][0]["run"]
     assert "tools.offline_release finalize-candidate" in candidate_source
     assert "global-signing-request-${{ inputs.tag }}" in candidate_source
     assert "signed-release-candidate-${{ inputs.tag }}" in candidate_source
@@ -503,7 +765,11 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
 
     assert release["environment"] == "release"
     assert release["needs"] == "release-candidate"
+    assert release["if"] == (
+        "${{ github.run_attempt == 1 && needs.release-candidate.result == 'success' }}"
+    )
     assert release["permissions"] == {
+        "actions": "read",
         "contents": "write",
         "packages": "write",
         "id-token": "write",
@@ -559,6 +825,32 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert "push-to-registry" in release_source
     assert release_source.count("actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26") == 3
     release_steps = {step.get("name"): step for step in release["steps"] if step.get("name")}
+    approval_step = release_steps["Require one explicit release environment approval"]
+    approval_source = approval_step["run"]
+    assert approval_step["env"] == {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
+    assert 'test "$GITHUB_RUN_ATTEMPT" = 1' in approval_source
+    assert "release promotion refuses workflow reruns" in approval_source
+    assert "/actions/runs/$GITHUB_RUN_ID/approvals" in approval_source
+    assert "/environments/release" in approval_source
+    assert "/environments/release/deployment-branch-policies" in approval_source
+    assert "X-GitHub-Api-Version: 2026-03-10" in approval_source
+    assert "EXPECTED_ENVIRONMENT_ID = 18095962050" in approval_source
+    assert "EXPECTED_REVIEWER_ID = 8366523" in approval_source
+    assert 'EXPECTED_REVIEWER_LOGIN = "beatsforthemind"' in approval_source
+    assert 'policy.get("can_admins_bypass") is not False' in approval_source
+    assert 'release_reviews[0]["state"] != "approved"' in approval_source
+    assert "release approval is ambiguous" in approval_source
+    approval_index = release["steps"].index(approval_step)
+    registry_login_index = next(
+        index
+        for index, step in enumerate(release["steps"])
+        if str(step.get("uses", "")).startswith("docker/login-action@")
+    )
+    image_push_index = release["steps"].index(
+        release_steps["Push validated per-architecture images and manifest"]
+    )
+    assert approval_index == 0
+    assert approval_index < registry_login_index < image_push_index
     attest_action = "actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26"
     assert release_steps["Attest release artifact provenance"] == {
         "name": "Attest release artifact provenance",

@@ -855,7 +855,7 @@ def test_v033_bootstrap_ignores_withdrawn_v032_tag(
 
 
 def test_v033_bootstrap_and_current_default_are_locked() -> None:
-    assert coverage_gate.DEFAULT_RELEASE_VERSION == "0.3.6"
+    assert coverage_gate.DEFAULT_RELEASE_VERSION == "0.3.7"
     assert coverage_gate._RELEASE_BOOTSTRAP_BASELINES["v0.3.3"] == (
         coverage_gate.ReleaseBootstrapBaseline(
             historical_version="0.2.4",
@@ -1321,4 +1321,4 @@ def test_ci_runs_fail_closed_gate_after_serial_coverage() -> None:
     assert "--release-version" in command
     assert "--github-event" in command
     assert "--github-event-name" in command
-    assert steps[gate_index]["env"]["COVERAGE_RELEASE_VERSION"].endswith("|| '0.3.6' }}")
+    assert steps[gate_index]["env"]["COVERAGE_RELEASE_VERSION"].endswith("|| '0.3.7' }}")

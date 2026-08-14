@@ -218,7 +218,7 @@ jobs:
       - run: pytest tests/ -v -n0 --cov=src/reticulumpi --cov-branch --cov-report=term-missing --cov-report=xml
       - name: Enforce aggregate, changed-code, and critical-module coverage
         env:
-          COVERAGE_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.3.6' }}
+          COVERAGE_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.3.7' }}
         run: >-
           python tools/check_coverage_gate.py
           --coverage-xml coverage.xml

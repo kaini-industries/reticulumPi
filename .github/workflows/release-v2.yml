@@ -1,4 +1,4 @@
-name: Promote offline-signed release
+name: Promote offline-signed release v2
 
 on:
   workflow_dispatch:
@@ -34,6 +34,7 @@ concurrency:
 jobs:
   release-candidate:
     name: Assemble exact offline-signed candidate
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
@@ -43,6 +44,12 @@ jobs:
       contents: read
       actions: read
     steps:
+      - name: Refuse workflow reruns before candidate assembly
+        run: |
+          test "$GITHUB_RUN_ATTEMPT" = 1 || {
+            echo "release candidate assembly refuses workflow reruns" >&2
+            exit 1
+          }
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.ref_type == 'tag' && github.ref || github.sha }}
@@ -278,15 +285,165 @@ jobs:
 
   release:
     name: Promote exact signed candidate
+    if: ${{ github.run_attempt == 1 && needs.release-candidate.result == 'success' }}
     needs: release-candidate
     runs-on: ubuntu-24.04
     environment: release
     permissions:
+      actions: read
       contents: write
       packages: write
       id-token: write
       attestations: write
     steps:
+      - name: Require one explicit release environment approval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1 || {
+            echo "release promotion refuses workflow reruns" >&2
+            exit 1
+          }
+          umask 077
+          environment_policy="$RUNNER_TEMP/release-environment.json"
+          branch_policies="$RUNNER_TEMP/release-branch-policies.json"
+          approval_history="$RUNNER_TEMP/release-approval-history.json"
+          trap 'rm -f "$environment_policy" "$branch_policies" "$approval_history"' EXIT
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/$GITHUB_REPOSITORY/environments/release" \
+            > "$environment_policy"
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/$GITHUB_REPOSITORY/environments/release/deployment-branch-policies" \
+            > "$branch_policies"
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            > "$approval_history"
+          python3 -I - "$environment_policy" "$branch_policies" "$approval_history" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          EXPECTED_ENVIRONMENT_ID = 18095962050
+          EXPECTED_REVIEWER_ID = 8366523
+          EXPECTED_REVIEWER_LOGIN = "beatsforthemind"
+
+          def refuse(reason: str) -> None:
+              raise SystemExit(f"release approval proof refused: {reason}")
+
+          def load_json(path: str, label: str) -> object:
+              try:
+                  return json.loads(Path(path).read_text(encoding="utf-8"))
+              except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                  refuse(f"{label} is unreadable: {exc}")
+
+          policy = load_json(sys.argv[1], "release environment policy")
+          branch_policy = load_json(sys.argv[2], "release branch policy")
+          history = load_json(sys.argv[3], "approval history")
+
+          if not isinstance(policy, dict):
+              refuse("release environment policy is not an object")
+          if policy.get("id") != EXPECTED_ENVIRONMENT_ID or policy.get("name") != "release":
+              refuse("release environment identity changed")
+          if policy.get("can_admins_bypass") is not False:
+              refuse("release environment permits administrator bypass")
+          if policy.get("deployment_branch_policy") != {
+              "protected_branches": False,
+              "custom_branch_policies": True,
+          }:
+              refuse("release deployment branch policy mode changed")
+
+          protection_rules = policy.get("protection_rules")
+          if not isinstance(protection_rules, list):
+              refuse("release protection rules are malformed")
+          rule_types = [
+              rule.get("type") if isinstance(rule, dict) else None
+              for rule in protection_rules
+          ]
+          if sorted(rule_types, key=lambda value: str(value)) != [
+              "branch_policy",
+              "required_reviewers",
+          ]:
+              refuse("release protection rule set changed")
+          reviewer_rule = next(
+              rule for rule in protection_rules if rule.get("type") == "required_reviewers"
+          )
+          if reviewer_rule.get("prevent_self_review") is not False:
+              refuse("release self-review policy changed")
+          reviewers = reviewer_rule.get("reviewers")
+          if not isinstance(reviewers, list) or len(reviewers) != 1:
+              refuse("release reviewer set changed")
+          reviewer_entry = reviewers[0]
+          if not isinstance(reviewer_entry, dict) or reviewer_entry.get("type") != "User":
+              refuse("release reviewer type changed")
+          reviewer = reviewer_entry.get("reviewer")
+          if not isinstance(reviewer, dict) or (
+              reviewer.get("id") != EXPECTED_REVIEWER_ID
+              or reviewer.get("login") != EXPECTED_REVIEWER_LOGIN
+          ):
+              refuse("release reviewer identity changed")
+
+          if not isinstance(branch_policy, dict):
+              refuse("release branch policy is not an object")
+          policies = branch_policy.get("branch_policies")
+          if branch_policy.get("total_count") != 1 or not isinstance(policies, list):
+              refuse("release branch policy count changed")
+          if len(policies) != 1 or not isinstance(policies[0], dict) or (
+              policies[0].get("name") != "v0.3.7" or policies[0].get("type") != "tag"
+          ):
+              refuse("release tag policy changed")
+
+          if not isinstance(history, list):
+              refuse("approval history is not an array")
+
+          release_reviews = []
+          for review in history:
+              if not isinstance(review, dict):
+                  refuse("approval history contains a non-object review")
+              state = review.get("state")
+              environments = review.get("environments")
+              if not isinstance(state, str) or not isinstance(environments, list):
+                  refuse("approval history contains a malformed review")
+
+              release_occurrences = 0
+              for environment in environments:
+                  if not isinstance(environment, dict) or not isinstance(
+                      environment.get("name"), str
+                  ):
+                      refuse("approval history contains a malformed environment")
+                  if environment["name"] == "release":
+                      if environment.get("id") != EXPECTED_ENVIRONMENT_ID:
+                          refuse("release approval environment identity changed")
+                      release_occurrences += 1
+
+              if release_occurrences:
+                  if release_occurrences != 1 or len(environments) != 1:
+                      refuse("release approval is ambiguous")
+                  release_reviews.append(review)
+
+          if len(release_reviews) != 1:
+              refuse(
+                  "expected exactly one release environment review, "
+                  f"found {len(release_reviews)}"
+              )
+          if release_reviews[0]["state"] != "approved":
+              refuse(
+                  "release environment review state is "
+                  f"{release_reviews[0]['state']!r}, not 'approved'"
+              )
+          approving_user = release_reviews[0].get("user")
+          if not isinstance(approving_user, dict) or (
+              approving_user.get("id") != EXPECTED_REVIEWER_ID
+              or approving_user.get("login") != EXPECTED_REVIEWER_LOGIN
+          ):
+              refuse("release approval reviewer identity changed")
+          PY
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.ref_type == 'tag' && github.ref || github.sha }}
