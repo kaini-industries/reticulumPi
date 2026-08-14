@@ -146,7 +146,7 @@ executable lines and 90% line and branch coverage for each critical module:
 - `admin_cli.py`
 
 The optional `--release-version` selects the aggregate row in the table above. An omitted
-version uses the current 0.3.5 stabilization policy. CI uses that policy for pull requests and
+version uses the current 0.3.6 stabilization policy. CI uses that policy for pull requests and
 ordinary main pushes, then passes the exact `vMAJOR.MINOR.PATCH` name for a tag build so the
 candidate cannot avoid its release-specific line or branch threshold.
 
@@ -174,7 +174,7 @@ For a local comparison, supply a base revision directly:
 ```bash
 python tools/check_coverage_gate.py origin/main \
   --coverage-xml coverage.xml \
-  --release-version 0.3.5
+  --release-version 0.3.6
 ```
 
 For `v0.3.3`, the pinned bootstrap still enforces 90% changed-line coverage across every executable
@@ -260,23 +260,36 @@ verification without importing PyYAML or executing the artifact. Install the man
 radio plugins preflight their complete tool list plus `rtl_test`. Mutable labels such as `latest`,
 `main`, and `nightly` are rejected.
 
-Regenerate all four locks with the reviewed uv version and one explicit cutoff date. Change the
-cutoff only in a dependency-update change that reviews the resulting diff:
+Regenerate all four locks with the reviewed uv version and the global cutoff below. The two
+package-scoped exceptions admit only reviewed security fixes: PyPI's final `aiohttp` 3.14.3
+artifact was uploaded at `2026-07-23T01:57:27.037320Z`, and its cutoff is the next whole second;
+the final `cryptography` 50.0.0 artifact was uploaded at `2026-07-31T14:25:10.110218Z`, and its
+cutoff is likewise the next whole second. Change any cutoff only in a dependency-update change
+that verifies the upstream artifact upload timestamps and reviews the resulting diff:
 
 ```bash
 uv --version  # expected for this lock generation: 0.9.14
 uv pip compile constraints/production-universal-core.in \
   --python-version 3.11 --universal --generate-hashes --only-binary :all: \
-  --exclude-newer 2026-07-11 -o constraints/production-universal-core.txt
+  --exclude-newer 2026-07-11T00:00:00Z \
+  --exclude-newer-package cryptography=2026-07-31T14:25:11Z \
+  --output-file constraints/production-universal-core.txt
 uv pip compile constraints/production-universal-dashboard-nomadnet.in \
   --python-version 3.11 --universal --generate-hashes --only-binary :all: \
-  --exclude-newer 2026-07-11 -o constraints/production-universal-dashboard-nomadnet.txt
+  --exclude-newer 2026-07-11T00:00:00Z \
+  --exclude-newer-package aiohttp=2026-07-23T01:57:28Z \
+  --exclude-newer-package cryptography=2026-07-31T14:25:11Z \
+  --output-file constraints/production-universal-dashboard-nomadnet.txt
 uv pip compile constraints/production-universal-all-features.in \
   --python-version 3.11 --universal --generate-hashes \
-  --exclude-newer 2026-07-11 -o constraints/production-universal-all-features.txt
+  --exclude-newer 2026-07-11T00:00:00Z \
+  --exclude-newer-package aiohttp=2026-07-23T01:57:28Z \
+  --exclude-newer-package cryptography=2026-07-31T14:25:11Z \
+  --output-file constraints/production-universal-all-features.txt
 uv pip compile constraints/production-universal-build.in \
   --python-version 3.11 --universal --generate-hashes --only-binary :all: \
-  --exclude-newer 2026-07-11 -o constraints/production-universal-build.txt
+  --exclude-newer 2026-07-11T00:00:00Z \
+  --output-file constraints/production-universal-build.txt
 ```
 
 Build and smoke-test the artifact on Bookworm/Python 3.11 with isolation disabled only after the

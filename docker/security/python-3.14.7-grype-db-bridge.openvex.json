@@ -1,0 +1,48 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/kaini-industries/reticulumPi/security/openvex/python-3.14.7/grype-db-bridge",
+  "author": "https://github.com/kaini-industries/reticulumPi",
+  "timestamp": "2026-08-09T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-15308",
+        "name": "CVE-2026-15308"
+      },
+      "products": [
+        {
+          "@id": "pkg:generic/python@3.14.7"
+        }
+      ],
+      "status": "fixed",
+      "status_notes": "The Python Software Foundation affected range at https://nvd.nist.gov/vuln/detail/CVE-2026-15308 identifies Python 3.14.7 as fixed, and https://www.python.org/downloads/release/python-3147/ is the official stable release. The runtime uses official multi-architecture image index sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910 and verifies native Lib/html/parser.py SHA256 5c5ed245889135564e75dfed9a47aeb6b4d3e5a2e9614d918a986767e3747539 on AMD64 and ARM64. Grype 0.110.0 database schema 6.1.9 built 2026-08-08T06:22:53Z still reports the superseded fixed version. Remove this statement as soon as the current Grype database recognizes Python 3.14.7 as fixed."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-11940",
+        "name": "CVE-2026-11940"
+      },
+      "products": [
+        {
+          "@id": "pkg:generic/python@3.14.7"
+        }
+      ],
+      "status": "fixed",
+      "status_notes": "The Python Software Foundation affected range at https://nvd.nist.gov/vuln/detail/CVE-2026-11940 identifies Python 3.14.7 as fixed, and https://www.python.org/downloads/release/python-3147/ is the official stable release. The runtime uses official multi-architecture image index sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910 and verifies native Lib/tarfile.py SHA256 3c8d585a77d7d376aea66e5e11a4d53c2605100d4c05a71b5385ed54bc526f51 on AMD64 and ARM64. Grype 0.110.0 database schema 6.1.9 built 2026-08-08T06:22:53Z still reports the superseded fixed version. Remove this statement as soon as the current Grype database recognizes Python 3.14.7 as fixed."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-11972",
+        "name": "CVE-2026-11972"
+      },
+      "products": [
+        {
+          "@id": "pkg:generic/python@3.14.7"
+        }
+      ],
+      "status": "fixed",
+      "status_notes": "The Python Software Foundation affected range at https://nvd.nist.gov/vuln/detail/CVE-2026-11972 identifies Python 3.14.7 as fixed, and https://www.python.org/downloads/release/python-3147/ is the official stable release. The runtime uses official multi-architecture image index sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910 and verifies native Lib/tarfile.py SHA256 3c8d585a77d7d376aea66e5e11a4d53c2605100d4c05a71b5385ed54bc526f51 on AMD64 and ARM64. Grype 0.110.0 database schema 6.1.9 built 2026-08-08T06:22:53Z still reports the superseded fixed version. Remove this statement as soon as the current Grype database recognizes Python 3.14.7 as fixed."
+    }
+  ]
+}

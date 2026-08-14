@@ -21,6 +21,15 @@ from typing import Any
 
 from reticulumpi import events
 from reticulumpi.plugin_base import PluginBase
+from reticulumpi.serial_devices import (
+    SerialDeviceChangedError,
+    SerialDeviceLease,
+    StaleSerialDeviceLeaseError,
+    serial_device_registry,
+    validate_stable_serial_path,
+)
+
+_DELIVERY_UNCERTAIN_REASON = "delivery_uncertain_connection_changed"
 
 
 class MeshCoreGateway(PluginBase):
@@ -28,7 +37,7 @@ class MeshCoreGateway(PluginBase):
 
     plugin_name = "meshcore_gateway"
     plugin_description = "Bridges MeshCore LoRa mesh with ReticulumPi"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.3"
     broadcast_tier = 1
     broadcast_keys = ["meshcore_status", "meshcore_device", "meshcore_contacts"]
 
@@ -45,8 +54,7 @@ class MeshCoreGateway(PluginBase):
             )
 
         port = self.config.get("serial_port", "/dev/meshcore")
-        if not isinstance(port, str) or not port:
-            raise ValueError("serial_port must be a non-empty string")
+        validate_stable_serial_path(port)
 
         baud = self.config.get("baudrate", 115200)
         if not isinstance(baud, int) or baud <= 0:
@@ -56,11 +64,23 @@ class MeshCoreGateway(PluginBase):
         if not isinstance(hci, (int, float)) or hci < 5:
             raise ValueError("health_check_interval must be >= 5 seconds")
 
+        hqt = self.config.get("health_query_timeout", 5)
+        if not isinstance(hqt, (int, float)) or isinstance(hqt, bool) or not 0 < hqt <= 30:
+            raise ValueError("health_query_timeout must be > 0 and <= 30 seconds")
+
+        hrma = self.config.get("health_response_max_age", max(float(hci) * 2, float(hqt)))
+        if not isinstance(hrma, (int, float)) or isinstance(hrma, bool) or not 0 <= hrma <= 3600:
+            raise ValueError("health_response_max_age must be between 0 and 3600 seconds")
+
+        hft = self.config.get("health_failure_threshold", 3)
+        if not isinstance(hft, int) or isinstance(hft, bool) or hft < 1:
+            raise ValueError("health_failure_threshold must be a positive integer")
+
         rd = self.config.get("reconnect_delay", 10)
         if not isinstance(rd, (int, float)) or rd < 1:
             raise ValueError("reconnect_delay must be >= 1 second")
 
-        mra = self.config.get("max_reconnect_attempts", 10)
+        mra = self.config.get("max_reconnect_attempts", 0)
         if not isinstance(mra, int) or mra < 0:
             raise ValueError("max_reconnect_attempts must be a non-negative integer")
 
@@ -80,6 +100,13 @@ class MeshCoreGateway(PluginBase):
 
     def start(self) -> None:
         self._lock = threading.Lock()
+        self._disconnect_lock = threading.Lock()
+        self._serial_device_lease: SerialDeviceLease | None = None
+        self._serial_reopen_blocked = False
+        self._connection_generation = 0
+        self._open_attempt: dict[str, Any] | None = None
+        self._teardown_attempt: dict[str, Any] | None = None
+        self._device_teardown_timeout = 5.0
         self._broadcast_cache: tuple[float, dict] | None = None
         self._broadcast_cache_ttl = 5.0
 
@@ -108,6 +135,25 @@ class MeshCoreGateway(PluginBase):
         self._advert_interval: float = self.config.get("advert_interval", 900)
         self._last_contact_refresh: float = 0
         self._contact_refresh_interval: float = self.config.get("contact_refresh_interval", 300)
+
+        # The meshcore library's ``is_connected`` value is cached and can
+        # remain true after a USB companion stops answering.  Health is based
+        # on a bounded local device query instead, with a short response-age
+        # grace period and consecutive-failure hysteresis before reconnecting
+        # this plugin's client.
+        health_check_interval = float(self.config.get("health_check_interval", 30))
+        self._health_query_timeout: float = float(self.config.get("health_query_timeout", 5))
+        self._health_response_max_age: float = float(
+            self.config.get(
+                "health_response_max_age",
+                max(health_check_interval * 2, self._health_query_timeout),
+            )
+        )
+        self._health_failure_threshold: int = int(self.config.get("health_failure_threshold", 3))
+        self._health_consecutive_failures: int = 0
+        self._health_query_failures: int = 0
+        self._last_device_response_monotonic: float = 0.0
+        self._last_device_response_time: float | None = None
 
         # Fuzzy dedup cache — MeshCore packets may arrive twice under mesh
         # flooding, and the companion radio exposes no packet ID. Key on
@@ -158,21 +204,43 @@ class MeshCoreGateway(PluginBase):
 
     def stop(self) -> None:
         self._active = False
-        # Disconnect MeshCore in the async loop
-        loop = self._loop
-        if loop is not None and loop.is_running() and self._mc:
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self._async_disconnect(),
-                    loop,
+        try:
+            disconnect_proven = self._disconnect_device()
+        except Exception:
+            disconnect_proven = False
+            self.log.exception("Unexpected error while closing MeshCore during shutdown")
+        try:
+            loop = self._loop
+            # Shut down the asyncio event loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(loop.stop)
+            self._join_threads()
+        finally:
+            # A timed join is not proof that the serial owner stopped. Retain
+            # the claim if disconnect failed, a managed worker is still alive,
+            # or a late connection published a new handle during shutdown.
+            with self._threads_lock:
+                live_threads = [thread.name for thread in self._threads if thread.is_alive()]
+            with self._lock:
+                handle_cleared = self._mc is None
+                reopen_blocked = self._serial_reopen_blocked
+                open_quiescent = self._open_attempt is None
+                teardown_quiescent = self._teardown_attempt is None
+            if (
+                disconnect_proven
+                and handle_cleared
+                and not reopen_blocked
+                and open_quiescent
+                and teardown_quiescent
+                and not live_threads
+            ):
+                self._release_serial_device_lease()
+            elif self._serial_device_lease is not None:
+                self.log.warning(
+                    "MeshCore shutdown was not proven quiescent; retaining serial-device "
+                    "ownership until process exit (live threads: %s)",
+                    ", ".join(live_threads) or "none",
                 )
-                future.result(timeout=5)
-            except Exception:
-                self.log.debug("Error during MeshCore disconnect", exc_info=True)
-        # Shut down the asyncio event loop
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
-        self._join_threads()
 
     # ── Asyncio event loop (dedicated thread) ───────────────────────
 
@@ -197,31 +265,291 @@ class MeshCoreGateway(PluginBase):
     def _run_async(self, coro: Any, timeout: float = 15) -> Any:
         """Run an async coroutine from a sync context, blocking until done."""
         if not self._loop or not self._loop.is_running():
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             raise RuntimeError("MeshCore async loop not running")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            # A timed-out serial command must not remain queued and consume a
+            # later response intended for the next liveness query.
+            future.cancel()
+            raise
+
+    @staticmethod
+    def _close_awaitable(awaitable: Any) -> None:
+        """Close an unscheduled coroutine without assuming its concrete type."""
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+
+    def _begin_connection_generation(self) -> int:
+        """Reserve one connection generation, refusing overlap with old work."""
+        with self._lock:
+            if (
+                self._mc is not None
+                or self._open_attempt is not None
+                or self._teardown_attempt is not None
+            ):
+                self._serial_reopen_blocked = True
+                raise RuntimeError("previous MeshCore connection work is not quiescent")
+            self._connection_generation += 1
+            return self._connection_generation
+
+    def _connection_is_current(
+        self,
+        mc: Any,
+        generation: int,
+        *,
+        require_connected: bool = False,
+    ) -> bool:
+        """Return whether a client still owns the current live generation."""
+        with self._lock:
+            return (
+                self._active
+                and self._connection_generation == generation
+                and self._mc is mc
+                and (self._connected or not require_connected)
+            )
+
+    def _require_current_connection(self, mc: Any, generation: int) -> None:
+        if not self._connection_is_current(mc, generation):
+            raise RuntimeError("MeshCore connection became stale during initialization")
+
+    def _invalidate_connection_generation(self) -> None:
+        """Fence callbacks/setup and request cancellation of an in-flight open."""
+        future = None
+        with self._lock:
+            self._connection_generation += 1
+            self._connected = False
+            attempt = self._open_attempt
+            if attempt is not None:
+                attempt["abandoned"] = True
+                self._serial_reopen_blocked = True
+                future = attempt.get("future")
+        if future is not None:
+            future.cancel()
+
+    async def _async_close_unpublished_mc(self, mc: Any) -> bool:
+        """Close a client returned after its caller timed out or was stopped."""
+        try:
+            await mc.disconnect()
+        except BaseException:
+            self.log.debug("Error closing late MeshCore client", exc_info=True)
+            return False
+        return True
+
+    def _run_tracked_open(self, coro: Any, generation: int, timeout: float) -> Any:
+        """Run an SDK create call without losing cancellation-resistant results.
+
+        The wrapper records a successfully-created client on ``self`` before it
+        wakes the synchronous caller.  If the generation has become stale, it
+        closes the late result on the owning event loop.  A create coroutine
+        that ignores cancellation remains represented by ``_open_attempt``, so
+        neither a retry nor serial-lease release can race it.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            # Compatibility path for lightweight hosts/tests.  Production opens
+            # always use the dedicated running loop above.
+            mc = self._run_async(coro, timeout=timeout)
+            with self._lock:
+                if mc is not None:
+                    self._mc = mc
+                    self._connected = False
+                    self._subscriptions = []
+                    self._serial_reopen_blocked = not (
+                        self._active and self._connection_generation == generation
+                    )
+            return mc
+
+        done = threading.Event()
+        attempt: dict[str, Any] = {
+            "generation": generation,
+            "done": done,
+            "future": None,
+            "result": None,
+            "error": None,
+            "abandoned": False,
+            "orphaned_client": None,
+        }
+        with self._lock:
+            if self._connection_generation != generation or self._open_attempt is not None:
+                self._close_awaitable(coro)
+                raise RuntimeError("MeshCore open generation is no longer current")
+            self._open_attempt = attempt
+            self._serial_reopen_blocked = True
+
+        async def _capture_open_result() -> None:
+            mc = None
+            error: BaseException | None = None
+            try:
+                mc = await coro
+            except BaseException as exc:  # includes cancellation
+                error = exc
+
+            close_late = False
+            with self._lock:
+                current = (
+                    self._active
+                    and self._connection_generation == generation
+                    and self._open_attempt is attempt
+                    and not attempt["abandoned"]
+                )
+                if error is None and current:
+                    attempt["result"] = mc
+                    if mc is not None:
+                        # Publish the disconnected candidate atomically before
+                        # waking the setup thread.  Stop can now always find it.
+                        self._mc = mc
+                        self._connected = False
+                        self._subscriptions = []
+                    self._open_attempt = None
+                    self._serial_reopen_blocked = False
+                elif error is not None:
+                    attempt["error"] = error
+                    if self._open_attempt is attempt:
+                        self._open_attempt = None
+                        self._serial_reopen_blocked = self._mc is not None
+                else:
+                    close_late = mc is not None
+                    if mc is None and self._open_attempt is attempt:
+                        self._open_attempt = None
+                        self._serial_reopen_blocked = self._mc is not None
+
+            if close_late:
+                closed = await self._async_close_unpublished_mc(mc)
+                with self._lock:
+                    if not closed:
+                        # Make a failed late close visible to the normal
+                        # teardown path instead of losing the only handle.
+                        if self._mc is None:
+                            self._mc = mc
+                            self._connected = False
+                            self._subscriptions = []
+                        else:
+                            attempt["orphaned_client"] = mc
+                        self._serial_reopen_blocked = True
+                    if self._open_attempt is attempt and attempt["orphaned_client"] is None:
+                        self._open_attempt = None
+                    if closed and self._open_attempt is None and self._mc is None:
+                        self._serial_reopen_blocked = False
+
+            done.set()
+
+        wrapper = _capture_open_result()
+        try:
+            future = asyncio.run_coroutine_threadsafe(wrapper, loop)
+        except BaseException:
+            self._close_awaitable(wrapper)
+            self._close_awaitable(coro)
+            with self._lock:
+                if self._open_attempt is attempt:
+                    self._open_attempt = None
+                    self._serial_reopen_blocked = self._mc is not None
+            raise
+
+        cancel_now = False
+        with self._lock:
+            attempt["future"] = future
+            cancel_now = bool(attempt["abandoned"])
+        if cancel_now:
+            future.cancel()
+
+        if not done.wait(timeout=timeout):
+            timed_out = True
+            with self._lock:
+                if done.is_set():
+                    timed_out = False
+                    future = None
+                elif self._open_attempt is attempt:
+                    attempt["abandoned"] = True
+                    self._serial_reopen_blocked = True
+                    future = attempt.get("future")
+                else:
+                    future = None
+            if future is not None:
+                future.cancel()
+            if timed_out:
+                raise TimeoutError("MeshCore create operation timed out")
+
+        error = attempt["error"]
+        if error is not None:
+            if isinstance(error, asyncio.CancelledError):
+                raise RuntimeError("MeshCore create operation was cancelled")
+            raise error
+        return attempt["result"]
 
     # ── Connection management ───────────────────────────────────────
+
+    def _ensure_serial_device_lease(self, configured_path: str) -> SerialDeviceLease:
+        """Claim or revalidate the configured physical serial endpoint.
+
+        MeshCore Observer's supported shared mode borrows this gateway's live
+        client and never opens the device itself.  Independent serial opens
+        therefore remain exclusive and do not receive a registry share token.
+        """
+        with self._lock:
+            lease = self._serial_device_lease
+            if lease is not None:
+                try:
+                    lease.revalidate()
+                    return lease
+                except (SerialDeviceChangedError, StaleSerialDeviceLeaseError):
+                    # USB re-enumeration can change the tty binding.  Release
+                    # exactly the stale claim before atomically claiming the
+                    # configured path's current identity.
+                    lease.release()
+                    self._serial_device_lease = None
+
+            lease = serial_device_registry.claim(configured_path, self.plugin_name)
+            self._serial_device_lease = lease
+            try:
+                # Close the claim/open race as far as the filesystem API
+                # permits by resolving the endpoint again immediately before
+                # handing the configured path to MeshCore.
+                lease.revalidate()
+            except Exception:
+                lease.release()
+                self._serial_device_lease = None
+                raise
+            return lease
+
+    def _release_serial_device_lease(self) -> None:
+        """Release this plugin's exact serial claim, if one is active."""
+        with self._lock:
+            lease = self._serial_device_lease
+            self._serial_device_lease = None
+        if lease is not None:
+            lease.release()
 
     def _connection_loop(self) -> None:
         """Background thread: connect to MeshCore device and monitor health."""
         reconnect_delay = self.config.get("reconnect_delay", 10)
         health_check_interval = self.config.get("health_check_interval", 30)
-        max_attempts = self.config.get("max_reconnect_attempts", 10)
-        # Require N consecutive failed health checks before tearing down
-        # the connection.  A single transient ``is_connected`` hiccup used
-        # to trigger a full reconnect (~15-30s of lost messages); require
-        # repeated failures so only a genuine outage escalates.
-        health_failure_threshold = max(1, int(self.config.get("health_failure_threshold", 3)))
-
-        consecutive_health_failures = 0
+        max_attempts = self.config.get("max_reconnect_attempts", 0)
 
         while self._active:
             if not self._connected:
+                # A DISCONNECTED callback marks the handle unusable but
+                # leaves teardown to this owner thread.  Dispose only the
+                # MeshCore client before the normal hotplug retry path.
+                with self._lock:
+                    stale_mc = self._mc
+                if stale_mc is not None:
+                    if not self._disconnect_device():
+                        self.log.warning(
+                            "MeshCore serial teardown is still uncertain; refusing a second open"
+                        )
+                        self._sleep_while_active(reconnect_delay)
+                        continue
                 try:
                     self._connect_device()
                     self._reconnect_failures = 0
-                    consecutive_health_failures = 0
+                    with self._lock:
+                        self._health_consecutive_failures = 0
                 except Exception as exc:
                     self._reconnect_failures += 1
                     self.log.warning(
@@ -255,26 +583,31 @@ class MeshCoreGateway(PluginBase):
             self._sleep_while_active(health_check_interval)
             if self._connected:
                 if self._check_health():
-                    if consecutive_health_failures > 0:
+                    with self._lock:
+                        recovered_failures = self._health_consecutive_failures
+                        self._health_consecutive_failures = 0
+                    if recovered_failures > 0:
                         self.log.info(
                             "MeshCore health recovered after %d failed check(s)",
-                            consecutive_health_failures,
+                            recovered_failures,
                         )
-                    consecutive_health_failures = 0
                 else:
-                    consecutive_health_failures += 1
-                    if consecutive_health_failures < health_failure_threshold:
+                    with self._lock:
+                        self._health_consecutive_failures += 1
+                        consecutive_health_failures = self._health_consecutive_failures
+                    if consecutive_health_failures < self._health_failure_threshold:
                         self.log.info(
                             "MeshCore health check failed (%d/%d) — will retry",
                             consecutive_health_failures,
-                            health_failure_threshold,
+                            self._health_failure_threshold,
                         )
                         continue
                     self.log.warning(
                         "MeshCore health check failed %d times, reconnecting",
                         consecutive_health_failures,
                     )
-                    consecutive_health_failures = 0
+                    with self._lock:
+                        self._health_consecutive_failures = 0
                     self._disconnect_device()
                     self.event_bus.publish(
                         events.MESHCORE_DISCONNECTED,
@@ -307,14 +640,20 @@ class MeshCoreGateway(PluginBase):
 
         self.log.info("Connecting to MeshCore device (port=%s)...", serial_port)
 
-        mc = self._run_async(
+        # Resolve and exclusively own the physical endpoint before every open
+        # or reconnect attempt.  Registry conflicts and missing devices fail
+        self._ensure_serial_device_lease(serial_port)
+
+        generation = self._begin_connection_generation()
+
+        mc = self._run_tracked_open(
             MeshCore.create_serial(
                 serial_port,
                 baudrate,
-                auto_reconnect=True,
-                max_reconnect_attempts=3,
+                auto_reconnect=False,
             ),
-            timeout=30,
+            generation,
+            30,
         )
         if mc is None:
             raise ConnectionError(
@@ -322,32 +661,54 @@ class MeshCoreGateway(PluginBase):
                 "is it flashed with Companion Radio firmware?"
             )
 
+        # _run_tracked_open publishes the disconnected candidate before it
+        # returns, so shutdown and retry paths can always find the exact handle.
+        self._require_current_connection(mc, generation)
+
         # Sync time
         self._run_async(mc.commands.set_time(int(time.time())))
+        self._require_current_connection(mc, generation)
 
-        # Query device info
-        result = self._run_async(mc.commands.send_device_query())
-        device_info = None
-        if result and hasattr(result, "payload"):
-            device_info = dict(result.payload)
+        # Query the local radio rather than trusting the client's cached
+        # connection flag.  A missing initial response is allowed to enter
+        # the normal hysteresis path so hotplug/retry semantics stay intact.
+        result = self._run_async(
+            mc.commands.send_device_query(),
+            timeout=self._health_query_timeout,
+        )
+        self._require_current_connection(mc, generation)
+        if not self._record_device_response(result):
+            self.log.warning("MeshCore initial device query returned no usable response")
 
         # Fetch contacts
         self._run_async(mc.commands.get_contacts())
+        self._require_current_connection(mc, generation)
         self._sync_contact_cache(mc)
 
         # Subscribe to incoming messages
-        subs = []
-
         async def _on_contact_msg(event):
+            if not self._connection_is_current(mc, generation, require_connected=True):
+                return
             self._handle_incoming_message(event, msg_type="direct")
 
         async def _on_channel_msg(event):
+            if not self._connection_is_current(mc, generation, require_connected=True):
+                return
             self._handle_incoming_message(event, msg_type="broadcast")
 
         async def _on_disconnect(event):
-            self.log.warning("MeshCore device disconnected")
             with self._lock:
+                if (
+                    not self._active
+                    or self._connection_generation != generation
+                    or self._mc is not mc
+                ):
+                    return
+                # A disconnect during setup must fence the setup thread before
+                # it can publish this client as connected.
+                self._connection_generation += 1
                 self._connected = False
+            self.log.warning("MeshCore device disconnected")
             self.event_bus.publish(
                 events.MESHCORE_DISCONNECTED,
                 {
@@ -356,36 +717,64 @@ class MeshCoreGateway(PluginBase):
             )
 
         async def _on_ack(event):
+            if not self._connection_is_current(mc, generation, require_connected=True):
+                return
             self._handle_ack_event(event)
 
         async def _on_new_contact(event):
+            if not self._connection_is_current(mc, generation, require_connected=True):
+                return
             self._handle_new_contact(event)
 
-        subs.append(mc.subscribe(EventType.CONTACT_MSG_RECV, _on_contact_msg))
-        subs.append(mc.subscribe(EventType.CHANNEL_MSG_RECV, _on_channel_msg))
-        subs.append(mc.subscribe(EventType.DISCONNECTED, _on_disconnect))
-        subs.append(mc.subscribe(EventType.ACK, _on_ack))
-        subs.append(mc.subscribe(EventType.NEW_CONTACT, _on_new_contact))
+        for event_type, callback in (
+            (EventType.CONTACT_MSG_RECV, _on_contact_msg),
+            (EventType.CHANNEL_MSG_RECV, _on_channel_msg),
+            (EventType.DISCONNECTED, _on_disconnect),
+            (EventType.ACK, _on_ack),
+            (EventType.NEW_CONTACT, _on_new_contact),
+        ):
+            self._require_current_connection(mc, generation)
+            sub = mc.subscribe(event_type, callback)
+            with self._lock:
+                if self._mc is mc:
+                    self._subscriptions.append(sub)
+                current = (
+                    self._active and self._connection_generation == generation and self._mc is mc
+                )
+            if not current:
+                raise RuntimeError("MeshCore connection became stale while subscribing")
 
         # Start auto-fetching queued messages
         auto_sub = self._run_async(mc.start_auto_message_fetching())
-        subs.append(auto_sub)
+        self._require_current_connection(mc, generation)
+        with self._lock:
+            if self._mc is mc:
+                self._subscriptions.append(auto_sub)
+            current = self._active and self._connection_generation == generation and self._mc is mc
+        if not current:
+            raise RuntimeError("MeshCore connection became stale while enabling message fetch")
 
         with self._lock:
-            self._mc = mc
+            if not self._active or self._connection_generation != generation or self._mc is not mc:
+                raise RuntimeError("MeshCore connection became stale before commit")
             self._connected = True
             self._connect_count += 1
-            self._subscriptions = subs
-            if device_info is not None:
-                self._device_info = device_info
+            self._health_consecutive_failures = 0
+            self._serial_reopen_blocked = False
 
         # Send initial advertisement so other MeshCore nodes can discover us
         try:
+            self._require_current_connection(mc, generation)
             self._run_async(mc.commands.send_advert(), timeout=10)
+            self._require_current_connection(mc, generation)
             self._last_advert_time = time.time()
             self.log.info("MeshCore initial advertisement sent")
         except Exception:
-            self.log.warning("Failed to send initial MeshCore advertisement", exc_info=True)
+            if self._connection_is_current(mc, generation):
+                self.log.warning("Failed to send initial MeshCore advertisement", exc_info=True)
+
+        if not self._connection_is_current(mc, generation, require_connected=True):
+            return
 
         fw = self._device_info.get("ver", "unknown")
         model = self._device_info.get("model", "unknown")
@@ -399,63 +788,91 @@ class MeshCoreGateway(PluginBase):
             },
         )
 
-    def _disconnect_device(self) -> None:
-        """Tear down the MeshCore connection."""
-        with self._lock:
-            mc = self._mc
-            subs = self._subscriptions
-            self._mc = None
-            self._connected = False
-            self._subscriptions = []
+    def _disconnect_device(self) -> bool:
+        """Close the current client, retaining it when teardown is uncertain."""
+        with self._disconnect_lock:
+            self._invalidate_connection_generation()
+            with self._lock:
+                mc = self._mc
+                subs = list(self._subscriptions)
+                self._connected = False
+                open_pending = self._open_attempt is not None
+                teardown = self._teardown_attempt
 
-        if mc is None:
-            return
+            if mc is None:
+                return not open_pending and teardown is None
 
-        # Unsubscribe event handlers
-        for sub in subs:
-            try:
-                mc.unsubscribe(sub)
-            except Exception:
-                self.log.debug(
-                    "Error unsubscribing MeshCore event handler",
-                    exc_info=True,
-                )
+            if teardown is not None and teardown.get("mc") is mc:
+                done = teardown["done"]
+                if not done.is_set():
+                    done.wait(timeout=self._device_teardown_timeout)
+                    return bool(done.is_set() and teardown.get("success"))
+                with self._lock:
+                    if self._teardown_attempt is teardown:
+                        self._teardown_attempt = None
 
-        # Disconnect — only schedule the coroutine if the async loop is
-        # actually running.  Creating the coroutine when ``_run_async``
-        # would raise leaves it un-awaited and produces a RuntimeWarning;
-        # check loop state first and skip cleanly when it's already down.
-        if self._loop and self._loop.is_running():
-            try:
-                self._run_async(self._async_disconnect_mc(mc), timeout=5)
-            except Exception:
-                self.log.debug("Error disconnecting MeshCore", exc_info=True)
-        else:
-            self.log.debug("MeshCore async loop not running; skipping device disconnect")
+            done = threading.Event()
+            teardown = {"mc": mc, "done": done, "success": False}
+            with self._lock:
+                self._teardown_attempt = teardown
+                self._serial_reopen_blocked = True
 
-        self._save_contact_cache()
+            def _teardown_client() -> None:
+                # unsubscribe() is synchronous in current meshcore releases and
+                # has no SDK timeout.  Keep it in a managed worker so a wedged
+                # callback registry cannot wedge stop() or permit a second open.
+                for sub in subs:
+                    try:
+                        mc.unsubscribe(sub)
+                    except Exception:
+                        self.log.debug(
+                            "Error unsubscribing MeshCore event handler",
+                            exc_info=True,
+                        )
 
-    async def _async_disconnect(self) -> None:
-        """Async helper for stop() — disconnects the current MeshCore instance."""
-        mc = self._mc
-        if mc:
-            try:
-                await mc.stop_auto_message_fetching()
-            except Exception:
-                self.log.debug(
-                    "Error stopping MeshCore auto-fetch",
-                    exc_info=True,
-                )
-            try:
-                await mc.disconnect()
-            except Exception:
-                self.log.debug("Error during MeshCore disconnect", exc_info=True)
+                success = False
+                try:
+                    if self._loop and self._loop.is_running():
+                        success = bool(
+                            self._run_async(
+                                self._async_disconnect_mc(mc),
+                                timeout=self._device_teardown_timeout,
+                            )
+                        )
+                    else:
+                        self.log.debug(
+                            "MeshCore async loop not running; cannot prove device disconnect"
+                        )
+                except Exception:
+                    self.log.debug("Error disconnecting MeshCore", exc_info=True)
 
-    async def _async_disconnect_mc(self, mc: Any) -> None:
+                with self._lock:
+                    teardown["success"] = success
+                    if self._mc is mc:
+                        self._serial_reopen_blocked = not success
+                        if success:
+                            self._mc = None
+                            self._subscriptions = []
+                            self._last_device_response_monotonic = 0.0
+                            self._last_device_response_time = None
+                    if self._teardown_attempt is teardown:
+                        self._teardown_attempt = None
+                if success:
+                    self._save_contact_cache()
+                done.set()
+
+            self._start_thread(_teardown_client, "meshcore-teardown")
+            if not done.wait(timeout=self._device_teardown_timeout):
+                return False
+            return bool(teardown["success"])
+
+    async def _async_disconnect_mc(self, mc: Any) -> bool:
         """Async helper — disconnect a specific MeshCore instance."""
+        success = True
         try:
             await mc.stop_auto_message_fetching()
         except Exception:
+            success = False
             self.log.debug(
                 "Error stopping MeshCore auto-fetch (mc)",
                 exc_info=True,
@@ -463,18 +880,151 @@ class MeshCoreGateway(PluginBase):
         try:
             await mc.disconnect()
         except Exception:
+            success = False
             self.log.debug("Error during MeshCore disconnect (mc)", exc_info=True)
+        return success
+
+    @staticmethod
+    def _validate_device_info_payload(payload: Any) -> tuple[bool, dict[str, Any]]:
+        """Validate a DEVICE_INFO payload independent of SDK result shape."""
+        if not isinstance(payload, dict) or not payload:
+            return False, {}
+        metadata = dict(payload)
+        normalized = {str(key).strip().lower(): value for key, value in metadata.items()}
+        if {"error", "err", "reason", "timeout", "timed_out", "busy"} & normalized.keys():
+            return False, {}
+        for key in ("status", "state"):
+            value = normalized.get(key)
+            if isinstance(value, str) and any(
+                marker in value.strip().lower()
+                for marker in ("error", "fail", "timeout", "timed out", "busy")
+            ):
+                return False, {}
+        device_info_keys = {
+            "fw ver",
+            "ver",
+            "version",
+            "firmware",
+            "firmware_version",
+            "fw_ver",
+            "model",
+            "board",
+            "device_id",
+            "public_key",
+            "radio_freq",
+            "radio_bw",
+            "radio_sf",
+            "radio_cr",
+            "max_tx_power",
+        }
+        has_device_info = any(
+            key in normalized and normalized[key] not in (None, "", [], {})
+            for key in device_info_keys
+        )
+        return has_device_info, metadata if has_device_info else {}
+
+    @staticmethod
+    def _parse_device_query_response(result: Any) -> tuple[bool, dict[str, Any]]:
+        """Return whether *result* proves a local response and its metadata.
+
+        MeshCore releases expose command responses as event objects, while
+        lightweight integrations and tests sometimes return the payload
+        mapping directly.  Accept both without depending on a particular
+        EventType enum identity, but reject explicit command errors.
+        """
+        if result is None:
+            return False, {}
+
+        event_type = getattr(result, "type", None)
+        event_name = str(getattr(event_type, "name", "")).lower()
+        event_value = str(getattr(event_type, "value", "")).lower()
+        event_label = str(event_type).lower()
+        if isinstance(result, dict):
+            return MeshCoreGateway._validate_device_info_payload(result)
+        if not hasattr(result, "payload"):
+            return False, {}
+        payload = getattr(result, "payload", None)
+        if (
+            event_name != "device_info"
+            and event_value != "device_info"
+            and event_label != "device_info"
+        ):
+            return False, {}
+        return MeshCoreGateway._validate_device_info_payload(payload)
+
+    def _record_device_response(self, result: Any) -> bool:
+        """Record a successful local device response and refresh metadata."""
+        usable, payload = self._parse_device_query_response(result)
+        if not usable:
+            return False
+        now_monotonic = time.monotonic()
+        now_wall = time.time()
+        with self._lock:
+            self._last_device_response_monotonic = now_monotonic
+            self._last_device_response_time = now_wall
+            if payload:
+                self._device_info.update(payload)
+        return True
+
+    def _device_response_age(self, now: float | None = None) -> float | None:
+        """Return seconds since the most recent proven local response."""
+        with self._lock:
+            last_response = self._last_device_response_monotonic
+        if last_response <= 0:
+            return None
+        current = time.monotonic() if now is None else now
+        return max(0.0, current - last_response)
+
+    def _recent_device_response_is_acceptable(self) -> bool:
+        age = self._device_response_age()
+        return (
+            age is not None
+            and self._health_response_max_age > 0
+            and age <= self._health_response_max_age
+        )
 
     def _check_health(self) -> bool:
-        """Return True if the MeshCore connection appears healthy."""
+        """Query the local companion with a bounded response-age fallback."""
         with self._lock:
             mc = self._mc
-        if mc is None:
+            connected = self._connected
+            generation = self._connection_generation
+        if mc is None or not connected:
             return False
+
         try:
-            return mc.is_connected
-        except Exception:
+            result = self._run_async(
+                mc.commands.send_device_query(),
+                timeout=self._health_query_timeout,
+            )
+        except Exception as exc:
+            with self._lock:
+                self._health_query_failures += 1
+            if self._recent_device_response_is_acceptable():
+                self.log.debug(
+                    "MeshCore health query failed; accepting recent local response",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                return True
+            self.log.debug(
+                "MeshCore health query failed with no recent local response",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             return False
+
+        if not self._connection_is_current(mc, generation, require_connected=True):
+            return False
+
+        if self._record_device_response(result):
+            return True
+
+        with self._lock:
+            self._health_query_failures += 1
+        if self._recent_device_response_is_acceptable():
+            self.log.debug("MeshCore health query returned no data; using recent response")
+            return True
+        self.log.debug("MeshCore health query returned no usable local response")
+        return False
 
     def _send_periodic_advert(self) -> None:
         """Send a periodic advertisement to the MeshCore mesh."""
@@ -788,30 +1338,40 @@ class MeshCoreGateway(PluginBase):
         if not self._check_send_rate_limit():
             return {"sent": False, "reason": "rate_limited"}
 
-        with self._lock:
-            mc = self._mc
-            connected = self._connected
-        if not connected or mc is None:
-            return {"sent": False, "reason": "not_connected"}
-
         try:
-            if destination:
-                result = self._run_async(
-                    mc.commands.send_msg(destination, text),
-                    timeout=10,
-                )
-            else:
-                ch = channel if channel is not None else 0
-                result = self._run_async(
-                    mc.commands.send_chan_msg(ch, text),
-                    timeout=10,
-                )
+            # Validate and enter the SDK while holding the same lock used by
+            # disconnect/reconnect generation changes. The async operation runs
+            # without the lock, so its callbacks remain free to fence this send.
+            with self._lock:
+                mc = self._mc
+                generation = self._connection_generation
+                if not self._active or not self._connected or mc is None:
+                    return {"sent": False, "reason": "not_connected"}
+                if destination:
+                    operation = mc.commands.send_msg(destination, text)
+                else:
+                    ch = channel if channel is not None else 0
+                    operation = mc.commands.send_chan_msg(ch, text)
+            result = self._run_async(operation, timeout=10)
         except (ConnectionError, TimeoutError, AttributeError):
+            if not self._connection_is_current(mc, generation, require_connected=True):
+                self.log.warning("MeshCore delivery is uncertain after connection changed")
+                return {"sent": False, "reason": _DELIVERY_UNCERTAIN_REASON}
             self.log.warning("MeshCore device disconnected during send")
             return {"sent": False, "reason": "device_disconnected_during_send"}
         except Exception as exc:
+            if not self._connection_is_current(mc, generation, require_connected=True):
+                self.log.warning("MeshCore delivery is uncertain after connection changed")
+                return {"sent": False, "reason": _DELIVERY_UNCERTAIN_REASON}
             self.log.exception("Error sending MeshCore message")
             return {"sent": False, "reason": str(exc)}
+
+        # A completed SDK call on an old client cannot prove whether the radio
+        # transmitted before disconnect/reconnect or shutdown fenced it. Never
+        # retry that ambiguous operation and never report it as sent.
+        if not self._connection_is_current(mc, generation, require_connected=True):
+            self.log.warning("MeshCore delivery is uncertain after connection changed")
+            return {"sent": False, "reason": _DELIVERY_UNCERTAIN_REASON}
 
         from meshcore.events import EventType
 
@@ -823,11 +1383,7 @@ class MeshCoreGateway(PluginBase):
             )
             return {"sent": False, "reason": reason}
 
-        with self._lock:
-            self._msgs_sent += 1
-
         dest_label = destination[:12] if destination else f"channel {channel or 0}"
-        self.log.info("Sent MeshCore message to %s", dest_label)
 
         # Extract ack tracking info for direct messages
         expected_ack = None
@@ -837,6 +1393,21 @@ class MeshCoreGateway(PluginBase):
             if raw_ack is not None:
                 expected_ack = raw_ack.hex() if isinstance(raw_ack, bytes) else str(raw_ack)
             suggested_timeout = result.payload.get("suggested_timeout")
+
+        # Commit statistics only while the exact client and generation captured
+        # before SDK entry remain the published connected owner.
+        with self._lock:
+            if (
+                not self._active
+                or self._connection_generation != generation
+                or self._mc is not mc
+                or not self._connected
+            ):
+                self.log.warning("MeshCore delivery is uncertain after connection changed")
+                return {"sent": False, "reason": _DELIVERY_UNCERTAIN_REASON}
+            self._msgs_sent += 1
+
+        self.log.info("Sent MeshCore message to %s", dest_label)
 
         self.event_bus.publish(
             events.MESHCORE_MESSAGE_SENT,
@@ -873,6 +1444,7 @@ class MeshCoreGateway(PluginBase):
 
     def get_status(self) -> dict[str, Any]:
         """Return current gateway status for monitoring and API."""
+        response_age = self._device_response_age()
         with self._lock:
             return {
                 "active": self._active,
@@ -885,6 +1457,14 @@ class MeshCoreGateway(PluginBase):
                 "msgs_rate_limited": self._msgs_rate_limited,
                 "connect_count": self._connect_count,
                 "reconnect_failures": self._reconnect_failures,
+                "serial_reopen_blocked": self._serial_reopen_blocked,
+                "health_query_failures": self._health_query_failures,
+                "health_consecutive_failures": self._health_consecutive_failures,
+                "health_failure_threshold": self._health_failure_threshold,
+                "last_device_response_time": self._last_device_response_time,
+                "device_response_age_seconds": (
+                    round(response_age, 1) if response_age is not None else None
+                ),
                 "last_msg_time": self._last_msg_time,
                 "contacts": len(self._contact_cache),
             }

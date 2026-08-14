@@ -8,6 +8,72 @@ import pytest
 from reticulumpi.event_bus import EventBus, _DaemonWorkerPool
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _no_eventbus_threads_survive_file():
+    """Fail if this module adds a worker that survives its final teardown."""
+    baseline_ids = {
+        id(thread)
+        for thread in threading.enumerate()
+        if thread.name.startswith("eventbus-") and thread.is_alive()
+    }
+    yield
+    leaked = [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("eventbus-")
+        and thread.is_alive()
+        and id(thread) not in baseline_ids
+    ]
+    assert not leaked, f"EventBus worker thread(s) survived the test file: {leaked!r}"
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_test_event_buses_and_pools(monkeypatch):
+    """Own and deterministically reap every bus and pool a test creates."""
+    import time
+
+    baseline_ids = {
+        id(thread)
+        for thread in threading.enumerate()
+        if thread.name.startswith("eventbus-") and thread.is_alive()
+    }
+    buses = []
+    pools = []
+    original_bus_init = EventBus.__init__
+    original_pool_init = _DaemonWorkerPool.__init__
+
+    def _tracked_pool_init(self, *args, **kwargs):
+        original_pool_init(self, *args, **kwargs)
+        pools.append(self)
+
+    def _tracked_bus_init(self, *args, **kwargs):
+        original_bus_init(self, *args, **kwargs)
+        buses.append(self)
+
+    monkeypatch.setattr(_DaemonWorkerPool, "__init__", _tracked_pool_init)
+    monkeypatch.setattr(EventBus, "__init__", _tracked_bus_init)
+    yield
+
+    for bus in reversed(buses):
+        bus.shutdown()
+    for pool in reversed(pools):
+        pool.shutdown(cancel_pending=True)
+
+    deadline = time.monotonic() + 5
+    for pool in pools:
+        for thread in pool._threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    leaked = [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("eventbus-")
+        and thread.is_alive()
+        and id(thread) not in baseline_ids
+    ]
+    assert not leaked, f"EventBus worker thread(s) survived test teardown: {leaked!r}"
+
+
 def test_subscribe_and_publish():
     bus = EventBus()
     cb = MagicMock()
@@ -248,13 +314,23 @@ def test_shutdown_does_not_wait_for_hung_offloaded_callback():
 
     bus.subscribe_offloaded("evt", hung)
     bus.publish("evt", {})
-    assert started.wait(1)
-    begin = time.monotonic()
-    bus.shutdown()
-    assert time.monotonic() - begin < 1.5
-    stats = bus.get_stats()
-    assert stats["abandoned_workers"] == 1
-    assert "dropped" in stats and "pending" in stats
+    try:
+        assert started.wait(1)
+        begin = time.monotonic()
+        bus.shutdown()
+        assert time.monotonic() - begin < 1.5
+        stats = bus.get_stats()
+        assert stats["abandoned_workers"] == 1
+        assert "dropped" in stats and "pending" in stats
+    finally:
+        # Preserve the bounded-shutdown assertion, then release and reap the
+        # deliberately blocked callback so it cannot contaminate later tests.
+        never.set()
+        bus.shutdown()
+        for thread in bus._offload_pool._threads:
+            thread.join(timeout=1)
+
+    assert not any(thread.is_alive() for thread in bus._offload_pool._threads)
 
 
 def test_bounded_pool_drops_work_cancels_pending_and_rejects_after_shutdown():
@@ -274,8 +350,6 @@ def test_bounded_pool_drops_work_cancels_pending_and_rejects_after_shutdown():
 
 
 def test_pool_shutdown_handles_full_queue_without_blocking():
-    import time
-
     pool = _DaemonWorkerPool(max_workers=1, max_pending=1)
     started = threading.Event()
     release = threading.Event()
@@ -284,20 +358,23 @@ def test_pool_shutdown_handles_full_queue_without_blocking():
         started.set()
         release.wait()
 
-    assert pool.submit(blocked) is True
-    assert started.wait(1)
-    assert pool.submit(lambda: None) is True
-    pool.shutdown(cancel_pending=False)
-    assert pool.stats()["abandoned_workers"] == 1
+    try:
+        assert pool.submit(blocked) is True
+        assert started.wait(1)
+        assert pool.submit(lambda: None) is True
+        pool.shutdown(cancel_pending=False)
+        assert pool.stats()["abandoned_workers"] == 1
+    finally:
+        # Let the daemon drain, then supply a stop token if the queue-full
+        # shutdown branch could not enqueue one.
+        release.set()
+        for thread in pool._threads:
+            thread.join(timeout=0.5)
+        for thread in pool._threads:
+            if thread.is_alive():
+                pool._queue.put(pool._STOP, timeout=1)
+                thread.join(timeout=1)
 
-    # Let the daemon drain and explicitly stop it so the test leaves no live
-    # worker behind after exercising the queue-full shutdown branch.
-    release.set()
-    deadline = time.monotonic() + 1
-    while pool._queue.qsize() and time.monotonic() < deadline:
-        time.sleep(0.005)
-    pool._queue.put(pool._STOP, timeout=1)
-    pool._threads[0].join(timeout=1)
     assert not pool._threads[0].is_alive()
 
 

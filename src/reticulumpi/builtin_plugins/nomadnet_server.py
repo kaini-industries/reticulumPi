@@ -32,7 +32,7 @@ destination = file
 
 [client]
 enable_client = yes
-user_interface = text
+user_interface = none
 announce_at_start = yes
 try_propagation_on_send_fail = yes
 
@@ -279,6 +279,9 @@ class NomadNetServer(PluginBase):
                     except Exception:
                         self.log.exception("Failed to restart NomadNet")
                         self._active = False
+                elif not auto_restart:
+                    self.log.error("NomadNet exited and automatic restart is disabled, giving up")
+                    self._active = False
                 else:
                     self.log.error("NomadNet exceeded max restarts (%d), giving up", max_restarts)
                     self._active = False
@@ -360,6 +363,12 @@ class NomadNetServer(PluginBase):
                         except Exception:
                             self.log.exception("Failed to restart NomadNet")
                             self._active = False
+                    elif not auto_restart:
+                        self.log.error(
+                            "NomadNet CPU runaway terminated the process and automatic restart "
+                            "is disabled, giving up"
+                        )
+                        self._active = False
                     else:
                         self.log.error(
                             "NomadNet exceeded max restarts (%d), giving up",

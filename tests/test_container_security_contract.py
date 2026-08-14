@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -12,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 DOCKERFILE = ROOT / "docker/Dockerfile"
 RUNTIME_VERIFIER = ROOT / "tools/verify_container_runtime.sh"
-VEX_PATH = "docker/security/cve-2026-15308.openvex.json"
-PATCH_SCRIPT = ROOT / "docker/security/patch_cpython_html_parser.py"
-PATCHED_PARSER_SHA256 = "951b46301862483dbcb3debbbd39b4cef3b85ebe488f86cc2ff667f834dfe523"
+VEX_PATH = "docker/security/python-3.14.7-grype-db-bridge.openvex.json"
+NATIVE_PARSER_SHA256 = "5c5ed245889135564e75dfed9a47aeb6b4d3e5a2e9614d918a986767e3747539"
+NATIVE_TARFILE_SHA256 = "3c8d585a77d7d376aea66e5e11a4d53c2605100d4c05a71b5385ed54bc526f51"
 
 
 def _container_steps() -> list[dict[str, object]]:
@@ -22,17 +23,18 @@ def _container_steps() -> list[dict[str, object]]:
     return workflow["jobs"]["container"]["steps"]
 
 
-def test_production_container_uses_digest_pinned_python_314_trixie() -> None:
+def test_production_container_uses_digest_pinned_python_3147_trixie() -> None:
     source = DOCKERFILE.read_text(encoding="utf-8")
     base_images = re.findall(r"^ARG PYTHON_TRIXIE_IMAGE=(.+)$", source, re.MULTILINE)
 
     assert base_images == [
-        "python:3.14-slim-trixie@sha256:"
-        "b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1"
+        "python:3.14.7-slim-trixie@sha256:"
+        "83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910"
     ]
-    assert "FROM ${PYTHON_TRIXIE_IMAGE} AS python-patched" in source
-    assert "FROM python-patched AS test" in source
-    assert "FROM python-patched AS runtime" in source
+    assert "FROM ${PYTHON_TRIXIE_IMAGE} AS test" in source
+    assert "FROM ${PYTHON_TRIXIE_IMAGE} AS runtime" in source
+    assert "python-patched" not in source
+    assert "patch_cpython_" not in source
     assert "PYTHON_BOOKWORM_IMAGE" not in source
     assert "slim-bookworm" not in source
 
@@ -152,15 +154,38 @@ def test_runtime_verifier_enforces_absence_of_python_packaging_toolchain() -> No
     assert explicit_probes or iterable_probe
 
 
-def test_vex_suppression_is_bound_to_the_exported_parser_postimage() -> None:
+def test_native_fixed_stdlib_and_scanner_bridge_are_bound_to_the_exported_runtime() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     verifier = RUNTIME_VERIFIER.read_text(encoding="utf-8")
-    patch_script = PATCH_SCRIPT.read_text(encoding="utf-8")
-    vex = (ROOT / VEX_PATH).read_text(encoding="utf-8")
+    vex = json.loads((ROOT / VEX_PATH).read_text(encoding="utf-8"))
 
     parser_path = "/usr/local/lib/python3.14/html/parser.py"
-    assert f"patch_cpython_html_parser.py {parser_path}" in dockerfile
+    tarfile_path = "/usr/local/lib/python3.14/tarfile.py"
+    assert "python:3.14.7-slim-trixie@sha256:" in dockerfile
+    assert "patch_cpython_" not in dockerfile
     assert parser_path in verifier
-    assert PATCHED_PARSER_SHA256 in verifier
-    assert PATCHED_PARSER_SHA256 in patch_script
-    assert PATCHED_PARSER_SHA256 in vex
+    assert tarfile_path in verifier
+    assert "sys.version_info[:3] == (3, 14, 7)" in verifier
+    assert NATIVE_PARSER_SHA256 in verifier
+    assert NATIVE_TARFILE_SHA256 in verifier
+    assert not list((ROOT / "docker/security").glob("patch_cpython_*.py"))
+    assert list((ROOT / "docker/security").glob("*.openvex.json")) == [ROOT / VEX_PATH]
+
+    statements = {statement["vulnerability"]["name"]: statement for statement in vex["statements"]}
+    assert statements.keys() == {
+        "CVE-2026-11940",
+        "CVE-2026-11972",
+        "CVE-2026-15308",
+    }
+    for vulnerability, statement in statements.items():
+        assert statement["products"] == [{"@id": "pkg:generic/python@3.14.7"}]
+        assert statement["status"] == "fixed"
+        notes = statement["status_notes"]
+        assert f"https://nvd.nist.gov/vuln/detail/{vulnerability}" in notes
+        assert "https://www.python.org/downloads/release/python-3147/" in notes
+        assert "83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910" in notes
+        assert "Grype 0.110.0 database schema 6.1.9 built 2026-08-08T06:22:53Z" in notes
+        assert "Remove this statement as soon as" in notes
+    assert NATIVE_PARSER_SHA256 in statements["CVE-2026-15308"]["status_notes"]
+    assert NATIVE_TARFILE_SHA256 in statements["CVE-2026-11940"]["status_notes"]
+    assert NATIVE_TARFILE_SHA256 in statements["CVE-2026-11972"]["status_notes"]

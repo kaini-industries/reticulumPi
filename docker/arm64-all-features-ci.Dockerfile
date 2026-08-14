@@ -22,7 +22,7 @@ RUN set -eu; \
     python -m pip install --require-hashes --requirement /tmp/constraints/all-features.txt; \
     python -m pip install --no-deps "${1}"; \
     python -m pip check; \
-    python -c 'from importlib.metadata import version; [version(name) for name in ("RPi.GPIO", "meshtastic", "meshcore", "pyModeS", "pynmea2", "pyserial", "sgp4", "smbus2")]'; \
+    python -c 'import nacl.bindings; from importlib.metadata import version; [version(name) for name in ("RPi.GPIO", "meshtastic", "meshcore", "PyNaCl", "pyModeS", "pynmea2", "pyserial", "sgp4", "smbus2")]'; \
     rm -rf /tmp/constraints /tmp/wheels
 
 CMD ["python", "-m", "pip", "check"]

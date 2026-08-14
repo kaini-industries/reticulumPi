@@ -1067,12 +1067,13 @@ async def handle_link_tester_start(
         body = await request.json()
     except (ValueError, TypeError):
         body = {}
+    if not isinstance(body, dict):
+        return _error("request body must be a JSON object", 400)
     count = body.get("count")
     if count is not None:
-        try:
-            count = int(count)
-        except (ValueError, TypeError):
-            return _error("count must be an integer", 400)
+        count_error = "count must be a non-negative integer (0 = unlimited)"
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return _error(count_error, 400)
     result = await _run_sync(
         lt.start_test,
         target=body.get("target"),

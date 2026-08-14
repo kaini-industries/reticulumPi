@@ -7,10 +7,17 @@ import textwrap
 
 import pytest
 
+from reticulumpi import rns_config
 from reticulumpi.rns_config import (
+    InterfaceEntry,
+    RNSConfigError,
     add_interface_section,
+    parse_enabled_rns_serial_interfaces,
     parse_rns_config,
+    parse_rns_config_from_lines,
+    remove_interface_property,
     set_interface_enabled,
+    set_interface_property,
     write_rns_config,
 )
 
@@ -127,6 +134,64 @@ class TestParse:
         results = [i.enabled for i in ifaces]
         assert results == [True, True, True, False, False, False]
 
+    def test_configobj_scalar_forms_and_unindented_keys_are_parsed_without_mutation(self):
+        source = """\
+ [interfaces] # top-level comment
+ [["Quoted RNode"]] # interface comment
+type = "RNodeInterface" # type comment
+interface_enabled = 'yes' # enable comment
+port = "/dev/serial/by-id/radio#one" # port comment
+[[[Channel One]]]
+enabled = yes
+port = /dev/must-not-replace-parent
+"""
+        lines = source.splitlines(keepends=True)
+
+        returned_lines, interfaces = parse_rns_config_from_lines(lines)
+
+        assert returned_lines is lines
+        assert "".join(returned_lines) == source
+        assert len(interfaces) == 1
+        interface = interfaces[0]
+        assert interface.name == "Quoted RNode"
+        assert interface.iface_type == "RNodeInterface"
+        assert interface.enabled is True
+        assert interface.properties["port"] == "/dev/serial/by-id/radio#one"
+        assert interface.enabled_lines == [3]
+
+    def test_missing_enable_flags_match_rns_disabled_default(self, tmp_path):
+        path = tmp_path / "config"
+        path.write_text(
+            "[interfaces]\n[[RNode]]\ntype = RNodeInterface\nport = /dev/rnode\n",
+            encoding="utf-8",
+        )
+
+        _, interfaces = parse_rns_config(str(path))
+
+        assert interfaces[0].enabled is False
+        assert interfaces[0].enabled_line == -1
+        assert interfaces[0].enabled_lines == []
+
+    @pytest.mark.parametrize(
+        ("flags", "expected"),
+        [
+            ("interface_enabled = yes", True),
+            ("interface_enabled = no\nenabled = yes", True),
+            ("interface_enabled = yes\nenabled = no", True),
+            ("interface_enabled = no\nenabled = no", False),
+        ],
+    )
+    def test_enabled_aliases_use_rns_or_semantics(self, tmp_path, flags, expected):
+        path = tmp_path / "config"
+        path.write_text(
+            f"[interfaces]\n[[RNode]]\ntype = RNodeInterface\n{flags}\n",
+            encoding="utf-8",
+        )
+
+        _, interfaces = parse_rns_config(str(path))
+
+        assert interfaces[0].enabled is expected
+
 
 class TestToggle:
     def test_disable_interface(self, config_file):
@@ -167,6 +232,41 @@ class TestToggle:
         new_lines = set_interface_enabled(lines, interfaces[0], False)
         text = "".join(new_lines)
         assert "# Reticulum Configuration" in text
+
+    def test_disable_updates_both_rns_enable_aliases_and_preserves_inline_comments(self):
+        source = """\
+[interfaces]
+[[RNode]]
+type = RNodeInterface
+interface_enabled = "yes"# legacy comment
+enabled = 'yes' # current comment
+port = /dev/rnode
+"""
+        lines = source.splitlines(keepends=True)
+        _, interfaces = parse_rns_config_from_lines(lines)
+
+        updated = set_interface_enabled(lines, interfaces[0], False)
+        _, reparsed = parse_rns_config_from_lines(updated)
+
+        assert "interface_enabled = no# legacy comment\n" in updated
+        assert "enabled = no # current comment\n" in updated
+        assert reparsed[0].enabled is False
+
+    def test_property_update_preserves_inline_comment_and_other_bytes(self):
+        source = """\
+[interfaces]
+[[RNode]]
+type = RNodeInterface
+enabled = yes
+port = "/dev/old#identity"   # keep this comment
+"""
+        lines = source.splitlines(keepends=True)
+        _, interfaces = parse_rns_config_from_lines(lines)
+
+        updated = set_interface_property(lines, interfaces[0], "port", "/dev/new")
+
+        assert updated[:-1] == lines[:-1]
+        assert updated[-1] == "port = /dev/new   # keep this comment\n"
 
 
 class TestRoundTrip:
@@ -259,3 +359,95 @@ class TestNoEnabledLine:
         p.write_text("".join(new_lines), encoding="utf-8")
         _, new_ifaces = parse_rns_config(str(p))
         assert new_ifaces[0].enabled is False
+
+
+class TestSerialReservationParserDefensivePaths:
+    @pytest.mark.parametrize(
+        "interface_types",
+        [set(), {""}, {"RNodeInterface", 1}],
+    )
+    def test_rejects_invalid_serial_interface_type_sets(self, tmp_path, interface_types):
+        with pytest.raises(ValueError, match="non-empty strings"):
+            parse_enabled_rns_serial_interfaces(
+                str(tmp_path / "does-not-need-to-exist"),
+                interface_types,
+            )
+
+    def test_absent_interfaces_section_is_empty(self, tmp_path):
+        path = tmp_path / "config"
+        path.write_text("[reticulum]\nenable_transport = yes\n", encoding="utf-8")
+
+        assert (
+            parse_enabled_rns_serial_interfaces(
+                str(path),
+                {"RNodeInterface"},
+            )
+            == []
+        )
+
+    def test_scalar_interfaces_value_is_rejected(self, tmp_path):
+        path = tmp_path / "config"
+        path.write_text("interfaces = not-a-section\n", encoding="utf-8")
+
+        with pytest.raises(RNSConfigError, match="must be a section"):
+            parse_enabled_rns_serial_interfaces(str(path), {"RNodeInterface"})
+
+    def test_unresolved_interface_type_is_rejected(self, tmp_path):
+        path = tmp_path / "config"
+        path.write_text(
+            "[interfaces]\n[[RNode]]\ntype = %(missing_type)s\nenabled = yes\nport = /dev/rnode\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(RNSConfigError, match="Could not resolve.*type"):
+            parse_enabled_rns_serial_interfaces(str(path), {"RNodeInterface"})
+
+
+class TestEditorDefensivePaths:
+    def test_toggle_honors_legacy_enabled_line_field(self):
+        lines = ["[[RNode]]\n", "enabled = yes\n"]
+        entry = InterfaceEntry(name="RNode", enabled_line=1)
+
+        assert set_interface_enabled(lines, entry, False) == [
+            "[[RNode]]\n",
+            "enabled = no\n",
+        ]
+
+    def test_property_insert_and_remove_stop_at_nested_section(self):
+        lines = [
+            "[interfaces]\n",
+            "[[RNode]]\n",
+            "type = RNodeInterface\n",
+            "[[[Channel]]]\n",
+            "port = /dev/nested\n",
+        ]
+        entry = InterfaceEntry(name="RNode", start_line=1)
+
+        inserted = set_interface_property(lines, entry, "port", "/dev/parent")
+        assert inserted == [
+            "[interfaces]\n",
+            "[[RNode]]\n",
+            "type = RNodeInterface\n",
+            "port = /dev/parent\n",
+            "[[[Channel]]]\n",
+            "port = /dev/nested\n",
+        ]
+        assert remove_interface_property(inserted, entry, "missing") == inserted
+
+    def test_scalar_parse_failure_preserves_source_spelling(self, monkeypatch):
+        def invalid_config(*_args, **_kwargs):
+            raise rns_config.ConfigObjError("invalid scalar")
+
+        monkeypatch.setattr(rns_config, "ConfigObj", invalid_config)
+
+        assert rns_config._parse_configobj_scalar("  raw value  ") == "raw value"
+
+    def test_property_replacement_handles_missing_equals_and_escaped_quotes(self):
+        assert rns_config._replace_property_value("not a property\n", "new") == ("not a property\n")
+        assert (
+            rns_config._replace_property_value(
+                'port = "/dev/radio\\"one"  # retain\n',
+                "/dev/new",
+            )
+            == "port = /dev/new  # retain\n"
+        )

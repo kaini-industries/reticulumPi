@@ -1,15 +1,18 @@
 # Complete optional-feature profile for every qualified production platform.
 # Core dependencies are included so this lock is standalone.
 -r production-universal-core.in
-aiohttp>=3.14.1,<4.0
+aiohttp>=3.14.3,<4.0
 nomadnet>=0.5,<2.0
 rnodeconf>=1.3.1,<2.0
 smbus2>=0.4,<1.0
 RPi.GPIO>=0.7,<1.0
-meshtastic>=2.0,<3.0
+# Host SDK pin for the correlated health adapter; radio firmware remains flexible.
+meshtastic==2.7.10
 paho-mqtt>=2.0,<3.0
-cryptography>=48.0.1,<50.0
+cryptography>=50.0.0,<51.0
 meshcore>=2.3,<3.0
+# MeshCore exports an expanded Ed25519 identity for Observer JWT fallback.
+PyNaCl>=1.5,<2.0
 sgp4>=2.20,<3.0
 pyserial>=3.5,<4.0
 pynmea2>=1.19,<2.0

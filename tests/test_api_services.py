@@ -13,9 +13,12 @@ import json
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from reticulumpi.builtin_plugins.web_dashboard.api_services import (
     _check_send_rate_limit,
     handle_delete_conversation,
+    handle_link_tester_start,
     handle_meshtastic_channel_delete,
     handle_meshtastic_channel_join,
     handle_meshtastic_device_reset,
@@ -64,6 +67,88 @@ def _make_plugin(tracker):
     plugin_mock = MagicMock()
     plugin_mock.app.get_plugin.return_value = tracker
     return plugin_mock
+
+
+def _make_link_tester_request(body, plugin_mock):
+    request = _make_request(plugin_mock=plugin_mock)
+
+    async def _json():
+        return body
+
+    request.json = _json
+    return request
+
+
+# ── handle_link_tester_start ───────────────────────────────────────────
+
+
+class TestHandleLinkTesterStart:
+    @pytest.mark.parametrize("body", [[], 1, "invalid"])
+    def test_rejects_non_object_json_body(self, body):
+        link_tester = MagicMock()
+        request = _make_link_tester_request(body, _make_plugin(link_tester))
+
+        response = asyncio.run(handle_link_tester_start(request))
+
+        assert response.status == 400
+        assert _parse_response(response)["error"] == "request body must be a JSON object"
+        link_tester.start_test.assert_not_called()
+
+    @pytest.mark.parametrize("count", [True, False, -1, "-2", "2", 1.5])
+    def test_rejects_noninteger_or_negative_count(self, count):
+        link_tester = MagicMock()
+        request = _make_link_tester_request(
+            {"target": "!11223344", "count": count},
+            _make_plugin(link_tester),
+        )
+
+        response = asyncio.run(handle_link_tester_start(request))
+
+        assert response.status == 400
+        assert _parse_response(response)["error"] == (
+            "count must be a non-negative integer (0 = unlimited)"
+        )
+        link_tester.start_test.assert_not_called()
+
+    def test_positive_integer_is_forwarded_without_coercion(self):
+        link_tester = MagicMock()
+        link_tester.start_test.return_value = {
+            "ok": True,
+            "target": "!11223344",
+            "count": 2,
+        }
+        request = _make_link_tester_request(
+            {"target": "!11223344", "count": 2},
+            _make_plugin(link_tester),
+        )
+
+        response = asyncio.run(handle_link_tester_start(request))
+
+        assert response.status == 200
+        link_tester.start_test.assert_called_once_with(
+            target="!11223344",
+            count=2,
+        )
+
+    def test_zero_is_forwarded_as_unlimited_count(self):
+        link_tester = MagicMock()
+        link_tester.start_test.return_value = {
+            "ok": True,
+            "target": "!11223344",
+            "count": 0,
+        }
+        request = _make_link_tester_request(
+            {"target": "!11223344", "count": 0},
+            _make_plugin(link_tester),
+        )
+
+        response = asyncio.run(handle_link_tester_start(request))
+
+        assert response.status == 200
+        link_tester.start_test.assert_called_once_with(
+            target="!11223344",
+            count=0,
+        )
 
 
 # ── handle_node_tracker_history ──────────────────────────────────────────

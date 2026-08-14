@@ -106,6 +106,29 @@ else:
     '
 }
 
+verify_nomadnet() {
+    # The configured monitor checks the subprocess every five seconds. Waiting
+    # through that boundary prevents initial process-launch readiness from
+    # masking a daemon that exits while parsing its configuration.
+    sleep 7
+    docker exec "$container" python -c '
+import os
+from pathlib import Path
+
+matches = []
+for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+    try:
+        arguments = tuple(value for value in cmdline.read_bytes().split(b"\0") if value)
+    except OSError:
+        continue
+    if any(os.path.basename(os.fsdecode(value)) == "nomadnet" for value in arguments):
+        matches.append(cmdline.parent.name)
+
+if len(matches) != 1:
+    raise SystemExit(f"expected one live NomadNet process after monitor check, found {matches}")
+'
+}
+
 stop_gracefully() {
     local started=$SECONDS
     docker stop --time 60 "$container" >/dev/null
@@ -143,13 +166,20 @@ docker run --rm \
 import importlib.util
 from hashlib import sha256
 from pathlib import Path
+import sys
+
+assert sys.version_info[:3] == (3, 14, 7)
 
 for name in ("ensurepip", "pip", "setuptools", "wheel"):
     assert importlib.util.find_spec(name) is None, name
 
 parser_path = Path("/usr/local/lib/python3.14/html/parser.py")
 assert sha256(parser_path.read_bytes()).hexdigest() == (
-    "951b46301862483dbcb3debbbd39b4cef3b85ebe488f86cc2ff667f834dfe523"
+    "5c5ed245889135564e75dfed9a47aeb6b4d3e5a2e9614d918a986767e3747539"
+)
+tarfile_path = Path("/usr/local/lib/python3.14/tarfile.py")
+assert sha256(tarfile_path.read_bytes()).hexdigest() == (
+    "3c8d585a77d7d376aea66e5e11a4d53c2605100d4c05a71b5385ed54bc526f51"
 )
 '\''
     test ! -e /src
@@ -160,6 +190,7 @@ assert sha256(parser_path.read_bytes()).hexdigest() == (
 
 start_container
 wait_healthy
+verify_nomadnet
 verify_dashboard
 first_state=$(probe_state)
 docker exec "$container" /bin/sh -ec 'touch /cache/recreation-sentinel'
@@ -170,6 +201,7 @@ stop_gracefully
 # unchanged, while the disposable cache must start empty.
 start_container
 wait_healthy
+verify_nomadnet
 verify_dashboard
 docker exec "$container" /bin/sh -ec 'test ! -e /cache/recreation-sentinel'
 second_state=$(probe_state)

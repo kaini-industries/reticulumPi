@@ -1,19 +1,10 @@
 # syntax=docker/dockerfile:1.7
-ARG PYTHON_TRIXIE_IMAGE=python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
+ARG PYTHON_TRIXIE_IMAGE=python:3.14.7-slim-trixie@sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910
 
 FROM scratch AS wheel-artifact
 COPY dist/reticulumpi-*.whl /wheels/
 
-FROM ${PYTHON_TRIXIE_IMAGE} AS python-patched
-
-# Python 3.14.6 predates the upstream fix for CVE-2026-15308. Apply the
-# verified CPython 3.14 backport fail-closed until a patched stable image is
-# available, then record that exact remediation in the release VEX document.
-COPY --chown=root:root docker/security/patch_cpython_html_parser.py /tmp/
-RUN python /tmp/patch_cpython_html_parser.py /usr/local/lib/python3.14/html/parser.py && \
-    rm -f /tmp/patch_cpython_html_parser.py
-
-FROM python-patched AS test
+FROM ${PYTHON_TRIXIE_IMAGE} AS test
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -44,7 +35,7 @@ ARG PYTEST_TIMEOUT=60
 RUN python -c "from importlib.resources import files; p = files('reticulumpi.builtin_plugins.web_dashboard').joinpath('static/index.html'); assert p.is_file(), p" && \
     pytest tests/ -q --tb=short -n "$PYTEST_WORKERS" --timeout="$PYTEST_TIMEOUT"
 
-FROM python-patched AS runtime
+FROM ${PYTHON_TRIXIE_IMAGE} AS runtime
 
 ARG RETICULUMPI_UID=10001
 ARG RETICULUMPI_GID=10001
