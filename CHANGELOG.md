@@ -10,12 +10,60 @@ installation, path, authentication, or security guidance.
 
 ## [Unreleased]
 
-The 0.2.5–0.3.1 entries and the current 0.3.6 entry are release candidates. They have not been
+The 0.2.5–0.3.1 entries and the current 0.3.7 entry are release candidates. They have not been
 promoted until their exact artifacts, signatures, CI records, hardware qualification, and approvals
-are complete. Versions 0.3.2–0.3.5 were withdrawn after failed qualification and will not be
+are complete. Versions 0.3.2–0.3.6 were withdrawn after failed qualification and will not be
 reused.
 
-## [0.3.6] - Unreleased
+## [0.3.7] - Unreleased
+
+### Added
+
+- Added canonical, generation-fenced ownership for USB serial radios so RNS, Meshtastic,
+  MeshCore, the LoRa Link Tester, and direct GPS cannot silently claim the same physical device.
+- Added bounded active health probes and observable recovery state for Meshtastic and MeshCore
+  radios, plus a durable reset circuit breaker and explicit USB identity guard for Meshtastic.
+- Added crash-safe Meshtastic MQTT packet-ID reservations and broker-CONNACK admission so encrypted
+  messages cannot reuse a packet nonce after restart or report readiness before broker acceptance.
+- Added a board/firmware compatibility matrix and hardware recovery sequence without permanently
+  pinning device firmware.
+
+### Changed
+
+- Require stable `/dev/serial/by-id` paths or dedicated udev aliases for direct multi-radio
+  consumers, and keep SDK-internal reconnects from bypassing lease identity validation.
+- Continue reconnecting Meshtastic, MeshCore, Link Tester, and direct-GPS services with bounded
+  backoff by default instead of permanently abandoning a temporarily unavailable peripheral.
+- Use the official digest-pinned Python 3.14.7 multi-architecture container base, whose native
+  standard library contains the required security fixes, without a local interpreter patch; an
+  exact-product temporary VEX bridges current scanner-data lag while full reports remain
+  unsuppressed.
+- Retire the v0.3.6 publication-workflow path and require an exact explicit `release` environment
+  approval before any registry authentication. Administrator bypass is disabled and the exact
+  `v0.3.7` tag is required at both protected environments; signed-candidate assembly and publication
+  also refuse workflow reruns.
+
+### Fixed
+
+- Recover a Link Tester after both fast USB send errors and hung calls, reject accidental negative
+  unlimited test counts, and isolate its Meshtastic packets from the gateway's global pubsub.
+- Escalate a Meshtastic soft recovery safely when a radio never reopens, serialize private SDK
+  health and recovery operations after timeouts, honor proactive probe cadence even while traffic
+  is flowing, and keep suspect or guarded recovery states visibly nonhealthy.
+- Reject error-shaped MeshCore device-info events, reserve every supported RNS serial interface,
+  and parse valid ConfigObj quoting, inline comments, and indentation consistently.
+- Accept the exact firmware metadata emitted by older MeshCore companions and keep Observer JWT
+  authentication functional with MeshCore's exported expanded Ed25519 key format.
+- Preserve whether an RTL-SDR selection came from `device_serial` or `device_index` through plugin
+  configuration, scheduler arbitration, device claims, refresh, and release. Zero-padded index
+  values remain indexes instead of being reinterpreted as serial numbers.
+
+### Pending promotion evidence
+
+- Fresh signed-tag CI, offline Minisign assembly, exact-artifact production qualification, and the
+  Pi 5 72-hour soak are required. No v0.3.6 evidence may be relabeled or carried forward.
+
+## [0.3.6] - Withdrawn 2026-08-13
 
 ### Added
 
@@ -54,10 +102,15 @@ reused.
   plugin configuration, scheduler arbitration, device claims, refresh, and release. Zero-padded
   index values remain indexes instead of being reinterpreted as serial numbers.
 
-### Pending promotion evidence
+### Withdrawal
 
-- Signed tag CI, offline Minisign assembly, exact-artifact production qualification, and the Pi 5
-  72-hour soak remain required. No 0.3.6 release gate has passed yet.
+- The signed tag, source CI, both offline Minisign rounds, and exact signed-candidate assembly
+  completed, but the protected `release` environment was administratively skipped before Gate 85.
+- The interrupted promotion published three unqualified GHCR version tags before cancellation.
+  They were removed without reuse; no GitHub Release, release attestation, production deployment,
+  hardware qualification, reboot check, or 72-hour soak completed.
+- Version 0.3.6 remains permanently withdrawn. Its signed Git tag, workflow runs, artifact hashes,
+  and incident record are retained as evidence and cannot qualify a successor.
 
 ## [0.3.5] - Withdrawn 2026-08-08
 

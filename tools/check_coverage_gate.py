@@ -23,7 +23,7 @@ from typing import Sequence
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = Path("src/reticulumpi")
 REQUIRED_PERCENT = 90
-DEFAULT_RELEASE_VERSION = "0.3.6"
+DEFAULT_RELEASE_VERSION = "0.3.7"
 _EMPTY_TREE_BASE = "reticulumpi:empty-tree"
 CRITICAL_MODULES = (
     Path("src/reticulumpi/identity_manager.py"),
