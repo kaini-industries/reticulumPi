@@ -10,9 +10,10 @@ installation, path, authentication, or security guidance.
 
 ## [Unreleased]
 
-The 0.2.5–0.3.1 entries and the current 0.3.7 entry are release candidates. They have not been
-promoted until their exact artifacts, signatures, CI records, hardware qualification, and approvals
-are complete. Versions 0.3.2–0.3.6 were withdrawn after failed qualification and will not be
+The 0.2.5–0.3.1 entries describe unpromoted release candidates. The current 0.3.7 entry is a
+pre-tag readiness plan and does not become an exact candidate until its signed tag and bound
+artifacts exist. Promotion still requires exact signatures, CI records, hardware qualification,
+and approvals. Versions 0.3.2–0.3.6 were withdrawn after failed qualification and will not be
 reused.
 
 ## [0.3.7] - Unreleased
@@ -42,6 +43,13 @@ reused.
   approval before any registry authentication. Administrator bypass is disabled and the exact
   `v0.3.7` tag is required at both protected environments; signed-candidate assembly and publication
   also refuse workflow reruns.
+- Bind tag CI, candidate finalization, and publication to the earliest exact version-tag run,
+  reject later replacement dispatches without letting them replace or sabotage the authoritative
+  earliest run, require integer attempt-1 provenance offline, and recheck live upstream run identity
+  after the protected hardware/soak wait before any registry write.
+- Reconcile all 52 historical audit rows with their merged PR/CI evidence, record an independent
+  18/20 pre-tag dashboard audit, require physical acceptance on both supported Pi host tuples, and
+  designate the final intended production tuple for one qualifying uninterrupted 72-hour soak.
 
 ### Fixed
 

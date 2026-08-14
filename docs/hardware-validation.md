@@ -1,8 +1,14 @@
 # Hardware Validation
 
-Stable promotion requires Raspberry Pi 5 evidence for both supported production tuples: current
-64-bit Bookworm/Python 3.11 and Ubuntu Noble 24.04/Python 3.12. The production-specific acceptance
-run must use the same tuple as the deployed node.
+Stable promotion requires physical Raspberry Pi 5 acceptance evidence for both supported
+production tuples: current 64-bit Bookworm/Python 3.11 and Ubuntu Noble 24.04/Python 3.12. Run the
+complete install, upgrade/rollback, service-readiness, peripheral/HIL, and reboot/identity sequence
+with the exact signed candidate on both tuples; CI systemd lanes do not substitute for either
+physical pass. One qualifying uninterrupted 72-hour soak is required per candidate, on the final
+intended production tuple. The other supported tuple requires the complete physical acceptance
+and reboot pass but not a second soak. Identify the designated soak tuple in the signed record. If
+the intended production tuple changes after a soak, the earlier interval no longer qualifies and
+the final tuple must complete a fresh uninterrupted 72-hour soak before Gate 85.
 Record model/serial identifiers without publishing private Reticulum identities or secrets.
 
 ## Fixture
@@ -60,12 +66,12 @@ Device firmware and the host-side protocol library have different compatibility 
 
 Use a table like this in the signed validation record:
 
-| Protocol | Board | Firmware | Host library | Region/preset | Active probe | Reset/reopen | 72h radio soak |
+| Protocol | Board | Firmware | Host library | Region/preset | Active probe | Reset/reopen | 72h radio soak (designated tuple only) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Meshtastic | record | record | record | record | pass/fail | pass/fail | pass/fail |
-| Meshtastic Link Tester | record | record | record | record | ACK/NAK | pass/fail | pass/fail |
-| MeshCore | record | record | record | record | pass/fail | pass/fail | pass/fail |
-| RNode | record | record | record | record | pass/fail | pass/fail | pass/fail |
+| Meshtastic | record | record | record | record | pass/fail | pass/fail | pass/fail or N/A—not designated |
+| Meshtastic Link Tester | record | record | record | record | ACK/NAK | pass/fail | pass/fail or N/A—not designated |
+| MeshCore | record | record | record | record | pass/fail | pass/fail | pass/fail or N/A—not designated |
+| RNode | record | record | record | record | pass/fail | pass/fail | pass/fail or N/A—not designated |
 
 ## Qualification sequence
 
@@ -77,6 +83,13 @@ attempts. Verify the global Minisign manifest with the independently provisioned
 run `tools/offline_release.py verify-candidate` with the recorded repository/tag/commit/source-run
 and candidate-run bindings. Record every digest and use only those files for the sequence below.
 Do not rebuild the wheel, install archive, recovery packages, or container images on the fixture.
+For each workflow, the earliest admissible run for the exact tag and commit is authoritative and
+must remain on attempt 1. A failed or cancelled authoritative run, or any rerun of it, withdraws
+the version. A later fresh same-tag run is rejected and cannot replace or sabotage the
+authoritative earliest run; none of its outputs is qualification evidence. Immediately before
+Gate 85 approval, re-query the live authoritative source and candidate-finalization run identities
+and attempts. If either authoritative identity or attempt changed during HIL or the soak, stop and
+use a successor version rather than approving cached workflow outputs.
 
 1. Fresh default (`/srv/reticulumpi`) and explicit `/opt/reticulumpi` compatibility installs;
    idempotent re-run and exact ownership. Prove the running module resolves inside the immutable
@@ -145,11 +158,14 @@ Do not rebuild the wheel, install archive, recovery packages, or container image
 
 ## Soak acceptance
 
-Run the exact candidate for 72 hours. The result fails for any failed unit, orphan process,
-reachable stopped destination, database integrity error, OOM kill, steadily increasing thread
-or descriptor count, or more than 10% RSS growth after warm-up. Record temperatures,
-throttling, reboots, plugin restarts, database checks, and resource high-water marks in the
-release-verification file.
+Run one qualifying uninterrupted 72-hour interval on the designated final production tuple after
+its complete acceptance and reboot pass. The result fails for any failed unit, orphan process,
+reachable stopped destination, database integrity error, OOM kill, steadily increasing thread or
+descriptor count, or more than 10% RSS growth after warm-up. Record the designated tuple,
+temperatures, throttling,
+reboots, plugin restarts, database checks, and resource high-water marks in the
+release-verification file. The second supported tuple's full physical acceptance record remains
+mandatory even though it does not repeat the 72-hour interval.
 
 Hardware-only checks cannot be certified by CI. Until a human completes and signs this record, the
 artifact remains a release candidate. Release owners approve the already-waiting protected GitHub

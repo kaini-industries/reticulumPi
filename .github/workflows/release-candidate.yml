@@ -29,8 +29,121 @@ concurrency:
 jobs:
   global-signing-request:
     name: Assemble global release-manifest signing request
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-24.04
+    env:
+      RETICULUMPI_RUN_ADMISSION_FILTER: |
+        def positive_integer:
+          if type == "number" then . > 0 and floor == . else false end;
+        def nonnegative_integer:
+          if type == "number" then . >= 0 and floor == . else false end;
+        def exact_repository($name):
+          type == "object" and .full_name == $name;
+        . as $selected
+        | $pages[0] as $page_list
+        | [$page_list[].workflow_runs[]] as $loaded
+        | [$page_list[].total_count] as $totals
+        | [$loaded[] | select(.event == $event and .head_branch == $tag)] as $matching
+        | [$matching[] | select((.id | tostring) == $run_id)] as $selected_rows
+        | ($selected | type) == "object"
+          and ($selected.id | positive_integer)
+          and (($selected.id | tostring) == $run_id)
+          and ($selected.run_number | positive_integer)
+          and ($selected.run_attempt | positive_integer)
+          and ($selected.run_attempt == 1)
+          and ($selected.workflow_id | positive_integer)
+          and ($selected.event == $event)
+          and ($selected.head_branch == $tag)
+          and ($selected.head_sha == $sha)
+          and ($selected.repository | exact_repository($repository))
+          and ($selected.head_repository | exact_repository($repository))
+          and (($require_success == false) or (
+            $selected.status == "completed" and $selected.conclusion == "success"
+          ))
+          and ($workflow | length == 1)
+          and (($workflow[0] | type) == "object")
+          and ($workflow[0].id == $selected.workflow_id)
+          and ($workflow[0].path == $workflow_path)
+          and ($pages | length == 1)
+          and (($page_list | type) == "array")
+          and ($page_list | length > 0)
+          and all($page_list[];
+            (.total_count | nonnegative_integer) and ((.workflow_runs | type) == "array")
+          )
+          and (($totals | unique | length) == 1)
+          and ($totals[0] == ($loaded | length))
+          and (($loaded | length) < 1000)
+          and all($matching[];
+            (.id | positive_integer)
+            and (.run_number | positive_integer)
+            and (.run_attempt | positive_integer)
+            and (.workflow_id == $selected.workflow_id)
+            and (.repository | exact_repository($repository))
+            and (.head_repository | exact_repository($repository))
+          )
+          and (($selected_rows | length) == 1)
+          and ($selected_rows[0].run_number == $selected.run_number)
+          and ($selected_rows[0].run_attempt == $selected.run_attempt)
+          and ($selected_rows[0].head_sha == $selected.head_sha)
+          and (([
+            $matching[] | select(.run_number == $selected.run_number)
+          ] | length) == 1)
+          and all($matching[]; .run_number >= $selected.run_number)
     steps:
+      - name: Refuse workflow reruns before global signing request assembly
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1 || {
+            echo "global signing request assembly refuses workflow reruns" >&2
+            exit 1
+          }
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"
+          [[ $GITHUB_REF_NAME =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ ]]
+          require_initial_run() {
+            local label=$1
+            local run_id=$2
+            local event=$3
+            local workflow_path=$4
+            local require_success=$5
+            [[ $label =~ ^[a-z-]+$ ]]
+            [[ $run_id =~ ^[1-9][0-9]*$ ]]
+            local run_json="$RUNNER_TEMP/$label-run.json"
+            local workflow_json="$RUNNER_TEMP/$label-workflow.json"
+            local runs_json="$RUNNER_TEMP/$label-runs.json"
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json"
+            local workflow_id
+            workflow_id=$(jq -er \
+              '.workflow_id | select(type == "number" and . > 0 and floor == .)' \
+              "$run_json")
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
+              > "$workflow_json"
+            gh api --method GET --paginate --slurp \
+              -f event="$event" \
+              -f per_page=100 \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs" \
+              > "$runs_json"
+            jq -e \
+              --arg run_id "$run_id" \
+              --arg event "$event" \
+              --arg tag "$GITHUB_REF_NAME" \
+              --arg sha "$GITHUB_SHA" \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg workflow_path "$workflow_path" \
+              --argjson require_success "$require_success" \
+              --slurpfile workflow "$workflow_json" \
+              --slurpfile pages "$runs_json" \
+              "$RETICULUMPI_RUN_ADMISSION_FILTER" \
+              "$run_json" >/dev/null
+          }
+          require_initial_run \
+            candidate "$GITHUB_RUN_ID" workflow_dispatch \
+            .github/workflows/release-candidate.yml false
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.ref_type == 'tag' && github.ref || github.sha }}
@@ -99,39 +212,54 @@ jobs:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           set -euo pipefail
-          [[ $SOURCE_RUN_ID =~ ^[1-9][0-9]*$ ]]
-          run_json="$RUNNER_TEMP/source-run.json"
-          workflow_json="$RUNNER_TEMP/source-workflow.json"
-          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$run_json"
-          jq -e \
-            --arg run_id "$SOURCE_RUN_ID" \
-            --arg repository "$GITHUB_REPOSITORY" \
-            --arg tag "$GITHUB_REF_NAME" \
-            --arg sha "$GITHUB_SHA" \
-            '(.id | tostring) == $run_id and
-             .status == "completed" and
-             .conclusion == "success" and
-             .event == "push" and
-             .head_branch == $tag and
-             .head_sha == $sha and
-             .repository.full_name == $repository and
-             .head_repository.full_name == $repository' \
-            "$run_json" >/dev/null
-          workflow_id=$(jq -er '.workflow_id | select(type == "number")' "$run_json")
-          source_run_attempt=$(jq -er '.run_attempt | select(type == "number" and . > 0)' \
-            "$run_json")
-          gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
-            > "$workflow_json"
-          jq -e '.path == ".github/workflows/ci.yml"' "$workflow_json" >/dev/null
+          require_initial_run() {
+            local label=$1
+            local run_id=$2
+            local event=$3
+            local workflow_path=$4
+            local require_success=$5
+            [[ $label =~ ^[a-z-]+$ ]]
+            [[ $run_id =~ ^[1-9][0-9]*$ ]]
+            local run_json="$RUNNER_TEMP/$label-run.json"
+            local workflow_json="$RUNNER_TEMP/$label-workflow.json"
+            local runs_json="$RUNNER_TEMP/$label-runs.json"
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json"
+            local workflow_id
+            workflow_id=$(jq -er \
+              '.workflow_id | select(type == "number" and . > 0 and floor == .)' \
+              "$run_json")
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
+              > "$workflow_json"
+            gh api --method GET --paginate --slurp \
+              -f event="$event" \
+              -f per_page=100 \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs" \
+              > "$runs_json"
+            jq -e \
+              --arg run_id "$run_id" \
+              --arg event "$event" \
+              --arg tag "$GITHUB_REF_NAME" \
+              --arg sha "$GITHUB_SHA" \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg workflow_path "$workflow_path" \
+              --argjson require_success "$require_success" \
+              --slurpfile workflow "$workflow_json" \
+              --slurpfile pages "$runs_json" \
+              "$RETICULUMPI_RUN_ADMISSION_FILTER" \
+              "$run_json" >/dev/null
+          }
+          require_initial_run source "$SOURCE_RUN_ID" push .github/workflows/ci.yml true
           artifacts_json="$RUNNER_TEMP/source-artifacts.json"
-          gh api --paginate --slurp \
+          gh api --method GET --paginate --slurp \
             "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
             > "$artifacts_json"
           jq -e \
             --arg name "release-signing-input-$GITHUB_REF_NAME" \
             '[.[].artifacts[] | select(.name == $name and .expired == false)] | length == 1' \
             "$artifacts_json" >/dev/null
-          printf 'source_run_attempt=%s\n' "$source_run_attempt" >> "$GITHUB_OUTPUT"
+          printf 'source_run_attempt=1\n' >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-signing-input-${{ inputs.tag }}
@@ -210,6 +338,51 @@ jobs:
           test -f release-assets/SHA256SUMS
           test ! -L release-assets/SHA256SUMS
           test ! -e release-assets/SHA256SUMS.minisig
+      - name: Reconfirm the source run before global request evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          require_initial_run() {
+            local label=$1
+            local run_id=$2
+            local event=$3
+            local workflow_path=$4
+            local require_success=$5
+            [[ $label =~ ^[a-z-]+$ ]]
+            [[ $run_id =~ ^[1-9][0-9]*$ ]]
+            local run_json="$RUNNER_TEMP/$label-run.json"
+            local workflow_json="$RUNNER_TEMP/$label-workflow.json"
+            local runs_json="$RUNNER_TEMP/$label-runs.json"
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$run_json"
+            local workflow_id
+            workflow_id=$(jq -er \
+              '.workflow_id | select(type == "number" and . > 0 and floor == .)' \
+              "$run_json")
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
+              > "$workflow_json"
+            gh api --method GET --paginate --slurp \
+              -f event="$event" \
+              -f per_page=100 \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs" \
+              > "$runs_json"
+            jq -e \
+              --arg run_id "$run_id" \
+              --arg event "$event" \
+              --arg tag "$GITHUB_REF_NAME" \
+              --arg sha "$GITHUB_SHA" \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg workflow_path "$workflow_path" \
+              --argjson require_success "$require_success" \
+              --slurpfile workflow "$workflow_json" \
+              --slurpfile pages "$runs_json" \
+              "$RETICULUMPI_RUN_ADMISSION_FILTER" \
+              "$run_json" >/dev/null
+          }
+          require_initial_run source "$SOURCE_RUN_ID" push .github/workflows/ci.yml true
       - name: Attest the exact global release manifest signing request
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
