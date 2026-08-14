@@ -77,22 +77,22 @@ def _validate_identity(expected: ExpectedRelease) -> str:
         raise OfflineReleaseError("repository must be OWNER/NAME")
     if COMMIT.fullmatch(expected.commit) is None:
         raise OfflineReleaseError("commit must be a lowercase 40-character Git object ID")
-    for label, value in (
-        ("source run ID", expected.source_run_id),
-        ("source run attempt", expected.source_run_attempt),
-    ):
-        if value <= 0:
-            raise OfflineReleaseError(f"{label} must be positive")
+    if type(expected.source_run_id) is not int or expected.source_run_id <= 0:
+        raise OfflineReleaseError("source run ID must be positive")
+    if type(expected.source_run_attempt) is not int or expected.source_run_attempt != 1:
+        raise OfflineReleaseError("source run attempt must be exactly 1")
     if (expected.candidate_run_id is None) != (expected.candidate_run_attempt is None):
         raise OfflineReleaseError("candidate run ID and attempt must be supplied together")
     if expected.candidate_run_id is not None and expected.input_manifest_sha256 is None:
         raise OfflineReleaseError("candidate identity requires the input manifest digest")
-    for label, value in (
-        ("candidate run ID", expected.candidate_run_id),
-        ("candidate run attempt", expected.candidate_run_attempt),
+    if expected.candidate_run_id is not None and (
+        type(expected.candidate_run_id) is not int or expected.candidate_run_id <= 0
     ):
-        if value is not None and value <= 0:
-            raise OfflineReleaseError(f"{label} must be positive")
+        raise OfflineReleaseError("candidate run ID must be positive")
+    if expected.candidate_run_attempt is not None and (
+        type(expected.candidate_run_attempt) is not int or expected.candidate_run_attempt != 1
+    ):
+        raise OfflineReleaseError("candidate run attempt must be exactly 1")
     if (
         expected.input_manifest_sha256 is not None
         and re.fullmatch(r"[0-9a-f]{64}", expected.input_manifest_sha256) is None
@@ -379,7 +379,7 @@ def _require_input_provenance(
     if type(epoch) is not int or epoch <= 0:
         raise OfflineReleaseError("release input provenance has an invalid source date epoch")
     required = _input_provenance(expected, source_date_epoch=epoch)
-    if document != required:
+    if _canonical_json(document) != _canonical_json(required):
         raise OfflineReleaseError("release input provenance does not match the expected run")
     return document
 
@@ -428,7 +428,7 @@ def _require_candidate_provenance(
         source_date_epoch=epoch,
         public_key_sha256=_sha256(_regular_file(public_key, "Minisign public key")),
     )
-    if document != required:
+    if _canonical_json(document) != _canonical_json(required):
         raise OfflineReleaseError("candidate provenance does not match the expected runs")
     return document
 

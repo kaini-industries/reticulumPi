@@ -27,7 +27,7 @@ SOURCE = offline_release.ExpectedRelease(
     repository="example/reticulumpi",
     commit="a" * 40,
     source_run_id=101,
-    source_run_attempt=2,
+    source_run_attempt=1,
 )
 CANDIDATE = offline_release.ExpectedRelease(
     tag=SOURCE.tag,
@@ -36,7 +36,7 @@ CANDIDATE = offline_release.ExpectedRelease(
     source_run_id=SOURCE.source_run_id,
     source_run_attempt=SOURCE.source_run_attempt,
     candidate_run_id=202,
-    candidate_run_attempt=3,
+    candidate_run_attempt=1,
 )
 
 
@@ -89,7 +89,7 @@ def test_prepare_inputs_binds_the_exact_tree_and_install_manifest(tmp_path: Path
         "repository": "example/reticulumpi",
         "schema": 1,
         "source_date_epoch": 1_700_000_000,
-        "source_run_attempt": 2,
+        "source_run_attempt": 1,
         "source_run_id": 101,
         "source_workflow": offline_release.SOURCE_WORKFLOW,
         "tag": f"v{VERSION}",
@@ -105,6 +105,85 @@ def test_prepare_inputs_binds_the_exact_tree_and_install_manifest(tmp_path: Path
     selected.sbom.write_text("{}", encoding="ascii")
     with pytest.raises(offline_release.OfflineReleaseError, match="checksum mismatch"):
         offline_release.verify_inputs(input_directory=inputs, expected=SOURCE)
+
+
+@pytest.mark.parametrize("attempt", [-1, 0, 2, True, 1.0, "1"])
+def test_release_identity_rejects_non_initial_source_attempt(attempt: object) -> None:
+    with pytest.raises(
+        offline_release.OfflineReleaseError,
+        match="source run attempt must be exactly 1",
+    ):
+        offline_release._validate_identity(replace(SOURCE, source_run_attempt=attempt))
+
+
+@pytest.mark.parametrize("attempt", [-1, 0, 2, True, 1.0, "1"])
+def test_release_identity_rejects_non_initial_candidate_attempt(attempt: object) -> None:
+    expected = replace(
+        CANDIDATE,
+        input_manifest_sha256="0" * 64,
+        candidate_run_attempt=attempt,
+    )
+    with pytest.raises(
+        offline_release.OfflineReleaseError,
+        match="candidate run attempt must be exactly 1",
+    ):
+        offline_release._validate_identity(expected)
+
+
+@pytest.mark.parametrize("run_id", [True, 101.0, "101"])
+def test_release_identity_rejects_non_integer_source_run_id(run_id: object) -> None:
+    with pytest.raises(offline_release.OfflineReleaseError, match="source run ID must be positive"):
+        offline_release._validate_identity(replace(SOURCE, source_run_id=run_id))
+
+
+@pytest.mark.parametrize("run_id", [True, 202.0, "202"])
+def test_release_identity_rejects_non_integer_candidate_run_id(run_id: object) -> None:
+    expected = replace(
+        CANDIDATE,
+        input_manifest_sha256="0" * 64,
+        candidate_run_id=run_id,
+    )
+    with pytest.raises(
+        offline_release.OfflineReleaseError,
+        match="candidate run ID must be positive",
+    ):
+        offline_release._validate_identity(expected)
+
+
+@pytest.mark.parametrize("attempt", [True, 1.0])
+def test_input_provenance_requires_integer_source_attempt(attempt: object) -> None:
+    document = offline_release._input_provenance(SOURCE, source_date_epoch=1_700_000_000)
+    document["source_run_attempt"] = attempt
+
+    with pytest.raises(offline_release.OfflineReleaseError, match="expected run"):
+        offline_release._require_input_provenance(document, SOURCE)
+
+
+@pytest.mark.parametrize(
+    ("field", "attempt"),
+    [
+        ("source_run_attempt", True),
+        ("source_run_attempt", 1.0),
+        ("candidate_run_attempt", True),
+        ("candidate_run_attempt", 1.0),
+    ],
+)
+def test_candidate_provenance_requires_integer_attempts(
+    tmp_path: Path,
+    field: str,
+    attempt: object,
+) -> None:
+    public_key = _public_key(tmp_path / "release.pub")
+    expected = replace(CANDIDATE, input_manifest_sha256="0" * 64)
+    document = offline_release._candidate_provenance(
+        expected,
+        source_date_epoch=1_700_000_000,
+        public_key_sha256=offline_release._sha256(public_key),
+    )
+    document[field] = attempt
+
+    with pytest.raises(offline_release.OfflineReleaseError, match="expected runs"):
+        offline_release._require_candidate_provenance(document, expected, public_key)
 
 
 def test_input_verification_rejects_run_drift_and_extra_paths(tmp_path: Path) -> None:

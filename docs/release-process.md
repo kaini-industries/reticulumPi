@@ -19,8 +19,11 @@ reticulumpi-admin --help >/dev/null
 python tools/check_docs.py
 ```
 
-1. Resolve every release-scoped row in `audit-remediation-2026-07.md` or document an approved
-   deferral that is not P0/P1, then freeze the candidate commit.
+1. Resolve the implementation side of every release-scoped row in
+   `audit-remediation-2026-07.md`; no P0/P1 implementation may be deferred. Document any approved
+   lower-severity implementation deferral, then freeze the candidate commit. Exact-tag, signing,
+   HIL, manual, production, and soak qualifications necessarily remain open until their named
+   post-freeze gates and continue to block promotion.
 2. Run Ruff check/format, ShellCheck, Python/JavaScript/YAML/Compose/sudoers/systemd checks,
    deterministic documentation links/stale-reference/help snapshots, dependency and secret
    scanning, the parallel suite, serial branch coverage, the dashboard performance lane, and
@@ -433,43 +436,49 @@ signing command runs.
 The release uses two offline signing rounds because the final install archive and global release
 manifest do not exist until GitHub combines the tag CI artifacts with the first signature:
 
-1. The tag CI run cryptographically verifies the annotated tag and signer fingerprint, completes
-   every gate, and emits the attested `release-signing-input-<TAG>` artifact.
+1. The authoritative earliest tag CI run cryptographically verifies the annotated tag and signer
+   fingerprint, completes every gate, and emits the attested `release-signing-input-<TAG>` artifact.
+   It emits release inputs only on attempt 1. A rerun withdraws the version; a later fresh
+   same-tag run is rejected and cannot replace or invalidate the authoritative earliest run.
 2. On the trusted workstation, download that artifact from the exact successful source run, verify
    its GitHub attestation and exact repository/tag/commit/run/run-attempt provenance. Record the
    SHA-256 of `RELEASE-INPUTS.SHA256SUMS`, then use `sign-request --kind install` with the complete
    request directory and recorded identity to verify again and sign only `INSTALL-SHA256SUMS`.
-3. Dispatch `.github/workflows/release-candidate.yml` at the tag itself, passing the exact source
-   run ID and base64 public signature. The workflow re-verifies the tag and source run, verifies
-   the inner signature, builds the deterministic install archive without rebuilding its wheel,
-   stages every exact release asset, and emits an attested
+3. Dispatch `.github/workflows/release-candidate.yml` exactly once at the tag itself, passing the
+   exact source run ID and base64 public signature. The workflow re-verifies the tag and source run,
+   verifies the inner signature, builds the deterministic install archive without rebuilding its
+   wheel, stages every exact release asset, and emits an attested
    `global-signing-request-<TAG>` artifact containing the unsigned global `SHA256SUMS`.
 4. On the trusted workstation, download that artifact from the exact candidate-finalization run,
    verify its attestation, nested install signature, exact asset tree, bound source/candidate run
    identities, and the previously recorded input-manifest digest. Then use
    `sign-request --kind release` with that complete request directory and identity to verify again
    and sign only `SHA256SUMS`.
-5. Dispatch `.github/workflows/release-v2.yml` at the same tag, passing both exact run IDs, the
-   recorded input-manifest digest, and the base64 public global signature. Approve the
+5. Dispatch `.github/workflows/release-v2.yml` exactly once at the same tag, passing both exact run
+   IDs, the recorded input-manifest digest, and the base64 public global signature. Approve the
    tag-restricted `release-signing` environment only after reviewing those bindings. Its read-only
    job attaches the signature, verifies the nested and global manifests, runs the administrator dry
    run, and uploads
-   `signed-release-candidate-<TAG>`. Candidate assembly is restricted to workflow attempt 1; a
-   failed or cancelled attempt withdraws that version instead of replacing its signed-candidate
-   evidence through a rerun.
+   `signed-release-candidate-<TAG>`. The earliest admissible candidate-finalization and candidate-
+   assembly dispatches are authoritative and restricted to attempt 1. A failed or cancelled
+   authoritative run, or its rerun, withdraws the version. A later fresh same-tag dispatch is
+   rejected and cannot replace or sabotage the authoritative run.
 6. Leave the separate protected `release` environment unapproved while operators download that
    exact artifact from the release workflow run, qualify it on hardware, complete the 72-hour soak,
    and attach the signed verification record. Configure that environment with the required reviewer
    and `can_admins_bypass=false`. Do not dispatch a second publication run.
 7. After approval, the waiting publication job downloads the same workflow artifact, re-verifies
    the signed tag, provenance, nested/global Minisign signatures, exact asset allowlist, and every
-   SHA-256 digest. The write-scoped job is eligible only on workflow attempt 1. Its first step checks
-   that invariant again, verifies the live environment identity, sole reviewer, disabled administrator
-   bypass, self-review setting, and exact `v0.3.7` successor-tag policy, then queries the current
-   workflow run's
-   approval history and requires exactly one unambiguous `release` environment review whose state is
-   exactly `approved` by that reviewer. Reruns and missing, skipped, rejected, duplicated, grouped, or
-   malformed reviews fail closed before checkout or registry authentication.
+   SHA-256 digest. The write-scoped job is eligible only on the authoritative earliest workflow
+   dispatch at attempt 1. Its first step checks that invariant again, verifies the live environment
+   identity, sole reviewer, disabled administrator bypass, self-review setting, and exact `v0.3.7`
+   successor-tag policy, then queries the current workflow run's approval history and requires
+   exactly one unambiguous `release` environment review whose state is exactly `approved` by that
+   reviewer. Reruns and missing, skipped, rejected, duplicated, grouped, or malformed reviews fail
+   closed before checkout or registry authentication. After the protected
+   wait, the job re-queries the authoritative source and candidate-finalization runs and refuses
+   publication if either identity or attempt changed. Rejected later fresh runs cannot supply
+   replacement evidence and do not invalidate the unchanged authoritative earliest run.
 8. It loads the two validated image archives, refuses existing version tags, pushes
    per-architecture tags, and creates the versioned multi-architecture GHCR manifest without
    rebuilding.
@@ -477,13 +486,16 @@ manifest do not exist until GitHub combines the tag CI artifacts with the first 
    the immutable GitHub release with generated notes, verification instructions, exact assets, and
    promoted image digest.
 
-Both manual workflows must be dispatched with `--ref <TAG>`, not from `main`; their protected
-environments accept only release tags. Record the source CI run ID/attempt, candidate-finalization
-run ID/attempt, release workflow run ID, tag commit, attestation verification results, and local
-manifest digests in `docs/release-verification/<version>.md`. Keep signature outputs outside the
-verified request directories. Use the command-specific help for `tools/offline_release.py` rather
-than manually modifying either manifest. Never sign a manifest until its preceding attestation and
-fail-closed local verification both succeed.
+Both manual workflows must be dispatched exactly once with `--ref <TAG>`, not from `main`; their
+protected environments accept only release tags. Record the source CI run ID/attempt,
+candidate-finalization run ID/attempt, release workflow run ID, tag commit, attestation verification
+results, and local manifest digests in `docs/release-verification/<version>.md`. Keep signature
+outputs outside the verified request directories. Use the command-specific help for
+`tools/offline_release.py` rather than manually modifying either manifest. Never sign a manifest
+until its preceding attestation and fail-closed local verification both succeed. A second
+workflow-dispatch run has attempt 1 but is
+still a forbidden replacement; the workflows query their tag-bound history, reject the later run,
+and preserve the unchanged earliest admissible run as authoritative.
 
 The retired `.github/workflows/release.yml` path must remain absent. Only dispatch
 `.github/workflows/release-v2.yml` at a release tag that contains that hardened workflow; do not

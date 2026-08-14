@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -31,6 +32,111 @@ RELEASE_ENVIRONMENT_ID = 18095962050
 RELEASE_REVIEWER_ID = 8366523
 RELEASE_REVIEWER_LOGIN = "beatsforthemind"
 _DEFAULT_POLICY = object()
+RUN_ADMISSION_ENV = "RETICULUMPI_RUN_ADMISSION_FILTER"
+
+
+def _release_run_admission_filters() -> tuple[str, str, str, str]:
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    candidate = yaml.safe_load(
+        (ROOT / ".github/workflows/release-candidate.yml").read_text(encoding="utf-8")
+    )
+    release = yaml.safe_load(
+        (ROOT / ".github/workflows/release-v2.yml").read_text(encoding="utf-8")
+    )
+    return (
+        ci["jobs"]["release-inputs"]["env"][RUN_ADMISSION_ENV],
+        candidate["jobs"]["global-signing-request"]["env"][RUN_ADMISSION_ENV],
+        release["jobs"]["release-candidate"]["env"][RUN_ADMISSION_ENV],
+        release["jobs"]["release"]["env"][RUN_ADMISSION_ENV],
+    )
+
+
+def _workflow_run_fixture(
+    *,
+    run_id: int = 101,
+    run_number: int = 7,
+    run_attempt: int = 1,
+    workflow_id: int = 303,
+    event: str = "push",
+    tag: str = "v3.2.1",
+    sha: str = "a" * 40,
+    repository: str = "example/reticulumpi",
+) -> dict[str, object]:
+    return {
+        "id": run_id,
+        "run_number": run_number,
+        "run_attempt": run_attempt,
+        "workflow_id": workflow_id,
+        "event": event,
+        "head_branch": tag,
+        "head_sha": sha,
+        "repository": {"full_name": repository},
+        "head_repository": {"full_name": repository},
+        "status": "completed",
+        "conclusion": "success",
+    }
+
+
+def _evaluate_run_admission(
+    tmp_path: Path,
+    *,
+    selected: dict[str, object],
+    workflow: dict[str, object],
+    pages: list[dict[str, object]],
+    run_id: str = "101",
+    event: str = "push",
+    tag: str = "v3.2.1",
+    sha: str = "a" * 40,
+    repository: str = "example/reticulumpi",
+    workflow_path: str = ".github/workflows/ci.yml",
+    require_success: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    selected_path = tmp_path / "selected.json"
+    workflow_path_json = tmp_path / "workflow.json"
+    pages_path = tmp_path / "pages.json"
+    selected_path.write_text(json.dumps(selected), encoding="utf-8")
+    workflow_path_json.write_text(json.dumps(workflow), encoding="utf-8")
+    pages_path.write_text(json.dumps(pages), encoding="utf-8")
+    admission_filter = _release_run_admission_filters()[0]
+    return subprocess.run(
+        [
+            "jq",
+            "-e",
+            "--arg",
+            "run_id",
+            run_id,
+            "--arg",
+            "event",
+            event,
+            "--arg",
+            "tag",
+            tag,
+            "--arg",
+            "sha",
+            sha,
+            "--arg",
+            "repository",
+            repository,
+            "--arg",
+            "workflow_path",
+            workflow_path,
+            "--argjson",
+            "require_success",
+            json.dumps(require_success),
+            "--slurpfile",
+            "workflow",
+            str(workflow_path_json),
+            "--slurpfile",
+            "pages",
+            str(pages_path),
+            admission_filter,
+            str(selected_path),
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -533,6 +639,113 @@ def test_container_probe_rejects_links_modes_and_corrupt_databases(
         container_state_probe._database_state(database)
 
 
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required by release workflows")
+def test_release_run_admission_accepts_only_the_earliest_exact_tag_run(
+    tmp_path: Path,
+) -> None:
+    selected = _workflow_run_fixture()
+    workflow = {"id": 303, "path": ".github/workflows/ci.yml"}
+    pages = [{"total_count": 1, "workflow_runs": [selected]}]
+
+    result = _evaluate_run_admission(
+        tmp_path,
+        selected=selected,
+        workflow=workflow,
+        pages=pages,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required by release workflows")
+def test_release_run_admission_ignores_a_later_same_tag_run(tmp_path: Path) -> None:
+    selected = _workflow_run_fixture()
+    later = _workflow_run_fixture(run_id=102, run_number=8, sha="b" * 40)
+    workflow = {"id": 303, "path": ".github/workflows/ci.yml"}
+
+    result = _evaluate_run_admission(
+        tmp_path,
+        selected=selected,
+        workflow=workflow,
+        pages=[{"total_count": 2, "workflow_runs": [selected, later]}],
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required by release workflows")
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "rerun",
+        "later_same_tag_different_sha",
+        "incomplete_pagination",
+        "wrong_ref",
+        "wrong_sha",
+        "wrong_workflow_path",
+        "wrong_repository",
+        "non_integer_run_number",
+        "non_integer_run_id",
+        "non_integer_run_attempt",
+        "selected_list_drift",
+    ],
+)
+def test_release_run_admission_rejects_non_initial_or_inexact_evidence(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    selected = _workflow_run_fixture()
+    workflow = {"id": 303, "path": ".github/workflows/ci.yml"}
+    listed = json.loads(json.dumps(selected))
+    rows = [listed]
+    total_count = 1
+
+    if failure == "rerun":
+        selected["run_attempt"] = 2
+        listed["run_attempt"] = 2
+    elif failure == "later_same_tag_different_sha":
+        selected["id"] = 102
+        selected["run_number"] = 8
+        listed["id"] = 102
+        listed["run_number"] = 8
+        rows.insert(0, _workflow_run_fixture(run_id=101, run_number=7, sha="b" * 40))
+        total_count = 2
+    elif failure == "incomplete_pagination":
+        total_count = 2
+    elif failure == "wrong_ref":
+        selected["head_branch"] = "v9.9.9"
+        listed["head_branch"] = "v9.9.9"
+    elif failure == "wrong_sha":
+        selected["head_sha"] = "b" * 40
+        listed["head_sha"] = "b" * 40
+    elif failure == "wrong_workflow_path":
+        workflow["path"] = ".github/workflows/not-ci.yml"
+    elif failure == "wrong_repository":
+        selected["repository"] = {"full_name": "attacker/fork"}
+        listed["repository"] = {"full_name": "attacker/fork"}
+    elif failure == "non_integer_run_number":
+        selected["run_number"] = True
+        listed["run_number"] = True
+    elif failure == "non_integer_run_id":
+        selected["id"] = True
+        listed["id"] = True
+    elif failure == "non_integer_run_attempt":
+        selected["run_attempt"] = True
+        listed["run_attempt"] = True
+    else:
+        listed["run_attempt"] = 2
+
+    result = _evaluate_run_admission(
+        tmp_path,
+        selected=selected,
+        workflow=workflow,
+        pages=[{"total_count": total_count, "workflow_runs": rows}],
+        run_id=str(selected["id"]),
+    )
+
+    assert result.returncode != 0
+
+
 def test_release_approval_validator_accepts_one_exact_approval(tmp_path: Path) -> None:
     result = _run_release_approval_validator(
         tmp_path,
@@ -691,10 +904,17 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert release_workflow["name"] == "Promote offline-signed release v2"
     release_inputs = workflow["jobs"]["release-inputs"]
     release_inputs_source = json.dumps(release_inputs)
+    release_inputs_steps = {
+        step.get("name"): step for step in release_inputs["steps"] if step.get("name")
+    }
     global_request = candidate_workflow["jobs"]["global-signing-request"]
     global_request_source = json.dumps(global_request)
+    global_request_steps = {
+        step.get("name"): step for step in global_request["steps"] if step.get("name")
+    }
     candidate = release_workflow["jobs"]["release-candidate"]
     candidate_source = json.dumps(candidate)
+    candidate_steps = {step.get("name"): step for step in candidate["steps"] if step.get("name")}
     release = release_workflow["jobs"]["release"]
     release_source = json.dumps(release)
     tag_trust = workflow["jobs"]["release-tag-trust"]
@@ -704,6 +924,7 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     )
 
     assert "github.ref_type == 'tag'" in release_inputs["if"]
+    assert "github.run_attempt == 1" in release_inputs["if"]
     assert "needs['release-tag-trust'].result == 'success'" in release_inputs["if"]
     assert "needs['dashboard-performance'].result == 'success'" in release_inputs["if"]
     assert "needs['bookworm-systemd'].result == 'success'" in release_inputs["if"]
@@ -720,10 +941,26 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
         "release-tag-trust",
     }
     assert release_inputs["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "id-token": "write",
         "attestations": "write",
     }
+    run_admission_filters = _release_run_admission_filters()
+    assert len(set(run_admission_filters)) == 1
+    assert "$selected.run_attempt == 1" in run_admission_filters[0]
+    assert "$selected.run_number" in run_admission_filters[0]
+    assert "$totals[0] == ($loaded | length)" in run_admission_filters[0]
+    assert "($loaded | length) < 1000" in run_admission_filters[0]
+    assert ".event == $event and .head_branch == $tag" in run_admission_filters[0]
+    assert ".head_branch == $tag and .head_sha == $sha" not in run_admission_filters[0]
+    source_guard = release_inputs_steps["Refuse a non-initial tag source run"]
+    assert release_inputs["steps"][0] == source_guard
+    assert 'test "$GITHUB_RUN_ATTEMPT" = 1' in source_guard["run"]
+    assert (
+        'require_initial_run source "$GITHUB_RUN_ID" push .github/workflows/ci.yml false'
+        in source_guard["run"]
+    )
     assert "environment" not in release_inputs
     assert "tools.offline_release prepare-inputs" in release_inputs_source
     assert "release-signing-input-${{ github.ref_name }}" in release_inputs_source
@@ -738,12 +975,29 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
         "attestations": "write",
     }
     assert "environment" not in global_request
+    assert global_request["if"] == "${{ github.run_attempt == 1 }}"
+    assert global_request["steps"][0]["name"] == (
+        "Refuse workflow reruns before global signing request assembly"
+    )
+    assert 'test "$GITHUB_RUN_ATTEMPT" = 1' in global_request["steps"][0]["run"]
     assert "tools.offline_release stage-global-request" in global_request_source
     assert "release-signing-input-${{ inputs.tag }}" in global_request_source
     assert "global-signing-request-${{ inputs.tag }}" in global_request_source
     assert "--input-manifest-sha256" in global_request_source
     assert "--paginate --slurp" in global_request_source
     assert ".github/workflows/ci.yml" in global_request_source
+    source_run_guard = global_request_steps["Require the exact successful tag CI run"]["run"]
+    assert (
+        'require_initial_run source "$SOURCE_RUN_ID" push .github/workflows/ci.yml true'
+        in source_run_guard
+    )
+    global_recheck = global_request_steps["Reconfirm the source run before global request evidence"]
+    global_attestation = global_request_steps[
+        "Attest the exact global release manifest signing request"
+    ]
+    assert global_request["steps"].index(global_recheck) + 1 == global_request["steps"].index(
+        global_attestation
+    )
     assert "verify-tag --raw" in global_request_source
     assert "docker push" not in global_request_source
     assert "gh release create" not in global_request_source
@@ -758,6 +1012,26 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     assert "signed-release-candidate-${{ inputs.tag }}" in candidate_source
     assert "--input-manifest-sha256" in candidate_source
     assert "--paginate --slurp" in candidate_source
+    release_runs_source = candidate_steps[
+        "Require the exact successful source and candidate-finalization runs"
+    ]["run"]
+    assert (
+        'require_initial_run source "$SOURCE_RUN_ID" push .github/workflows/ci.yml true'
+        in release_runs_source
+    )
+    assert 'candidate "$CANDIDATE_RUN_ID" workflow_dispatch' in release_runs_source
+    assert ".github/workflows/release-candidate.yml true" in release_runs_source
+    assert 'release "$GITHUB_RUN_ID" workflow_dispatch' in candidate["steps"][0]["run"]
+    signed_candidate_recheck = candidate_steps[
+        "Reconfirm upstream runs before signed candidate evidence"
+    ]
+    signed_candidate_upload_index = next(
+        index
+        for index, step in enumerate(candidate["steps"])
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    assert candidate["steps"].index(signed_candidate_recheck) + 1 == signed_candidate_upload_index
+    assert signed_candidate_recheck["run"].count("require_initial_run") >= 3
     assert "reticulumpi.admin_cli install" in candidate_source
     assert "--dry-run" in candidate_source
     assert "docker push" not in candidate_source
@@ -851,6 +1125,19 @@ def test_tag_publication_job_promotes_validated_artifacts_without_rebuilding() -
     )
     assert approval_index == 0
     assert approval_index < registry_login_index < image_push_index
+    image_push_source = release_steps["Push validated per-architecture images and manifest"]["run"]
+    assert (
+        'require_initial_run source "$SOURCE_RUN_ID" push .github/workflows/ci.yml true'
+        in image_push_source
+    )
+    assert 'candidate "$CANDIDATE_RUN_ID" workflow_dispatch' in image_push_source
+    assert ".github/workflows/release-candidate.yml true" in image_push_source
+    assert image_push_source.index("require_initial_run source") < image_push_source.index(
+        "tools/publish_validated_images.sh"
+    )
+    assert image_push_source.index('candidate "$CANDIDATE_RUN_ID"') < image_push_source.index(
+        "tools/publish_validated_images.sh"
+    )
     attest_action = "actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26"
     assert release_steps["Attest release artifact provenance"] == {
         "name": "Attest release artifact provenance",
