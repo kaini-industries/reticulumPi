@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReticulumPi lab fixture preflight report",
+  "description": "Canonical non-release result contract for a read-only, candidate-agnostic RNS radio smoke preflight.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "classification",
+    "scope",
+    "fixture_id",
+    "inventory_sha256",
+    "expected_platform_profile",
+    "devices",
+    "checks",
+    "observed",
+    "started_at",
+    "finished_at",
+    "status",
+    "release_evidence",
+    "gate85_eligible",
+    "candidate_bound",
+    "hardware_opened",
+    "rf_transmitted",
+    "hardware_mutated",
+    "operator_declared_nonproduction"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "classification": {
+      "const": "development-lab-fixture-preflight-not-release-evidence"
+    },
+    "scope": {
+      "const": "rns-radio-smoke"
+    },
+    "fixture_id": {
+      "$ref": "#/$defs/logicalId"
+    },
+    "inventory_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "expected_platform_profile": {
+      "$ref": "#/$defs/platformProfile"
+    },
+    "devices": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "device_id",
+          "role"
+        ],
+        "properties": {
+          "device_id": {
+            "$ref": "#/$defs/logicalId"
+          },
+          "role": {
+            "const": "rnode"
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hil_binding",
+        "supported_platform",
+        "expected_platform",
+        "pi_identity",
+        "operator_attestations",
+        "serial_path",
+        "serial_identity",
+        "serial_inventory_unique",
+        "serial_binding_stable"
+      ],
+      "properties": {
+        "hil_binding": {
+          "type": "boolean"
+        },
+        "supported_platform": {
+          "type": "boolean"
+        },
+        "expected_platform": {
+          "type": "boolean"
+        },
+        "pi_identity": {
+          "type": "boolean"
+        },
+        "operator_attestations": {
+          "type": "boolean"
+        },
+        "serial_path": {
+          "type": "boolean"
+        },
+        "serial_identity": {
+          "type": "boolean"
+        },
+        "serial_inventory_unique": {
+          "type": "boolean"
+        },
+        "serial_binding_stable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "observed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform_profile",
+        "device_count"
+      ],
+      "properties": {
+        "platform_profile": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/platformProfile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "device_count": {
+          "const": 1
+        }
+      }
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "finished_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "subject"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "subject": {
+          "$ref": "#/$defs/logicalId"
+        }
+      }
+    },
+    "release_evidence": {
+      "const": false
+    },
+    "gate85_eligible": {
+      "const": false
+    },
+    "candidate_bound": {
+      "const": false
+    },
+    "hardware_opened": {
+      "const": false
+    },
+    "rf_transmitted": {
+      "const": false
+    },
+    "hardware_mutated": {
+      "const": false
+    },
+    "operator_declared_nonproduction": {
+      "const": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "passed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "not": {
+          "type": "object",
+          "properties": {
+            "failure": {}
+          },
+          "required": [
+            "failure"
+          ]
+        },
+        "properties": {
+          "failure": {},
+          "checks": {
+            "type": "object",
+            "properties": {
+              "hil_binding": {
+                "const": true
+              },
+              "supported_platform": {
+                "const": true
+              },
+              "expected_platform": {
+                "const": true
+              },
+              "pi_identity": {
+                "const": true
+              },
+              "operator_attestations": {
+                "const": true
+              },
+              "serial_path": {
+                "const": true
+              },
+              "serial_identity": {
+                "const": true
+              },
+              "serial_inventory_unique": {
+                "const": true
+              },
+              "serial_binding_stable": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "type": "object",
+        "required": [
+          "failure"
+        ],
+        "properties": {
+          "failure": {},
+          "checks": {
+            "not": {
+              "type": "object",
+              "properties": {
+                "hil_binding": {
+                  "const": true
+                },
+                "supported_platform": {
+                  "const": true
+                },
+                "expected_platform": {
+                  "const": true
+                },
+                "pi_identity": {
+                  "const": true
+                },
+                "operator_attestations": {
+                  "const": true
+                },
+                "serial_path": {
+                  "const": true
+                },
+                "serial_identity": {
+                  "const": true
+                },
+                "serial_inventory_unique": {
+                  "const": true
+                },
+                "serial_binding_stable": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "logicalId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "platformProfile": {
+      "type": "string",
+      "enum": [
+        "linux-arm64-debian-bookworm-py311",
+        "linux-arm64-ubuntu-noble-py312"
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
+    }
+  }
+}

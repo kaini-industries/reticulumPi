@@ -5,6 +5,10 @@ include .gitattributes
 include package.json
 include package-lock.json
 recursive-include constraints *.in *.txt
+include config/lab/fixture-inventory.bookworm.example.json
+include config/lab/fixture-inventory.noble.example.json
+include config/lab/fixture-inventory.schema.json
+include config/lab/preflight-report.schema.json
 recursive-include config/nomadnet/pages *.mu
 recursive-include config/reticulum config.*
 recursive-include config/reticulumpi *.yaml
