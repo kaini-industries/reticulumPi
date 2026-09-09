@@ -475,12 +475,10 @@ def test_installed_wheel_smoke_discovers_packaged_plugins() -> None:
 
 def test_local_package_check_ignores_existing_distributions(tmp_path: Path) -> None:
     fake_root = tmp_path / "checkout"
-    fake_bin = tmp_path / "bin"
     fake_python = fake_root / ".venv/bin/python"
     fake_twine = fake_root / ".venv/bin/twine"
     log = tmp_path / "commands.jsonl"
     fake_root.mkdir()
-    fake_bin.mkdir()
     fake_python.parent.mkdir(parents=True)
     (fake_root / "dist").mkdir()
 
@@ -518,16 +516,24 @@ with Path(os.environ["PACKAGE_CHECK_TEST_LOG"]).open("a", encoding="utf-8") as h
 """,
         encoding="utf-8",
     )
-    fake_npm = fake_bin / "npm"
-    fake_npm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    for executable in (fake_python, fake_twine, fake_npm):
+    for executable in (fake_python, fake_twine):
         executable.chmod(0o755)
 
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    target = re.search(
+        r"(?m)^package-check: dashboard-assets-check\n(?P<recipe>(?:\t.*\n)+)", makefile
+    )
+    assert target is not None
+    recipe_lines = target.group("recipe").splitlines()
+    assert all(line.endswith("\\") for line in recipe_lines[:-1])
+    assert not recipe_lines[-1].endswith("\\")
+    recipe = "\n".join(line[1:] for line in recipe_lines)
+    recipe = recipe.removeprefix("@").replace("$$", "$")
+
     environment = os.environ.copy()
-    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
     environment["PACKAGE_CHECK_TEST_LOG"] = str(log)
     subprocess.run(
-        ["make", "-f", str(ROOT / "Makefile"), "package-check"],
+        ["/bin/sh", "-c", recipe],
         cwd=fake_root,
         env=environment,
         check=True,
