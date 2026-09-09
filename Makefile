@@ -1,4 +1,4 @@
-.PHONY: install dev install-nomadnet test test-serial test-cov lint format format-check docs-check docs-help-refresh docs-reference-refresh dashboard-assets dashboard-assets-check package-wheel package-check clean docker-test docker-test-arm64
+.PHONY: install dev install-nomadnet test test-serial test-hil test-cov lint format format-check docs-check docs-help-refresh docs-reference-refresh dashboard-assets dashboard-assets-check package-wheel package-check clean docker-test docker-test-arm64
 
 install:
 	python3 -m venv .venv
@@ -18,6 +18,13 @@ test:
 
 test-serial:
 	.venv/bin/pytest -v -n0
+
+test-hil:
+	@test -n "$(HIL_CONFIG)" || { echo "HIL_CONFIG must name an absolute private lab config" >&2; exit 2; }
+	@test -n "$(HIL_REPORT)" || { echo "HIL_REPORT must name a new absolute report path" >&2; exit 2; }
+	@test ! -e "$(HIL_REPORT)" || { echo "HIL_REPORT already exists; choose a new path" >&2; exit 2; }
+	@RETICULUMPI_HIL_CONFIG="$(HIL_CONFIG)" RETICULUMPI_HIL_REPORT="$(HIL_REPORT)" \
+		.venv/bin/pytest -v -n0 --timeout=420 -m integration tests/test_lab_hil_live.py
 
 test-cov:
 	.venv/bin/pytest -v --cov=src/reticulumpi --cov-branch --cov-report=term-missing
@@ -51,10 +58,23 @@ package-wheel: dashboard-assets-check
 	.venv/bin/python -m build --wheel --no-isolation
 
 package-check: dashboard-assets-check
-	.venv/bin/python -m build --no-isolation
-	.venv/bin/twine check dist/*
-	.venv/bin/python scripts/verify_wheel.py dist/*.whl \
-		--requirements constraints/production-universal-dashboard-nomadnet.txt
+	@set -eu; \
+		package_check_dir=$$(mktemp -d); \
+		trap 'rm -rf "$$package_check_dir"' 0; \
+		.venv/bin/python -m build --no-isolation --outdir "$$package_check_dir"; \
+		set -- "$$package_check_dir"/*; \
+		test "$$#" -eq 2; \
+		set -- "$$package_check_dir"/*.whl; \
+		test "$$#" -eq 1; \
+		test -f "$$1"; \
+		wheel=$$1; \
+		set -- "$$package_check_dir"/*.tar.gz; \
+		test "$$#" -eq 1; \
+		test -f "$$1"; \
+		sdist=$$1; \
+		.venv/bin/twine check "$$wheel" "$$sdist"; \
+		.venv/bin/python scripts/verify_wheel.py "$$wheel" \
+			--requirements constraints/production-universal-dashboard-nomadnet.txt
 
 docker-test: package-wheel
 	docker build --target test -f docker/Dockerfile -t reticulumpi-test .

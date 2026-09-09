@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import RNS
@@ -35,18 +36,47 @@ class RemoteClient:
         reticulum_config_dir: str | None = None,
         identity_path: str | None = None,
         timeout: float = 30.0,
+        *,
+        identity_bytes: bytes | None = None,
+        output: Callable[[str], None] | None = print,
     ):
+        if identity_path is not None and identity_bytes is not None:
+            raise ValueError("identity_path and identity_bytes are mutually exclusive")
+
         self._destination_hex = destination_hex.replace("<", "").replace(">", "").replace(" ", "")
         self._timeout = timeout
+        self._output = output
         self._link: Any = None
         self._link_ready = threading.Event()
         self._link_closed = threading.Event()
 
+        # Validate caller-supplied key material before Reticulum starts any
+        # interfaces.  This path lets strict callers read identities through
+        # their own already-validated file descriptor instead of asking this
+        # compatibility client to reopen or create a pathname.
+        identity = None
+        if identity_bytes is not None:
+            if type(identity_bytes) is not bytes:
+                raise TypeError("identity_bytes must be bytes")
+            try:
+                identity = RNS.Identity.from_bytes(identity_bytes)
+            except Exception as exc:
+                raise ValueError("identity_bytes is not a valid RNS private identity") from exc
+            if identity is None:
+                raise ValueError("identity_bytes is not a valid RNS private identity")
+
         # Initialize Reticulum
-        self.reticulum = RNS.Reticulum(configdir=reticulum_config_dir)
+        reticulum_options: dict[str, Any] = {"configdir": reticulum_config_dir}
+        if output is None:
+            # RNS otherwise writes lifecycle and path details to its global
+            # stdout logger.  A no-op callback keeps quiet clients quiet.
+            reticulum_options["logdest"] = lambda _message: None
+        self.reticulum = RNS.Reticulum(**reticulum_options)
 
         # Load or create client identity
-        if identity_path:
+        if identity is not None:
+            self.identity = identity
+        elif identity_path:
             import os
 
             if os.path.isfile(identity_path):
@@ -57,6 +87,10 @@ class RemoteClient:
         else:
             self.identity = RNS.Identity()
 
+    def _emit(self, message: str) -> None:
+        if self._output is not None:
+            self._output(message)
+
     def connect(self) -> bool:
         """Establish a Link to the remote node and identify.
 
@@ -65,25 +99,25 @@ class RemoteClient:
         try:
             dest_hash = bytes.fromhex(self._destination_hex)
         except ValueError:
-            print(f"Error: invalid destination hash: {self._destination_hex}")
+            self._emit(f"Error: invalid destination hash: {self._destination_hex}")
             return False
 
         # Resolve the destination
         if not RNS.Transport.has_path(dest_hash):
-            print(f"Requesting path to {RNS.prettyhexrep(dest_hash)}...")
+            self._emit(f"Requesting path to {RNS.prettyhexrep(dest_hash)}...")
             RNS.Transport.request_path(dest_hash)
             # Wait for path
             deadline = time.monotonic() + self._timeout
             while not RNS.Transport.has_path(dest_hash):
                 if time.monotonic() > deadline:
-                    print("Error: path request timed out")
+                    self._emit("Error: path request timed out")
                     return False
                 time.sleep(0.5)
 
         # Create the destination
         remote_identity = RNS.Identity.recall(dest_hash)
         if remote_identity is None:
-            print(
+            self._emit(
                 f"Error: could not recall identity for {RNS.prettyhexrep(dest_hash)}. "
                 "The identity may not have been announced yet."
             )
@@ -98,7 +132,7 @@ class RemoteClient:
         )
 
         # Establish Link
-        print(f"Connecting to {RNS.prettyhexrep(dest_hash)}...")
+        self._emit(f"Connecting to {RNS.prettyhexrep(dest_hash)}...")
         self._link = RNS.Link(destination, established_callback=self._link_established)
         self._link.set_link_closed_callback(self._on_link_closed)
 
@@ -106,12 +140,12 @@ class RemoteClient:
         remaining = self._timeout
         while not self._link_ready.is_set():
             if self._link_closed.is_set():
-                print("Error: link was closed before establishment")
+                self._emit("Error: link was closed before establishment")
                 return False
             if not self._link_ready.wait(timeout=min(0.25, remaining)):
                 remaining -= 0.25
                 if remaining <= 0:
-                    print("Error: link establishment timed out")
+                    self._emit("Error: link establishment timed out")
                     return False
 
         # Identify ourselves
@@ -121,10 +155,10 @@ class RemoteClient:
         time.sleep(1.0)
 
         if self._link_closed.is_set():
-            print("Error: link closed after identification (likely unauthorized)")
+            self._emit("Error: link closed after identification (likely unauthorized)")
             return False
 
-        print(f"Connected to {RNS.prettyhexrep(dest_hash)}")
+        self._emit(f"Connected to {RNS.prettyhexrep(dest_hash)}")
         return True
 
     def request(

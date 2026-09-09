@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -470,6 +471,91 @@ def test_installed_wheel_smoke_discovers_packaged_plugins() -> None:
     assert "PluginLoader().discover([str(builtin_directory)])" in verifier
     for plugin_name in ("file_transfer", "messaging_hub", "nomadnet_server", "web_dashboard"):
         assert f'"{plugin_name}"' in verifier
+
+
+def test_local_package_check_ignores_existing_distributions(tmp_path: Path) -> None:
+    fake_root = tmp_path / "checkout"
+    fake_bin = tmp_path / "bin"
+    fake_python = fake_root / ".venv/bin/python"
+    fake_twine = fake_root / ".venv/bin/twine"
+    log = tmp_path / "commands.jsonl"
+    fake_root.mkdir()
+    fake_bin.mkdir()
+    fake_python.parent.mkdir(parents=True)
+    (fake_root / "dist").mkdir()
+
+    old_wheel = fake_root / "dist/reticulumpi-old.whl"
+    old_sdist = fake_root / "dist/reticulumpi-old.tar.gz"
+    old_wheel.write_bytes(b"old wheel\n")
+    old_sdist.write_bytes(b"old sdist\n")
+
+    fake_python.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+with Path(os.environ["PACKAGE_CHECK_TEST_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(["python", *args]) + "\\n")
+if args[:2] == ["-m", "build"]:
+    output = Path(args[args.index("--outdir") + 1])
+    (output / "reticulumpi-fresh.whl").write_bytes(b"fresh wheel\\n")
+    (output / "reticulumpi-fresh.tar.gz").write_bytes(b"fresh sdist\\n")
+""",
+        encoding="utf-8",
+    )
+    fake_twine.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+with Path(os.environ["PACKAGE_CHECK_TEST_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(["twine", *sys.argv[1:]]) + "\\n")
+""",
+        encoding="utf-8",
+    )
+    fake_npm = fake_bin / "npm"
+    fake_npm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for executable in (fake_python, fake_twine, fake_npm):
+        executable.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+    environment["PACKAGE_CHECK_TEST_LOG"] = str(log)
+    subprocess.run(
+        ["make", "-f", str(ROOT / "Makefile"), "package-check"],
+        cwd=fake_root,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    commands = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    build = next(command for command in commands if command[1:3] == ["-m", "build"])
+    output = Path(build[build.index("--outdir") + 1])
+    fresh_wheel = str(output / "reticulumpi-fresh.whl")
+    fresh_sdist = str(output / "reticulumpi-fresh.tar.gz")
+
+    assert output != fake_root / "dist"
+    assert not output.exists()
+    assert commands == [
+        ["python", "-m", "build", "--no-isolation", "--outdir", str(output)],
+        ["twine", "check", fresh_wheel, fresh_sdist],
+        [
+            "python",
+            "scripts/verify_wheel.py",
+            fresh_wheel,
+            "--requirements",
+            "constraints/production-universal-dashboard-nomadnet.txt",
+        ],
+    ]
+    assert old_wheel.read_bytes() == b"old wheel\n"
+    assert old_sdist.read_bytes() == b"old sdist\n"
 
 
 def test_dashboard_service_worker_version_comes_from_package_metadata():

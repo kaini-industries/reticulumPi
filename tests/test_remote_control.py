@@ -187,6 +187,91 @@ def test_handle_status_uptime_ignores_wall_clock_jump(
 
 @patch("RNS.Transport")
 @patch("RNS.Destination")
+def test_handle_interfaces_prefers_normalized_shared_instance_stats(
+    mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+):
+    from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+    import RNS.vendor.umsgpack as umsgpack
+
+    mock_app.reticulum.get_interface_stats.return_value = {
+        "interfaces": [
+            {
+                "name": "RNodeInterface[Lab RNode]",
+                "short_name": "Lab RNode",
+                "type": "RNodeInterface",
+                "status": True,
+                "rxb": 123,
+                "txb": 456,
+                "bitrate": 1200,
+                "hash": b"private",
+            }
+        ]
+    }
+    plugin = RemoteControlPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    result = plugin._handle_interfaces("/interfaces", None, None, None, authorized_identity, None)
+
+    assert umsgpack.unpackb(result) == {
+        "ok": True,
+        "data": [
+            {
+                "name": "RNodeInterface[Lab RNode]",
+                "type": "RNodeInterface",
+                "online": True,
+                "rxb": 123,
+                "txb": 456,
+                "bitrate": 1200,
+            }
+        ],
+    }
+    mock_app.reticulum.get_interface_stats.assert_called_once_with()
+    assert b"private" not in result
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
+def test_handle_interfaces_falls_back_to_direct_standalone_interfaces(
+    mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
+):
+    from reticulumpi.builtin_plugins.remote_control import RemoteControlPlugin
+    import RNS.vendor.umsgpack as umsgpack
+
+    class DirectInterface:
+        online = True
+        rxb = 10
+        txb = 20
+        bitrate = 2400
+
+        def __str__(self):
+            return "DirectInterface[Lab]"
+
+    mock_app.reticulum.get_interface_stats.side_effect = OSError("RPC unavailable")
+    mock_transport.interfaces = [DirectInterface()]
+    plugin = RemoteControlPlugin(mock_app, plugin_config)
+    plugin.start()
+
+    result = plugin._handle_interfaces("/interfaces", None, None, None, authorized_identity, None)
+
+    assert umsgpack.unpackb(result) == {
+        "ok": True,
+        "data": [
+            {
+                "name": "DirectInterface[Lab]",
+                "type": "DirectInterface",
+                "online": True,
+                "rxb": 10,
+                "txb": 20,
+                "bitrate": 2400,
+            }
+        ],
+    }
+    plugin.stop()
+
+
+@patch("RNS.Transport")
+@patch("RNS.Destination")
 def test_handle_metrics_no_monitor(
     mock_dest, mock_transport, mock_app, plugin_config, authorized_identity
 ):

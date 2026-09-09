@@ -22,6 +22,132 @@ Record model/serial identifiers without publishing private Reticulum identities 
 - USB or serial GPS
 - Ethernet/Wi-Fi LAN with controllable internet loss
 
+## Development HIL rehearsal (not release evidence)
+
+Use the tracked [lab HIL runner](../tools/lab_hil.py) to find hardware defects on ordinary
+development commits before freezing a release candidate. Run it only with dedicated
+non-production state, identities, configuration, and radios. A branch checkout or editable install
+is acceptable on that isolated lab fixture; it is never acceptable as a production deployment
+input.
+
+The first tracked probe establishes one real vertical path through the persistent client identity,
+RNS, an authenticated Remote Control link, and the selected RNode interface. The remote endpoint
+must enable `remote_control`, allow the dedicated lab client identity, and expose the exact node,
+version, and interface recorded in the config. The remote endpoint may run standalone or use a
+shared `rnsd`; shared mode requires working `get_interface_stats()` RPC because the direct
+`/interfaces` fallback cannot observe a radio owned by the separate daemon. The runner ignores
+online `LocalClientInterface` and `LocalServerInterface` entries but requires the expected RNode to
+be the sole online non-local interface in both snapshots. Offline extra interfaces are allowed.
+
+Although the remote application endpoints are non-mutating, this is not a passive or RF-read-only
+test: RNS path discovery, link establishment, authentication, and requests transmit packets. Use
+only frequencies and effective radiated power permitted for the operator and region; see the
+[LoRa/RNode connectivity guidance](connectivity-guide.md#lora-radio-with-rnode). Prefer a shielded RF
+enclosure or a properly rated dummy-load/attenuated cabled fixture, and never key a transmitter
+without a suitable antenna or load.
+
+Give the client a dedicated RNS config containing only its intended RNode path. The runner reads
+and validates this file before RNS can initialize: `[reticulum]` must explicitly disable instance
+sharing, transport, interface discovery, and discovery autoconnect; `network_identity` is
+forbidden; exactly one top-level interface may be enabled; and that interface must match the
+expected `RNodeInterface` name and stable `/dev` port. The dedicated config may contain only the
+shown top-level sections and `[reticulum]` keys. The enabled RNode also requires a frequency of
+137000000–3000000000 Hz, bandwidth of 7800–1625000 Hz, TX power of 0–37 dBm, spreading factor of
+5–12, and coding rate of 5–8. TCP, a shared instance, dynamic discovery, or a production identity
+must not provide an alternate route. For example:
+
+```ini
+[reticulum]
+  share_instance = false
+  enable_transport = false
+  discover_interfaces = false
+  autoconnect_discovered_interfaces = 0
+
+[interfaces]
+  [[Lab Client RNode]]
+    type = RNodeInterface
+    enabled = yes
+    port = /dev/serial/by-id/usb-example-lab-rnode
+    frequency = 915000000
+    bandwidth = 125000
+    txpower = 7
+    spreadingfactor = 8
+    codingrate = 5
+```
+
+The probe's remote application requests are limited to `/interfaces`, `/ping`, and `/status`, and
+it requires both radio byte counters to increase. Every report intentionally contains the
+operator-supplied fixture ID and a stable digest of the target destination; a successful report
+also contains the expected node/version/interface labels. Do not put secrets in those fields. The
+report excludes the raw destination, identity or key bytes, config and identity paths, and raw
+remote responses.
+
+Create an owner-only config outside the repository, replacing every example value with the lab
+fixture's actual value:
+
+```json
+{
+  "schema": 1,
+  "classification": "development-lab-rehearsal-not-release-evidence",
+  "production": false,
+  "fixture_id": "bookworm-lab-a",
+  "destination": "00000000000000000000000000000000",
+  "rns_config_dir": "/absolute/path/to/lab-rns-config",
+  "client_identity": "/absolute/path/to/private-lab-client.identity",
+  "expected_node": "remote-lab-node",
+  "expected_version": "0.3.8.dev1+g1234567",
+  "expected_local_interface_name": "Lab Client RNode",
+  "expected_local_port": "/dev/serial/by-id/usb-example-lab-rnode",
+  "expected_interface_name": "RNodeInterface[RNode LoRa]",
+  "expected_interface_type": "RNodeInterface",
+  "timeout_seconds": 60
+}
+```
+
+`production: false` is an explicit operator declaration, not a technical determination by the
+runner. Confirm the destination belongs to the isolated lab before running it. The report records
+this only as `operator_declared_nonproduction: true`.
+
+The JSON config, existing client identity, and RNS `config` must be regular caller-owned files with
+one hard link and no group or other permissions. The runner reads the identity through a no-follow
+file descriptor, asks RNS to validate those exact bytes, and never gives the client a path it could
+auto-create. It likewise gives RNS a private, process-owned snapshot of the exact config bytes it
+validated, so changing or removing the operator-owned file after validation cannot alter the
+network configuration RNS loads. The RNS config directory and report directory must be
+caller-owned, private, and real rather than symlinked. Keep all of this lab state outside the
+repository. Use a new report pathname for every run; report paths below `.codex-*` or
+`release-verification` are refused:
+
+```bash
+chmod 700 /absolute/path/to/lab-rns-config /absolute/path/to/reports
+chmod 600 \
+  /absolute/path/to/lab-hil.json \
+  /absolute/path/to/lab-rns-config/config \
+  /absolute/path/to/private-lab-client.identity
+make test-hil \
+  HIL_CONFIG=/absolute/path/to/lab-hil.json \
+  HIL_REPORT=/absolute/path/to/reports/rns-smoke-001.json
+```
+
+The runner writes a canonical, owner-only, create-once report classified with
+`release_evidence: false` and `gate85_eligible: false`, including on a completed probe failure.
+It completes and syncs a private temporary inode before atomically publishing the report without
+replacement. RNS and the RNode driver run in a disposable child process because those libraries
+can terminate their process directly. The parent maps an abrupt child exit or inner timeout to a
+redacted failure code and still owns report publication. Its 375-second maximum at the 60-second
+operation setting leaves time for child termination, snapshot cleanup, and report publication
+inside the Make target's 420-second watchdog. That outer limit exceeds the worst-case 60-second
+path lookup, 60-second link establishment, four 60-second requests, and normal overhead.
+Fixes may be tested again with a new report path; a failed development rehearsal does not consume
+a release version. Add further physical paths as tracked integration tests and keep each test
+bounded and independently runnable.
+
+This first probe does not run candidate verification or preflight, install anything, restart a
+service, reboot a device, exercise peripheral recovery, or start a soak. It cannot close any
+exact-candidate row below, credit a soak, authorize production mutation, satisfy Gate 85, or
+approve publication. Stable promotion still requires the complete sequence in this document
+against the unchanged signed candidate.
+
 ## Stable serial identities
 
 Do not qualify a multi-radio fixture with `/dev/ttyUSBN` or `/dev/ttyACMN` configuration. Discover
