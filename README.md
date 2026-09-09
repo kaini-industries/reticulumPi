@@ -12,7 +12,7 @@ set carried by the signed ReticulumPi bundle.
 - **Plugin system** -- add capabilities by dropping Python files into a directory
 - **Built-in plugins** -- messaging, mesh networking, LoRa diagnostics, RTL-SDR radio, ADS-B aircraft tracking, AIS marine tracking, ACARS aviation messages, NOAA weather satellite imagery, radiosonde balloon tracking, weather alerts, satellite tracking, GPS telemetry, NTP time sync, spectrum analysis, FM receiver, MeshCore bridging, and more
 - **Web dashboard** -- real-time monitoring UI with auth, WebSocket updates, interface management, routing table visualization, mesh topology, sensor sparklines, chat messaging, spectrum waterfall with full-page view, ADS-B radar, AIS marine map, GPS map, satellite tracking, node tracker, and weather alerts
-- **SDR dongle scheduler** -- priority-based time-sharing of RTL-SDR dongles across multiple signal plugins (weather alerts > satellite passes > continuous decoders), so a single $25 dongle can power ADS-B, AIS, ACARS, FM, spectrum, and weather monitoring
+- **SDR dongle scheduling** -- priority-based time-sharing for participating signal plugins; direct consumers such as ADS-B, FM, spectrum, and LoRa scanning currently require dedicated dongles when run concurrently
 - **RTL-SDR radio** -- spectrum waterfall, LoRa band scanning, ADS-B aircraft tracking, AIS marine vessel tracking, ACARS aviation messages, NOAA satellite images, radiosonde balloon tracking, SAME weather alerts, ISM band device decoding, and FM/AM receiver using cheap USB SDR dongles
 - **Multi-mesh bridging** -- bidirectional relay between Meshtastic and MeshCore networks with loop prevention and rate limiting
 - **Interface management** -- enable/disable Reticulum network interfaces from the dashboard with one-click service restart
@@ -47,6 +47,7 @@ set carried by the signed ReticulumPi bundle.
 | **[Container Deployment](docs/container-deployment.md)** | Persistent data, networking, and hardware access |
 | **[Dashboard Operations](docs/dashboard-operations.md)** | Authentication, TLS, local tokens, and recovery |
 | **[Hardware Validation](docs/hardware-validation.md)** | Raspberry Pi release qualification |
+| **[Project Status](docs/project-status.md)** | Dated recovery snapshot, capability matrix, and development roadmap |
 | **[Contributing](CONTRIBUTING.md)** | How to contribute code, plugins, and docs |
 | **[Security](SECURITY.md)** | Security model, best practices, vulnerability reporting |
 

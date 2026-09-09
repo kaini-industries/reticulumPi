@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -68,11 +69,11 @@ def test_pytest_treats_warnings_as_release_failures():
     assert project["tool"]["pytest"]["ini_options"]["filterwarnings"] == ["error"]
 
 
-def test_sdist_manifest_includes_container_scanner_state():
+def test_sdist_manifest_excludes_retired_container_scanner_state():
     manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
 
-    assert "include docker/security/README.md" in manifest
-    assert "include docker/security/*.openvex.json" in manifest
+    assert "prune docker/security" in manifest
+    assert "include docker/security" not in manifest
 
 
 def test_development_extra_covers_meshcore_signing_tests():
@@ -395,7 +396,6 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
         "only-fixed": True,
         "output-format": "table",
         "grype-version": "v0.110.0",
-        "vex": "docker/security/python-3.14.7-grype-db-bridge.openvex.json",
         "cache-db": True,
     }
     assert "reticulumpi:${{ matrix.suffix }}" in named_steps[verify_name]["run"]
@@ -470,6 +470,97 @@ def test_installed_wheel_smoke_discovers_packaged_plugins() -> None:
     assert "PluginLoader().discover([str(builtin_directory)])" in verifier
     for plugin_name in ("file_transfer", "messaging_hub", "nomadnet_server", "web_dashboard"):
         assert f'"{plugin_name}"' in verifier
+
+
+def test_local_package_check_ignores_existing_distributions(tmp_path: Path) -> None:
+    fake_root = tmp_path / "checkout"
+    fake_python = fake_root / ".venv/bin/python"
+    fake_twine = fake_root / ".venv/bin/twine"
+    log = tmp_path / "commands.jsonl"
+    fake_root.mkdir()
+    fake_python.parent.mkdir(parents=True)
+    (fake_root / "dist").mkdir()
+
+    old_wheel = fake_root / "dist/reticulumpi-old.whl"
+    old_sdist = fake_root / "dist/reticulumpi-old.tar.gz"
+    old_wheel.write_bytes(b"old wheel\n")
+    old_sdist.write_bytes(b"old sdist\n")
+
+    fake_python.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+with Path(os.environ["PACKAGE_CHECK_TEST_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(["python", *args]) + "\\n")
+if args[:2] == ["-m", "build"]:
+    output = Path(args[args.index("--outdir") + 1])
+    (output / "reticulumpi-fresh.whl").write_bytes(b"fresh wheel\\n")
+    (output / "reticulumpi-fresh.tar.gz").write_bytes(b"fresh sdist\\n")
+""",
+        encoding="utf-8",
+    )
+    fake_twine.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+with Path(os.environ["PACKAGE_CHECK_TEST_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(["twine", *sys.argv[1:]]) + "\\n")
+""",
+        encoding="utf-8",
+    )
+    for executable in (fake_python, fake_twine):
+        executable.chmod(0o755)
+
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    target = re.search(
+        r"(?m)^package-check: dashboard-assets-check\n(?P<recipe>(?:\t.*\n)+)", makefile
+    )
+    assert target is not None
+    recipe_lines = target.group("recipe").splitlines()
+    assert all(line.endswith("\\") for line in recipe_lines[:-1])
+    assert not recipe_lines[-1].endswith("\\")
+    recipe = "\n".join(line[1:] for line in recipe_lines)
+    recipe = recipe.removeprefix("@").replace("$$", "$")
+
+    environment = os.environ.copy()
+    environment["PACKAGE_CHECK_TEST_LOG"] = str(log)
+    subprocess.run(
+        ["/bin/sh", "-c", recipe],
+        cwd=fake_root,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    commands = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    build = next(command for command in commands if command[1:3] == ["-m", "build"])
+    output = Path(build[build.index("--outdir") + 1])
+    fresh_wheel = str(output / "reticulumpi-fresh.whl")
+    fresh_sdist = str(output / "reticulumpi-fresh.tar.gz")
+
+    assert output != fake_root / "dist"
+    assert not output.exists()
+    assert commands == [
+        ["python", "-m", "build", "--no-isolation", "--outdir", str(output)],
+        ["twine", "check", fresh_wheel, fresh_sdist],
+        [
+            "python",
+            "scripts/verify_wheel.py",
+            fresh_wheel,
+            "--requirements",
+            "constraints/production-universal-dashboard-nomadnet.txt",
+        ],
+    ]
+    assert old_wheel.read_bytes() == b"old wheel\n"
+    assert old_sdist.read_bytes() == b"old sdist\n"
 
 
 def test_dashboard_service_worker_version_comes_from_package_metadata():

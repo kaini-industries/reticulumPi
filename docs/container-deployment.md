@@ -4,7 +4,7 @@ The production image consumes an already-built ReticulumPi wheel and installs it
 compiler-free Debian Trixie/Python 3.14.7 runtime with hash-locked Dashboard/NomadNet dependencies.
 It does not build from the source tree. It runs as fixed UID/GID 10001 under `tini`. All stages
 use the official multi-architecture image digest
-`sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910` pinned by
+`sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6` pinned by
 `PYTHON_TRIXIE_IMAGE`; updating that digest is an explicit release change and requires rebuilding
 and qualifying both ARM64 and AMD64 images.
 
@@ -12,10 +12,9 @@ The final runtime removes pip, setuptools, wheel, and `ensurepip` after the whee
 dependencies pass `pip check`. CI retains a complete vulnerability report, while the release
 gate blocks high/critical findings that have an available remediation. Python 3.14.7 natively
 contains the reviewed CPython fixes required by this release, so the image applies no local
-interpreter patch. The complete report uses no VEX. Until Grype's current database recognizes
-those native fixes, only the actionable gate consumes the exact-product scanner bridge in
-`docker/security/python-3.14.7-grype-db-bridge.openvex.json`; its documented removal condition
-prevents the temporary bridge from becoming a permanent exception.
+interpreter patch. The complete report and actionable gate use no VEX suppression. The retired
+scanner bridge in `docker/security/python-3.14.7-grype-db-bridge.openvex.json` remains only as the
+review record for the previous image digest and must not be re-enabled.
 
 From a development checkout, build exactly one wheel before invoking Compose:
 

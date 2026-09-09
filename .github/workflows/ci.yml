@@ -493,7 +493,6 @@ jobs:
           only-fixed: true
           output-format: table
           grype-version: v0.110.0
-          vex: docker/security/python-3.14.7-grype-db-bridge.openvex.json
           cache-db: true
       - name: Verify minimal runtime, readiness, shutdown, and durable recreation
         run: >-

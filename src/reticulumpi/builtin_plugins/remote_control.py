@@ -361,21 +361,48 @@ class RemoteControlPlugin(PluginBase):
         remote_identity: Any,
         requested_at: Any,
     ) -> Any:
-        interfaces = []
+        interfaces: list[dict[str, Any]] = []
         try:
-            for iface in RNS.Transport.interfaces:
+            stats = self.rns.get_interface_stats()
+            entries = stats.get("interfaces") if isinstance(stats, dict) else stats
+            if not isinstance(entries, list):
+                raise TypeError("Reticulum interface stats are unavailable")
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                interface_type = entry.get("type")
+                if not isinstance(name, str) or not isinstance(interface_type, str):
+                    continue
                 info = {
-                    "name": str(iface),
-                    "type": type(iface).__name__,
-                    "online": getattr(iface, "online", True),
+                    "name": name,
+                    "type": interface_type,
+                    "online": entry.get("status", entry.get("online", False)),
                 }
                 for attr in ("rxb", "txb", "bitrate"):
-                    val = getattr(iface, attr, None)
+                    val = entry.get(attr)
                     if val is not None:
                         info[attr] = val
                 interfaces.append(info)
         except Exception:
-            self.log.debug("Interface stats collection failed", exc_info=True)
+            self.log.debug(
+                "Reticulum interface stats query failed; using direct fallback", exc_info=True
+            )
+            interfaces.clear()
+            try:
+                for iface in RNS.Transport.interfaces:
+                    info = {
+                        "name": str(iface),
+                        "type": type(iface).__name__,
+                        "online": getattr(iface, "online", True),
+                    }
+                    for attr in ("rxb", "txb", "bitrate"):
+                        val = getattr(iface, attr, None)
+                        if val is not None:
+                            info[attr] = val
+                    interfaces.append(info)
+            except Exception:
+                self.log.debug("Direct interface stats collection failed", exc_info=True)
         return umsgpack.packb({"ok": True, "data": interfaces})
 
     @_auth_required
