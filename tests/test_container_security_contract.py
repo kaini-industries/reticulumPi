@@ -14,6 +14,8 @@ WORKFLOW = ROOT / ".github/workflows/ci.yml"
 DOCKERFILE = ROOT / "docker/Dockerfile"
 RUNTIME_VERIFIER = ROOT / "tools/verify_container_runtime.sh"
 VEX_PATH = "docker/security/python-3.14.7-grype-db-bridge.openvex.json"
+CURRENT_BASE_DIGEST = "cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6"
+RETIRED_BASE_DIGEST = "83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910"
 NATIVE_PARSER_SHA256 = "5c5ed245889135564e75dfed9a47aeb6b4d3e5a2e9614d918a986767e3747539"
 NATIVE_TARFILE_SHA256 = "3c8d585a77d7d376aea66e5e11a4d53c2605100d4c05a71b5385ed54bc526f51"
 
@@ -27,10 +29,7 @@ def test_production_container_uses_digest_pinned_python_3147_trixie() -> None:
     source = DOCKERFILE.read_text(encoding="utf-8")
     base_images = re.findall(r"^ARG PYTHON_TRIXIE_IMAGE=(.+)$", source, re.MULTILINE)
 
-    assert base_images == [
-        "python:3.14.7-slim-trixie@sha256:"
-        "83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910"
-    ]
+    assert base_images == [f"python:3.14.7-slim-trixie@sha256:{CURRENT_BASE_DIGEST}"]
     assert "FROM ${PYTHON_TRIXIE_IMAGE} AS test" in source
     assert "FROM ${PYTHON_TRIXIE_IMAGE} AS runtime" in source
     assert "python-patched" not in source
@@ -114,8 +113,8 @@ def test_container_scans_publish_full_evidence_before_enforcing_actionable_gate(
         "severity-cutoff": "high",
         "only-fixed": True,
         "output-format": "table",
-        "vex": VEX_PATH,
     }.items() <= gate["with"].items()
+    assert "vex" not in gate["with"]
     assert (ROOT / VEX_PATH).is_file()
 
     report_index = steps.index(report)
@@ -154,7 +153,7 @@ def test_runtime_verifier_enforces_absence_of_python_packaging_toolchain() -> No
     assert explicit_probes or iterable_probe
 
 
-def test_native_fixed_stdlib_and_scanner_bridge_are_bound_to_the_exported_runtime() -> None:
+def test_native_fixed_stdlib_and_retired_scanner_bridge_are_bound_to_their_images() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     verifier = RUNTIME_VERIFIER.read_text(encoding="utf-8")
     vex = json.loads((ROOT / VEX_PATH).read_text(encoding="utf-8"))
@@ -183,7 +182,8 @@ def test_native_fixed_stdlib_and_scanner_bridge_are_bound_to_the_exported_runtim
         notes = statement["status_notes"]
         assert f"https://nvd.nist.gov/vuln/detail/{vulnerability}" in notes
         assert "https://www.python.org/downloads/release/python-3147/" in notes
-        assert "83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910" in notes
+        assert RETIRED_BASE_DIGEST in notes
+        assert CURRENT_BASE_DIGEST not in notes
         assert "Grype 0.110.0 database schema 6.1.9 built 2026-08-08T06:22:53Z" in notes
         assert "Remove this statement as soon as" in notes
     assert NATIVE_PARSER_SHA256 in statements["CVE-2026-15308"]["status_notes"]

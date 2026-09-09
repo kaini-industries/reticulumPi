@@ -69,11 +69,11 @@ def test_pytest_treats_warnings_as_release_failures():
     assert project["tool"]["pytest"]["ini_options"]["filterwarnings"] == ["error"]
 
 
-def test_sdist_manifest_includes_container_scanner_state():
+def test_sdist_manifest_excludes_retired_container_scanner_state():
     manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
 
-    assert "include docker/security/README.md" in manifest
-    assert "include docker/security/*.openvex.json" in manifest
+    assert "prune docker/security" in manifest
+    assert "include docker/security" not in manifest
 
 
 def test_development_extra_covers_meshcore_signing_tests():
@@ -396,7 +396,6 @@ def test_container_job_loads_then_validates_and_exports_one_runtime_image():
         "only-fixed": True,
         "output-format": "table",
         "grype-version": "v0.110.0",
-        "vex": "docker/security/python-3.14.7-grype-db-bridge.openvex.json",
         "cache-db": True,
     }
     assert "reticulumpi:${{ matrix.suffix }}" in named_steps[verify_name]["run"]
