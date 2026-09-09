@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "classification": "development-lab-fixture-preflight-not-release-evidence",
+  "production": false,
+  "fixture_id": "replace-noble-lab-fixture",
+  "scope": "rns-radio-smoke",
+  "expected_platform_profile": "linux-arm64-ubuntu-noble-py312",
+  "expected_pi": {
+    "model": "Raspberry Pi 5 Model B Rev 1.0",
+    "serial_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "serial_devices": [
+    {
+      "device_id": "replace-noble-lab-rnode",
+      "role": "rnode",
+      "path": "/dev/serial/by-id/usb-REPLACE_WITH_NOBLE_LAB_RNODE",
+      "usb_identity": {
+        "vendor_id": "0000",
+        "product_id": "0000",
+        "serial_number": "REPLACE_WITH_NOBLE_LAB_RNODE_SERIAL",
+        "sysfs_path": "/sys/devices/REPLACE_WITH_NOBLE_LAB_RNODE_USB_PARENT"
+      }
+    }
+  ],
+  "operator_attestations": {
+    "dedicated_nonproduction_state": true,
+    "dedicated_nonproduction_identity": true,
+    "dedicated_nonproduction_radios": true,
+    "official_power_supply": true,
+    "active_cooling": true,
+    "durable_storage": true
+  }
+}

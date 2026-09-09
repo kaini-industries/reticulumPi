@@ -1,4 +1,4 @@
-.PHONY: install dev install-nomadnet test test-serial test-hil test-cov lint format format-check docs-check docs-help-refresh docs-reference-refresh dashboard-assets dashboard-assets-check package-wheel package-check clean docker-test docker-test-arm64
+.PHONY: install dev install-nomadnet test test-serial lab-preflight test-hil test-cov lint format format-check docs-check docs-help-refresh docs-reference-refresh dashboard-assets dashboard-assets-check package-wheel package-check clean docker-test docker-test-arm64
 
 install:
 	python3 -m venv .venv
@@ -19,11 +19,27 @@ test:
 test-serial:
 	.venv/bin/pytest -v -n0
 
-test-hil:
+lab-preflight:
+	@test -n "$(HIL_INVENTORY)" || { echo "HIL_INVENTORY must name an absolute private fixture inventory" >&2; exit 2; }
 	@test -n "$(HIL_CONFIG)" || { echo "HIL_CONFIG must name an absolute private lab config" >&2; exit 2; }
+	@test -n "$(HIL_PREFLIGHT_REPORT)" || { echo "HIL_PREFLIGHT_REPORT must name a new absolute report path" >&2; exit 2; }
+	@test ! -e "$(HIL_PREFLIGHT_REPORT)" || { echo "HIL_PREFLIGHT_REPORT already exists; choose a new path" >&2; exit 2; }
+	@.venv/bin/python tools/lab_preflight.py \
+		--inventory "$(HIL_INVENTORY)" \
+		--hil-config "$(HIL_CONFIG)" \
+		--report "$(HIL_PREFLIGHT_REPORT)"
+
+test-hil:
+	@test -n "$(HIL_INVENTORY)" || { echo "HIL_INVENTORY must name an absolute private fixture inventory" >&2; exit 2; }
+	@test -n "$(HIL_CONFIG)" || { echo "HIL_CONFIG must name an absolute private lab config" >&2; exit 2; }
+	@test -n "$(HIL_PREFLIGHT_REPORT)" || { echo "HIL_PREFLIGHT_REPORT must name a new absolute report path" >&2; exit 2; }
 	@test -n "$(HIL_REPORT)" || { echo "HIL_REPORT must name a new absolute report path" >&2; exit 2; }
+	@test ! -e "$(HIL_PREFLIGHT_REPORT)" || { echo "HIL_PREFLIGHT_REPORT already exists; choose a new path" >&2; exit 2; }
 	@test ! -e "$(HIL_REPORT)" || { echo "HIL_REPORT already exists; choose a new path" >&2; exit 2; }
-	@RETICULUMPI_HIL_CONFIG="$(HIL_CONFIG)" RETICULUMPI_HIL_REPORT="$(HIL_REPORT)" \
+	@RETICULUMPI_HIL_INVENTORY="$(HIL_INVENTORY)" \
+		RETICULUMPI_HIL_CONFIG="$(HIL_CONFIG)" \
+		RETICULUMPI_HIL_PREFLIGHT_REPORT="$(HIL_PREFLIGHT_REPORT)" \
+		RETICULUMPI_HIL_REPORT="$(HIL_REPORT)" \
 		.venv/bin/pytest -v -n0 --timeout=420 -m integration tests/test_lab_hil_live.py
 
 test-cov:

@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReticulumPi lab fixture inventory",
+  "description": "Strict, private input contract for a candidate-agnostic, non-production RNS radio smoke preflight.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "classification",
+    "production",
+    "fixture_id",
+    "scope",
+    "expected_platform_profile",
+    "expected_pi",
+    "serial_devices",
+    "operator_attestations"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "classification": {
+      "const": "development-lab-fixture-preflight-not-release-evidence"
+    },
+    "production": {
+      "const": false
+    },
+    "fixture_id": {
+      "$ref": "#/$defs/logicalId"
+    },
+    "scope": {
+      "const": "rns-radio-smoke"
+    },
+    "expected_platform_profile": {
+      "$ref": "#/$defs/platformProfile"
+    },
+    "expected_pi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "serial_sha256"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "^Raspberry Pi 5 Model B Rev [0-9]+(?:\\.[0-9]+)*$",
+          "maxLength": 128
+        },
+        "serial_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "serial_devices": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "device_id",
+          "role",
+          "path",
+          "usb_identity"
+        ],
+        "properties": {
+          "device_id": {
+            "$ref": "#/$defs/logicalId"
+          },
+          "role": {
+            "const": "rnode"
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/dev/[^\\u0000-\\u001f\\u007f]+$",
+            "maxLength": 4096,
+            "not": {
+              "anyOf": [
+                {
+                  "pattern": "^/dev/tty(?:ACM|USB)[0-9]+$"
+                },
+                {
+                  "pattern": "//"
+                },
+                {
+                  "pattern": "(?:^|/)\\.{1,2}(?:/|$)"
+                },
+                {
+                  "pattern": "\\s$"
+                },
+                {
+                  "pattern": "/$"
+                }
+              ]
+            }
+          },
+          "usb_identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "vendor_id",
+              "product_id",
+              "serial_number",
+              "sysfs_path"
+            ],
+            "properties": {
+              "vendor_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{4}$"
+              },
+              "product_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{4}$"
+              },
+              "serial_number": {
+                "type": "string",
+                "pattern": "^(?=\\S)[^\\u0000-\\u001f\\u007f]*\\S$",
+                "maxLength": 128
+              },
+              "sysfs_path": {
+                "type": "string",
+                "pattern": "^/sys/devices/[^\\u0000-\\u001f\\u007f]+$",
+                "maxLength": 4096,
+                "not": {
+                  "anyOf": [
+                    {
+                      "pattern": "//"
+                    },
+                    {
+                      "pattern": "(?:^|/)\\.{1,2}(?:/|$)"
+                    },
+                    {
+                      "pattern": "\\s$"
+                    },
+                    {
+                      "pattern": "/$"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "operator_attestations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dedicated_nonproduction_state",
+        "dedicated_nonproduction_identity",
+        "dedicated_nonproduction_radios",
+        "official_power_supply",
+        "active_cooling",
+        "durable_storage"
+      ],
+      "properties": {
+        "dedicated_nonproduction_state": {
+          "const": true
+        },
+        "dedicated_nonproduction_identity": {
+          "const": true
+        },
+        "dedicated_nonproduction_radios": {
+          "const": true
+        },
+        "official_power_supply": {
+          "const": true
+        },
+        "active_cooling": {
+          "const": true
+        },
+        "durable_storage": {
+          "const": true
+        }
+      }
+    }
+  },
+  "$defs": {
+    "logicalId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "platformProfile": {
+      "type": "string",
+      "enum": [
+        "linux-arm64-debian-bookworm-py311",
+        "linux-arm64-ubuntu-noble-py312"
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
