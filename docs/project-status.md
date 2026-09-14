@@ -1,6 +1,6 @@
 # Project Status and Recovery Roadmap
 
-Last verified: **2026-09-08**
+Last verified: **2026-09-09**
 
 This document is the tracked resume point for ReticulumPi development. It is not release evidence,
 does not replace the immutable records under `docs/release-verification/`, and grants no production,
@@ -18,8 +18,9 @@ Development stalled after the v0.3.7 source freeze. Release qualification became
 mostly ignored codebase of one-shot controllers. Setup and diagnostic failures repeatedly required
 new successor namespaces. At the start of this recovery, no reusable hardware-in-the-loop (HIL)
 or soak runner had been added to the tracked repository. Product development stopped even though
-the application test suite was green. This recovery branch adds the first narrow, lab-only RNS and
-RNode smoke lane; the broader HIL and soak gap remains.
+the application test suite was green. The tracked recovery now includes the first narrow,
+lab-only RNS/RNode smoke lane and its passive Pi/RNode fixture preflight; the broader HIL and soak
+gap remains.
 
 The recovery strategy is therefore:
 
@@ -125,9 +126,11 @@ facts that another clone or CI job cannot discover or authenticate.
 ### 4. Hardware qualification was specified but not productized
 
 `docs/hardware-validation.md` defined a strong manual contract, but `origin/main` had no HIL or soak
-command, Make target, lab profile, or machine-readable result validator. The recovery branch now
-adds an opt-in, non-production `make test-hil` smoke test and a create-once JSON result. It still
-lacks candidate preflight, install, restart, reboot, peripheral fault-recovery, and soak runners.
+command, Make target, lab profile, or machine-readable result validator. The tracked recovery now
+adds an opt-in, non-production `make test-hil` smoke test, a passive `make lab-preflight`, and
+create-once JSON results. The first fixed preflight scope covers only the supported Pi tuple and
+the selected RNode; it still lacks candidate artifact checks, install, restart, reboot, the other
+peripherals, fault-recovery, and soak runners.
 The normal suite uses local fixtures and subprocesses, but deliberately excludes live radios,
 external-network production integration, and production credentials.
 
@@ -157,9 +160,12 @@ development depends on ignored controller state.
 
 - Retain the new candidate-agnostic, non-mutating remote-API RNS/RNode smoke command with stable
   redacted result codes as the first repeatable vertical slice.
+- Require its passive, schema-backed Pi/RNode fixture preflight to pass before RNS initializes or
+  radio traffic is transmitted.
 - Expand it into a complete candidate preflight without granting release-evidence authority to
   ordinary lab rehearsals.
-- Add tracked fixture inventory and result schemas for both supported Pi tuples.
+- Expand the tracked schema-1 inventory and result contract from the initial RNode scope to the
+  complete peripheral fixture on both supported Pi tuples.
 - Add a repeatable core integration command and a checkpointed soak recorder.
 - Keep exploratory diagnostics retryable; create authoritative one-shot evidence only after the
   repeatable lane passes.

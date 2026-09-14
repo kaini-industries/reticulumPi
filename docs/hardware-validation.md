@@ -46,6 +46,52 @@ only frequencies and effective radiated power permitted for the operator and reg
 enclosure or a properly rated dummy-load/attenuated cabled fixture, and never key a transmitter
 without a suitable antenna or load.
 
+Before RNS initializes, the live lane runs a passive fixture preflight. Schema 1 deliberately
+covers only the first `rns-radio-smoke` slice: it proves that one operator-declared non-production
+Pi 5 matches one supported OS/Python tuple and that the exact RNode named by the HIL config resolves
+to the expected USB parent without opening the serial device. It does not claim that the power
+supply, cooling, or storage declarations were measured, or that any other peripheral is present.
+Those checks will be added as new fixed scopes rather than as operator-selectable ways to weaken
+this one.
+
+The tracked [inventory schema](../config/lab/fixture-inventory.schema.json),
+[preflight-report schema](../config/lab/preflight-report.schema.json), and
+[Bookworm](../config/lab/fixture-inventory.bookworm.example.json) and
+[Noble](../config/lab/fixture-inventory.noble.example.json) templates define the contract. Copy the
+matching template to an owner-only file outside the repository and replace every example value.
+The Pi serial is recorded only as a SHA-256 digest; the USB serial and sysfs parent remain private
+inside the inventory. One live report proves only its own tuple, so reimage and run a fresh
+preflight report for the other supported tuple.
+
+Compute `expected_pi.serial_sha256` over the ASCII device-tree serial after removing its trailing
+NUL terminator and then an optional trailing newline. For `usb_identity.sysfs_path`, use
+`udevadm info --attribute-walk` on the stable RNode path and record `/sys` plus the nearest parent
+path that exposes `idVendor` and `idProduct`; record that parent's non-empty `serial` value. A
+device without a USB serial is ineligible for schema 1 because the preflight could not detect an
+identical unit swapped into the same physical port. The preflight compares all four USB-parent
+fields to the read-only sysfs snapshot.
+
+These commands use the same normalization and resolver as the preflight and write the derived
+values to new owner-only files rather than the terminal. Copy them into the inventory and retain or
+remove the scratch files according to the operator's evidence policy:
+
+```bash
+umask 077
+set -o noclobber
+.venv/bin/python -c 'import hashlib; from pathlib import Path; value = Path("/proc/device-tree/serial-number").read_bytes().removesuffix(b"\0").removesuffix(b"\n"); print(hashlib.sha256(value).hexdigest())' \
+  > /absolute/private/path/pi-serial.sha256
+.venv/bin/python -c 'import json, sys; from reticulumpi.serial_devices import resolve_serial_device; usb = resolve_serial_device(sys.argv[1]).usb; assert usb is not None and usb.serial_number is not None; print(json.dumps({"product_id": usb.product_id, "serial_number": usb.serial_number, "sysfs_path": usb.sysfs_path, "vendor_id": usb.vendor_id}, sort_keys=True))' \
+  /dev/serial/by-id/usb-example-lab-rnode \
+  > /absolute/private/path/rnode-usb-identity.json
+```
+
+The inventory's `production: false` and six attestations are operator declarations. The runner can
+compare the live platform, Pi identity, and RNode identity, but it cannot technically determine
+whether state, identities, or radios are non-production, authenticate an official power supply, or
+measure cooling and storage durability. A passing report therefore records
+`operator_declared_nonproduction: true` without asserting a measured production state. It also
+fixes `candidate_bound`, `release_evidence`, and `gate85_eligible` to false.
+
 Give the client a dedicated RNS config containing only its intended RNode path. The runner reads
 and validates this file before RNS can initialize: `[reticulum]` must explicitly disable instance
 sharing, transport, interface discovery, and discovery autoconnect; `network_identity` is
@@ -82,8 +128,14 @@ also contains the expected node/version/interface labels. Do not put secrets in 
 report excludes the raw destination, identity or key bytes, config and identity paths, and raw
 remote responses.
 
-Create an owner-only config outside the repository, replacing every example value with the lab
-fixture's actual value:
+The preflight report emits the operator-supplied `fixture_id` and `device_id`, the expected and
+observed platform-profile labels, and the inventory digest. Keep both IDs non-secret and do not
+embed the Pi serial, USB serial, stable device path, or other private inventory values in them.
+The preflight report does not emit the raw Pi or USB identity fields.
+
+Create an owner-only HIL config outside the repository, replacing every example value with the lab
+fixture's actual value. Its `fixture_id` and `expected_local_port` must exactly match the private
+fixture inventory:
 
 ```json
 {
@@ -105,31 +157,39 @@ fixture's actual value:
 ```
 
 `production: false` is an explicit operator declaration, not a technical determination by the
-runner. Confirm the destination belongs to the isolated lab before running it. The report records
-this only as `operator_declared_nonproduction: true`.
+runner. Confirm the destination belongs to the isolated lab before running it. The HIL report
+records this only as `operator_declared_nonproduction: true`.
 
-The JSON config, existing client identity, and RNS `config` must be regular caller-owned files with
-one hard link and no group or other permissions. The runner reads the identity through a no-follow
-file descriptor, asks RNS to validate those exact bytes, and never gives the client a path it could
-auto-create. It likewise gives RNS a private, process-owned snapshot of the exact config bytes it
-validated, so changing or removing the operator-owned file after validation cannot alter the
-network configuration RNS loads. The RNS config directory and report directory must be
-caller-owned, private, and real rather than symlinked. Keep all of this lab state outside the
-repository. Use a new report pathname for every run; report paths below `.codex-*` or
-`release-verification` are refused:
+The JSON inventory, JSON HIL config, existing client identity, and RNS `config` must be regular
+caller-owned files with one hard link and no group or other permissions. The runner reads them
+through no-follow file descriptors. It asks RNS to validate the exact identity bytes and never
+gives the client a path it could auto-create. It likewise gives RNS a private, process-owned
+snapshot of the exact config bytes it validated, so changing or removing the operator-owned file
+after validation cannot alter the network configuration RNS loads. The RNS config directory and
+report directory must be caller-owned, private, and real rather than symlinked. Keep all of this
+lab state outside the repository. Use new preflight and HIL report pathnames for every run; report
+paths below `.codex-*` or `release-verification` are refused:
 
 ```bash
 chmod 700 /absolute/path/to/lab-rns-config /absolute/path/to/reports
 chmod 600 \
+  /absolute/path/to/lab-fixture.json \
   /absolute/path/to/lab-hil.json \
   /absolute/path/to/lab-rns-config/config \
   /absolute/path/to/private-lab-client.identity
 make test-hil \
+  HIL_INVENTORY=/absolute/path/to/lab-fixture.json \
   HIL_CONFIG=/absolute/path/to/lab-hil.json \
+  HIL_PREFLIGHT_REPORT=/absolute/path/to/reports/rns-preflight-001.json \
   HIL_REPORT=/absolute/path/to/reports/rns-smoke-001.json
 ```
 
-The runner writes a canonical, owner-only, create-once report classified with
+To inspect the host and RNode binding without initializing RNS or transmitting, run the
+`lab-preflight` Make target with `HIL_INVENTORY`, `HIL_CONFIG`, and a new
+`HIL_PREFLIGHT_REPORT`. The full `test-hil` target performs that same preflight first and stops
+before RNS construction if it fails.
+
+Each runner writes a canonical, owner-only, create-once report classified with
 `release_evidence: false` and `gate85_eligible: false`, including on a completed probe failure.
 It completes and syncs a private temporary inode before atomically publishing the report without
 replacement. RNS and the RNode driver run in a disposable child process because those libraries
@@ -142,11 +202,11 @@ Fixes may be tested again with a new report path; a failed development rehearsal
 a release version. Add further physical paths as tracked integration tests and keep each test
 bounded and independently runnable.
 
-This first probe does not run candidate verification or preflight, install anything, restart a
-service, reboot a device, exercise peripheral recovery, or start a soak. It cannot close any
-exact-candidate row below, credit a soak, authorize production mutation, satisfy Gate 85, or
-approve publication. Stable promotion still requires the complete sequence in this document
-against the unchanged signed candidate.
+This first probe does not run candidate artifact verification or production preflight, install
+anything, restart a service, reboot a device, exercise peripheral recovery, or start a soak. It
+cannot close any exact-candidate row below, credit a soak, authorize production mutation, satisfy
+Gate 85, or approve publication. Stable promotion still requires the complete sequence in this
+document against the unchanged signed candidate.
 
 ## Stable serial identities
 
